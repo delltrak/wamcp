@@ -15,6 +15,11 @@ import {
 import { InstanceManager } from "./services/instance-manager.js";
 import { MessageQueue } from "./services/message-queue.js";
 import { createMcpServer } from "./server/mcp.js";
+import { verifyWebhookSignature } from "./channels/cloud-api/cloud.auth.js";
+import { normalizeWebhookPayload } from "./channels/cloud-api/cloud.events.js";
+import type { MetaWebhookPayload } from "./channels/cloud-api/cloud.events.js";
+
+const CLOUD_WEBHOOK_PATH = "/cloud-webhook";
 
 const transport = process.env.WA_TRANSPORT ?? DEFAULT_TRANSPORT;
 const port = parseInt(process.env.WA_MCP_PORT ?? String(DEFAULT_PORT), 10);
@@ -132,6 +137,83 @@ async function startHttp(): Promise<void> {
         }
         res.writeHead(400, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ error: "Missing or invalid session ID" }));
+        return;
+      }
+
+      res.writeHead(405, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: "Method not allowed" }));
+      return;
+    }
+
+    // Cloud API Webhook endpoint
+    if (url.pathname === CLOUD_WEBHOOK_PATH) {
+      // GET — Meta webhook verification (hub.challenge)
+      if (req.method === "GET") {
+        const mode = url.searchParams.get("hub.mode");
+        const token = url.searchParams.get("hub.verify_token");
+        const challenge = url.searchParams.get("hub.challenge");
+        const verifyToken = process.env.WA_CLOUD_VERIFY_TOKEN;
+
+        if (mode === "subscribe" && token === verifyToken && challenge) {
+          logger.info("Cloud webhook verified");
+          res.writeHead(200, { "Content-Type": "text/plain" });
+          res.end(challenge);
+        } else {
+          logger.warn("Cloud webhook verification failed");
+          res.writeHead(403, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "Verification failed" }));
+        }
+        return;
+      }
+
+      // POST — Incoming webhook events
+      if (req.method === "POST") {
+        // Read body
+        const chunks: Buffer[] = [];
+        for await (const chunk of req) {
+          chunks.push(typeof chunk === "string" ? Buffer.from(chunk) : chunk);
+        }
+        const rawBody = Buffer.concat(chunks);
+
+        // Verify signature if secret is configured
+        const webhookSecret = process.env.WA_CLOUD_WEBHOOK_SECRET;
+        if (webhookSecret) {
+          const signature = req.headers["x-hub-signature-256"] as string | undefined;
+          if (!verifyWebhookSignature(rawBody, signature, webhookSecret)) {
+            logger.warn("Cloud webhook signature verification failed");
+            res.writeHead(401, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({ error: "Invalid signature" }));
+            return;
+          }
+        }
+
+        // Return 200 immediately — Meta requires a response within 5 seconds
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ status: "ok" }));
+
+        // Process asynchronously
+        try {
+          const payload = JSON.parse(rawBody.toString()) as MetaWebhookPayload;
+          const events = normalizeWebhookPayload(payload);
+
+          for (const evt of events) {
+            const match = instanceManager.findCloudAdapterByPhoneNumberId(evt.phoneNumberId);
+            if (!match) {
+              logger.warn(
+                { phoneNumberId: evt.phoneNumberId },
+                "No Cloud API instance found for phone number ID",
+              );
+              continue;
+            }
+
+            // Set instanceId on the payload
+            (evt.payload as unknown as { instanceId: string }).instanceId = match.instanceId;
+
+            match.adapter.emit(evt.event, evt.payload);
+          }
+        } catch (err) {
+          logger.error({ err }, "Failed to process cloud webhook payload");
+        }
         return;
       }
 

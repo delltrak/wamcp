@@ -187,6 +187,19 @@ export class InstanceManager {
     return row as InstanceEntity;
   }
 
+  /** Find a Cloud API adapter by its phone number ID (for webhook routing). */
+  findCloudAdapterByPhoneNumberId(phoneNumberId: string): { instanceId: string; adapter: CloudApiAdapter } | null {
+    for (const [instanceId, managed] of this.adapters) {
+      if (managed.channel === "cloud") {
+        const cloudAdapter = managed.adapter as CloudApiAdapter;
+        if (cloudAdapter.getPhoneNumberId() === phoneNumberId) {
+          return { instanceId, adapter: cloudAdapter };
+        }
+      }
+    }
+    return null;
+  }
+
   // ---- Private helpers ----
 
   private createAdapter(instanceId: string, channel: ChannelType): ChannelAdapter {
