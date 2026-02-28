@@ -722,11 +722,10 @@ export class BaileysAdapter implements ChannelAdapter {
     if (this.contactCache.size > 0) {
       const now = Date.now();
       for (const c of this.contactCache.values()) {
-        let phone: string | null = null;
         let lid: string | null = c.lid ?? null;
-
         const extractPhone = (jid: string): string => jid.split("@")[0].split(":")[0];
 
+        let phone: string | null;
         if (c.phoneNumber) {
           phone = extractPhone(c.phoneNumber);
         } else if (c.id.endsWith("@lid")) {
