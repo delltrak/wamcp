@@ -103,7 +103,10 @@ export function registerContactTools(
       try {
         const adapter = instanceManager.getAdapter(params.instanceId);
         const contacts = await adapter.getContacts(params.query);
-        log.info({ duration: Date.now() - start, found: contacts.length }, "Contact search completed");
+        log.info(
+          { duration: Date.now() - start, found: contacts.length },
+          "Contact search completed",
+        );
         return toolSuccess({ query: params.query, count: contacts.length, contacts });
       } catch (err) {
         return handleToolError("wa_search_contact", err, params.instanceId);

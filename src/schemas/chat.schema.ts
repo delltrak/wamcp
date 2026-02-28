@@ -49,7 +49,10 @@ export const ClearChatSchema = z
 export const GetMessagesSchema = z
   .object({
     instanceId: z.string().min(1).describe("The instance ID"),
-    chatId: z.string().min(5).describe("Chat JID to retrieve messages from (e.g. 5511999999999@s.whatsapp.net)"),
+    chatId: z
+      .string()
+      .min(5)
+      .describe("Chat JID to retrieve messages from (e.g. 5511999999999@s.whatsapp.net)"),
     limit: z
       .number()
       .int()

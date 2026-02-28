@@ -129,7 +129,10 @@ export function registerChatTools(
       try {
         const adapter = instanceManager.getAdapter(params.instanceId);
         const messages = await adapter.getMessages(params.chatId, params.limit);
-        log.info({ duration: Date.now() - start, chatId: params.chatId, count: messages.length }, "Messages retrieved");
+        log.info(
+          { duration: Date.now() - start, chatId: params.chatId, count: messages.length },
+          "Messages retrieved",
+        );
         return toolSuccess({ chatId: params.chatId, count: messages.length, messages });
       } catch (err) {
         return handleToolError("wa_get_messages", err, params.instanceId);

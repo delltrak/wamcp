@@ -75,7 +75,14 @@ import { createChildLogger } from "../../utils/logger.js";
 
 const logger = createChildLogger({ service: "baileys-adapter" });
 
-type ContactCache = { id: string; name?: string; notify?: string; verifiedName?: string; phoneNumber?: string; lid?: string };
+type ContactCache = {
+  id: string;
+  name?: string;
+  notify?: string;
+  verifiedName?: string;
+  phoneNumber?: string;
+  lid?: string;
+};
 
 export class BaileysAdapter implements ChannelAdapter {
   private sock: WASocket | null = null;
@@ -805,12 +812,7 @@ export class BaileysAdapter implements ChannelAdapter {
     const rows = db
       .select()
       .from(messagesTable)
-      .where(
-        and(
-          eq(messagesTable.instanceId, this.instanceId),
-          eq(messagesTable.chatId, chatId),
-        ),
-      )
+      .where(and(eq(messagesTable.instanceId, this.instanceId), eq(messagesTable.chatId, chatId)))
       .orderBy(desc(messagesTable.timestamp))
       .limit(limit)
       .all();
@@ -890,12 +892,7 @@ export class BaileysAdapter implements ChannelAdapter {
     try {
       db.update(messagesTable)
         .set({ status })
-        .where(
-          and(
-            eq(messagesTable.instanceId, this.instanceId),
-            eq(messagesTable.id, messageId),
-          ),
-        )
+        .where(and(eq(messagesTable.instanceId, this.instanceId), eq(messagesTable.id, messageId)))
         .run();
     } catch (err) {
       logger.error({ err, messageId }, "Failed to update message status");
@@ -995,7 +992,16 @@ export class BaileysAdapter implements ChannelAdapter {
       await this.saveCreds?.();
     });
 
-    const cacheContacts = (contacts: { id: string; name?: string; notify?: string; verifiedName?: string; phoneNumber?: string; lid?: string }[]) => {
+    const cacheContacts = (
+      contacts: {
+        id: string;
+        name?: string;
+        notify?: string;
+        verifiedName?: string;
+        phoneNumber?: string;
+        lid?: string;
+      }[],
+    ) => {
       for (const c of contacts) {
         if (!c.id) continue;
 
@@ -1033,7 +1039,10 @@ export class BaileysAdapter implements ChannelAdapter {
       // --- LID Mapping (v7+): store LID <-> PN mappings ---
       if (events["lid-mapping.update"]) {
         const mapping = events["lid-mapping.update"];
-        logger.info({ instanceId: this.instanceId, lid: mapping.lid, pn: mapping.pn }, "LID mapping updated");
+        logger.info(
+          { instanceId: this.instanceId, lid: mapping.lid, pn: mapping.pn },
+          "LID mapping updated",
+        );
       }
 
       // --- Chats: extract phonebook names from chat metadata ---
@@ -1044,7 +1053,10 @@ export class BaileysAdapter implements ChannelAdapter {
         );
         if (namedChats.length > 0) {
           cacheContacts(namedChats.map((ch) => ({ id: ch.id, name: ch.name })));
-          logger.info({ instanceId: this.instanceId, count: namedChats.length }, "Contacts cached from chat names (chats.upsert)");
+          logger.info(
+            { instanceId: this.instanceId, count: namedChats.length },
+            "Contacts cached from chat names (chats.upsert)",
+          );
         }
       }
 
@@ -1052,7 +1064,10 @@ export class BaileysAdapter implements ChannelAdapter {
       if (events["contacts.upsert"]) {
         const contacts = events["contacts.upsert"];
         cacheContacts(contacts);
-        logger.info({ instanceId: this.instanceId, count: contacts.length }, "Contacts cached (upsert)");
+        logger.info(
+          { instanceId: this.instanceId, count: contacts.length },
+          "Contacts cached (upsert)",
+        );
       }
 
       if (events["contacts.update"]) {
@@ -1065,15 +1080,20 @@ export class BaileysAdapter implements ChannelAdapter {
         const { contacts = [], chats = [] } = events["messaging-history.set"];
         const filtered = contacts.filter((c) => c.id && (c.notify || c.name));
         if (filtered.length > 0) {
-          cacheContacts(filtered.map((c) => ({
-            id: c.id,
-            name: c.name ?? c.notify,
-            notify: c.notify,
-            verifiedName: c.verifiedName,
-            phoneNumber: c.phoneNumber,
-            lid: c.lid,
-          })));
-          logger.info({ instanceId: this.instanceId, contacts: filtered.length, chats: chats.length }, "Contacts cached (history sync)");
+          cacheContacts(
+            filtered.map((c) => ({
+              id: c.id,
+              name: c.name ?? c.notify,
+              notify: c.notify,
+              verifiedName: c.verifiedName,
+              phoneNumber: c.phoneNumber,
+              lid: c.lid,
+            })),
+          );
+          logger.info(
+            { instanceId: this.instanceId, contacts: filtered.length, chats: chats.length },
+            "Contacts cached (history sync)",
+          );
         }
 
         // Extract contact names from chat list (may include phonebook names)
@@ -1082,11 +1102,16 @@ export class BaileysAdapter implements ChannelAdapter {
             !!ch.id && !!ch.name && !ch.id.endsWith("@g.us") && !ch.id.endsWith("@broadcast"),
         );
         if (chatContacts.length > 0) {
-          cacheContacts(chatContacts.map((ch) => ({
-            id: ch.id,
-            name: ch.name,
-          })));
-          logger.info({ instanceId: this.instanceId, chatContacts: chatContacts.length }, "Contacts cached from chat names");
+          cacheContacts(
+            chatContacts.map((ch) => ({
+              id: ch.id,
+              name: ch.name,
+            })),
+          );
+          logger.info(
+            { instanceId: this.instanceId, chatContacts: chatContacts.length },
+            "Contacts cached from chat names",
+          );
         }
       }
 
@@ -1175,7 +1200,10 @@ export class BaileysAdapter implements ChannelAdapter {
       }
 
       if (events["group-participants.update"]) {
-        const event = normalizeGroupParticipantsUpdate(this.instanceId, events["group-participants.update"]);
+        const event = normalizeGroupParticipantsUpdate(
+          this.instanceId,
+          events["group-participants.update"],
+        );
         this.emit("group.participants_changed", event);
       }
 

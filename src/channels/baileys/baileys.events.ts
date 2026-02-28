@@ -91,7 +91,12 @@ export function extractQuotedMessageId(msg: WAMessage): string | null {
  */
 export function normalizeLidInMessage(msg: WAMessage): void {
   const key = msg.key as Record<string, unknown>;
-  if (key.remoteJid && typeof key.remoteJid === "string" && key.remoteJid.endsWith("@lid") && key.remoteJidAlt) {
+  if (
+    key.remoteJid &&
+    typeof key.remoteJid === "string" &&
+    key.remoteJid.endsWith("@lid") &&
+    key.remoteJidAlt
+  ) {
     const lid = key.remoteJid;
     key.remoteJid = key.remoteJidAlt;
     key.remoteJidAlt = lid;

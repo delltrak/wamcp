@@ -45,11 +45,13 @@ export function registerEventNotifications(
           logger: "whatsapp-events",
           data: { method, payload },
         }),
-      ).then(() => {
-        logger.info({ method }, "sendLoggingMessage sent successfully");
-      }).catch((err) => {
-        logger.warn({ err: String(err), method }, "sendLoggingMessage failed");
-      });
+      )
+        .then(() => {
+          logger.info({ method }, "sendLoggingMessage sent successfully");
+        })
+        .catch((err) => {
+          logger.warn({ err: String(err), method }, "sendLoggingMessage failed");
+        });
 
       void Promise.resolve(
         server.server.notification({
@@ -59,11 +61,13 @@ export function registerEventNotifications(
             ...(payload as unknown as Record<string, unknown>),
           },
         }),
-      ).then(() => {
-        logger.info({ method }, "MCP notification sent successfully");
-      }).catch((err) => {
-        logger.warn({ err: String(err), method }, "MCP notification failed");
-      });
+      )
+        .then(() => {
+          logger.info({ method }, "MCP notification sent successfully");
+        })
+        .catch((err) => {
+          logger.warn({ err: String(err), method }, "MCP notification failed");
+        });
     },
   );
 }
