@@ -32,17 +32,19 @@
 
 ---
 
-## 🤖 What is this?
+## 🤖 What is WA MCP?
 
-**WA MCP** is an MCP (Model Context Protocol) server that gives AI agents full access to WhatsApp. Your agent connects once and auto-discovers **61 tools**, **10 resources**, and **12 real-time events** — zero configuration, zero REST wrappers, zero glue code.
+**WA MCP** is a WhatsApp MCP server built with TypeScript that gives AI agents full access to WhatsApp through the [Model Context Protocol](https://modelcontextprotocol.io). It supports both **Baileys** (WhatsApp Web) and **Meta Cloud API** as dual-channel backends, deployable with **Docker** in a single command.
+
+Your agent connects once and auto-discovers **61 tools**, **10 resources**, and **12 real-time events** — zero configuration, zero REST wrappers, zero glue code.
 
 ```
 Your AI Agent ←→ MCP Protocol ←→ WA MCP ←→ WhatsApp
 ```
 
-Instead of writing HTTP clients, parsing webhook payloads, and mapping endpoints to tools manually — your agent just **connects and goes**.
+Instead of writing HTTP clients, parsing webhook payloads, and mapping endpoints to tools manually — your agent just **connects and goes**. Works out of the box with **Claude**, **Google ADK**, **LangChain**, and any MCP-compatible AI agent framework.
 
-> 💡 **MCP** is the [Model Context Protocol](https://modelcontextprotocol.io) — the open standard for connecting AI agents to tools and data. WA MCP speaks MCP natively.
+> 💡 **MCP** (Model Context Protocol) is the open standard for connecting AI agents to tools and data. WA MCP speaks MCP natively via Streamable HTTP and stdio transports.
 
 ---
 
