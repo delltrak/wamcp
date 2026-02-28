@@ -73,3 +73,6 @@ export const MEDIA_LIMITS = {
 // MCP endpoint
 export const MCP_ENDPOINT = "/mcp";
 export const HEALTH_ENDPOINT = "/health";
+
+// Max base64 media size (bytes)
+export const MAX_BASE64_MEDIA_BYTES = 100 * 1024 * 1024; // 100 MB

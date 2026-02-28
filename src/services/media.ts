@@ -7,6 +7,7 @@ import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 import { DEFAULT_MEDIA_CACHE_MAX_MB } from "../constants.js";
+import { validateMediaUrl, validateBase64Size } from "../utils/validation.js";
 
 const MEDIA_DIR = "data/media";
 
@@ -23,28 +24,39 @@ export class MediaService {
     }
   }
 
-  /** Download media from an HTTPS URL */
+  /** Download media from an HTTPS URL (with SSRF protection) */
   async downloadMedia(url: string): Promise<Buffer> {
-    if (!url.startsWith("https://") && !url.startsWith("http://")) {
-      throw new Error("Only HTTP(S) URLs are supported for media download");
+    const urlError = validateMediaUrl(url);
+    if (urlError) {
+      throw new Error(`Invalid media URL: ${urlError}`);
     }
     const response = await fetch(url);
     if (!response.ok) {
-      throw new Error(`Failed to download media: ${response.status} ${response.statusText}`);
+      throw new Error(`Failed to download media: HTTP ${response.status}`);
     }
     const arrayBuffer = await response.arrayBuffer();
     return Buffer.from(arrayBuffer);
   }
 
-  /** Decode base64 media to a buffer */
+  /** Decode base64 media to a buffer (with size limit) */
   decodeBase64Media(base64: string): Buffer {
+    const sizeError = validateBase64Size(base64);
+    if (sizeError) {
+      throw new Error(sizeError);
+    }
     return Buffer.from(base64, "base64");
   }
 
   /** Auto-detect URL vs base64, return Buffer */
   async getMediaBuffer(input: string): Promise<Buffer> {
-    if (input.startsWith("http://") || input.startsWith("https://")) {
+    if (input.startsWith("https://")) {
       return this.downloadMedia(input);
+    }
+    if (input.startsWith("http://")) {
+      throw new Error("Media URLs must use HTTPS");
+    }
+    if (input.startsWith("file://") || input.startsWith("data:")) {
+      throw new Error("file:// and data: URLs are not allowed");
     }
     return this.decodeBase64Media(input);
   }

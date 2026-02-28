@@ -4,9 +4,9 @@
 // ============================================================
 
 import { createHmac, timingSafeEqual } from "node:crypto";
-import pino from "pino";
+import { createChildLogger } from "../../utils/logger.js";
 
-const logger = pino({ name: "cloud-api-auth" });
+const logger = createChildLogger({ service: "cloud-api-auth" });
 
 const GRAPH_API_BASE = "https://graph.facebook.com/v21.0";
 

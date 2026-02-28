@@ -1,39 +1,65 @@
 import "dotenv/config";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
+import { timingSafeEqual } from "node:crypto";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import pino from "pino";
 import {
   VERSION,
   SERVER_NAME,
   DEFAULT_TRANSPORT,
   DEFAULT_PORT,
-  DEFAULT_LOG_LEVEL,
   MCP_ENDPOINT,
   HEALTH_ENDPOINT,
 } from "./constants.js";
 import { InstanceManager } from "./services/instance-manager.js";
 import { MessageQueue } from "./services/message-queue.js";
+import { MaintenanceService } from "./services/maintenance.js";
 import { createMcpServer } from "./server/mcp.js";
 import { verifyWebhookSignature } from "./channels/cloud-api/cloud.auth.js";
 import { normalizeWebhookPayload } from "./channels/cloud-api/cloud.events.js";
 import type { MetaWebhookPayload } from "./channels/cloud-api/cloud.events.js";
+import { logger } from "./utils/logger.js";
 
 const CLOUD_WEBHOOK_PATH = "/cloud-webhook";
 
 const transport = process.env.WA_TRANSPORT ?? DEFAULT_TRANSPORT;
 const port = parseInt(process.env.WA_MCP_PORT ?? String(DEFAULT_PORT), 10);
-const logLevel = process.env.WA_LOG_LEVEL ?? DEFAULT_LOG_LEVEL;
 
-const logger = pino({
-  name: SERVER_NAME,
-  level: logLevel,
-  transport:
-    process.env.NODE_ENV !== "production"
-      ? { target: "pino-pretty", options: { colorize: true } }
-      : undefined,
-  redact: ["headers.authorization", "*.accessToken", "*.cloudAccessToken"],
-});
+/** Timing-safe API key comparison to prevent timing attacks */
+function verifyApiKey(provided: string, expected: string): boolean {
+  if (provided.length !== expected.length) return false;
+  try {
+    return timingSafeEqual(Buffer.from(provided), Buffer.from(expected));
+  } catch {
+    return false;
+  }
+}
+
+/** Check API key from request headers. Returns true if valid, or no key is configured. */
+function checkApiKey(req: IncomingMessage, res: ServerResponse): boolean {
+  const apiKey = process.env.WA_MCP_API_KEY;
+  if (!apiKey) return true; // No key configured, allow
+
+  const authHeader = req.headers.authorization;
+  const apiKeyHeader = req.headers["x-api-key"] as string | undefined;
+
+  let provided: string | undefined;
+
+  if (authHeader?.startsWith("Bearer ")) {
+    provided = authHeader.slice(7);
+  } else if (apiKeyHeader) {
+    provided = apiKeyHeader;
+  }
+
+  if (!provided || !verifyApiKey(provided, apiKey)) {
+    logger.warn("Unauthorized request: invalid or missing API key");
+    res.writeHead(401, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ error: "Unauthorized" }));
+    return false;
+  }
+
+  return true;
+}
 
 async function initServices() {
   // Initialize services
@@ -45,6 +71,10 @@ async function initServices() {
 
   // Load existing instances from DB and reconnect
   await instanceManager.init();
+
+  // Start maintenance jobs (pruning, version checks, health checks)
+  const maintenance = new MaintenanceService(instanceManager);
+  await maintenance.start();
 
   logger.info("Services initialized");
 
@@ -83,6 +113,9 @@ async function startHttp(): Promise<void> {
 
     // MCP endpoint
     if (url.pathname === MCP_ENDPOINT) {
+      // Authenticate before processing MCP requests
+      if (!checkApiKey(req, res)) return;
+
       // Extract session ID from header
       const sessionId = req.headers["mcp-session-id"] as string | undefined;
 

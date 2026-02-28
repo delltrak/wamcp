@@ -4,7 +4,6 @@
 // WhatsApp Cloud API (graph.facebook.com/v21.0).
 // ============================================================
 
-import pino from "pino";
 import type { ChannelAdapter, ChannelEventHandler } from "../channel.interface.js";
 import type {
   ConnectionStatus,
@@ -29,8 +28,9 @@ import type {
   ChannelEvent,
   ChannelEventPayload,
 } from "../../types/channel.types.js";
+import { createChildLogger } from "../../utils/logger.js";
 
-const logger = pino({ name: "cloud-api-adapter" });
+const logger = createChildLogger({ service: "cloud-api-adapter" });
 
 const GRAPH_API_BASE = "https://graph.facebook.com/v21.0";
 
@@ -165,8 +165,12 @@ export class CloudApiAdapter implements ChannelAdapter {
     extra?: Record<string, unknown>,
   ): Record<string, unknown> {
     const mediaObj: Record<string, unknown> = { ...extra };
-    if (input.startsWith("http://") || input.startsWith("https://")) {
+    if (input.startsWith("https://")) {
       mediaObj.link = input;
+    } else if (input.startsWith("http://")) {
+      throw new Error("Media URLs must use HTTPS");
+    } else if (input.startsWith("file://") || input.startsWith("data:")) {
+      throw new Error("file:// and data: URLs are not allowed");
     } else {
       // Assume it's a media ID (previously uploaded)
       mediaObj.id = input;
@@ -372,7 +376,7 @@ export class CloudApiAdapter implements ChannelAdapter {
     throw new Error("Deleting sent messages is not supported on Cloud API");
   }
 
-  async forwardMessage(to: string, _msgId: string, _fromChat: string): Promise<MessageResponse> {
+  async forwardMessage(_to: string, _msgId: string, _fromChat: string): Promise<MessageResponse> {
     // Cloud API does not have a native forward endpoint.
     // Forwarding requires re-sending the content.
     throw new Error(

@@ -15,7 +15,6 @@ import makeWASocket, {
   type MiscMessageGenerationOptions,
 } from "@whiskeysockets/baileys";
 import { Boom } from "@hapi/boom";
-import pino from "pino";
 import type { ChannelAdapter, ChannelEventHandler } from "../channel.interface.js";
 import type {
   ConnectionStatus,
@@ -61,8 +60,9 @@ import {
   RECONNECT_MAX_DELAY_MS,
   RECONNECT_MAX_ATTEMPTS,
 } from "../../constants.js";
+import { createChildLogger } from "../../utils/logger.js";
 
-const logger = pino({ name: "baileys-adapter" });
+const logger = createChildLogger({ service: "baileys-adapter" });
 
 export class BaileysAdapter implements ChannelAdapter {
   private sock: WASocket | null = null;
@@ -95,8 +95,14 @@ export class BaileysAdapter implements ChannelAdapter {
   }
 
   private resolveMedia(input: string): { url: string } | Buffer {
-    if (input.startsWith("http://") || input.startsWith("https://")) {
+    if (input.startsWith("https://")) {
       return { url: input };
+    }
+    if (input.startsWith("http://")) {
+      throw new Error("Media URLs must use HTTPS");
+    }
+    if (input.startsWith("file://") || input.startsWith("data:")) {
+      throw new Error("file:// and data: URLs are not allowed");
     }
     return Buffer.from(input, "base64");
   }
@@ -146,7 +152,7 @@ export class BaileysAdapter implements ChannelAdapter {
         keys: makeCacheableSignalKeyStore(state.keys, logger),
       },
       printQRInTerminal: false,
-      logger: logger.child({ instanceId: this.instanceId }) as ReturnType<typeof pino>,
+      logger: logger.child({ instanceId: this.instanceId }) as unknown as import("pino").Logger,
       generateHighQualityLinkPreview: true,
       syncFullHistory: false,
       markOnlineOnConnect: true,

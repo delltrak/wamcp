@@ -8,9 +8,9 @@ import { fetchLatestBaileysVersion } from "@whiskeysockets/baileys";
 import { eq } from "drizzle-orm";
 import { db } from "../../db/client.js";
 import { waVersionCache } from "../../db/schema.js";
-import pino from "pino";
+import { createChildLogger } from "../../utils/logger.js";
 
-const logger = pino({ name: "baileys-version" });
+const logger = createChildLogger({ service: "baileys-version" });
 
 // Cache duration: 24 hours
 const CACHE_TTL_MS = 24 * 60 * 60 * 1000;

@@ -5,7 +5,9 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { InstanceManager } from "../services/instance-manager.js";
 import type { MessageQueue } from "../services/message-queue.js";
-import { toolSuccess, toolError } from "../types/mcp.types.js";
+import { toolSuccess } from "../types/mcp.types.js";
+import { handleToolError } from "../utils/tool-handler.js";
+import { createRequestLogger } from "../utils/logger.js";
 import {
   CheckNumberExistsSchema,
   BlockContactSchema,
@@ -23,12 +25,15 @@ export function registerContactTools(
     "Check if a phone number is registered on WhatsApp. Returns the JID if the number exists.",
     CheckNumberExistsSchema.shape,
     async (params) => {
+      const log = createRequestLogger("wa_check_number_exists", params.instanceId);
+      const start = Date.now();
       try {
         const adapter = instanceManager.getAdapter(params.instanceId);
         const result = await adapter.checkNumberExists(params.phoneNumber);
+        log.info({ duration: Date.now() - start, exists: result.exists }, "Number check completed");
         return toolSuccess(result);
       } catch (err) {
-        return toolError((err as Error).message);
+        return handleToolError("wa_check_number_exists", err, params.instanceId);
       }
     },
   );
@@ -38,12 +43,15 @@ export function registerContactTools(
     "Block a WhatsApp contact. Blocked contacts cannot send you messages.",
     BlockContactSchema.shape,
     async (params) => {
+      const log = createRequestLogger("wa_block_contact", params.instanceId);
+      const start = Date.now();
       try {
         const adapter = instanceManager.getAdapter(params.instanceId);
         await adapter.blockContact(params.jid);
+        log.info({ duration: Date.now() - start }, "Contact blocked");
         return toolSuccess({ success: true, blocked: true });
       } catch (err) {
-        return toolError((err as Error).message);
+        return handleToolError("wa_block_contact", err, params.instanceId);
       }
     },
   );
@@ -53,12 +61,15 @@ export function registerContactTools(
     "Unblock a previously blocked WhatsApp contact.",
     UnblockContactSchema.shape,
     async (params) => {
+      const log = createRequestLogger("wa_unblock_contact", params.instanceId);
+      const start = Date.now();
       try {
         const adapter = instanceManager.getAdapter(params.instanceId);
         await adapter.unblockContact(params.jid);
+        log.info({ duration: Date.now() - start }, "Contact unblocked");
         return toolSuccess({ success: true, blocked: false });
       } catch (err) {
-        return toolError((err as Error).message);
+        return handleToolError("wa_unblock_contact", err, params.instanceId);
       }
     },
   );
@@ -68,12 +79,15 @@ export function registerContactTools(
     "Fetch the business profile information for a WhatsApp Business contact.",
     GetBusinessProfileSchema.shape,
     async (params) => {
+      const log = createRequestLogger("wa_get_business_profile", params.instanceId);
+      const start = Date.now();
       try {
         const adapter = instanceManager.getAdapter(params.instanceId);
         const profile = await adapter.getBusinessProfile(params.jid);
+        log.info({ duration: Date.now() - start }, "Business profile retrieved");
         return toolSuccess(profile);
       } catch (err) {
-        return toolError((err as Error).message);
+        return handleToolError("wa_get_business_profile", err, params.instanceId);
       }
     },
   );

@@ -55,8 +55,11 @@ export function registerInstancesResource(
       const id = uri.pathname.split("/").pop() ?? "";
       const instance = instanceManager.getInstance(id);
       const stats = await messageQueue.getQueueStats(id);
+      // Strip sensitive fields before returning to agents
+      const { cloudAccessToken: _token, ...safeInstance } = instance;
       const data = {
-        ...instance,
+        ...safeInstance,
+        cloudAccessToken: instance.cloudAccessToken ? "[REDACTED]" : null,
         queue: { outbound: stats },
       };
       return {

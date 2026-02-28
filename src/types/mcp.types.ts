@@ -37,11 +37,15 @@ export function toolSuccess(data: unknown): ToolSuccessResponse {
   };
 }
 
-// Helper to create an error text response
+// Helper to create an error text response (sanitized for agent consumption)
 export function toolError(message: string): ToolErrorResponse {
+  // Strip internal paths and stack traces from error messages
+  let sanitized = message;
+  sanitized = sanitized.replace(/\/[^\s:]+\.(ts|js|mjs|cjs)/g, "[internal]");
+  sanitized = sanitized.replace(/\s+at\s+.+/g, "");
   return {
     isError: true,
-    content: [{ type: "text", text: `Error: ${message}` }],
+    content: [{ type: "text", text: `Error: ${sanitized.trim()}` }],
   };
 }
 

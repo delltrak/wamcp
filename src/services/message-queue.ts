@@ -3,7 +3,6 @@
 // ============================================================
 
 import { Queue, Worker, type Job } from "bullmq";
-import pino from "pino";
 import type { ChannelAdapter } from "../channels/channel.interface.js";
 import type { MessageContent } from "../types/channel.types.js";
 import {
@@ -15,8 +14,9 @@ import {
   QUEUE_COMPLETED_AGE_S,
   QUEUE_FAILED_AGE_S,
 } from "../constants.js";
+import { createChildLogger } from "../utils/logger.js";
 
-const logger = pino({ name: "message-queue" });
+const logger = createChildLogger({ service: "message-queue" });
 
 export interface OutboundJob {
   instanceId: string;

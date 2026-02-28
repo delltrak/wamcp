@@ -3,7 +3,7 @@
 // Maps Meta webhook payloads to normalized ChannelEvent types.
 // ============================================================
 
-import pino from "pino";
+import { createChildLogger } from "../../utils/logger.js";
 import type {
   MessageType,
   MessageDeliveryStatus,
@@ -13,7 +13,7 @@ import type {
   ChannelEventPayload,
 } from "../../types/channel.types.js";
 
-const logger = pino({ name: "cloud-api-events" });
+const logger = createChildLogger({ service: "cloud-api-events" });
 
 // ---- Meta Webhook Payload Types ----
 

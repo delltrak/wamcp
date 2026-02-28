@@ -4,7 +4,6 @@
 
 import { eq } from "drizzle-orm";
 import { randomUUID } from "node:crypto";
-import pino from "pino";
 import { db } from "../db/client.js";
 import { instances, authKeys, queueStats } from "../db/schema.js";
 import { BaileysAdapter } from "../channels/baileys/baileys.adapter.js";
@@ -13,9 +12,10 @@ import type { ChannelAdapter } from "../channels/channel.interface.js";
 import type { ChannelType, ChannelEvent, ChannelEventPayload } from "../types/channel.types.js";
 import type { InstanceEntity } from "../types/db.types.js";
 import { INSTANCE_ID_PREFIX } from "../constants.js";
+import { createChildLogger } from "../utils/logger.js";
 import type { MessageQueue } from "./message-queue.js";
 
-const logger = pino({ name: "instance-manager" });
+const logger = createChildLogger({ service: "instance-manager" });
 
 interface ManagedInstance {
   adapter: ChannelAdapter;
