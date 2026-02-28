@@ -7,6 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-02-28
+
+### Added
+
+- Upgrade Baileys from v6 to v7 with full LID (Local Identifier) support
+- LID-to-phone-number resolution via Signal repository mapping
+- `wa_search_contact` tool with multi-word fuzzy matching across name, notify name, phone, and LID
+- `wa_get_messages` tool to retrieve persisted chat messages from the database
+- Message persistence: all messages (sent and received) are saved to SQLite automatically
+- `lid` column on contacts table with inline migration for existing databases
+- Contacts cached from history sync, chat metadata (`chats.upsert`), and incoming message `pushName`
+- Structured logging for MCP notification delivery (success/failure tracking)
+- Drizzle migration files for schema changes
+
+### Changed
+
+- `markOnlineOnConnect` set to `false` — instance stays offline until explicit interaction
+- `syncFullHistory` enabled for better contact and chat sync on reconnection
+- Pairing code flow improved with proper queueing, timeout, and caching
+- Phonebook names prioritized over WhatsApp profile names in contact cache
+
+### Fixed
+
+- BullMQ queue names now use hyphens instead of colons (colons not allowed)
+- LID normalization in incoming messages (swap `remoteJid`/`remoteJidAlt` when LID is primary)
+- Group participants update type mismatch in Baileys v7 (`GroupParticipant[]` → `string[]`)
+- Redis port mapped to host for external connections
+- MCP notifications gracefully handle missing client sessions
+
 ## [1.0.0] - 2026-02-28
 
 ### Added

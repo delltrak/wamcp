@@ -10,9 +10,9 @@
 2. [Tools Reference](#2-tools-reference)
    - [Instance Management](#21-instance-management-8-tools)
    - [Messaging](#22-messaging-17-tools)
-   - [Chat Management](#23-chat-management-5-tools)
+   - [Chat Management](#23-chat-management-6-tools)
    - [Group Management](#24-group-management-14-tools)
-   - [Contact Management](#25-contact-management-4-tools)
+   - [Contact Management](#25-contact-management-5-tools)
    - [Profile Management](#26-profile-management-5-tools)
    - [Status / Stories](#27-status--stories-3-tools)
    - [Newsletter / Channels](#28-newsletter--channels-3-tools)
@@ -48,10 +48,10 @@ The key is configured via the `WA_API_KEY` environment variable on the server.
 
 WA MCP supports two underlying WhatsApp connection methods:
 
-| Channel | Description | Notes |
-|---------|-------------|-------|
+| Channel   | Description                       | Notes                                                                                             |
+| --------- | --------------------------------- | ------------------------------------------------------------------------------------------------- |
 | `baileys` | Open-source WhatsApp Web protocol | Full feature support. Requires QR code or pairing code auth. Unofficial -- numbers may be banned. |
-| `cloud` | Meta Cloud API (official) | Subset of features. Requires Meta Business credentials. Production-safe. |
+| `cloud`   | Meta Cloud API (official)         | Subset of features. Requires Meta Business credentials. Production-safe.                          |
 
 Tools marked **Baileys only** are not available on Cloud API instances.
 
@@ -72,10 +72,12 @@ WA MCP exposes **60 tools** grouped by domain. All tools return MCP-standard res
 
 ```json
 {
-  "content": [{
-    "type": "text",
-    "text": "{\"key\": \"value\"}"
-  }]
+  "content": [
+    {
+      "type": "text",
+      "text": "{\"key\": \"value\"}"
+    }
+  ]
 }
 ```
 
@@ -84,10 +86,12 @@ WA MCP exposes **60 tools** grouped by domain. All tools return MCP-standard res
 ```json
 {
   "isError": true,
-  "content": [{
-    "type": "text",
-    "text": "Error: Description of what went wrong"
-  }]
+  "content": [
+    {
+      "type": "text",
+      "text": "Error: Description of what went wrong"
+    }
+  ]
 }
 ```
 
@@ -101,14 +105,15 @@ Tools for creating, connecting, and managing WhatsApp instances.
 
 Create a new WhatsApp instance.
 
-| Parameter | Type | Required | Description |
-|-----------|------|----------|-------------|
-| `name` | string | Yes | Human-friendly instance name (e.g. `"support-bot"`) |
-| `channel` | `"baileys"` \| `"cloud"` | No (default: `"baileys"`) | WhatsApp channel type |
+| Parameter | Type                     | Required                  | Description                                         |
+| --------- | ------------------------ | ------------------------- | --------------------------------------------------- |
+| `name`    | string                   | Yes                       | Human-friendly instance name (e.g. `"support-bot"`) |
+| `channel` | `"baileys"` \| `"cloud"` | No (default: `"baileys"`) | WhatsApp channel type                               |
 
 **Channel support:** Both
 
 **Response:**
+
 ```json
 {
   "id": "inst_abc123",
@@ -125,13 +130,14 @@ Create a new WhatsApp instance.
 
 Connect a WhatsApp instance. For Baileys instances, this starts the WebSocket connection and generates a QR code for authentication.
 
-| Parameter | Type | Required | Description |
-|-----------|------|----------|-------------|
-| `instanceId` | string | Yes | The instance ID to connect |
+| Parameter    | Type   | Required | Description                |
+| ------------ | ------ | -------- | -------------------------- |
+| `instanceId` | string | Yes      | The instance ID to connect |
 
 **Channel support:** Both
 
 **Response:**
+
 ```json
 {
   "instanceId": "inst_abc123",
@@ -145,13 +151,14 @@ Connect a WhatsApp instance. For Baileys instances, this starts the WebSocket co
 
 Gracefully disconnect a WhatsApp instance. The session is preserved for reconnection.
 
-| Parameter | Type | Required | Description |
-|-----------|------|----------|-------------|
-| `instanceId` | string | Yes | The instance ID to disconnect |
+| Parameter    | Type   | Required | Description                   |
+| ------------ | ------ | -------- | ----------------------------- |
+| `instanceId` | string | Yes      | The instance ID to disconnect |
 
 **Channel support:** Both
 
 **Response:**
+
 ```json
 {
   "instanceId": "inst_abc123",
@@ -165,13 +172,14 @@ Gracefully disconnect a WhatsApp instance. The session is preserved for reconnec
 
 Permanently delete a WhatsApp instance and all its data including auth state, messages, contacts, and queue. **This action cannot be undone.**
 
-| Parameter | Type | Required | Description |
-|-----------|------|----------|-------------|
-| `instanceId` | string | Yes | The instance ID to permanently delete |
+| Parameter    | Type   | Required | Description                           |
+| ------------ | ------ | -------- | ------------------------------------- |
+| `instanceId` | string | Yes      | The instance ID to permanently delete |
 
 **Channel support:** Both
 
 **Response:**
+
 ```json
 {
   "instanceId": "inst_abc123",
@@ -185,13 +193,14 @@ Permanently delete a WhatsApp instance and all its data including auth state, me
 
 Disconnect and reconnect a WhatsApp instance. Useful for recovering from errors.
 
-| Parameter | Type | Required | Description |
-|-----------|------|----------|-------------|
-| `instanceId` | string | Yes | The instance ID to restart |
+| Parameter    | Type   | Required | Description                |
+| ------------ | ------ | -------- | -------------------------- |
+| `instanceId` | string | Yes      | The instance ID to restart |
 
 **Channel support:** Both
 
 **Response:**
+
 ```json
 {
   "instanceId": "inst_abc123",
@@ -205,13 +214,14 @@ Disconnect and reconnect a WhatsApp instance. Useful for recovering from errors.
 
 Get the QR code as a base64 image for authenticating a Baileys instance. Returns null if no QR code is available (already authenticated or not yet connecting).
 
-| Parameter | Type | Required | Description |
-|-----------|------|----------|-------------|
-| `instanceId` | string | Yes | The instance ID (Baileys only) |
+| Parameter    | Type   | Required | Description                    |
+| ------------ | ------ | -------- | ------------------------------ |
+| `instanceId` | string | Yes      | The instance ID (Baileys only) |
 
 **Channel support:** Baileys only
 
 **Response (QR available):**
+
 ```json
 {
   "instanceId": "inst_abc123",
@@ -220,6 +230,7 @@ Get the QR code as a base64 image for authenticating a Baileys instance. Returns
 ```
 
 **Response (no QR):**
+
 ```json
 {
   "instanceId": "inst_abc123",
@@ -234,14 +245,15 @@ Get the QR code as a base64 image for authenticating a Baileys instance. Returns
 
 Get a numeric pairing code for authenticating a Baileys instance. The code is entered on the phone in WhatsApp > Linked Devices > Link with phone number.
 
-| Parameter | Type | Required | Description |
-|-----------|------|----------|-------------|
-| `instanceId` | string | Yes | The instance ID (Baileys only) |
-| `phoneNumber` | string | Yes | Phone number to pair with (e.g. `"5511999999999"`) |
+| Parameter     | Type   | Required | Description                                        |
+| ------------- | ------ | -------- | -------------------------------------------------- |
+| `instanceId`  | string | Yes      | The instance ID (Baileys only)                     |
+| `phoneNumber` | string | Yes      | Phone number to pair with (e.g. `"5511999999999"`) |
 
 **Channel support:** Baileys only
 
 **Response:**
+
 ```json
 {
   "instanceId": "inst_abc123",
@@ -255,16 +267,17 @@ Get a numeric pairing code for authenticating a Baileys instance. The code is en
 
 Configure Meta Cloud API credentials for a Cloud API instance. Required before connecting a Cloud API instance.
 
-| Parameter | Type | Required | Description |
-|-----------|------|----------|-------------|
-| `instanceId` | string | Yes | The instance ID (Cloud API only) |
-| `accessToken` | string | Yes | Meta Cloud API access token |
-| `phoneNumberId` | string | Yes | Meta Phone Number ID |
-| `businessId` | string | No | Meta Business ID |
+| Parameter       | Type   | Required | Description                      |
+| --------------- | ------ | -------- | -------------------------------- |
+| `instanceId`    | string | Yes      | The instance ID (Cloud API only) |
+| `accessToken`   | string | Yes      | Meta Cloud API access token      |
+| `phoneNumberId` | string | Yes      | Meta Phone Number ID             |
+| `businessId`    | string | No       | Meta Business ID                 |
 
 **Channel support:** Cloud API only
 
 **Response:**
+
 ```json
 {
   "instanceId": "inst_abc123",
@@ -282,16 +295,17 @@ Tools for sending messages, media, reactions, and managing message state.
 
 Send a text message to a WhatsApp contact or group.
 
-| Parameter | Type | Required | Description |
-|-----------|------|----------|-------------|
-| `instanceId` | string | Yes | The instance to send from |
-| `to` | string | Yes | Recipient phone number (e.g. `"5511999999999"`) or group JID |
-| `text` | string | Yes | Message content (max 65536 chars) |
-| `quotedMessageId` | string | No | Message ID to reply to |
+| Parameter         | Type   | Required | Description                                                  |
+| ----------------- | ------ | -------- | ------------------------------------------------------------ |
+| `instanceId`      | string | Yes      | The instance to send from                                    |
+| `to`              | string | Yes      | Recipient phone number (e.g. `"5511999999999"`) or group JID |
+| `text`            | string | Yes      | Message content (max 65536 chars)                            |
+| `quotedMessageId` | string | No       | Message ID to reply to                                       |
 
 **Channel support:** Both
 
 **Response:**
+
 ```json
 {
   "status": "queued",
@@ -305,17 +319,18 @@ Send a text message to a WhatsApp contact or group.
 
 Send an image to a WhatsApp contact or group.
 
-| Parameter | Type | Required | Description |
-|-----------|------|----------|-------------|
-| `instanceId` | string | Yes | The instance to send from |
-| `to` | string | Yes | Recipient phone number or group JID |
-| `image` | string | Yes | Image URL or base64-encoded data |
-| `caption` | string | No | Image caption |
-| `quotedMessageId` | string | No | Message ID to reply to |
+| Parameter         | Type   | Required | Description                         |
+| ----------------- | ------ | -------- | ----------------------------------- |
+| `instanceId`      | string | Yes      | The instance to send from           |
+| `to`              | string | Yes      | Recipient phone number or group JID |
+| `image`           | string | Yes      | Image URL or base64-encoded data    |
+| `caption`         | string | No       | Image caption                       |
+| `quotedMessageId` | string | No       | Message ID to reply to              |
 
 **Channel support:** Both
 
 **Response:**
+
 ```json
 {
   "status": "queued",
@@ -329,17 +344,18 @@ Send an image to a WhatsApp contact or group.
 
 Send a video to a WhatsApp contact or group.
 
-| Parameter | Type | Required | Description |
-|-----------|------|----------|-------------|
-| `instanceId` | string | Yes | The instance to send from |
-| `to` | string | Yes | Recipient phone number or group JID |
-| `video` | string | Yes | Video URL or base64-encoded data |
-| `caption` | string | No | Video caption |
-| `quotedMessageId` | string | No | Message ID to reply to |
+| Parameter         | Type   | Required | Description                         |
+| ----------------- | ------ | -------- | ----------------------------------- |
+| `instanceId`      | string | Yes      | The instance to send from           |
+| `to`              | string | Yes      | Recipient phone number or group JID |
+| `video`           | string | Yes      | Video URL or base64-encoded data    |
+| `caption`         | string | No       | Video caption                       |
+| `quotedMessageId` | string | No       | Message ID to reply to              |
 
 **Channel support:** Both
 
 **Response:**
+
 ```json
 {
   "status": "queued",
@@ -353,16 +369,17 @@ Send a video to a WhatsApp contact or group.
 
 Send an audio file or voice note to a WhatsApp contact or group.
 
-| Parameter | Type | Required | Description |
-|-----------|------|----------|-------------|
-| `instanceId` | string | Yes | The instance to send from |
-| `to` | string | Yes | Recipient phone number or group JID |
-| `audio` | string | Yes | Audio URL or base64-encoded data |
-| `ptt` | boolean | No (default: `false`) | Send as voice note (push-to-talk) |
+| Parameter    | Type    | Required              | Description                         |
+| ------------ | ------- | --------------------- | ----------------------------------- |
+| `instanceId` | string  | Yes                   | The instance to send from           |
+| `to`         | string  | Yes                   | Recipient phone number or group JID |
+| `audio`      | string  | Yes                   | Audio URL or base64-encoded data    |
+| `ptt`        | boolean | No (default: `false`) | Send as voice note (push-to-talk)   |
 
 **Channel support:** Both
 
 **Response:**
+
 ```json
 {
   "status": "queued",
@@ -376,17 +393,18 @@ Send an audio file or voice note to a WhatsApp contact or group.
 
 Send a document/file to a WhatsApp contact or group.
 
-| Parameter | Type | Required | Description |
-|-----------|------|----------|-------------|
-| `instanceId` | string | Yes | The instance to send from |
-| `to` | string | Yes | Recipient phone number or group JID |
-| `document` | string | Yes | Document URL or base64-encoded data |
-| `fileName` | string | Yes | File name with extension (e.g. `"report.pdf"`) |
-| `mimeType` | string | Yes | MIME type (e.g. `"application/pdf"`) |
+| Parameter    | Type   | Required | Description                                    |
+| ------------ | ------ | -------- | ---------------------------------------------- |
+| `instanceId` | string | Yes      | The instance to send from                      |
+| `to`         | string | Yes      | Recipient phone number or group JID            |
+| `document`   | string | Yes      | Document URL or base64-encoded data            |
+| `fileName`   | string | Yes      | File name with extension (e.g. `"report.pdf"`) |
+| `mimeType`   | string | Yes      | MIME type (e.g. `"application/pdf"`)           |
 
 **Channel support:** Both
 
 **Response:**
+
 ```json
 {
   "status": "queued",
@@ -400,18 +418,19 @@ Send a document/file to a WhatsApp contact or group.
 
 Send a GPS location to a WhatsApp contact or group.
 
-| Parameter | Type | Required | Description |
-|-----------|------|----------|-------------|
-| `instanceId` | string | Yes | The instance to send from |
-| `to` | string | Yes | Recipient phone number or group JID |
-| `latitude` | number | Yes | GPS latitude (-90 to 90) |
-| `longitude` | number | Yes | GPS longitude (-180 to 180) |
-| `name` | string | No | Location name |
-| `address` | string | No | Location address |
+| Parameter    | Type   | Required | Description                         |
+| ------------ | ------ | -------- | ----------------------------------- |
+| `instanceId` | string | Yes      | The instance to send from           |
+| `to`         | string | Yes      | Recipient phone number or group JID |
+| `latitude`   | number | Yes      | GPS latitude (-90 to 90)            |
+| `longitude`  | number | Yes      | GPS longitude (-180 to 180)         |
+| `name`       | string | No       | Location name                       |
+| `address`    | string | No       | Location address                    |
 
 **Channel support:** Both
 
 **Response:**
+
 ```json
 {
   "status": "queued",
@@ -425,16 +444,17 @@ Send a GPS location to a WhatsApp contact or group.
 
 Send a vCard contact to a WhatsApp contact or group.
 
-| Parameter | Type | Required | Description |
-|-----------|------|----------|-------------|
-| `instanceId` | string | Yes | The instance to send from |
-| `to` | string | Yes | Recipient phone number or group JID |
-| `contactName` | string | Yes | Contact display name |
-| `contactPhone` | string | Yes | Contact phone number |
+| Parameter      | Type   | Required | Description                         |
+| -------------- | ------ | -------- | ----------------------------------- |
+| `instanceId`   | string | Yes      | The instance to send from           |
+| `to`           | string | Yes      | Recipient phone number or group JID |
+| `contactName`  | string | Yes      | Contact display name                |
+| `contactPhone` | string | Yes      | Contact phone number                |
 
 **Channel support:** Both
 
 **Response:**
+
 ```json
 {
   "status": "queued",
@@ -448,17 +468,18 @@ Send a vCard contact to a WhatsApp contact or group.
 
 Create and send a poll to a WhatsApp contact or group.
 
-| Parameter | Type | Required | Description |
-|-----------|------|----------|-------------|
-| `instanceId` | string | Yes | The instance to send from |
-| `to` | string | Yes | Recipient phone number or group JID |
-| `question` | string | Yes | Poll question |
-| `options` | string[] | Yes | Poll options (2-12 choices) |
-| `multiSelect` | boolean | No (default: `false`) | Allow multiple selections |
+| Parameter     | Type     | Required              | Description                         |
+| ------------- | -------- | --------------------- | ----------------------------------- |
+| `instanceId`  | string   | Yes                   | The instance to send from           |
+| `to`          | string   | Yes                   | Recipient phone number or group JID |
+| `question`    | string   | Yes                   | Poll question                       |
+| `options`     | string[] | Yes                   | Poll options (2-12 choices)         |
+| `multiSelect` | boolean  | No (default: `false`) | Allow multiple selections           |
 
 **Channel support:** Both
 
 **Response:**
+
 ```json
 {
   "status": "queued",
@@ -472,16 +493,17 @@ Create and send a poll to a WhatsApp contact or group.
 
 React to a message with an emoji. Send an empty string emoji to remove a reaction.
 
-| Parameter | Type | Required | Description |
-|-----------|------|----------|-------------|
-| `instanceId` | string | Yes | The instance to send from |
-| `chatId` | string | Yes | Chat JID where the message is |
-| `messageId` | string | Yes | Message ID to react to |
-| `emoji` | string | Yes | Emoji to react with (empty string to remove) |
+| Parameter    | Type   | Required | Description                                  |
+| ------------ | ------ | -------- | -------------------------------------------- |
+| `instanceId` | string | Yes      | The instance to send from                    |
+| `chatId`     | string | Yes      | Chat JID where the message is                |
+| `messageId`  | string | Yes      | Message ID to react to                       |
+| `emoji`      | string | Yes      | Emoji to react with (empty string to remove) |
 
 **Channel support:** Both
 
 **Response:**
+
 ```json
 {
   "success": true
@@ -494,16 +516,17 @@ React to a message with an emoji. Send an empty string emoji to remove a reactio
 
 Send a text message with a rich link preview.
 
-| Parameter | Type | Required | Description |
-|-----------|------|----------|-------------|
-| `instanceId` | string | Yes | The instance to send from |
-| `to` | string | Yes | Recipient phone number or group JID |
-| `text` | string | Yes | Message text content |
-| `url` | string | Yes | URL for the link preview (must be valid URL) |
+| Parameter    | Type   | Required | Description                                  |
+| ------------ | ------ | -------- | -------------------------------------------- |
+| `instanceId` | string | Yes      | The instance to send from                    |
+| `to`         | string | Yes      | Recipient phone number or group JID          |
+| `text`       | string | Yes      | Message text content                         |
+| `url`        | string | Yes      | URL for the link preview (must be valid URL) |
 
 **Channel support:** Both
 
 **Response:**
+
 ```json
 {
   "messageId": "msg_abc123",
@@ -517,16 +540,17 @@ Send a text message with a rich link preview.
 
 Forward an existing message to another chat.
 
-| Parameter | Type | Required | Description |
-|-----------|------|----------|-------------|
-| `instanceId` | string | Yes | The instance to send from |
-| `to` | string | Yes | Recipient phone number or group JID to forward to |
-| `messageId` | string | Yes | Message ID to forward |
-| `fromChatId` | string | Yes | Chat JID where the original message is |
+| Parameter    | Type   | Required | Description                                       |
+| ------------ | ------ | -------- | ------------------------------------------------- |
+| `instanceId` | string | Yes      | The instance to send from                         |
+| `to`         | string | Yes      | Recipient phone number or group JID to forward to |
+| `messageId`  | string | Yes      | Message ID to forward                             |
+| `fromChatId` | string | Yes      | Chat JID where the original message is            |
 
 **Channel support:** Both
 
 **Response:**
+
 ```json
 {
   "messageId": "msg_fwd_456",
@@ -540,16 +564,17 @@ Forward an existing message to another chat.
 
 Edit a previously sent message. Only text messages sent by this instance can be edited.
 
-| Parameter | Type | Required | Description |
-|-----------|------|----------|-------------|
-| `instanceId` | string | Yes | The instance ID |
-| `chatId` | string | Yes | Chat JID where the message is |
-| `messageId` | string | Yes | Message ID to edit |
-| `newText` | string | Yes | New text content for the message |
+| Parameter    | Type   | Required | Description                      |
+| ------------ | ------ | -------- | -------------------------------- |
+| `instanceId` | string | Yes      | The instance ID                  |
+| `chatId`     | string | Yes      | Chat JID where the message is    |
+| `messageId`  | string | Yes      | Message ID to edit               |
+| `newText`    | string | Yes      | New text content for the message |
 
 **Channel support:** Both
 
 **Response:**
+
 ```json
 {
   "success": true
@@ -562,15 +587,16 @@ Edit a previously sent message. Only text messages sent by this instance can be 
 
 Delete a message for everyone in the chat. Only messages sent by this instance can be deleted.
 
-| Parameter | Type | Required | Description |
-|-----------|------|----------|-------------|
-| `instanceId` | string | Yes | The instance ID |
-| `chatId` | string | Yes | Chat JID where the message is |
-| `messageId` | string | Yes | Message ID to delete for everyone |
+| Parameter    | Type   | Required | Description                       |
+| ------------ | ------ | -------- | --------------------------------- |
+| `instanceId` | string | Yes      | The instance ID                   |
+| `chatId`     | string | Yes      | Chat JID where the message is     |
+| `messageId`  | string | Yes      | Message ID to delete for everyone |
 
 **Channel support:** Both
 
 **Response:**
+
 ```json
 {
   "success": true
@@ -583,16 +609,17 @@ Delete a message for everyone in the chat. Only messages sent by this instance c
 
 Pin or unpin a message in a chat.
 
-| Parameter | Type | Required | Description |
-|-----------|------|----------|-------------|
-| `instanceId` | string | Yes | The instance ID |
-| `chatId` | string | Yes | Chat JID where the message is |
-| `messageId` | string | Yes | Message ID to pin or unpin |
-| `pin` | boolean | Yes | `true` to pin, `false` to unpin |
+| Parameter    | Type    | Required | Description                     |
+| ------------ | ------- | -------- | ------------------------------- |
+| `instanceId` | string  | Yes      | The instance ID                 |
+| `chatId`     | string  | Yes      | Chat JID where the message is   |
+| `messageId`  | string  | Yes      | Message ID to pin or unpin      |
+| `pin`        | boolean | Yes      | `true` to pin, `false` to unpin |
 
 **Channel support:** Both
 
 **Response:**
+
 ```json
 {
   "success": true,
@@ -606,16 +633,17 @@ Pin or unpin a message in a chat.
 
 Send a view-once image or video. The media disappears after the recipient views it once.
 
-| Parameter | Type | Required | Description |
-|-----------|------|----------|-------------|
-| `instanceId` | string | Yes | The instance to send from |
-| `to` | string | Yes | Recipient phone number or group JID |
-| `media` | string | Yes | Media URL or base64-encoded data |
-| `type` | `"image"` \| `"video"` | Yes | Media type |
+| Parameter    | Type                   | Required | Description                         |
+| ------------ | ---------------------- | -------- | ----------------------------------- |
+| `instanceId` | string                 | Yes      | The instance to send from           |
+| `to`         | string                 | Yes      | Recipient phone number or group JID |
+| `media`      | string                 | Yes      | Media URL or base64-encoded data    |
+| `type`       | `"image"` \| `"video"` | Yes      | Media type                          |
 
 **Channel support:** Both
 
 **Response:**
+
 ```json
 {
   "messageId": "msg_vo_789",
@@ -629,15 +657,16 @@ Send a view-once image or video. The media disappears after the recipient views 
 
 Send a presence status (typing, recording, etc.) to a chat.
 
-| Parameter | Type | Required | Description |
-|-----------|------|----------|-------------|
-| `instanceId` | string | Yes | The instance ID |
-| `chatId` | string | Yes | Chat JID to send presence to |
-| `status` | `"composing"` \| `"recording"` \| `"paused"` \| `"available"` \| `"unavailable"` | Yes | Presence status |
+| Parameter    | Type                                                                             | Required | Description                  |
+| ------------ | -------------------------------------------------------------------------------- | -------- | ---------------------------- |
+| `instanceId` | string                                                                           | Yes      | The instance ID              |
+| `chatId`     | string                                                                           | Yes      | Chat JID to send presence to |
+| `status`     | `"composing"` \| `"recording"` \| `"paused"` \| `"available"` \| `"unavailable"` | Yes      | Presence status              |
 
 **Channel support:** Both
 
 **Response:**
+
 ```json
 {
   "success": true
@@ -650,15 +679,16 @@ Send a presence status (typing, recording, etc.) to a chat.
 
 Mark specific messages as read in a chat.
 
-| Parameter | Type | Required | Description |
-|-----------|------|----------|-------------|
-| `instanceId` | string | Yes | The instance ID |
-| `chatId` | string | Yes | Chat JID containing the messages |
-| `messageIds` | string[] | Yes | Message IDs to mark as read (min 1) |
+| Parameter    | Type     | Required | Description                         |
+| ------------ | -------- | -------- | ----------------------------------- |
+| `instanceId` | string   | Yes      | The instance ID                     |
+| `chatId`     | string   | Yes      | Chat JID containing the messages    |
+| `messageIds` | string[] | Yes      | Message IDs to mark as read (min 1) |
 
 **Channel support:** Both
 
 **Response:**
+
 ```json
 {
   "success": true
@@ -667,23 +697,58 @@ Mark specific messages as read in a chat.
 
 ---
 
-### 2.3 Chat Management (5 tools)
+### 2.3 Chat Management (6 tools)
 
-Tools for organizing the chat list (archive, pin, mute, delete, clear).
+Tools for organizing the chat list and retrieving message history.
+
+#### `wa_get_messages`
+
+Get recent messages from a chat. Returns messages ordered by most recent first, with sender, content, type, and timestamp. Messages are persisted automatically as they are sent and received.
+
+| Parameter    | Type   | Required | Description                                    |
+| ------------ | ------ | -------- | ---------------------------------------------- |
+| `instanceId` | string | Yes      | The instance ID                                |
+| `chatId`     | string | Yes      | Chat JID (e.g. `5511999999999@s.whatsapp.net`) |
+| `limit`      | number | No       | Max messages to return (default 50, max 100)   |
+
+**Response:**
+
+```json
+{
+  "chatId": "5511999999999@s.whatsapp.net",
+  "count": 3,
+  "messages": [
+    {
+      "id": "3EB0ABC123",
+      "chatId": "5511999999999@s.whatsapp.net",
+      "senderId": "5511999999999@s.whatsapp.net",
+      "type": "text",
+      "content": "Hello!",
+      "mediaUrl": null,
+      "quotedMessageId": null,
+      "isFromMe": false,
+      "isForwarded": false,
+      "status": "received",
+      "timestamp": 1772314262
+    }
+  ]
+}
+```
 
 #### `wa_archive_chat`
 
 Archive or unarchive a chat. Archived chats are hidden from the main chat list.
 
-| Parameter | Type | Required | Description |
-|-----------|------|----------|-------------|
-| `instanceId` | string | Yes | The instance ID |
-| `chatId` | string | Yes | Chat JID to archive or unarchive |
-| `archive` | boolean | Yes | `true` to archive, `false` to unarchive |
+| Parameter    | Type    | Required | Description                             |
+| ------------ | ------- | -------- | --------------------------------------- |
+| `instanceId` | string  | Yes      | The instance ID                         |
+| `chatId`     | string  | Yes      | Chat JID to archive or unarchive        |
+| `archive`    | boolean | Yes      | `true` to archive, `false` to unarchive |
 
 **Channel support:** Both
 
 **Response:**
+
 ```json
 {
   "success": true,
@@ -697,15 +762,16 @@ Archive or unarchive a chat. Archived chats are hidden from the main chat list.
 
 Pin or unpin a chat. Pinned chats appear at the top of the chat list.
 
-| Parameter | Type | Required | Description |
-|-----------|------|----------|-------------|
-| `instanceId` | string | Yes | The instance ID |
-| `chatId` | string | Yes | Chat JID to pin or unpin |
-| `pin` | boolean | Yes | `true` to pin, `false` to unpin |
+| Parameter    | Type    | Required | Description                     |
+| ------------ | ------- | -------- | ------------------------------- |
+| `instanceId` | string  | Yes      | The instance ID                 |
+| `chatId`     | string  | Yes      | Chat JID to pin or unpin        |
+| `pin`        | boolean | Yes      | `true` to pin, `false` to unpin |
 
 **Channel support:** Both
 
 **Response:**
+
 ```json
 {
   "success": true,
@@ -719,16 +785,17 @@ Pin or unpin a chat. Pinned chats appear at the top of the chat list.
 
 Mute or unmute a chat.
 
-| Parameter | Type | Required | Description |
-|-----------|------|----------|-------------|
-| `instanceId` | string | Yes | The instance ID |
-| `chatId` | string | Yes | Chat JID to mute or unmute |
-| `mute` | boolean | Yes | `true` to mute, `false` to unmute |
-| `muteUntil` | number | No | Unix timestamp in ms when the mute expires (required if `mute=true`) |
+| Parameter    | Type    | Required | Description                                                          |
+| ------------ | ------- | -------- | -------------------------------------------------------------------- |
+| `instanceId` | string  | Yes      | The instance ID                                                      |
+| `chatId`     | string  | Yes      | Chat JID to mute or unmute                                           |
+| `mute`       | boolean | Yes      | `true` to mute, `false` to unmute                                    |
+| `muteUntil`  | number  | No       | Unix timestamp in ms when the mute expires (required if `mute=true`) |
 
 **Channel support:** Both
 
 **Response:**
+
 ```json
 {
   "success": true,
@@ -742,14 +809,15 @@ Mute or unmute a chat.
 
 Delete an entire chat for this account. **This cannot be undone.**
 
-| Parameter | Type | Required | Description |
-|-----------|------|----------|-------------|
-| `instanceId` | string | Yes | The instance ID |
-| `chatId` | string | Yes | Chat JID to delete |
+| Parameter    | Type   | Required | Description        |
+| ------------ | ------ | -------- | ------------------ |
+| `instanceId` | string | Yes      | The instance ID    |
+| `chatId`     | string | Yes      | Chat JID to delete |
 
 **Channel support:** Both
 
 **Response:**
+
 ```json
 {
   "success": true,
@@ -763,14 +831,15 @@ Delete an entire chat for this account. **This cannot be undone.**
 
 Clear all messages in a chat. The chat remains but all messages are removed.
 
-| Parameter | Type | Required | Description |
-|-----------|------|----------|-------------|
-| `instanceId` | string | Yes | The instance ID |
-| `chatId` | string | Yes | Chat JID to clear all messages from |
+| Parameter    | Type   | Required | Description                         |
+| ------------ | ------ | -------- | ----------------------------------- |
+| `instanceId` | string | Yes      | The instance ID                     |
+| `chatId`     | string | Yes      | Chat JID to clear all messages from |
 
 **Channel support:** Both
 
 **Response:**
+
 ```json
 {
   "success": true,
@@ -788,15 +857,16 @@ Tools for creating and managing WhatsApp groups.
 
 Create a new WhatsApp group with a name and initial participants.
 
-| Parameter | Type | Required | Description |
-|-----------|------|----------|-------------|
-| `instanceId` | string | Yes | The instance ID |
-| `name` | string | Yes | Group name/subject (max 100 chars) |
-| `participants` | string[] | Yes | Phone numbers or JIDs of initial participants (min 1) |
+| Parameter      | Type     | Required | Description                                           |
+| -------------- | -------- | -------- | ----------------------------------------------------- |
+| `instanceId`   | string   | Yes      | The instance ID                                       |
+| `name`         | string   | Yes      | Group name/subject (max 100 chars)                    |
+| `participants` | string[] | Yes      | Phone numbers or JIDs of initial participants (min 1) |
 
 **Channel support:** Both
 
 **Response:**
+
 ```json
 {
   "groupId": "120363...@g.us",
@@ -810,15 +880,16 @@ Create a new WhatsApp group with a name and initial participants.
 
 Add members to a WhatsApp group.
 
-| Parameter | Type | Required | Description |
-|-----------|------|----------|-------------|
-| `instanceId` | string | Yes | The instance ID |
-| `groupId` | string | Yes | Group JID |
-| `participants` | string[] | Yes | Phone numbers or JIDs to add (min 1) |
+| Parameter      | Type     | Required | Description                          |
+| -------------- | -------- | -------- | ------------------------------------ |
+| `instanceId`   | string   | Yes      | The instance ID                      |
+| `groupId`      | string   | Yes      | Group JID                            |
+| `participants` | string[] | Yes      | Phone numbers or JIDs to add (min 1) |
 
 **Channel support:** Both
 
 **Response:**
+
 ```json
 {
   "success": true
@@ -831,15 +902,16 @@ Add members to a WhatsApp group.
 
 Remove members from a WhatsApp group.
 
-| Parameter | Type | Required | Description |
-|-----------|------|----------|-------------|
-| `instanceId` | string | Yes | The instance ID |
-| `groupId` | string | Yes | Group JID |
-| `participants` | string[] | Yes | Phone numbers or JIDs to remove (min 1) |
+| Parameter      | Type     | Required | Description                             |
+| -------------- | -------- | -------- | --------------------------------------- |
+| `instanceId`   | string   | Yes      | The instance ID                         |
+| `groupId`      | string   | Yes      | Group JID                               |
+| `participants` | string[] | Yes      | Phone numbers or JIDs to remove (min 1) |
 
 **Channel support:** Both
 
 **Response:**
+
 ```json
 {
   "success": true
@@ -852,15 +924,16 @@ Remove members from a WhatsApp group.
 
 Promote members to group admin.
 
-| Parameter | Type | Required | Description |
-|-----------|------|----------|-------------|
-| `instanceId` | string | Yes | The instance ID |
-| `groupId` | string | Yes | Group JID |
-| `participants` | string[] | Yes | Phone numbers or JIDs to promote to admin (min 1) |
+| Parameter      | Type     | Required | Description                                       |
+| -------------- | -------- | -------- | ------------------------------------------------- |
+| `instanceId`   | string   | Yes      | The instance ID                                   |
+| `groupId`      | string   | Yes      | Group JID                                         |
+| `participants` | string[] | Yes      | Phone numbers or JIDs to promote to admin (min 1) |
 
 **Channel support:** Both
 
 **Response:**
+
 ```json
 {
   "success": true
@@ -873,15 +946,16 @@ Promote members to group admin.
 
 Demote group admins to regular members.
 
-| Parameter | Type | Required | Description |
-|-----------|------|----------|-------------|
-| `instanceId` | string | Yes | The instance ID |
-| `groupId` | string | Yes | Group JID |
-| `participants` | string[] | Yes | Phone numbers or JIDs to demote from admin (min 1) |
+| Parameter      | Type     | Required | Description                                        |
+| -------------- | -------- | -------- | -------------------------------------------------- |
+| `instanceId`   | string   | Yes      | The instance ID                                    |
+| `groupId`      | string   | Yes      | Group JID                                          |
+| `participants` | string[] | Yes      | Phone numbers or JIDs to demote from admin (min 1) |
 
 **Channel support:** Both
 
 **Response:**
+
 ```json
 {
   "success": true
@@ -894,15 +968,16 @@ Demote group admins to regular members.
 
 Change the name/subject of a WhatsApp group.
 
-| Parameter | Type | Required | Description |
-|-----------|------|----------|-------------|
-| `instanceId` | string | Yes | The instance ID |
-| `groupId` | string | Yes | Group JID |
-| `subject` | string | Yes | New group name/subject (max 100 chars) |
+| Parameter    | Type   | Required | Description                            |
+| ------------ | ------ | -------- | -------------------------------------- |
+| `instanceId` | string | Yes      | The instance ID                        |
+| `groupId`    | string | Yes      | Group JID                              |
+| `subject`    | string | Yes      | New group name/subject (max 100 chars) |
 
 **Channel support:** Both
 
 **Response:**
+
 ```json
 {
   "success": true
@@ -915,15 +990,16 @@ Change the name/subject of a WhatsApp group.
 
 Change the description of a WhatsApp group.
 
-| Parameter | Type | Required | Description |
-|-----------|------|----------|-------------|
-| `instanceId` | string | Yes | The instance ID |
-| `groupId` | string | Yes | Group JID |
-| `description` | string | Yes | New group description (max 2048 chars, empty string to clear) |
+| Parameter     | Type   | Required | Description                                                   |
+| ------------- | ------ | -------- | ------------------------------------------------------------- |
+| `instanceId`  | string | Yes      | The instance ID                                               |
+| `groupId`     | string | Yes      | Group JID                                                     |
+| `description` | string | Yes      | New group description (max 2048 chars, empty string to clear) |
 
 **Channel support:** Both
 
 **Response:**
+
 ```json
 {
   "success": true
@@ -936,16 +1012,17 @@ Change the description of a WhatsApp group.
 
 Change group settings.
 
-| Parameter | Type | Required | Description |
-|-----------|------|----------|-------------|
-| `instanceId` | string | Yes | The instance ID |
-| `groupId` | string | Yes | Group JID |
-| `announce` | boolean | No | Only admins can send messages |
-| `locked` | boolean | No | Only admins can edit group info |
+| Parameter    | Type    | Required | Description                     |
+| ------------ | ------- | -------- | ------------------------------- |
+| `instanceId` | string  | Yes      | The instance ID                 |
+| `groupId`    | string  | Yes      | Group JID                       |
+| `announce`   | boolean | No       | Only admins can send messages   |
+| `locked`     | boolean | No       | Only admins can edit group info |
 
 **Channel support:** Both
 
 **Response:**
+
 ```json
 {
   "success": true
@@ -958,14 +1035,15 @@ Change group settings.
 
 Leave a WhatsApp group.
 
-| Parameter | Type | Required | Description |
-|-----------|------|----------|-------------|
-| `instanceId` | string | Yes | The instance ID |
-| `groupId` | string | Yes | Group JID to leave |
+| Parameter    | Type   | Required | Description        |
+| ------------ | ------ | -------- | ------------------ |
+| `instanceId` | string | Yes      | The instance ID    |
+| `groupId`    | string | Yes      | Group JID to leave |
 
 **Channel support:** Both
 
 **Response:**
+
 ```json
 {
   "success": true
@@ -978,14 +1056,15 @@ Leave a WhatsApp group.
 
 Get the shareable invite link for a WhatsApp group.
 
-| Parameter | Type | Required | Description |
-|-----------|------|----------|-------------|
-| `instanceId` | string | Yes | The instance ID |
-| `groupId` | string | Yes | Group JID |
+| Parameter    | Type   | Required | Description     |
+| ------------ | ------ | -------- | --------------- |
+| `instanceId` | string | Yes      | The instance ID |
+| `groupId`    | string | Yes      | Group JID       |
 
 **Channel support:** Both
 
 **Response:**
+
 ```json
 {
   "groupId": "120363...@g.us",
@@ -1000,14 +1079,15 @@ Get the shareable invite link for a WhatsApp group.
 
 Revoke the current invite link for a WhatsApp group, generating a new one.
 
-| Parameter | Type | Required | Description |
-|-----------|------|----------|-------------|
-| `instanceId` | string | Yes | The instance ID |
-| `groupId` | string | Yes | Group JID |
+| Parameter    | Type   | Required | Description     |
+| ------------ | ------ | -------- | --------------- |
+| `instanceId` | string | Yes      | The instance ID |
+| `groupId`    | string | Yes      | Group JID       |
 
 **Channel support:** Both
 
 **Response:**
+
 ```json
 {
   "success": true
@@ -1020,14 +1100,15 @@ Revoke the current invite link for a WhatsApp group, generating a new one.
 
 Join a WhatsApp group using an invite code or link.
 
-| Parameter | Type | Required | Description |
-|-----------|------|----------|-------------|
-| `instanceId` | string | Yes | The instance ID |
-| `inviteCode` | string | Yes | Group invite code or full link |
+| Parameter    | Type   | Required | Description                    |
+| ------------ | ------ | -------- | ------------------------------ |
+| `instanceId` | string | Yes      | The instance ID                |
+| `inviteCode` | string | Yes      | Group invite code or full link |
 
 **Channel support:** Both
 
 **Response:**
+
 ```json
 {
   "groupId": "120363...@g.us"
@@ -1040,15 +1121,16 @@ Join a WhatsApp group using an invite code or link.
 
 Enable or disable disappearing messages in a group.
 
-| Parameter | Type | Required | Description |
-|-----------|------|----------|-------------|
-| `instanceId` | string | Yes | The instance ID |
-| `groupId` | string | Yes | Group JID |
-| `duration` | number (int) | Yes | Duration in seconds (0 to disable). Common values: `86400` (24h), `604800` (7d), `7776000` (90d) |
+| Parameter    | Type         | Required | Description                                                                                      |
+| ------------ | ------------ | -------- | ------------------------------------------------------------------------------------------------ |
+| `instanceId` | string       | Yes      | The instance ID                                                                                  |
+| `groupId`    | string       | Yes      | Group JID                                                                                        |
+| `duration`   | number (int) | Yes      | Duration in seconds (0 to disable). Common values: `86400` (24h), `604800` (7d), `7776000` (90d) |
 
 **Channel support:** Both
 
 **Response:**
+
 ```json
 {
   "success": true,
@@ -1062,16 +1144,17 @@ Enable or disable disappearing messages in a group.
 
 Approve or reject a pending join request for a WhatsApp group.
 
-| Parameter | Type | Required | Description |
-|-----------|------|----------|-------------|
-| `instanceId` | string | Yes | The instance ID |
-| `groupId` | string | Yes | Group JID |
-| `participantId` | string | Yes | JID of the requester |
-| `action` | `"approve"` \| `"reject"` | Yes | Whether to approve or reject |
+| Parameter       | Type                      | Required | Description                  |
+| --------------- | ------------------------- | -------- | ---------------------------- |
+| `instanceId`    | string                    | Yes      | The instance ID              |
+| `groupId`       | string                    | Yes      | Group JID                    |
+| `participantId` | string                    | Yes      | JID of the requester         |
+| `action`        | `"approve"` \| `"reject"` | Yes      | Whether to approve or reject |
 
 **Channel support:** Both
 
 **Response:**
+
 ```json
 {
   "success": true,
@@ -1081,22 +1164,52 @@ Approve or reject a pending join request for a WhatsApp group.
 
 ---
 
-### 2.5 Contact Management (4 tools)
+### 2.5 Contact Management (5 tools)
 
-Tools for checking phone numbers, blocking/unblocking contacts, and fetching business profiles.
+Tools for searching contacts, checking phone numbers, blocking/unblocking contacts, and fetching business profiles.
+
+#### `wa_search_contact`
+
+Search contacts by name or phone number. Supports multi-word fuzzy matching across name, notify name, phone, and LID fields.
+
+| Parameter    | Type   | Required | Description                                       |
+| ------------ | ------ | -------- | ------------------------------------------------- |
+| `instanceId` | string | Yes      | The instance ID                                   |
+| `query`      | string | Yes      | Search term (e.g. "John", "5511999", "John boss") |
+
+**Response:**
+
+```json
+{
+  "query": "John boss",
+  "count": 1,
+  "contacts": [
+    {
+      "jid": "5511999999999@s.whatsapp.net",
+      "name": "John (boss)",
+      "notifyName": "John",
+      "phone": "5511999999999",
+      "profilePicUrl": null,
+      "isBusiness": false,
+      "isBlocked": false
+    }
+  ]
+}
+```
 
 #### `wa_check_number_exists`
 
 Check if a phone number is registered on WhatsApp.
 
-| Parameter | Type | Required | Description |
-|-----------|------|----------|-------------|
-| `instanceId` | string | Yes | The instance ID |
-| `phoneNumber` | string | Yes | Phone number to check (e.g. `"5511999999999"`) |
+| Parameter     | Type   | Required | Description                                    |
+| ------------- | ------ | -------- | ---------------------------------------------- |
+| `instanceId`  | string | Yes      | The instance ID                                |
+| `phoneNumber` | string | Yes      | Phone number to check (e.g. `"5511999999999"`) |
 
 **Channel support:** Both
 
 **Response:**
+
 ```json
 {
   "exists": true,
@@ -1110,14 +1223,15 @@ Check if a phone number is registered on WhatsApp.
 
 Block a WhatsApp contact. Blocked contacts cannot send you messages.
 
-| Parameter | Type | Required | Description |
-|-----------|------|----------|-------------|
-| `instanceId` | string | Yes | The instance ID |
-| `jid` | string | Yes | Contact JID to block |
+| Parameter    | Type   | Required | Description          |
+| ------------ | ------ | -------- | -------------------- |
+| `instanceId` | string | Yes      | The instance ID      |
+| `jid`        | string | Yes      | Contact JID to block |
 
 **Channel support:** Both
 
 **Response:**
+
 ```json
 {
   "success": true,
@@ -1131,14 +1245,15 @@ Block a WhatsApp contact. Blocked contacts cannot send you messages.
 
 Unblock a previously blocked WhatsApp contact.
 
-| Parameter | Type | Required | Description |
-|-----------|------|----------|-------------|
-| `instanceId` | string | Yes | The instance ID |
-| `jid` | string | Yes | Contact JID to unblock |
+| Parameter    | Type   | Required | Description            |
+| ------------ | ------ | -------- | ---------------------- |
+| `instanceId` | string | Yes      | The instance ID        |
+| `jid`        | string | Yes      | Contact JID to unblock |
 
 **Channel support:** Both
 
 **Response:**
+
 ```json
 {
   "success": true,
@@ -1152,14 +1267,15 @@ Unblock a previously blocked WhatsApp contact.
 
 Fetch the business profile information for a WhatsApp Business contact.
 
-| Parameter | Type | Required | Description |
-|-----------|------|----------|-------------|
-| `instanceId` | string | Yes | The instance ID |
-| `jid` | string | Yes | Contact JID to fetch business profile for |
+| Parameter    | Type   | Required | Description                               |
+| ------------ | ------ | -------- | ----------------------------------------- |
+| `instanceId` | string | Yes      | The instance ID                           |
+| `jid`        | string | Yes      | Contact JID to fetch business profile for |
 
 **Channel support:** Both
 
 **Response:**
+
 ```json
 {
   "name": "Acme Corp",
@@ -1181,14 +1297,15 @@ Tools for managing the instance's own WhatsApp profile.
 
 Change the profile picture for a WhatsApp instance.
 
-| Parameter | Type | Required | Description |
-|-----------|------|----------|-------------|
-| `instanceId` | string | Yes | The instance ID |
-| `image` | string | Yes | Profile picture as base64-encoded data or URL |
+| Parameter    | Type   | Required | Description                                   |
+| ------------ | ------ | -------- | --------------------------------------------- |
+| `instanceId` | string | Yes      | The instance ID                               |
+| `image`      | string | Yes      | Profile picture as base64-encoded data or URL |
 
 **Channel support:** Both
 
 **Response:**
+
 ```json
 {
   "success": true
@@ -1201,13 +1318,14 @@ Change the profile picture for a WhatsApp instance.
 
 Remove the profile picture for a WhatsApp instance.
 
-| Parameter | Type | Required | Description |
-|-----------|------|----------|-------------|
-| `instanceId` | string | Yes | The instance ID |
+| Parameter    | Type   | Required | Description     |
+| ------------ | ------ | -------- | --------------- |
+| `instanceId` | string | Yes      | The instance ID |
 
 **Channel support:** Both
 
 **Response:**
+
 ```json
 {
   "success": true
@@ -1220,14 +1338,15 @@ Remove the profile picture for a WhatsApp instance.
 
 Change the display name for a WhatsApp instance.
 
-| Parameter | Type | Required | Description |
-|-----------|------|----------|-------------|
-| `instanceId` | string | Yes | The instance ID |
-| `name` | string | Yes | New display name (max 25 characters) |
+| Parameter    | Type   | Required | Description                          |
+| ------------ | ------ | -------- | ------------------------------------ |
+| `instanceId` | string | Yes      | The instance ID                      |
+| `name`       | string | Yes      | New display name (max 25 characters) |
 
 **Channel support:** Both
 
 **Response:**
+
 ```json
 {
   "success": true
@@ -1240,14 +1359,15 @@ Change the display name for a WhatsApp instance.
 
 Change the text status/bio for a WhatsApp instance.
 
-| Parameter | Type | Required | Description |
-|-----------|------|----------|-------------|
-| `instanceId` | string | Yes | The instance ID |
-| `status` | string | Yes | New text status/bio (max 139 characters) |
+| Parameter    | Type   | Required | Description                              |
+| ------------ | ------ | -------- | ---------------------------------------- |
+| `instanceId` | string | Yes      | The instance ID                          |
+| `status`     | string | Yes      | New text status/bio (max 139 characters) |
 
 **Channel support:** Both
 
 **Response:**
+
 ```json
 {
   "success": true
@@ -1260,15 +1380,16 @@ Change the text status/bio for a WhatsApp instance.
 
 Update privacy settings for the instance.
 
-| Parameter | Type | Required | Description |
-|-----------|------|----------|-------------|
-| `instanceId` | string | Yes | The instance ID |
-| `setting` | `"lastSeen"` \| `"online"` \| `"profilePic"` \| `"status"` \| `"readReceipts"` \| `"groupAdd"` | Yes | Privacy setting to update |
-| `value` | `"all"` \| `"contacts"` \| `"contact_blacklist"` \| `"none"` | Yes | New value |
+| Parameter    | Type                                                                                           | Required | Description               |
+| ------------ | ---------------------------------------------------------------------------------------------- | -------- | ------------------------- |
+| `instanceId` | string                                                                                         | Yes      | The instance ID           |
+| `setting`    | `"lastSeen"` \| `"online"` \| `"profilePic"` \| `"status"` \| `"readReceipts"` \| `"groupAdd"` | Yes      | Privacy setting to update |
+| `value`      | `"all"` \| `"contacts"` \| `"contact_blacklist"` \| `"none"`                                   | Yes      | New value                 |
 
 **Channel support:** Both
 
 **Response:**
+
 ```json
 {
   "success": true,
@@ -1287,16 +1408,17 @@ Tools for posting WhatsApp status/story updates.
 
 Post a text status/story update visible to contacts.
 
-| Parameter | Type | Required | Description |
-|-----------|------|----------|-------------|
-| `instanceId` | string | Yes | The instance ID |
-| `text` | string | Yes | Status text content |
-| `backgroundColor` | string | No | Background color hex code (e.g. `"#FF5733"`) |
-| `font` | number (int) | No | Font style (0-5) |
+| Parameter         | Type         | Required | Description                                  |
+| ----------------- | ------------ | -------- | -------------------------------------------- |
+| `instanceId`      | string       | Yes      | The instance ID                              |
+| `text`            | string       | Yes      | Status text content                          |
+| `backgroundColor` | string       | No       | Background color hex code (e.g. `"#FF5733"`) |
+| `font`            | number (int) | No       | Font style (0-5)                             |
 
 **Channel support:** Baileys only
 
 **Response:**
+
 ```json
 {
   "success": true
@@ -1309,15 +1431,16 @@ Post a text status/story update visible to contacts.
 
 Post an image status/story update visible to contacts.
 
-| Parameter | Type | Required | Description |
-|-----------|------|----------|-------------|
-| `instanceId` | string | Yes | The instance ID |
-| `image` | string | Yes | Image URL or base64-encoded data |
-| `caption` | string | No | Image caption |
+| Parameter    | Type   | Required | Description                      |
+| ------------ | ------ | -------- | -------------------------------- |
+| `instanceId` | string | Yes      | The instance ID                  |
+| `image`      | string | Yes      | Image URL or base64-encoded data |
+| `caption`    | string | No       | Image caption                    |
 
 **Channel support:** Baileys only
 
 **Response:**
+
 ```json
 {
   "success": true
@@ -1330,15 +1453,16 @@ Post an image status/story update visible to contacts.
 
 Post a video status/story update visible to contacts.
 
-| Parameter | Type | Required | Description |
-|-----------|------|----------|-------------|
-| `instanceId` | string | Yes | The instance ID |
-| `video` | string | Yes | Video URL or base64-encoded data |
-| `caption` | string | No | Video caption |
+| Parameter    | Type   | Required | Description                      |
+| ------------ | ------ | -------- | -------------------------------- |
+| `instanceId` | string | Yes      | The instance ID                  |
+| `video`      | string | Yes      | Video URL or base64-encoded data |
+| `caption`    | string | No       | Video caption                    |
 
 **Channel support:** Baileys only
 
 **Response:**
+
 ```json
 {
   "success": true
@@ -1355,14 +1479,15 @@ Tools for interacting with WhatsApp Channels (Newsletters). **Baileys only.**
 
 Follow a WhatsApp Channel/Newsletter.
 
-| Parameter | Type | Required | Description |
-|-----------|------|----------|-------------|
-| `instanceId` | string | Yes | The instance ID |
-| `jid` | string | Yes | Newsletter/Channel JID to follow |
+| Parameter    | Type   | Required | Description                      |
+| ------------ | ------ | -------- | -------------------------------- |
+| `instanceId` | string | Yes      | The instance ID                  |
+| `jid`        | string | Yes      | Newsletter/Channel JID to follow |
 
 **Channel support:** Baileys only
 
 **Response:**
+
 ```json
 {
   "success": true
@@ -1375,14 +1500,15 @@ Follow a WhatsApp Channel/Newsletter.
 
 Unfollow a WhatsApp Channel/Newsletter.
 
-| Parameter | Type | Required | Description |
-|-----------|------|----------|-------------|
-| `instanceId` | string | Yes | The instance ID |
-| `jid` | string | Yes | Newsletter/Channel JID to unfollow |
+| Parameter    | Type   | Required | Description                        |
+| ------------ | ------ | -------- | ---------------------------------- |
+| `instanceId` | string | Yes      | The instance ID                    |
+| `jid`        | string | Yes      | Newsletter/Channel JID to unfollow |
 
 **Channel support:** Baileys only
 
 **Response:**
+
 ```json
 {
   "success": true
@@ -1395,15 +1521,16 @@ Unfollow a WhatsApp Channel/Newsletter.
 
 Send a message to a WhatsApp Channel/Newsletter (must be admin).
 
-| Parameter | Type | Required | Description |
-|-----------|------|----------|-------------|
-| `instanceId` | string | Yes | The instance ID |
-| `jid` | string | Yes | Newsletter/Channel JID (must be admin) |
-| `text` | string | Yes | Message text content |
+| Parameter    | Type   | Required | Description                            |
+| ------------ | ------ | -------- | -------------------------------------- |
+| `instanceId` | string | Yes      | The instance ID                        |
+| `jid`        | string | Yes      | Newsletter/Channel JID (must be admin) |
+| `text`       | string | Yes      | Message text content                   |
 
 **Channel support:** Baileys only
 
 **Response:**
+
 ```json
 {
   "messageId": "msg_nl_123",
@@ -1419,14 +1546,15 @@ Send a message to a WhatsApp Channel/Newsletter (must be admin).
 
 Reject an incoming voice or video call. The call ID is received via the `whatsapp/call.received` notification.
 
-| Parameter | Type | Required | Description |
-|-----------|------|----------|-------------|
-| `instanceId` | string | Yes | The instance ID |
-| `callId` | string | Yes | The call ID (from `whatsapp/call.received` notification) |
+| Parameter    | Type   | Required | Description                                              |
+| ------------ | ------ | -------- | -------------------------------------------------------- |
+| `instanceId` | string | Yes      | The instance ID                                          |
+| `callId`     | string | Yes      | The call ID (from `whatsapp/call.received` notification) |
 
 **Channel support:** Baileys only
 
 **Response:**
+
 ```json
 {
   "success": true,
@@ -1449,6 +1577,7 @@ List all WhatsApp instances.
 **Description:** List all WhatsApp instances with connection status, phone number, and channel type.
 
 **Response:**
+
 ```json
 [
   {
@@ -1477,6 +1606,7 @@ Single instance details.
 | `id` | Instance ID |
 
 **Response:**
+
 ```json
 {
   "id": "inst_abc123",
@@ -1511,6 +1641,7 @@ Active chats for an instance.
 | `id` | Instance ID |
 
 **Response:**
+
 ```json
 [
   {
@@ -1541,6 +1672,7 @@ Recent messages in a chat (up to 50 most recent).
 | `chatId` | Chat JID |
 
 **Response:**
+
 ```json
 [
   {
@@ -1573,6 +1705,7 @@ All contacts for an instance.
 | `id` | Instance ID |
 
 **Response:**
+
 ```json
 [
   {
@@ -1601,6 +1734,7 @@ All groups for an instance.
 | `id` | Instance ID |
 
 **Response:**
+
 ```json
 [
   {
@@ -1631,6 +1765,7 @@ Full group metadata.
 | `groupId` | Group JID |
 
 **Response:**
+
 ```json
 {
   "jid": "120363...@g.us",
@@ -1672,6 +1807,7 @@ Own profile information.
 | `id` | Instance ID |
 
 **Response:**
+
 ```json
 {
   "name": "Support Bot",
@@ -1694,6 +1830,7 @@ Privacy settings for an instance.
 | `id` | Instance ID |
 
 **Response:**
+
 ```json
 {
   "lastSeen": "contacts",
@@ -1719,11 +1856,9 @@ Blocked contacts for an instance.
 | `id` | Instance ID |
 
 **Response:**
+
 ```json
-[
-  "5511777777777@s.whatsapp.net",
-  "5511666666666@s.whatsapp.net"
-]
+["5511777777777@s.whatsapp.net", "5511666666666@s.whatsapp.net"]
 ```
 
 ---
@@ -1739,6 +1874,7 @@ Notifications are **fire-and-forget** -- if the agent is disconnected, notificat
 Fired when a new message is received in any chat.
 
 **Payload:**
+
 ```json
 {
   "_meta": { "notificationType": "whatsapp/message.received" },
@@ -1764,6 +1900,7 @@ Fired when a new message is received in any chat.
 Fired when a message delivery status changes (sent, delivered, read, played).
 
 **Payload:**
+
 ```json
 {
   "_meta": { "notificationType": "whatsapp/message.updated" },
@@ -1783,6 +1920,7 @@ Fired when a message delivery status changes (sent, delivered, read, played).
 Fired when a message is deleted (revoked) in a chat.
 
 **Payload:**
+
 ```json
 {
   "_meta": { "notificationType": "whatsapp/message.deleted" },
@@ -1800,6 +1938,7 @@ Fired when a message is deleted (revoked) in a chat.
 Fired when someone reacts to a message with an emoji.
 
 **Payload:**
+
 ```json
 {
   "_meta": { "notificationType": "whatsapp/message.reaction" },
@@ -1818,6 +1957,7 @@ Fired when someone reacts to a message with an emoji.
 Fired when a message is edited.
 
 **Payload:**
+
 ```json
 {
   "_meta": { "notificationType": "whatsapp/message.edited" },
@@ -1836,6 +1976,7 @@ Fired when a message is edited.
 Fired when a contact's presence status changes (typing, recording, online, etc.).
 
 **Payload:**
+
 ```json
 {
   "_meta": { "notificationType": "whatsapp/presence.updated" },
@@ -1855,6 +1996,7 @@ Fired when a contact's presence status changes (typing, recording, online, etc.)
 Fired when a chat's metadata changes (e.g. archived, pinned, muted).
 
 **Payload:**
+
 ```json
 {
   "_meta": { "notificationType": "whatsapp/chat.updated" },
@@ -1873,6 +2015,7 @@ Fired when a chat's metadata changes (e.g. archived, pinned, muted).
 Fired when a group's metadata changes (subject, description, settings).
 
 **Payload:**
+
 ```json
 {
   "_meta": { "notificationType": "whatsapp/group.updated" },
@@ -1891,6 +2034,7 @@ Fired when a group's metadata changes (subject, description, settings).
 Fired when participants are added, removed, promoted, or demoted in a group.
 
 **Payload:**
+
 ```json
 {
   "_meta": { "notificationType": "whatsapp/group.participants_changed" },
@@ -1910,6 +2054,7 @@ Fired when participants are added, removed, promoted, or demoted in a group.
 Fired when a contact's information changes.
 
 **Payload:**
+
 ```json
 {
   "_meta": { "notificationType": "whatsapp/contact.updated" },
@@ -1928,6 +2073,7 @@ Fired when a contact's information changes.
 Fired when an instance's connection status changes. Also carries QR code and pairing code data during authentication.
 
 **Payload:**
+
 ```json
 {
   "_meta": { "notificationType": "whatsapp/connection.changed" },
@@ -1949,6 +2095,7 @@ When `status` is `"connecting"`, `qrCode` may contain a base64-encoded QR code i
 Fired when an incoming voice or video call is received. Use the `callId` with `wa_reject_call` to reject the call.
 
 **Payload:**
+
 ```json
 {
   "_meta": { "notificationType": "whatsapp/call.received" },
@@ -1970,45 +2117,47 @@ All tool errors return a standard MCP error response:
 ```json
 {
   "isError": true,
-  "content": [{
-    "type": "text",
-    "text": "Error: Description of what went wrong"
-  }]
+  "content": [
+    {
+      "type": "text",
+      "text": "Error: Description of what went wrong"
+    }
+  ]
 }
 ```
 
 ### Common Errors
 
-| Error | Cause | Resolution |
-|-------|-------|------------|
-| `Instance 'X' not found` | Invalid `instanceId` | Check `whatsapp://instances` resource for valid IDs |
-| `Instance 'X' is not connected` | Instance exists but is disconnected | Call `wa_connect_instance` first |
-| `No adapter found for instance 'X'` | Instance not initialized | Call `wa_connect_instance` to initialize |
-| `Phone number not registered on WhatsApp` | Number does not have WhatsApp | Verify with `wa_check_number_exists` before sending |
-| `Not a group admin` | Operation requires admin privileges | Only group admins can modify settings, add/remove participants |
-| `Cloud API token expired` | Meta access token is invalid or expired | Call `wa_set_cloud_credentials` with a new token |
-| `Rate limit exceeded` | Too many messages in a short period | Wait and retry. Messages are queued with rate limiting. |
-| `Media too large` | File exceeds size limits | See media limits below |
+| Error                                     | Cause                                   | Resolution                                                     |
+| ----------------------------------------- | --------------------------------------- | -------------------------------------------------------------- |
+| `Instance 'X' not found`                  | Invalid `instanceId`                    | Check `whatsapp://instances` resource for valid IDs            |
+| `Instance 'X' is not connected`           | Instance exists but is disconnected     | Call `wa_connect_instance` first                               |
+| `No adapter found for instance 'X'`       | Instance not initialized                | Call `wa_connect_instance` to initialize                       |
+| `Phone number not registered on WhatsApp` | Number does not have WhatsApp           | Verify with `wa_check_number_exists` before sending            |
+| `Not a group admin`                       | Operation requires admin privileges     | Only group admins can modify settings, add/remove participants |
+| `Cloud API token expired`                 | Meta access token is invalid or expired | Call `wa_set_cloud_credentials` with a new token               |
+| `Rate limit exceeded`                     | Too many messages in a short period     | Wait and retry. Messages are queued with rate limiting.        |
+| `Media too large`                         | File exceeds size limits                | See media limits below                                         |
 
 ### Media Size Limits
 
-| Media Type | Max Size (Baileys) | Max Size (Cloud API) | Supported Formats |
-|------------|-------------------|---------------------|-------------------|
-| Image | 16 MB | 5 MB | JPEG, PNG, WebP |
-| Video | 16 MB | 16 MB | MP4, 3GPP |
-| Audio | 16 MB | 16 MB | OGG (Opus), MP3, AAC, AMR |
-| Document | 100 MB | 100 MB | PDF, DOC, XLS, PPT, TXT, ZIP, etc. |
-| Sticker | 500 KB | 500 KB | WebP |
+| Media Type | Max Size (Baileys) | Max Size (Cloud API) | Supported Formats                  |
+| ---------- | ------------------ | -------------------- | ---------------------------------- |
+| Image      | 16 MB              | 5 MB                 | JPEG, PNG, WebP                    |
+| Video      | 16 MB              | 16 MB                | MP4, 3GPP                          |
+| Audio      | 16 MB              | 16 MB                | OGG (Opus), MP3, AAC, AMR          |
+| Document   | 100 MB             | 100 MB               | PDF, DOC, XLS, PPT, TXT, ZIP, etc. |
+| Sticker    | 500 KB             | 500 KB               | WebP                               |
 
 ### Failure Mode Recovery
 
-| Failure | Behavior | Recovery |
-|---------|----------|----------|
-| Instance disconnect | Auto-reconnect with exponential backoff (1s to 30s max, 10 attempts) | `wa_restart_instance` to retry, or `wa_connect_instance` for fresh QR |
-| Redis down | Outbound queue stalls, inbound events dropped | Server retries Redis connection every 5s, resumes automatically |
-| SQLite locked | Write operations retry 3x with 100ms delay | Extremely rare with WAL mode. Restart server if persistent. |
-| Cloud API token expired | All Cloud instance operations fail with 401 | Call `wa_set_cloud_credentials` with new token |
-| Message send fails | Job moves to "failed" in BullMQ | Check queue stats via `whatsapp://instances/{id}` resource |
+| Failure                 | Behavior                                                             | Recovery                                                              |
+| ----------------------- | -------------------------------------------------------------------- | --------------------------------------------------------------------- |
+| Instance disconnect     | Auto-reconnect with exponential backoff (1s to 30s max, 10 attempts) | `wa_restart_instance` to retry, or `wa_connect_instance` for fresh QR |
+| Redis down              | Outbound queue stalls, inbound events dropped                        | Server retries Redis connection every 5s, resumes automatically       |
+| SQLite locked           | Write operations retry 3x with 100ms delay                           | Extremely rare with WAL mode. Restart server if persistent.           |
+| Cloud API token expired | All Cloud instance operations fail with 401                          | Call `wa_set_cloud_credentials` with new token                        |
+| Message send fails      | Job moves to "failed" in BullMQ                                      | Check queue stats via `whatsapp://instances/{id}` resource            |
 
 ---
 
@@ -2087,19 +2236,19 @@ tools = toolkit.get_tools()
 
 ## Appendix: Tool Count Summary
 
-| Domain | Tools | Channel |
-|--------|-------|---------|
-| Instance Management | 8 | Both (2 Baileys only, 1 Cloud only) |
-| Messaging | 17 | Both |
-| Chat Management | 5 | Both |
-| Group Management | 14 | Both |
-| Contact Management | 4 | Both |
-| Profile Management | 5 | Both |
-| Status / Stories | 3 | Baileys only |
-| Newsletter / Channels | 3 | Baileys only |
-| Call Management | 1 | Baileys only |
-| **Total** | **60** | |
+| Domain                | Tools  | Channel                             |
+| --------------------- | ------ | ----------------------------------- |
+| Instance Management   | 8      | Both (2 Baileys only, 1 Cloud only) |
+| Messaging             | 17     | Both                                |
+| Chat Management       | 6      | Both                                |
+| Group Management      | 14     | Both                                |
+| Contact Management    | 5      | Both                                |
+| Profile Management    | 5      | Both                                |
+| Status / Stories      | 3      | Baileys only                        |
+| Newsletter / Channels | 3      | Baileys only                        |
+| Call Management       | 1      | Baileys only                        |
+| **Total**             | **60** |                                     |
 
-| Resources | 10 |
-|-----------|-----|
-| Notifications | 12 |
+| Resources     | 10  |
+| ------------- | --- |
+| Notifications | 12  |

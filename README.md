@@ -36,7 +36,7 @@
 
 **WA MCP** is a WhatsApp MCP server built with TypeScript that gives AI agents full access to WhatsApp through the [Model Context Protocol](https://modelcontextprotocol.io). It supports both **Baileys** (WhatsApp Web) and **Meta Cloud API** as dual-channel backends, deployable with **Docker** in a single command.
 
-Your agent connects once and auto-discovers **61 tools**, **10 resources**, and **12 real-time events** — zero configuration, zero REST wrappers, zero glue code.
+Your agent connects once and auto-discovers **63 tools**, **10 resources**, and **12 real-time events** — zero configuration, zero REST wrappers, zero glue code.
 
 ```
 Your AI Agent ←→ MCP Protocol ←→ WA MCP ←→ WhatsApp
@@ -82,9 +82,10 @@ from google.adk.tools.mcp_tool import McpToolset
 
 tools = McpToolset(url="http://localhost:3000/mcp")
 
-# Agent auto-discovers 61 WhatsApp tools
+# Agent auto-discovers 63 WhatsApp tools
 # wa_create_instance, wa_send_text, wa_send_image, ...
 ```
+
 </details>
 
 <details>
@@ -96,6 +97,7 @@ from langchain_mcp import McpToolkit
 toolkit = McpToolkit(server_url="http://localhost:3000/mcp")
 tools = toolkit.get_tools()
 ```
+
 </details>
 
 <details>
@@ -117,153 +119,165 @@ Add to your `claude_desktop_config.json`:
   }
 }
 ```
+
 </details>
 
 ---
 
 ## ✨ Features
 
-| | Feature | Description |
-|---|---|---|
-| 🔌 | **MCP-native** | Streamable HTTP + stdio transports. No REST, no webhooks. |
-| 📱 | **Dual-channel** | Baileys (WhatsApp Web) + Meta Cloud API — same interface. |
-| 🔄 | **Multi-instance** | Run 1–50 WhatsApp numbers from a single server. |
-| 📨 | **Full messaging** | Text, images, video, audio, documents, polls, reactions, replies, forwards, edits, deletes, view-once. |
-| 👥 | **Groups** | Create, manage members, promote/demote admins, settings, invite links, join requests, ephemeral messages. |
-| 👤 | **Contacts & Profile** | Number check, block/unblock, business profiles, privacy, status updates. |
-| 📡 | **Real-time events** | 12 notification types via SSE: messages, typing, groups, calls, connection status. |
-| ⚡ | **Rate limiting** | BullMQ queues prevent WhatsApp bans (20 msg/min Baileys, 80 msg/min Cloud). |
-| 🔁 | **Auto-reconnect** | Automatic reconnection with exponential backoff. |
-| 🗃️ | **Persistent** | SQLite storage for sessions, messages, contacts, groups. |
-| 🐳 | **Single container** | `docker compose up` — only Redis as external dependency. |
+|     | Feature                | Description                                                                                               |
+| --- | ---------------------- | --------------------------------------------------------------------------------------------------------- |
+| 🔌  | **MCP-native**         | Streamable HTTP + stdio transports. No REST, no webhooks.                                                 |
+| 📱  | **Dual-channel**       | Baileys (WhatsApp Web) + Meta Cloud API — same interface.                                                 |
+| 🔄  | **Multi-instance**     | Run 1–50 WhatsApp numbers from a single server.                                                           |
+| 📨  | **Full messaging**     | Text, images, video, audio, documents, polls, reactions, replies, forwards, edits, deletes, view-once.    |
+| 👥  | **Groups**             | Create, manage members, promote/demote admins, settings, invite links, join requests, ephemeral messages. |
+| 👤  | **Contacts & Profile** | Number check, block/unblock, business profiles, privacy, status updates.                                  |
+| 📡  | **Real-time events**   | 12 notification types via SSE: messages, typing, groups, calls, connection status.                        |
+| ⚡  | **Rate limiting**      | BullMQ queues prevent WhatsApp bans (20 msg/min Baileys, 80 msg/min Cloud).                               |
+| 🔁  | **Auto-reconnect**     | Automatic reconnection with exponential backoff.                                                          |
+| 🗃️  | **Persistent**         | SQLite storage for sessions, messages, contacts, groups.                                                  |
+| 🐳  | **Single container**   | `docker compose up` — only Redis as external dependency.                                                  |
 
 ---
 
 ## 🛠️ Tools
 
-WA MCP exposes **61 tools** across 9 domains. All tools use the `wa_` prefix.
+WA MCP exposes **63 tools** across 9 domains. All tools use the `wa_` prefix.
 
 <details>
 <summary>📋 <strong>Instance Management</strong> (8 tools)</summary>
 
-| Tool | Description |
-|---|---|
-| `wa_create_instance` | Create a new WhatsApp connection |
-| `wa_connect_instance` | Connect (generates QR code) |
-| `wa_disconnect_instance` | Gracefully disconnect |
-| `wa_delete_instance` | Permanently remove instance |
-| `wa_restart_instance` | Disconnect + reconnect |
-| `wa_get_qr_code` | Get QR as base64 (Baileys) |
-| `wa_get_pairing_code` | Get pairing code (Baileys) |
-| `wa_set_cloud_credentials` | Set Cloud API token |
+| Tool                       | Description                      |
+| -------------------------- | -------------------------------- |
+| `wa_create_instance`       | Create a new WhatsApp connection |
+| `wa_connect_instance`      | Connect (generates QR code)      |
+| `wa_disconnect_instance`   | Gracefully disconnect            |
+| `wa_delete_instance`       | Permanently remove instance      |
+| `wa_restart_instance`      | Disconnect + reconnect           |
+| `wa_get_qr_code`           | Get QR as base64 (Baileys)       |
+| `wa_get_pairing_code`      | Get pairing code (Baileys)       |
+| `wa_set_cloud_credentials` | Set Cloud API token              |
+
 </details>
 
 <details>
 <summary>💬 <strong>Messaging</strong> (17 tools)</summary>
 
-| Tool | Description |
-|---|---|
-| `wa_send_text` | Send text message |
-| `wa_send_image` | Send image with caption |
-| `wa_send_video` | Send video with caption |
-| `wa_send_audio` | Send audio / voice note |
-| `wa_send_document` | Send file / document |
-| `wa_send_location` | Send GPS location |
-| `wa_send_contact` | Send vCard contact |
-| `wa_send_poll` | Create a poll |
-| `wa_send_reaction` | React with emoji |
-| `wa_send_link_preview` | Send URL with preview |
-| `wa_forward_message` | Forward a message |
-| `wa_edit_message` | Edit sent message |
-| `wa_delete_message` | Delete message |
-| `wa_pin_message` | Pin a message |
-| `wa_send_view_once` | Send view-once media |
-| `wa_send_presence` | Show typing / recording |
-| `wa_mark_read` | Mark messages as read |
+| Tool                   | Description             |
+| ---------------------- | ----------------------- |
+| `wa_send_text`         | Send text message       |
+| `wa_send_image`        | Send image with caption |
+| `wa_send_video`        | Send video with caption |
+| `wa_send_audio`        | Send audio / voice note |
+| `wa_send_document`     | Send file / document    |
+| `wa_send_location`     | Send GPS location       |
+| `wa_send_contact`      | Send vCard contact      |
+| `wa_send_poll`         | Create a poll           |
+| `wa_send_reaction`     | React with emoji        |
+| `wa_send_link_preview` | Send URL with preview   |
+| `wa_forward_message`   | Forward a message       |
+| `wa_edit_message`      | Edit sent message       |
+| `wa_delete_message`    | Delete message          |
+| `wa_pin_message`       | Pin a message           |
+| `wa_send_view_once`    | Send view-once media    |
+| `wa_send_presence`     | Show typing / recording |
+| `wa_mark_read`         | Mark messages as read   |
+
 </details>
 
 <details>
-<summary>💭 <strong>Chat Management</strong> (5 tools)</summary>
+<summary>💭 <strong>Chat Management</strong> (6 tools)</summary>
 
-| Tool | Description |
-|---|---|
-| `wa_archive_chat` | Archive / unarchive |
-| `wa_pin_chat` | Pin / unpin chat |
-| `wa_mute_chat` | Mute / unmute |
-| `wa_delete_chat` | Delete chat |
-| `wa_clear_chat` | Clear chat history |
+| Tool              | Description              |
+| ----------------- | ------------------------ |
+| `wa_get_messages` | Get chat message history |
+| `wa_archive_chat` | Archive / unarchive      |
+| `wa_pin_chat`     | Pin / unpin chat         |
+| `wa_mute_chat`    | Mute / unmute            |
+| `wa_delete_chat`  | Delete chat              |
+| `wa_clear_chat`   | Clear chat history       |
+
 </details>
 
 <details>
 <summary>👥 <strong>Groups</strong> (14 tools)</summary>
 
-| Tool | Description |
-|---|---|
-| `wa_create_group` | Create group |
-| `wa_group_add_participants` | Add members |
-| `wa_group_remove_participants` | Remove members |
-| `wa_group_promote` | Promote to admin |
-| `wa_group_demote` | Demote from admin |
-| `wa_group_update_subject` | Change group name |
-| `wa_group_update_description` | Change description |
-| `wa_group_update_settings` | Change settings |
-| `wa_group_leave` | Leave group |
-| `wa_group_get_invite_code` | Get invite link |
-| `wa_group_revoke_invite` | Revoke invite link |
-| `wa_group_join` | Join via invite code |
-| `wa_group_toggle_ephemeral` | Toggle disappearing messages |
-| `wa_group_handle_request` | Approve / reject join request |
+| Tool                           | Description                   |
+| ------------------------------ | ----------------------------- |
+| `wa_create_group`              | Create group                  |
+| `wa_group_add_participants`    | Add members                   |
+| `wa_group_remove_participants` | Remove members                |
+| `wa_group_promote`             | Promote to admin              |
+| `wa_group_demote`              | Demote from admin             |
+| `wa_group_update_subject`      | Change group name             |
+| `wa_group_update_description`  | Change description            |
+| `wa_group_update_settings`     | Change settings               |
+| `wa_group_leave`               | Leave group                   |
+| `wa_group_get_invite_code`     | Get invite link               |
+| `wa_group_revoke_invite`       | Revoke invite link            |
+| `wa_group_join`                | Join via invite code          |
+| `wa_group_toggle_ephemeral`    | Toggle disappearing messages  |
+| `wa_group_handle_request`      | Approve / reject join request |
+
 </details>
 
 <details>
-<summary>📇 <strong>Contacts</strong> (4 tools)</summary>
+<summary>📇 <strong>Contacts</strong> (5 tools)</summary>
 
-| Tool | Description |
-|---|---|
-| `wa_check_number_exists` | Check if number is on WhatsApp |
-| `wa_block_contact` | Block contact |
-| `wa_unblock_contact` | Unblock contact |
-| `wa_get_business_profile` | Get business profile |
+| Tool                      | Description                      |
+| ------------------------- | -------------------------------- |
+| `wa_search_contact`       | Search contacts by name or phone |
+| `wa_check_number_exists`  | Check if number is on WhatsApp   |
+| `wa_block_contact`        | Block contact                    |
+| `wa_unblock_contact`      | Unblock contact                  |
+| `wa_get_business_profile` | Get business profile             |
+
 </details>
 
 <details>
 <summary>👤 <strong>Profile</strong> (5 tools)</summary>
 
-| Tool | Description |
-|---|---|
-| `wa_update_profile_picture` | Set profile picture |
-| `wa_remove_profile_picture` | Remove profile picture |
-| `wa_update_profile_name` | Change display name |
-| `wa_update_profile_status` | Change status text |
-| `wa_update_privacy` | Update privacy settings |
+| Tool                        | Description             |
+| --------------------------- | ----------------------- |
+| `wa_update_profile_picture` | Set profile picture     |
+| `wa_remove_profile_picture` | Remove profile picture  |
+| `wa_update_profile_name`    | Change display name     |
+| `wa_update_profile_status`  | Change status text      |
+| `wa_update_privacy`         | Update privacy settings |
+
 </details>
 
 <details>
 <summary>📢 <strong>Status / Stories</strong> (3 tools)</summary>
 
-| Tool | Description |
-|---|---|
-| `wa_send_text_status` | Post text status |
+| Tool                   | Description       |
+| ---------------------- | ----------------- |
+| `wa_send_text_status`  | Post text status  |
 | `wa_send_image_status` | Post image status |
 | `wa_send_video_status` | Post video status |
+
 </details>
 
 <details>
 <summary>📰 <strong>Newsletter</strong> (3 tools)</summary>
 
-| Tool | Description |
-|---|---|
-| `wa_newsletter_follow` | Follow a newsletter |
+| Tool                     | Description           |
+| ------------------------ | --------------------- |
+| `wa_newsletter_follow`   | Follow a newsletter   |
 | `wa_newsletter_unfollow` | Unfollow a newsletter |
-| `wa_newsletter_send` | Send to newsletter |
+| `wa_newsletter_send`     | Send to newsletter    |
+
 </details>
 
 <details>
 <summary>📞 <strong>Calls</strong> (1 tool)</summary>
 
-| Tool | Description |
-|---|---|
+| Tool             | Description          |
+| ---------------- | -------------------- |
 | `wa_reject_call` | Reject incoming call |
+
 </details>
 
 ---
@@ -272,18 +286,18 @@ WA MCP exposes **61 tools** across 9 domains. All tools use the `wa_` prefix.
 
 Resources expose read-only WhatsApp state via `whatsapp://` URIs:
 
-| URI | Description |
-|---|---|
-| `whatsapp://instances` | List all instances |
-| `whatsapp://instances/{id}` | Instance details + queue stats |
-| `whatsapp://instances/{id}/contacts` | All contacts |
-| `whatsapp://instances/{id}/chats` | Active conversations |
-| `whatsapp://instances/{id}/groups` | All groups |
-| `whatsapp://instances/{id}/groups/{gid}` | Group metadata |
-| `whatsapp://instances/{id}/messages/{chatId}` | Message history |
-| `whatsapp://instances/{id}/profile` | Own profile |
-| `whatsapp://instances/{id}/privacy` | Privacy settings |
-| `whatsapp://instances/{id}/blocklist` | Blocked contacts |
+| URI                                           | Description                    |
+| --------------------------------------------- | ------------------------------ |
+| `whatsapp://instances`                        | List all instances             |
+| `whatsapp://instances/{id}`                   | Instance details + queue stats |
+| `whatsapp://instances/{id}/contacts`          | All contacts                   |
+| `whatsapp://instances/{id}/chats`             | Active conversations           |
+| `whatsapp://instances/{id}/groups`            | All groups                     |
+| `whatsapp://instances/{id}/groups/{gid}`      | Group metadata                 |
+| `whatsapp://instances/{id}/messages/{chatId}` | Message history                |
+| `whatsapp://instances/{id}/profile`           | Own profile                    |
+| `whatsapp://instances/{id}/privacy`           | Privacy settings               |
+| `whatsapp://instances/{id}/blocklist`         | Blocked contacts               |
 
 ---
 
@@ -291,20 +305,20 @@ Resources expose read-only WhatsApp state via `whatsapp://` URIs:
 
 Events are pushed to agents via SSE (Server-Sent Events):
 
-| Event | Trigger |
-|---|---|
-| `whatsapp/message.received` | New incoming message |
-| `whatsapp/message.updated` | Status change (sent → delivered → read) |
-| `whatsapp/message.deleted` | Message deleted |
-| `whatsapp/message.reaction` | Emoji reaction added/removed |
-| `whatsapp/message.edited` | Message edited |
-| `whatsapp/presence.updated` | Typing / recording / online |
-| `whatsapp/chat.updated` | Chat metadata changed |
-| `whatsapp/group.updated` | Group info changed |
-| `whatsapp/group.participants_changed` | Member add/remove/promote/demote |
-| `whatsapp/contact.updated` | Contact info changed |
-| `whatsapp/connection.changed` | Instance status change (includes QR as base64) |
-| `whatsapp/call.received` | Incoming call |
+| Event                                 | Trigger                                        |
+| ------------------------------------- | ---------------------------------------------- |
+| `whatsapp/message.received`           | New incoming message                           |
+| `whatsapp/message.updated`            | Status change (sent → delivered → read)        |
+| `whatsapp/message.deleted`            | Message deleted                                |
+| `whatsapp/message.reaction`           | Emoji reaction added/removed                   |
+| `whatsapp/message.edited`             | Message edited                                 |
+| `whatsapp/presence.updated`           | Typing / recording / online                    |
+| `whatsapp/chat.updated`               | Chat metadata changed                          |
+| `whatsapp/group.updated`              | Group info changed                             |
+| `whatsapp/group.participants_changed` | Member add/remove/promote/demote               |
+| `whatsapp/contact.updated`            | Contact info changed                           |
+| `whatsapp/connection.changed`         | Instance status change (includes QR as base64) |
+| `whatsapp/call.received`              | Incoming call                                  |
 
 ---
 
@@ -323,7 +337,7 @@ Events are pushed to agents via SSE (Server-Sent Events):
 │  │  Layer 1 — MCP Transport (HTTP/stdio) │ │
 │  ├────────────────────────────────────────┤ │
 │  │  Layer 2 — MCP Core                   │ │
-│  │  61 Tools │ 10 Resources │ 12 Events  │ │
+│  │  63 Tools │ 10 Resources │ 12 Events  │ │
 │  ├────────────────────────────────────────┤ │
 │  │  Layer 3 — Services                   │ │
 │  │  Instance Manager │ Queue │ Dedup     │ │
@@ -343,13 +357,13 @@ Events are pushed to agents via SSE (Server-Sent Events):
 
 ### Dual-Channel Design
 
-| | Baileys | Cloud API |
-|---|---|---|
-| Protocol | WhatsApp Web (WebSocket) | Meta Official (HTTPS) |
-| Auth | QR Code / Pairing Code | Access Token |
-| Cost | Free | Per-conversation pricing |
-| Compliance | Unofficial | Meta-approved |
-| Best for | Dev, testing, low volume | Production, enterprise |
+|            | Baileys                  | Cloud API                |
+| ---------- | ------------------------ | ------------------------ |
+| Protocol   | WhatsApp Web (WebSocket) | Meta Official (HTTPS)    |
+| Auth       | QR Code / Pairing Code   | Access Token             |
+| Cost       | Free                     | Per-conversation pricing |
+| Compliance | Unofficial               | Meta-approved            |
+| Best for   | Dev, testing, low volume | Production, enterprise   |
 
 Both backends implement the same `ChannelAdapter` interface. Your agent doesn't know or care which one is active — the tools work identically.
 
@@ -359,21 +373,21 @@ Both backends implement the same `ChannelAdapter` interface. Your agent doesn't 
 
 Copy `.env.example` to `.env` and configure:
 
-| Variable | Default | Description |
-|---|---|---|
-| `WA_TRANSPORT` | `http` | `http` (Streamable HTTP) or `stdio` |
-| `WA_MCP_API_KEY` | — | Bearer token auth. Unset = no auth (dev) |
-| `WA_MCP_PORT` | `3000` | HTTP server port |
-| `WA_REDIS_URL` | `redis://localhost:6379` | Redis for BullMQ queues |
-| `WA_LOG_LEVEL` | `info` | `debug` \| `info` \| `warn` \| `error` |
-| `WA_BAILEYS_RATE_LIMIT` | `20` | Messages/min per Baileys instance |
-| `WA_CLOUD_RATE_LIMIT` | `80` | Messages/min per Cloud API instance |
-| `WA_MESSAGE_RETENTION_DAYS` | `30` | Auto-delete old messages |
-| `WA_AUTO_RECONNECT` | `true` | Auto-reconnect on disconnect |
-| `WA_MEDIA_CACHE_MAX_MB` | `500` | Media cache size limit |
-| `WA_CLOUD_WEBHOOK_SECRET` | — | Meta webhook verification |
-| `WA_CLOUD_WEBHOOK_PORT` | `3001` | Webhook receiver port |
-| `WA_VERSION_CHECK` | `true` | Daily WhatsApp Web version check |
+| Variable                    | Default                  | Description                              |
+| --------------------------- | ------------------------ | ---------------------------------------- |
+| `WA_TRANSPORT`              | `http`                   | `http` (Streamable HTTP) or `stdio`      |
+| `WA_MCP_API_KEY`            | —                        | Bearer token auth. Unset = no auth (dev) |
+| `WA_MCP_PORT`               | `3000`                   | HTTP server port                         |
+| `WA_REDIS_URL`              | `redis://localhost:6379` | Redis for BullMQ queues                  |
+| `WA_LOG_LEVEL`              | `info`                   | `debug` \| `info` \| `warn` \| `error`   |
+| `WA_BAILEYS_RATE_LIMIT`     | `20`                     | Messages/min per Baileys instance        |
+| `WA_CLOUD_RATE_LIMIT`       | `80`                     | Messages/min per Cloud API instance      |
+| `WA_MESSAGE_RETENTION_DAYS` | `30`                     | Auto-delete old messages                 |
+| `WA_AUTO_RECONNECT`         | `true`                   | Auto-reconnect on disconnect             |
+| `WA_MEDIA_CACHE_MAX_MB`     | `500`                    | Media cache size limit                   |
+| `WA_CLOUD_WEBHOOK_SECRET`   | —                        | Meta webhook verification                |
+| `WA_CLOUD_WEBHOOK_PORT`     | `3001`                   | Webhook receiver port                    |
+| `WA_VERSION_CHECK`          | `true`                   | Daily WhatsApp Web version check         |
 
 ---
 
@@ -386,6 +400,7 @@ docker compose up -d
 ```
 
 Services:
+
 - **wa-mcp** — The MCP server on port `3000`
 - **redis** — BullMQ backend with AOF persistence
 
@@ -406,11 +421,11 @@ curl http://localhost:3000/health
 
 ### Resource Requirements
 
-| Instances | RAM | CPU | Disk |
-|---|---|---|---|
-| 1–5 | 256 MB | 0.5 vCPU | 1 GB |
-| 5–20 | 512 MB | 1 vCPU | 5 GB |
-| 20–50 | 1 GB | 2 vCPU | 10 GB |
+| Instances | RAM    | CPU      | Disk  |
+| --------- | ------ | -------- | ----- |
+| 1–5       | 256 MB | 0.5 vCPU | 1 GB  |
+| 5–20      | 512 MB | 1 vCPU   | 5 GB  |
+| 20–50     | 1 GB   | 2 vCPU   | 10 GB |
 
 ---
 
@@ -421,7 +436,7 @@ src/
 ├── index.ts                     # Entry point (HTTP/stdio)
 ├── constants.ts                 # Defaults and limits
 ├── server/mcp.ts                # MCP server setup
-├── tools/                       # 🔧 61 MCP tools (9 files)
+├── tools/                       # 🔧 63 MCP tools (9 files)
 ├── resources/                   # 📖 10 MCP resources (8 files)
 ├── notifications/events.ts      # 📡 12 event types
 ├── channels/
@@ -447,8 +462,9 @@ src/
 - [x] **Phase 1** — Foundation: Baileys adapter, text messaging, QR auth, instance management
 - [x] **Phase 2** — Full messaging: all media types, dedup, reactions, edits, forwards
 - [x] **Phase 3** — Groups, contacts, profile, status/stories, newsletters
-- [ ] **Phase 4** — Cloud API adapter: dual-channel unified interface
-- [ ] **Phase 5** — Hardening: error recovery, CI/CD, tests, docs, v1.0 release
+- [x] **Phase 4** — Cloud API adapter: dual-channel unified interface
+- [x] **Phase 5** — Hardening: error recovery, CI/CD, tests, docs, v1.0 release
+- [x] **Phase 6** — Baileys v7 upgrade, LID support, contact sync, message persistence
 
 ---
 
