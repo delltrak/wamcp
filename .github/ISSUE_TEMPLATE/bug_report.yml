@@ -1,0 +1,114 @@
+name: Bug Report
+description: Report a bug or unexpected behavior in WA MCP
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting a bug! Please fill in the details below so we can reproduce and fix it.
+
+  - type: input
+    id: version
+    attributes:
+      label: WA MCP Version
+      description: Run `npm list wa-mcp` or check package.json
+      placeholder: "1.0.0"
+    validations:
+      required: true
+
+  - type: input
+    id: node-version
+    attributes:
+      label: Node.js Version
+      description: Run `node --version`
+      placeholder: "v22.0.0"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: channel
+    attributes:
+      label: Channel
+      description: Which WhatsApp channel adapter are you using?
+      options:
+        - Baileys (WhatsApp Web)
+        - Cloud API (Meta Official)
+        - Both
+        - Not applicable
+    validations:
+      required: true
+
+  - type: dropdown
+    id: transport
+    attributes:
+      label: Transport
+      description: Which MCP transport are you using?
+      options:
+        - HTTP (Streamable HTTP)
+        - stdio
+    validations:
+      required: true
+
+  - type: dropdown
+    id: deployment
+    attributes:
+      label: Deployment
+      description: How are you running WA MCP?
+      options:
+        - Docker Compose
+        - Node.js (local)
+        - Other
+    validations:
+      required: true
+
+  - type: textarea
+    id: description
+    attributes:
+      label: Bug Description
+      description: A clear description of what the bug is.
+      placeholder: Describe what happened...
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to Reproduce
+      description: Step-by-step instructions to reproduce the behavior.
+      placeholder: |
+        1. Create an instance with `wa_create_instance`
+        2. Connect with `wa_connect_instance`
+        3. Send a message with `wa_send_text`
+        4. See error...
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected Behavior
+      description: What did you expect to happen?
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual Behavior
+      description: What actually happened?
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: Paste any relevant log output. Set `WA_LOG_LEVEL=debug` for detailed logs.
+      render: shell
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional Context
+      description: Any other context, screenshots, or configuration details.

@@ -1,0 +1,53 @@
+{
+  "name": "wa-mcp",
+  "version": "1.0.0",
+  "description": "WhatsApp MCP server — expose WhatsApp as discoverable tools, resources, and notifications for AI agents",
+  "type": "module",
+  "main": "dist/index.js",
+  "scripts": {
+    "dev": "tsx src/index.ts",
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "db:generate": "drizzle-kit generate",
+    "db:migrate": "drizzle-kit migrate",
+    "lint": "eslint src/",
+    "lint:fix": "eslint src/ --fix",
+    "format": "prettier --write src/",
+    "format:check": "prettier --check src/"
+  },
+  "keywords": [
+    "whatsapp",
+    "mcp",
+    "model-context-protocol",
+    "ai-agent",
+    "baileys",
+    "cloud-api"
+  ],
+  "license": "MIT",
+  "engines": {
+    "node": ">=22"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.12.1",
+    "@whiskeysockets/baileys": "^6.7.16",
+    "better-sqlite3": "^11.8.2",
+    "bullmq": "^5.38.1",
+    "dotenv": "^16.5.0",
+    "drizzle-orm": "^0.39.3",
+    "ioredis": "^5.6.0",
+    "pino": "^9.6.0",
+    "pino-pretty": "^13.0.0",
+    "zod": "^3.24.2"
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "@types/better-sqlite3": "^7.6.13",
+    "@types/node": "^22.13.5",
+    "drizzle-kit": "^0.30.5",
+    "eslint": "^10.0.2",
+    "prettier": "^3.8.1",
+    "tsx": "^4.19.3",
+    "typescript": "^5.7.3",
+    "typescript-eslint": "^8.56.1"
+  }
+}

@@ -1,0 +1,176 @@
+import "dotenv/config";
+import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
+import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
+import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import pino from "pino";
+import {
+  VERSION,
+  SERVER_NAME,
+  DEFAULT_TRANSPORT,
+  DEFAULT_PORT,
+  DEFAULT_LOG_LEVEL,
+  MCP_ENDPOINT,
+  HEALTH_ENDPOINT,
+} from "./constants.js";
+import { InstanceManager } from "./services/instance-manager.js";
+import { MessageQueue } from "./services/message-queue.js";
+import { createMcpServer } from "./server/mcp.js";
+
+const transport = process.env.WA_TRANSPORT ?? DEFAULT_TRANSPORT;
+const port = parseInt(process.env.WA_MCP_PORT ?? String(DEFAULT_PORT), 10);
+const logLevel = process.env.WA_LOG_LEVEL ?? DEFAULT_LOG_LEVEL;
+
+const logger = pino({
+  name: SERVER_NAME,
+  level: logLevel,
+  transport:
+    process.env.NODE_ENV !== "production"
+      ? { target: "pino-pretty", options: { colorize: true } }
+      : undefined,
+  redact: ["headers.authorization", "*.accessToken", "*.cloudAccessToken"],
+});
+
+async function initServices() {
+  // Initialize services
+  const instanceManager = new InstanceManager();
+  const messageQueue = new MessageQueue();
+
+  // Wire them together
+  instanceManager.setMessageQueue(messageQueue);
+
+  // Load existing instances from DB and reconnect
+  await instanceManager.init();
+
+  logger.info("Services initialized");
+
+  return { instanceManager, messageQueue };
+}
+
+async function startHttp(): Promise<void> {
+  const { instanceManager, messageQueue } = await initServices();
+  const mcpServer = createMcpServer(instanceManager, messageQueue);
+  const startTime = Date.now();
+
+  // Map to track transports by session ID
+  const transports = new Map<string, StreamableHTTPServerTransport>();
+
+  const httpServer = createServer(async (req: IncomingMessage, res: ServerResponse) => {
+    const url = new URL(req.url ?? "/", `http://localhost:${port}`);
+
+    // Health endpoint
+    if (url.pathname === HEALTH_ENDPOINT && req.method === "GET") {
+      const allInstances = instanceManager.getAllInstances();
+      const connected = allInstances.filter((i) => i.status === "connected").length;
+      const health = {
+        status: "ok",
+        uptime: Math.floor((Date.now() - startTime) / 1000),
+        instances: {
+          total: allInstances.length,
+          connected,
+          disconnected: allInstances.length - connected,
+        },
+        version: VERSION,
+      };
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify(health));
+      return;
+    }
+
+    // MCP endpoint
+    if (url.pathname === MCP_ENDPOINT) {
+      // Extract session ID from header
+      const sessionId = req.headers["mcp-session-id"] as string | undefined;
+
+      if (req.method === "POST") {
+        // For new sessions or existing sessions
+        let mcpTransport: StreamableHTTPServerTransport;
+
+        if (sessionId && transports.has(sessionId)) {
+          mcpTransport = transports.get(sessionId)!;
+        } else {
+          // Create new transport for new session
+          mcpTransport = new StreamableHTTPServerTransport({
+            sessionIdGenerator: () => crypto.randomUUID(),
+            onsessioninitialized: (newSessionId) => {
+              transports.set(newSessionId, mcpTransport);
+              logger.info({ sessionId: newSessionId }, "MCP session initialized");
+            },
+          });
+
+          mcpTransport.onclose = () => {
+            const sid = Array.from(transports.entries()).find(([, t]) => t === mcpTransport)?.[0];
+            if (sid) {
+              transports.delete(sid);
+              logger.info({ sessionId: sid }, "MCP session closed");
+            }
+          };
+
+          await mcpServer.connect(mcpTransport);
+        }
+
+        await mcpTransport.handleRequest(req, res);
+        return;
+      }
+
+      if (req.method === "GET") {
+        // SSE stream for notifications
+        if (sessionId && transports.has(sessionId)) {
+          const mcpTransport = transports.get(sessionId)!;
+          await mcpTransport.handleRequest(req, res);
+          return;
+        }
+        res.writeHead(400, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "Missing or invalid session ID" }));
+        return;
+      }
+
+      if (req.method === "DELETE") {
+        if (sessionId && transports.has(sessionId)) {
+          const mcpTransport = transports.get(sessionId)!;
+          await mcpTransport.handleRequest(req, res);
+          return;
+        }
+        res.writeHead(400, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "Missing or invalid session ID" }));
+        return;
+      }
+
+      res.writeHead(405, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: "Method not allowed" }));
+      return;
+    }
+
+    res.writeHead(404, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ error: "Not found" }));
+  });
+
+  httpServer.listen(port, () => {
+    logger.info(
+      { port, transport: "http", version: VERSION },
+      `${SERVER_NAME} started on port ${port}`,
+    );
+  });
+}
+
+async function startStdio(): Promise<void> {
+  const { instanceManager, messageQueue } = await initServices();
+  const mcpServer = createMcpServer(instanceManager, messageQueue);
+  const stdioTransport = new StdioServerTransport();
+  await mcpServer.connect(stdioTransport);
+  logger.info({ transport: "stdio", version: VERSION }, `${SERVER_NAME} started on stdio`);
+}
+
+async function main(): Promise<void> {
+  logger.info({ transport, version: VERSION }, "Starting WA MCP server");
+
+  if (transport === "stdio") {
+    await startStdio();
+  } else {
+    await startHttp();
+  }
+}
+
+main().catch((err) => {
+  logger.fatal(err, "Failed to start WA MCP server");
+  process.exit(1);
+});

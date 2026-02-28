@@ -1,0 +1,60 @@
+name: Feature Request
+description: Suggest a new feature or improvement for WA MCP
+title: "[Feature]: "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for suggesting a feature! Please describe your idea so we can evaluate it.
+
+  - type: textarea
+    id: description
+    attributes:
+      label: Description
+      description: A clear description of the feature you'd like.
+      placeholder: Describe the feature...
+    validations:
+      required: true
+
+  - type: textarea
+    id: use-case
+    attributes:
+      label: Use Case
+      description: What problem does this solve? How would you or your AI agent use it?
+      placeholder: |
+        As an agent developer, I want to ... so that ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposed-solution
+    attributes:
+      label: Proposed Solution
+      description: How do you think this could be implemented?
+      placeholder: |
+        A new tool `wa_example` that...
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives Considered
+      description: Any alternative solutions or workarounds you've considered.
+
+  - type: dropdown
+    id: scope
+    attributes:
+      label: Scope
+      description: Which area of WA MCP does this affect?
+      options:
+        - Tools (new or enhanced)
+        - Resources
+        - Notifications / Events
+        - Transport / Protocol
+        - Channel Adapter (Baileys)
+        - Channel Adapter (Cloud API)
+        - Infrastructure (Docker, Redis, SQLite)
+        - Documentation
+        - Other
+    validations:
+      required: true

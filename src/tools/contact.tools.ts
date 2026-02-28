@@ -1,0 +1,80 @@
+// ============================================================
+// WA MCP — Contact Management Tools
+// ============================================================
+
+import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import type { InstanceManager } from "../services/instance-manager.js";
+import type { MessageQueue } from "../services/message-queue.js";
+import { toolSuccess, toolError } from "../types/mcp.types.js";
+import {
+  CheckNumberExistsSchema,
+  BlockContactSchema,
+  UnblockContactSchema,
+  GetBusinessProfileSchema,
+} from "../schemas/contact.schema.js";
+
+export function registerContactTools(
+  server: McpServer,
+  instanceManager: InstanceManager,
+  _messageQueue: MessageQueue,
+): void {
+  server.tool(
+    "wa_check_number_exists",
+    "Check if a phone number is registered on WhatsApp. Returns the JID if the number exists.",
+    CheckNumberExistsSchema.shape,
+    async (params) => {
+      try {
+        const adapter = instanceManager.getAdapter(params.instanceId);
+        const result = await adapter.checkNumberExists(params.phoneNumber);
+        return toolSuccess(result);
+      } catch (err) {
+        return toolError((err as Error).message);
+      }
+    },
+  );
+
+  server.tool(
+    "wa_block_contact",
+    "Block a WhatsApp contact. Blocked contacts cannot send you messages.",
+    BlockContactSchema.shape,
+    async (params) => {
+      try {
+        const adapter = instanceManager.getAdapter(params.instanceId);
+        await adapter.blockContact(params.jid);
+        return toolSuccess({ success: true, blocked: true });
+      } catch (err) {
+        return toolError((err as Error).message);
+      }
+    },
+  );
+
+  server.tool(
+    "wa_unblock_contact",
+    "Unblock a previously blocked WhatsApp contact.",
+    UnblockContactSchema.shape,
+    async (params) => {
+      try {
+        const adapter = instanceManager.getAdapter(params.instanceId);
+        await adapter.unblockContact(params.jid);
+        return toolSuccess({ success: true, blocked: false });
+      } catch (err) {
+        return toolError((err as Error).message);
+      }
+    },
+  );
+
+  server.tool(
+    "wa_get_business_profile",
+    "Fetch the business profile information for a WhatsApp Business contact.",
+    GetBusinessProfileSchema.shape,
+    async (params) => {
+      try {
+        const adapter = instanceManager.getAdapter(params.instanceId);
+        const profile = await adapter.getBusinessProfile(params.jid);
+        return toolSuccess(profile);
+      } catch (err) {
+        return toolError((err as Error).message);
+      }
+    },
+  );
+}
