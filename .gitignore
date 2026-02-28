@@ -1,6 +1,8 @@
 node_modules
 **/node_modules/
 .env
+.env.*
+!.env.example
 docker-compose.extra.yml
 dist
 pnpm-lock.yaml
@@ -14,6 +16,12 @@ __pycache__/
 .worktrees/
 .DS_Store
 **/.DS_Store
+
+# Runtime data (sessions, DB, media)
 data/
-.env.*
-!.env.example
+
+# IDE / editor configs (may contain local paths or credentials)
+.cursor/
+.gemini/
+.vscode/
+.idea/

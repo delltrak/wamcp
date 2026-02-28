@@ -6,6 +6,7 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { InstanceManager } from "../services/instance-manager.js";
 import type { ChannelEvent, ChannelEventPayload } from "../types/channel.types.js";
+import { logger } from "../utils/logger.js";
 
 /** Mapping from channel event names to MCP notification method names */
 const EVENT_TO_METHOD: Record<ChannelEvent, string> = {
@@ -32,31 +33,37 @@ export function registerEventNotifications(
   instanceManager: InstanceManager,
 ): void {
   instanceManager.onAnyEvent(
-    <E extends ChannelEvent>(event: E, _instanceId: string, payload: ChannelEventPayload[E]) => {
+    <E extends ChannelEvent>(event: E, instanceId: string, payload: ChannelEventPayload[E]) => {
       const method = EVENT_TO_METHOD[event];
       if (!method) return;
 
-      try {
+      logger.info({ event, method, instanceId }, "Forwarding event as MCP notification");
+
+      void Promise.resolve(
         server.server.sendLoggingMessage({
           level: "info",
           logger: "whatsapp-events",
           data: { method, payload },
-        });
-      } catch {
-        // If no transport is connected yet, silently ignore
-      }
+        }),
+      ).then(() => {
+        logger.info({ method }, "sendLoggingMessage sent successfully");
+      }).catch((err) => {
+        logger.warn({ err: String(err), method }, "sendLoggingMessage failed");
+      });
 
-      try {
-        void server.server.notification({
+      void Promise.resolve(
+        server.server.notification({
           method: "notifications/message",
           params: {
             _meta: { notificationType: method },
             ...(payload as unknown as Record<string, unknown>),
           },
-        });
-      } catch {
-        // Notification delivery is best-effort
-      }
+        }),
+      ).then(() => {
+        logger.info({ method }, "MCP notification sent successfully");
+      }).catch((err) => {
+        logger.warn({ err: String(err), method }, "MCP notification failed");
+      });
     },
   );
 }

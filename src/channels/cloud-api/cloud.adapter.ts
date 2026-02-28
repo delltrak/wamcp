@@ -629,7 +629,7 @@ export class CloudApiAdapter implements ChannelAdapter {
 
   // ---- Data access ----
 
-  async getContacts(): Promise<Contact[]> {
+  async getContacts(_search?: string): Promise<Contact[]> {
     throw new Error(
       "Contact list is not available on Cloud API. Contacts are managed in Meta Business Suite.",
     );

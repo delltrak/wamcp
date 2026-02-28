@@ -14,6 +14,7 @@ import {
   MuteChatSchema,
   DeleteChatSchema,
   ClearChatSchema,
+  GetMessagesSchema,
 } from "../schemas/chat.schema.js";
 
 export function registerChatTools(
@@ -114,6 +115,24 @@ export function registerChatTools(
         return toolSuccess({ success: true, cleared: true });
       } catch (err) {
         return handleToolError("wa_clear_chat", err, params.instanceId);
+      }
+    },
+  );
+
+  server.tool(
+    "wa_get_messages",
+    "Get recent messages from a chat. Returns messages ordered by most recent first, with sender, content, type, and timestamp.",
+    GetMessagesSchema.shape,
+    async (params) => {
+      const log = createRequestLogger("wa_get_messages", params.instanceId);
+      const start = Date.now();
+      try {
+        const adapter = instanceManager.getAdapter(params.instanceId);
+        const messages = await adapter.getMessages(params.chatId, params.limit);
+        log.info({ duration: Date.now() - start, chatId: params.chatId, count: messages.length }, "Messages retrieved");
+        return toolSuccess({ chatId: params.chatId, count: messages.length, messages });
+      } catch (err) {
+        return handleToolError("wa_get_messages", err, params.instanceId);
       }
     },
   );

@@ -63,7 +63,7 @@ export class MessageQueue {
       return this.queues.get(instanceId)!;
     }
 
-    const queueName = `outbound:${instanceId}`;
+    const queueName = `outbound-${instanceId}`;
 
     const rateLimit =
       channel === "baileys"

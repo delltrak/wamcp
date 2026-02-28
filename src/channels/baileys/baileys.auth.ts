@@ -78,7 +78,7 @@ export async function useSqliteAuthState(
           if (raw) {
             let parsed = JSON.parse(raw, BufferJSON.reviver);
             if (type === "app-state-sync-key" && parsed) {
-              parsed = proto.Message.AppStateSyncKeyData.fromObject(parsed);
+              parsed = proto.Message.AppStateSyncKeyData.create(parsed);
             }
             result[id] = parsed;
           }

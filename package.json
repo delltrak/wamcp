@@ -46,7 +46,7 @@
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.12.1",
-    "@whiskeysockets/baileys": "^6.7.16",
+    "@whiskeysockets/baileys": "^7.0.0-rc.9",
     "better-sqlite3": "^11.8.2",
     "bullmq": "^5.38.1",
     "dotenv": "^16.5.0",

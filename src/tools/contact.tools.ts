@@ -13,6 +13,7 @@ import {
   BlockContactSchema,
   UnblockContactSchema,
   GetBusinessProfileSchema,
+  SearchContactSchema,
 } from "../schemas/contact.schema.js";
 
 export function registerContactTools(
@@ -88,6 +89,24 @@ export function registerContactTools(
         return toolSuccess(profile);
       } catch (err) {
         return handleToolError("wa_get_business_profile", err, params.instanceId);
+      }
+    },
+  );
+
+  server.tool(
+    "wa_search_contact",
+    "Search contacts by name or phone number. Returns matching contacts from the local cache.",
+    SearchContactSchema.shape,
+    async (params) => {
+      const log = createRequestLogger("wa_search_contact", params.instanceId);
+      const start = Date.now();
+      try {
+        const adapter = instanceManager.getAdapter(params.instanceId);
+        const contacts = await adapter.getContacts(params.query);
+        log.info({ duration: Date.now() - start, found: contacts.length }, "Contact search completed");
+        return toolSuccess({ query: params.query, count: contacts.length, contacts });
+      } catch (err) {
+        return handleToolError("wa_search_contact", err, params.instanceId);
       }
     },
   );

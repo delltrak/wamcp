@@ -132,6 +132,7 @@ export const contacts = sqliteTable(
     name: text("name"),
     notifyName: text("notify_name"),
     phone: text("phone"),
+    lid: text("lid"),
     profilePicUrl: text("profile_pic_url"),
     isBusiness: integer("is_business").notNull().default(0),
     isBlocked: integer("is_blocked").notNull().default(0),
@@ -140,6 +141,7 @@ export const contacts = sqliteTable(
   (table) => [
     primaryKey({ columns: [table.instanceId, table.jid] }),
     index("idx_contacts_phone").on(table.instanceId, table.phone),
+    index("idx_contacts_lid").on(table.instanceId, table.lid),
   ],
 );
 

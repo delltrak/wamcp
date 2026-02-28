@@ -109,7 +109,7 @@ export interface ChannelAdapter {
   rejectCall(callId: string): Promise<void>;
 
   // ---- Data access ----
-  getContacts(): Promise<Contact[]>;
+  getContacts(search?: string): Promise<Contact[]>;
   getChats(): Promise<Chat[]>;
   getMessages(chatId: string, limit?: number): Promise<Message[]>;
   getProfileInfo(): Promise<ProfileInfo>;

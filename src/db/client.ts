@@ -85,6 +85,7 @@ function initializeDatabase(): void {
       name            TEXT,
       notify_name     TEXT,
       phone           TEXT,
+      lid             TEXT,
       profile_pic_url TEXT,
       is_business     INTEGER NOT NULL DEFAULT 0,
       is_blocked      INTEGER NOT NULL DEFAULT 0,
@@ -92,6 +93,7 @@ function initializeDatabase(): void {
       PRIMARY KEY (instance_id, jid)
     );
     CREATE INDEX IF NOT EXISTS idx_contacts_phone ON contacts(instance_id, phone);
+    CREATE INDEX IF NOT EXISTS idx_contacts_lid ON contacts(instance_id, lid);
 
     CREATE TABLE IF NOT EXISTS groups_cache (
       instance_id     TEXT NOT NULL REFERENCES instances(id) ON DELETE CASCADE,
@@ -142,6 +144,14 @@ function initializeDatabase(): void {
       rate_limited_until INTEGER
     );
   `);
+}
+
+// Inline migration: add `lid` column for existing databases (pre-v7 upgrade)
+// Must run BEFORE initializeDatabase() so the index creation succeeds
+try {
+  sqlite.exec(`ALTER TABLE contacts ADD COLUMN lid TEXT`);
+} catch {
+  // column already exists or table doesn't exist yet — ignore
 }
 
 initializeDatabase();

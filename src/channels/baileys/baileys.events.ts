@@ -86,6 +86,19 @@ export function extractQuotedMessageId(msg: WAMessage): string | null {
 }
 
 /**
+ * Swap LID/PN in message keys: when remoteJid is a LID and remoteJidAlt has the PN, use the PN.
+ * This follows the Evolution API pattern for Baileys v7.
+ */
+export function normalizeLidInMessage(msg: WAMessage): void {
+  const key = msg.key as Record<string, unknown>;
+  if (key.remoteJid && typeof key.remoteJid === "string" && key.remoteJid.endsWith("@lid") && key.remoteJidAlt) {
+    const lid = key.remoteJid;
+    key.remoteJid = key.remoteJidAlt;
+    key.remoteJidAlt = lid;
+  }
+}
+
+/**
  * Get the chat JID for a message (group or individual).
  */
 export function getChatJid(msg: WAMessage): string {
@@ -115,23 +128,26 @@ export function normalizeMessagesUpsert(
   // Only process notify-type messages (not history sync)
   if (data.type !== "notify") return [];
 
-  return data.messages.map((msg) => ({
-    instanceId,
-    chatId: getChatJid(msg),
-    message: {
-      id: msg.key.id ?? "",
-      sender: getSenderJid(msg),
-      timestamp:
-        typeof msg.messageTimestamp === "number"
-          ? msg.messageTimestamp
-          : Number(msg.messageTimestamp ?? 0),
-      type: extractMessageType(msg),
-      content: extractTextContent(msg),
-      mediaUrl: null, // Media URLs are resolved separately
-      quotedMessageId: extractQuotedMessageId(msg),
-      isFromMe: msg.key.fromMe ?? false,
-    },
-  }));
+  return data.messages.map((msg) => {
+    normalizeLidInMessage(msg);
+    return {
+      instanceId,
+      chatId: getChatJid(msg),
+      message: {
+        id: msg.key.id ?? "",
+        sender: getSenderJid(msg),
+        timestamp:
+          typeof msg.messageTimestamp === "number"
+            ? msg.messageTimestamp
+            : Number(msg.messageTimestamp ?? 0),
+        type: extractMessageType(msg),
+        content: extractTextContent(msg),
+        mediaUrl: null,
+        quotedMessageId: extractQuotedMessageId(msg),
+        isFromMe: msg.key.fromMe ?? false,
+      },
+    };
+  });
 }
 
 /**
@@ -282,7 +298,7 @@ export function normalizeGroupParticipantsUpdate(
     instanceId,
     groupId: data.id,
     action: actionMap[data.action] ?? "add",
-    participants: data.participants,
+    participants: data.participants.map((p) => (typeof p === "string" ? p : p.id)),
   };
 }
 

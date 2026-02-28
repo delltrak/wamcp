@@ -31,3 +31,10 @@ export const GetBusinessProfileSchema = z
     jid: z.string().min(5).describe("Contact JID to fetch business profile for"),
   })
   .strict();
+
+export const SearchContactSchema = z
+  .object({
+    instanceId: z.string().min(1).describe("The instance ID"),
+    query: z.string().min(1).describe("Search term — matches name, notify name, or phone number"),
+  })
+  .strict();
