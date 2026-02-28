@@ -56,20 +56,32 @@ export class MaintenanceService {
     });
 
     // Set up repeatable jobs
-    await this.queue.add("prune-messages", { type: "prune-messages" }, {
-      repeat: { pattern: PRUNE_MESSAGES_CRON },
-      jobId: "prune-messages",
-    });
+    await this.queue.add(
+      "prune-messages",
+      { type: "prune-messages" },
+      {
+        repeat: { pattern: PRUNE_MESSAGES_CRON },
+        jobId: "prune-messages",
+      },
+    );
 
-    await this.queue.add("prune-dedup", { type: "prune-dedup" }, {
-      repeat: { pattern: PRUNE_DEDUP_CRON },
-      jobId: "prune-dedup",
-    });
+    await this.queue.add(
+      "prune-dedup",
+      { type: "prune-dedup" },
+      {
+        repeat: { pattern: PRUNE_DEDUP_CRON },
+        jobId: "prune-dedup",
+      },
+    );
 
-    await this.queue.add("check-wa-version", { type: "check-wa-version" }, {
-      repeat: { pattern: CHECK_VERSION_CRON },
-      jobId: "check-wa-version",
-    });
+    await this.queue.add(
+      "check-wa-version",
+      { type: "check-wa-version" },
+      {
+        repeat: { pattern: CHECK_VERSION_CRON },
+        jobId: "check-wa-version",
+      },
+    );
 
     // Worker to process maintenance jobs
     this.worker = new Worker(
@@ -136,15 +148,9 @@ export class MaintenanceService {
     );
     const cutoff = Date.now() - retentionDays * 24 * 60 * 60 * 1000;
 
-    const result = db
-      .delete(messages)
-      .where(lt(messages.timestamp, cutoff))
-      .run();
+    const result = db.delete(messages).where(lt(messages.timestamp, cutoff)).run();
 
-    logger.info(
-      { deleted: result.changes, retentionDays },
-      "Pruned old messages",
-    );
+    logger.info({ deleted: result.changes, retentionDays }, "Pruned old messages");
   }
 
   private async pruneDedup(): Promise<void> {
@@ -186,10 +192,7 @@ export class MaintenanceService {
           logger.info({ instanceId: instance.id }, "Auto-reconnecting instance");
           await this.instanceManager.connectInstance(instance.id);
         } catch (err) {
-          logger.warn(
-            { instanceId: instance.id, err },
-            "Failed to auto-reconnect instance",
-          );
+          logger.warn({ instanceId: instance.id, err }, "Failed to auto-reconnect instance");
         }
       }
     }

@@ -14,10 +14,7 @@ const GRAPH_API_BASE = "https://graph.facebook.com/v21.0";
  * Validate a Cloud API access token by making a test API call.
  * Returns true if the token is valid for the given phone number ID.
  */
-export async function validateToken(
-  accessToken: string,
-  phoneNumberId: string,
-): Promise<boolean> {
+export async function validateToken(accessToken: string, phoneNumberId: string): Promise<boolean> {
   try {
     const url = `${GRAPH_API_BASE}/${phoneNumberId}`;
     const response = await fetch(url, {
@@ -61,15 +58,10 @@ export function verifyWebhookSignature(
   }
 
   const signatureHash = signature.slice(prefix.length);
-  const expectedHash = createHmac("sha256", appSecret)
-    .update(body)
-    .digest("hex");
+  const expectedHash = createHmac("sha256", appSecret).update(body).digest("hex");
 
   try {
-    return timingSafeEqual(
-      Buffer.from(signatureHash, "hex"),
-      Buffer.from(expectedHash, "hex"),
-    );
+    return timingSafeEqual(Buffer.from(signatureHash, "hex"), Buffer.from(expectedHash, "hex"));
   } catch {
     // Lengths might not match if signature is malformed
     return false;

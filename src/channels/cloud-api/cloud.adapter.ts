@@ -110,10 +110,7 @@ export class CloudApiAdapter implements ChannelAdapter {
     return cleaned;
   }
 
-  private async request<T>(
-    url: string,
-    options: RequestInit = {},
-  ): Promise<T> {
+  private async request<T>(url: string, options: RequestInit = {}): Promise<T> {
     const { accessToken } = this.getCredentials();
 
     const headers = new Headers(options.headers);
@@ -123,16 +120,14 @@ export class CloudApiAdapter implements ChannelAdapter {
     }
 
     const response = await fetch(url, { ...options, headers });
-    const body = await response.json() as T | CloudApiError;
+    const body = (await response.json()) as T | CloudApiError;
 
     if (!response.ok) {
       const err = body as CloudApiError;
       const msg = err.error?.message ?? `HTTP ${response.status}`;
       const code = err.error?.code ?? response.status;
       const traceId = err.error?.fbtrace_id ?? "";
-      throw new Error(
-        `Cloud API error ${code}: ${msg}${traceId ? ` (trace: ${traceId})` : ""}`,
-      );
+      throw new Error(`Cloud API error ${code}: ${msg}${traceId ? ` (trace: ${traceId})` : ""}`);
     }
 
     return body as T;
@@ -401,11 +396,7 @@ export class CloudApiAdapter implements ChannelAdapter {
     throw new Error("Pinning messages is not supported on Cloud API");
   }
 
-  async sendViewOnce(
-    to: string,
-    media: string,
-    type: "image" | "video",
-  ): Promise<MessageResponse> {
+  async sendViewOnce(to: string, media: string, type: "image" | "video"): Promise<MessageResponse> {
     // Cloud API doesn't have a direct viewOnce parameter the same way.
     // We send as a normal media message (viewOnce is controlled client-side on Cloud API).
     const phone = this.normalizePhone(to);
@@ -563,7 +554,7 @@ export class CloudApiAdapter implements ChannelAdapter {
     // For now throw a descriptive error about the limitation.
     throw new Error(
       `Profile picture update on Cloud API requires a resumable upload handle. ` +
-      `Upload the image via POST ${url} with profile_picture_handle parameter.`,
+        `Upload the image via POST ${url} with profile_picture_handle parameter.`,
     );
   }
 
@@ -639,7 +630,9 @@ export class CloudApiAdapter implements ChannelAdapter {
   // ---- Data access ----
 
   async getContacts(): Promise<Contact[]> {
-    throw new Error("Contact list is not available on Cloud API. Contacts are managed in Meta Business Suite.");
+    throw new Error(
+      "Contact list is not available on Cloud API. Contacts are managed in Meta Business Suite.",
+    );
   }
 
   async getChats(): Promise<Chat[]> {
@@ -647,7 +640,9 @@ export class CloudApiAdapter implements ChannelAdapter {
   }
 
   async getMessages(_chatId: string, _limit?: number): Promise<Message[]> {
-    throw new Error("Message history is not available on Cloud API. Use webhooks to receive messages.");
+    throw new Error(
+      "Message history is not available on Cloud API. Use webhooks to receive messages.",
+    );
   }
 
   async getProfileInfo(): Promise<ProfileInfo> {
@@ -674,11 +669,7 @@ export class CloudApiAdapter implements ChannelAdapter {
 
   // ---- Media helpers (public for external use) ----
 
-  async uploadMedia(
-    file: Buffer,
-    mimeType: string,
-    fileName?: string,
-  ): Promise<string> {
+  async uploadMedia(file: Buffer, mimeType: string, fileName?: string): Promise<string> {
     const { phoneNumberId, accessToken } = this.getCredentials();
     const url = `${GRAPH_API_BASE}/${phoneNumberId}/media`;
 
@@ -694,7 +685,7 @@ export class CloudApiAdapter implements ChannelAdapter {
       body: formData,
     });
 
-    const body = await response.json() as CloudApiMediaUploadResponse | CloudApiError;
+    const body = (await response.json()) as CloudApiMediaUploadResponse | CloudApiError;
 
     if (!response.ok) {
       const err = body as CloudApiError;

@@ -45,9 +45,7 @@ export function handleToolError(
 
   // Cloud API unsupported operation
   if (message.includes("not supported") || message.includes("not implemented")) {
-    return toolError(
-      `This operation is not supported by the current channel adapter. ${message}`,
-    );
+    return toolError(`This operation is not supported by the current channel adapter. ${message}`);
   }
 
   // Rate limiting

@@ -188,7 +188,9 @@ export class InstanceManager {
   }
 
   /** Find a Cloud API adapter by its phone number ID (for webhook routing). */
-  findCloudAdapterByPhoneNumberId(phoneNumberId: string): { instanceId: string; adapter: CloudApiAdapter } | null {
+  findCloudAdapterByPhoneNumberId(
+    phoneNumberId: string,
+  ): { instanceId: string; adapter: CloudApiAdapter } | null {
     for (const [instanceId, managed] of this.adapters) {
       if (managed.channel === "cloud") {
         const cloudAdapter = managed.adapter as CloudApiAdapter;

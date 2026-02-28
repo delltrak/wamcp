@@ -36,13 +36,23 @@ interface WebhookMessage {
   image?: { id: string; mime_type?: string; sha256?: string; caption?: string };
   video?: { id: string; mime_type?: string; sha256?: string; caption?: string };
   audio?: { id: string; mime_type?: string; sha256?: string };
-  document?: { id: string; mime_type?: string; sha256?: string; caption?: string; filename?: string };
+  document?: {
+    id: string;
+    mime_type?: string;
+    sha256?: string;
+    caption?: string;
+    filename?: string;
+  };
   sticker?: { id: string; mime_type?: string; sha256?: string };
   location?: { latitude: number; longitude: number; name?: string; address?: string };
   contacts?: Array<{ name: { formatted_name?: string }; phones?: Array<{ phone?: string }> }>;
   reaction?: { message_id: string; emoji: string };
   button?: { text: string; payload: string };
-  interactive?: { type: string; button_reply?: { id: string; title: string }; list_reply?: { id: string; title: string } };
+  interactive?: {
+    type: string;
+    button_reply?: { id: string; title: string };
+    list_reply?: { id: string; title: string };
+  };
   context?: WebhookMessageContext;
 }
 
@@ -100,15 +110,24 @@ export interface NormalizedWebhookEvent {
 
 function mapMessageType(type: string): MessageType {
   switch (type) {
-    case "text": return "text";
-    case "image": return "image";
-    case "video": return "video";
-    case "audio": return "audio";
-    case "document": return "document";
-    case "location": return "location";
-    case "contacts": return "contact";
-    case "reaction": return "reaction";
-    case "sticker": return "sticker";
+    case "text":
+      return "text";
+    case "image":
+      return "image";
+    case "video":
+      return "video";
+    case "audio":
+      return "audio";
+    case "document":
+      return "document";
+    case "location":
+      return "location";
+    case "contacts":
+      return "contact";
+    case "reaction":
+      return "reaction";
+    case "sticker":
+      return "sticker";
     case "button":
     case "interactive":
       return "text";
@@ -119,11 +138,16 @@ function mapMessageType(type: string): MessageType {
 
 function mapStatusToDelivery(status: string): MessageDeliveryStatus | null {
   switch (status) {
-    case "sent": return "sent";
-    case "delivered": return "delivered";
-    case "read": return "read";
-    case "failed": return "sent"; // keep last known status
-    default: return null;
+    case "sent":
+      return "sent";
+    case "delivered":
+      return "delivered";
+    case "read":
+      return "read";
+    case "failed":
+      return "sent"; // keep last known status
+    default:
+      return null;
   }
 }
 
@@ -136,19 +160,14 @@ function extractTextContent(msg: WebhookMessage): string | null {
   if (msg.document?.caption) return msg.document.caption;
 
   if (msg.location) {
-    const parts = [
-      `lat:${msg.location.latitude}`,
-      `lng:${msg.location.longitude}`,
-    ];
+    const parts = [`lat:${msg.location.latitude}`, `lng:${msg.location.longitude}`];
     if (msg.location.name) parts.push(msg.location.name);
     if (msg.location.address) parts.push(msg.location.address);
     return parts.join(", ");
   }
 
   if (msg.contacts?.length) {
-    return msg.contacts
-      .map((c) => c.name?.formatted_name ?? "Unknown")
-      .join(", ");
+    return msg.contacts.map((c) => c.name?.formatted_name ?? "Unknown").join(", ");
   }
 
   if (msg.button) return msg.button.text;
@@ -161,12 +180,7 @@ function extractTextContent(msg: WebhookMessage): string | null {
 
 function extractMediaId(msg: WebhookMessage): string | null {
   return (
-    msg.image?.id ??
-    msg.video?.id ??
-    msg.audio?.id ??
-    msg.document?.id ??
-    msg.sticker?.id ??
-    null
+    msg.image?.id ?? msg.video?.id ?? msg.audio?.id ?? msg.document?.id ?? msg.sticker?.id ?? null
   );
 }
 
@@ -176,9 +190,7 @@ function extractMediaId(msg: WebhookMessage): string | null {
  * Parse a Meta webhook payload into an array of normalized events.
  * Each event includes the phoneNumberId for routing to the correct adapter.
  */
-export function normalizeWebhookPayload(
-  payload: MetaWebhookPayload,
-): NormalizedWebhookEvent[] {
+export function normalizeWebhookPayload(payload: MetaWebhookPayload): NormalizedWebhookEvent[] {
   const events: NormalizedWebhookEvent[] = [];
 
   if (payload.object !== "whatsapp_business_account") {
@@ -250,10 +262,7 @@ export function normalizeWebhookPayload(
           if (!deliveryStatus) continue;
 
           if (status.errors?.length) {
-            logger.warn(
-              { messageId: status.id, errors: status.errors },
-              "Message delivery error",
-            );
+            logger.warn({ messageId: status.id, errors: status.errors }, "Message delivery error");
           }
 
           const updateEvent: NormalizedMessageUpdateEvent = {
