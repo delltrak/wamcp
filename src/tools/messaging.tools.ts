@@ -33,16 +33,18 @@ export function registerMessagingTools(
   instanceManager: InstanceManager,
   messageQueue: MessageQueue,
 ): void {
-  server.tool(
+  server.registerTool(
     "wa_send_text",
-    `Send a text message to a WhatsApp contact or group.
+    {
+      description: `Send a text message to a WhatsApp contact or group.
 Args:
   - instanceId: The instance to send from
   - to: Recipient phone number (e.g. "5511999999999") or group JID
   - text: Message content (max 65536 chars)
   - quotedMessageId (optional): Message ID to reply to
 Returns: { status: "queued", jobId }`,
-    SendTextSchema.shape,
+      inputSchema: SendTextSchema,
+    },
     async (params) => {
       const log = createRequestLogger("wa_send_text", params.instanceId);
       const start = Date.now();
@@ -62,10 +64,13 @@ Returns: { status: "queued", jobId }`,
     },
   );
 
-  server.tool(
+  server.registerTool(
     "wa_send_image",
-    "Send an image to a WhatsApp contact or group. Image can be provided as a URL or base64-encoded data. Optional caption.",
-    SendImageSchema.shape,
+    {
+      description:
+        "Send an image to a WhatsApp contact or group. Image can be provided as a URL or base64-encoded data. Optional caption.",
+      inputSchema: SendImageSchema,
+    },
     async (params) => {
       const log = createRequestLogger("wa_send_image", params.instanceId);
       const start = Date.now();
@@ -90,10 +95,13 @@ Returns: { status: "queued", jobId }`,
     },
   );
 
-  server.tool(
+  server.registerTool(
     "wa_send_video",
-    "Send a video to a WhatsApp contact or group. Video can be provided as a URL or base64-encoded data. Optional caption.",
-    SendVideoSchema.shape,
+    {
+      description:
+        "Send a video to a WhatsApp contact or group. Video can be provided as a URL or base64-encoded data. Optional caption.",
+      inputSchema: SendVideoSchema,
+    },
     async (params) => {
       const log = createRequestLogger("wa_send_video", params.instanceId);
       const start = Date.now();
@@ -118,10 +126,13 @@ Returns: { status: "queued", jobId }`,
     },
   );
 
-  server.tool(
+  server.registerTool(
     "wa_send_audio",
-    "Send an audio file or voice note to a WhatsApp contact or group. Set ptt=true for voice note (push-to-talk).",
-    SendAudioSchema.shape,
+    {
+      description:
+        "Send an audio file or voice note to a WhatsApp contact or group. Set ptt=true for voice note (push-to-talk).",
+      inputSchema: SendAudioSchema,
+    },
     async (params) => {
       const log = createRequestLogger("wa_send_audio", params.instanceId);
       const start = Date.now();
@@ -141,10 +152,13 @@ Returns: { status: "queued", jobId }`,
     },
   );
 
-  server.tool(
+  server.registerTool(
     "wa_send_document",
-    "Send a document/file to a WhatsApp contact or group. Requires fileName and mimeType.",
-    SendDocumentSchema.shape,
+    {
+      description:
+        "Send a document/file to a WhatsApp contact or group. Requires fileName and mimeType.",
+      inputSchema: SendDocumentSchema,
+    },
     async (params) => {
       const log = createRequestLogger("wa_send_document", params.instanceId);
       const start = Date.now();
@@ -169,10 +183,12 @@ Returns: { status: "queued", jobId }`,
     },
   );
 
-  server.tool(
+  server.registerTool(
     "wa_send_location",
-    "Send a GPS location to a WhatsApp contact or group. Optional name and address.",
-    SendLocationSchema.shape,
+    {
+      description: "Send a GPS location to a WhatsApp contact or group. Optional name and address.",
+      inputSchema: SendLocationSchema,
+    },
     async (params) => {
       const log = createRequestLogger("wa_send_location", params.instanceId);
       const start = Date.now();
@@ -198,10 +214,12 @@ Returns: { status: "queued", jobId }`,
     },
   );
 
-  server.tool(
+  server.registerTool(
     "wa_send_contact",
-    "Send a vCard contact to a WhatsApp contact or group.",
-    SendContactSchema.shape,
+    {
+      description: "Send a vCard contact to a WhatsApp contact or group.",
+      inputSchema: SendContactSchema,
+    },
     async (params) => {
       const log = createRequestLogger("wa_send_contact", params.instanceId);
       const start = Date.now();
@@ -221,10 +239,12 @@ Returns: { status: "queued", jobId }`,
     },
   );
 
-  server.tool(
+  server.registerTool(
     "wa_send_poll",
-    "Create and send a poll to a WhatsApp contact or group. Supports 2-12 options.",
-    SendPollSchema.shape,
+    {
+      description: "Create and send a poll to a WhatsApp contact or group. Supports 2-12 options.",
+      inputSchema: SendPollSchema,
+    },
     async (params) => {
       const log = createRequestLogger("wa_send_poll", params.instanceId);
       const start = Date.now();
@@ -249,10 +269,13 @@ Returns: { status: "queued", jobId }`,
     },
   );
 
-  server.tool(
+  server.registerTool(
     "wa_send_reaction",
-    "React to a message with an emoji. Send an empty string emoji to remove a reaction.",
-    SendReactionSchema.shape,
+    {
+      description:
+        "React to a message with an emoji. Send an empty string emoji to remove a reaction.",
+      inputSchema: SendReactionSchema,
+    },
     async (params) => {
       const log = createRequestLogger("wa_send_reaction", params.instanceId);
       const start = Date.now();
@@ -267,10 +290,13 @@ Returns: { status: "queued", jobId }`,
     },
   );
 
-  server.tool(
+  server.registerTool(
     "wa_send_link_preview",
-    "Send a text message with a rich link preview. The URL is used to generate the preview.",
-    SendLinkPreviewSchema.shape,
+    {
+      description:
+        "Send a text message with a rich link preview. The URL is used to generate the preview.",
+      inputSchema: SendLinkPreviewSchema,
+    },
     async (params) => {
       const log = createRequestLogger("wa_send_link_preview", params.instanceId);
       const start = Date.now();
@@ -285,10 +311,12 @@ Returns: { status: "queued", jobId }`,
     },
   );
 
-  server.tool(
+  server.registerTool(
     "wa_forward_message",
-    "Forward an existing message to another chat.",
-    ForwardMessageSchema.shape,
+    {
+      description: "Forward an existing message to another chat.",
+      inputSchema: ForwardMessageSchema,
+    },
     async (params) => {
       const log = createRequestLogger("wa_forward_message", params.instanceId);
       const start = Date.now();
@@ -303,10 +331,13 @@ Returns: { status: "queued", jobId }`,
     },
   );
 
-  server.tool(
+  server.registerTool(
     "wa_edit_message",
-    "Edit a previously sent message. Only text messages sent by this instance can be edited.",
-    EditMessageSchema.shape,
+    {
+      description:
+        "Edit a previously sent message. Only text messages sent by this instance can be edited.",
+      inputSchema: EditMessageSchema,
+    },
     async (params) => {
       const log = createRequestLogger("wa_edit_message", params.instanceId);
       const start = Date.now();
@@ -321,10 +352,13 @@ Returns: { status: "queued", jobId }`,
     },
   );
 
-  server.tool(
+  server.registerTool(
     "wa_delete_message",
-    "Delete a message for everyone in the chat. Only messages sent by this instance can be deleted.",
-    DeleteMessageSchema.shape,
+    {
+      description:
+        "Delete a message for everyone in the chat. Only messages sent by this instance can be deleted.",
+      inputSchema: DeleteMessageSchema,
+    },
     async (params) => {
       const log = createRequestLogger("wa_delete_message", params.instanceId);
       const start = Date.now();
@@ -339,10 +373,12 @@ Returns: { status: "queued", jobId }`,
     },
   );
 
-  server.tool(
+  server.registerTool(
     "wa_pin_message",
-    "Pin or unpin a message in a chat.",
-    PinMessageSchema.shape,
+    {
+      description: "Pin or unpin a message in a chat.",
+      inputSchema: PinMessageSchema,
+    },
     async (params) => {
       const log = createRequestLogger("wa_pin_message", params.instanceId);
       const start = Date.now();
@@ -357,10 +393,13 @@ Returns: { status: "queued", jobId }`,
     },
   );
 
-  server.tool(
+  server.registerTool(
     "wa_send_view_once",
-    "Send a view-once image or video. The media disappears after the recipient views it once.",
-    SendViewOnceSchema.shape,
+    {
+      description:
+        "Send a view-once image or video. The media disappears after the recipient views it once.",
+      inputSchema: SendViewOnceSchema,
+    },
     async (params) => {
       const log = createRequestLogger("wa_send_view_once", params.instanceId);
       const start = Date.now();
@@ -375,10 +414,13 @@ Returns: { status: "queued", jobId }`,
     },
   );
 
-  server.tool(
+  server.registerTool(
     "wa_send_presence",
-    "Send a presence status (typing, recording, paused, available, unavailable) to a chat.",
-    SendPresenceSchema.shape,
+    {
+      description:
+        "Send a presence status (typing, recording, paused, available, unavailable) to a chat.",
+      inputSchema: SendPresenceSchema,
+    },
     async (params) => {
       const log = createRequestLogger("wa_send_presence", params.instanceId);
       const start = Date.now();
@@ -393,10 +435,12 @@ Returns: { status: "queued", jobId }`,
     },
   );
 
-  server.tool(
+  server.registerTool(
     "wa_mark_read",
-    "Mark specific messages as read in a chat.",
-    MarkReadSchema.shape,
+    {
+      description: "Mark specific messages as read in a chat.",
+      inputSchema: MarkReadSchema,
+    },
     async (params) => {
       const log = createRequestLogger("wa_mark_read", params.instanceId);
       const start = Date.now();

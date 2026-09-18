@@ -183,7 +183,7 @@ export class BaileysAdapter implements ChannelAdapter {
         keys: makeCacheableSignalKeyStore(state.keys, logger),
       },
       printQRInTerminal: false,
-      logger: logger.child({ instanceId: this.instanceId }) as unknown as import("pino").Logger,
+      logger: logger.child({ instanceId: this.instanceId }),
       generateHighQualityLinkPreview: true,
       syncFullHistory: true,
       markOnlineOnConnect: false,

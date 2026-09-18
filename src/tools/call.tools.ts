@@ -15,10 +15,13 @@ export function registerCallTools(
   instanceManager: InstanceManager,
   _messageQueue: MessageQueue,
 ): void {
-  server.tool(
+  server.registerTool(
     "wa_reject_call",
-    "Reject an incoming voice or video call. The call ID is received via the whatsapp/call.received notification.",
-    RejectCallSchema.shape,
+    {
+      description:
+        "Reject an incoming voice or video call. The call ID is received via the whatsapp/call.received notification.",
+      inputSchema: RejectCallSchema,
+    },
     async (params) => {
       const log = createRequestLogger("wa_reject_call", params.instanceId);
       const start = Date.now();

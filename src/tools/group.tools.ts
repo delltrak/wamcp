@@ -30,10 +30,12 @@ export function registerGroupTools(
   instanceManager: InstanceManager,
   _messageQueue: MessageQueue,
 ): void {
-  server.tool(
+  server.registerTool(
     "wa_create_group",
-    "Create a new WhatsApp group with a name and initial participants.",
-    CreateGroupSchema.shape,
+    {
+      description: "Create a new WhatsApp group with a name and initial participants.",
+      inputSchema: CreateGroupSchema,
+    },
     async (params) => {
       const log = createRequestLogger("wa_create_group", params.instanceId);
       const start = Date.now();
@@ -48,10 +50,12 @@ export function registerGroupTools(
     },
   );
 
-  server.tool(
+  server.registerTool(
     "wa_group_add_participants",
-    "Add members to a WhatsApp group.",
-    AddParticipantsSchema.shape,
+    {
+      description: "Add members to a WhatsApp group.",
+      inputSchema: AddParticipantsSchema,
+    },
     async (params) => {
       const log = createRequestLogger("wa_group_add_participants", params.instanceId);
       const start = Date.now();
@@ -66,10 +70,12 @@ export function registerGroupTools(
     },
   );
 
-  server.tool(
+  server.registerTool(
     "wa_group_remove_participants",
-    "Remove members from a WhatsApp group.",
-    RemoveParticipantsSchema.shape,
+    {
+      description: "Remove members from a WhatsApp group.",
+      inputSchema: RemoveParticipantsSchema,
+    },
     async (params) => {
       const log = createRequestLogger("wa_group_remove_participants", params.instanceId);
       const start = Date.now();
@@ -84,10 +90,12 @@ export function registerGroupTools(
     },
   );
 
-  server.tool(
+  server.registerTool(
     "wa_group_promote",
-    "Promote members to group admin.",
-    PromoteParticipantSchema.shape,
+    {
+      description: "Promote members to group admin.",
+      inputSchema: PromoteParticipantSchema,
+    },
     async (params) => {
       const log = createRequestLogger("wa_group_promote", params.instanceId);
       const start = Date.now();
@@ -102,10 +110,12 @@ export function registerGroupTools(
     },
   );
 
-  server.tool(
+  server.registerTool(
     "wa_group_demote",
-    "Demote group admins to regular members.",
-    DemoteParticipantSchema.shape,
+    {
+      description: "Demote group admins to regular members.",
+      inputSchema: DemoteParticipantSchema,
+    },
     async (params) => {
       const log = createRequestLogger("wa_group_demote", params.instanceId);
       const start = Date.now();
@@ -120,10 +130,12 @@ export function registerGroupTools(
     },
   );
 
-  server.tool(
+  server.registerTool(
     "wa_group_update_subject",
-    "Change the name/subject of a WhatsApp group.",
-    UpdateSubjectSchema.shape,
+    {
+      description: "Change the name/subject of a WhatsApp group.",
+      inputSchema: UpdateSubjectSchema,
+    },
     async (params) => {
       const log = createRequestLogger("wa_group_update_subject", params.instanceId);
       const start = Date.now();
@@ -141,10 +153,12 @@ export function registerGroupTools(
     },
   );
 
-  server.tool(
+  server.registerTool(
     "wa_group_update_description",
-    "Change the description of a WhatsApp group.",
-    UpdateDescriptionSchema.shape,
+    {
+      description: "Change the description of a WhatsApp group.",
+      inputSchema: UpdateDescriptionSchema,
+    },
     async (params) => {
       const log = createRequestLogger("wa_group_update_description", params.instanceId);
       const start = Date.now();
@@ -162,10 +176,13 @@ export function registerGroupTools(
     },
   );
 
-  server.tool(
+  server.registerTool(
     "wa_group_update_settings",
-    "Change group settings (announce: only admins can send, locked: only admins can edit info).",
-    UpdateSettingsSchema.shape,
+    {
+      description:
+        "Change group settings (announce: only admins can send, locked: only admins can edit info).",
+      inputSchema: UpdateSettingsSchema,
+    },
     async (params) => {
       const log = createRequestLogger("wa_group_update_settings", params.instanceId);
       const start = Date.now();
@@ -191,10 +208,12 @@ export function registerGroupTools(
     },
   );
 
-  server.tool(
+  server.registerTool(
     "wa_group_leave",
-    "Leave a WhatsApp group.",
-    LeaveGroupSchema.shape,
+    {
+      description: "Leave a WhatsApp group.",
+      inputSchema: LeaveGroupSchema,
+    },
     async (params) => {
       const log = createRequestLogger("wa_group_leave", params.instanceId);
       const start = Date.now();
@@ -209,10 +228,12 @@ export function registerGroupTools(
     },
   );
 
-  server.tool(
+  server.registerTool(
     "wa_group_get_invite_code",
-    "Get the shareable invite link for a WhatsApp group.",
-    GetInviteCodeSchema.shape,
+    {
+      description: "Get the shareable invite link for a WhatsApp group.",
+      inputSchema: GetInviteCodeSchema,
+    },
     async (params) => {
       const log = createRequestLogger("wa_group_get_invite_code", params.instanceId);
       const start = Date.now();
@@ -231,10 +252,12 @@ export function registerGroupTools(
     },
   );
 
-  server.tool(
+  server.registerTool(
     "wa_group_revoke_invite",
-    "Revoke the current invite link for a WhatsApp group, generating a new one.",
-    RevokeInviteSchema.shape,
+    {
+      description: "Revoke the current invite link for a WhatsApp group, generating a new one.",
+      inputSchema: RevokeInviteSchema,
+    },
     async (params) => {
       const log = createRequestLogger("wa_group_revoke_invite", params.instanceId);
       const start = Date.now();
@@ -249,10 +272,12 @@ export function registerGroupTools(
     },
   );
 
-  server.tool(
+  server.registerTool(
     "wa_group_join",
-    "Join a WhatsApp group using an invite code or link.",
-    JoinGroupSchema.shape,
+    {
+      description: "Join a WhatsApp group using an invite code or link.",
+      inputSchema: JoinGroupSchema,
+    },
     async (params) => {
       const log = createRequestLogger("wa_group_join", params.instanceId);
       const start = Date.now();
@@ -267,10 +292,13 @@ export function registerGroupTools(
     },
   );
 
-  server.tool(
+  server.registerTool(
     "wa_group_toggle_ephemeral",
-    "Enable or disable disappearing messages in a group. Duration is in seconds (0 to disable).",
-    ToggleEphemeralSchema.shape,
+    {
+      description:
+        "Enable or disable disappearing messages in a group. Duration is in seconds (0 to disable).",
+      inputSchema: ToggleEphemeralSchema,
+    },
     async (params) => {
       const log = createRequestLogger("wa_group_toggle_ephemeral", params.instanceId);
       const start = Date.now();
@@ -288,10 +316,12 @@ export function registerGroupTools(
     },
   );
 
-  server.tool(
+  server.registerTool(
     "wa_group_handle_request",
-    "Approve or reject a pending join request for a WhatsApp group.",
-    HandleJoinRequestSchema.shape,
+    {
+      description: "Approve or reject a pending join request for a WhatsApp group.",
+      inputSchema: HandleJoinRequestSchema,
+    },
     async (params) => {
       const log = createRequestLogger("wa_group_handle_request", params.instanceId);
       const start = Date.now();

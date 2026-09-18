@@ -22,10 +22,13 @@ export function registerChatTools(
   instanceManager: InstanceManager,
   _messageQueue: MessageQueue,
 ): void {
-  server.tool(
+  server.registerTool(
     "wa_archive_chat",
-    "Archive or unarchive a chat. Archived chats are hidden from the main chat list.",
-    ArchiveChatSchema.shape,
+    {
+      description:
+        "Archive or unarchive a chat. Archived chats are hidden from the main chat list.",
+      inputSchema: ArchiveChatSchema,
+    },
     async (params) => {
       const log = createRequestLogger("wa_archive_chat", params.instanceId);
       const start = Date.now();
@@ -42,10 +45,12 @@ export function registerChatTools(
     },
   );
 
-  server.tool(
+  server.registerTool(
     "wa_pin_chat",
-    "Pin or unpin a chat. Pinned chats appear at the top of the chat list.",
-    PinChatSchema.shape,
+    {
+      description: "Pin or unpin a chat. Pinned chats appear at the top of the chat list.",
+      inputSchema: PinChatSchema,
+    },
     async (params) => {
       const log = createRequestLogger("wa_pin_chat", params.instanceId);
       const start = Date.now();
@@ -62,10 +67,13 @@ export function registerChatTools(
     },
   );
 
-  server.tool(
+  server.registerTool(
     "wa_mute_chat",
-    "Mute or unmute a chat. When muting, optionally specify muteUntil as a Unix timestamp in milliseconds.",
-    MuteChatSchema.shape,
+    {
+      description:
+        "Mute or unmute a chat. When muting, optionally specify muteUntil as a Unix timestamp in milliseconds.",
+      inputSchema: MuteChatSchema,
+    },
     async (params) => {
       const log = createRequestLogger("wa_mute_chat", params.instanceId);
       const start = Date.now();
@@ -83,10 +91,12 @@ export function registerChatTools(
     },
   );
 
-  server.tool(
+  server.registerTool(
     "wa_delete_chat",
-    "Delete an entire chat for this account. This cannot be undone.",
-    DeleteChatSchema.shape,
+    {
+      description: "Delete an entire chat for this account. This cannot be undone.",
+      inputSchema: DeleteChatSchema,
+    },
     async (params) => {
       const log = createRequestLogger("wa_delete_chat", params.instanceId);
       const start = Date.now();
@@ -101,10 +111,12 @@ export function registerChatTools(
     },
   );
 
-  server.tool(
+  server.registerTool(
     "wa_clear_chat",
-    "Clear all messages in a chat. The chat remains but all messages are removed.",
-    ClearChatSchema.shape,
+    {
+      description: "Clear all messages in a chat. The chat remains but all messages are removed.",
+      inputSchema: ClearChatSchema,
+    },
     async (params) => {
       const log = createRequestLogger("wa_clear_chat", params.instanceId);
       const start = Date.now();
@@ -119,10 +131,13 @@ export function registerChatTools(
     },
   );
 
-  server.tool(
+  server.registerTool(
     "wa_get_messages",
-    "Get recent messages from a chat. Returns messages ordered by most recent first, with sender, content, type, and timestamp.",
-    GetMessagesSchema.shape,
+    {
+      description:
+        "Get recent messages from a chat. Returns messages ordered by most recent first, with sender, content, type, and timestamp.",
+      inputSchema: GetMessagesSchema,
+    },
     async (params) => {
       const log = createRequestLogger("wa_get_messages", params.instanceId);
       const start = Date.now();

@@ -7,6 +7,74 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.0.0] - 2026-09-18
+
+Dependency modernization after ~6.5 months of drift. Closes 4 critical and 17 high
+advisories; `npm audit` goes from **33 vulnerabilities to 4** (all moderate, all dev-only).
+
+### Security
+
+- **Baileys `7.0.0-rc.9` → `7.0.0-rc14`** — fixes [GHSA-qvv5-jq5g-4cgg] (critical, affects
+  `>=7.0.0-rc.1 <7.0.0-rc12`): message-upsert / history-sync spoofing and app-state corruption
+  from a maliciously crafted `protocolMessage` payload. rc.9 was vulnerable; rc12 patched it.
+- **drizzle-orm `0.39.3` → `0.45.2`** — fixes [GHSA-gpj5-g38j-94v9] (high, CVSS 7.5):
+  SQL injection via improperly escaped SQL identifiers.
+- Baileys rc14 also moves `libsignal` off a git URL onto the registry package `libsignal@^6`,
+  and pulls patched `protobufjs` (critical RCE) and `music-metadata`.
+- Refreshed transitive dependencies within their existing semver ranges, clearing advisories in
+  `ws`, `sharp`, `hono`, `@hono/node-server`, `express-rate-limit`, `path-to-regexp`, `qs`,
+  `body-parser`, `fast-uri` and `ip-address`.
+- The Docker runtime image no longer ships devDependencies — a dedicated `deps` stage installs
+  with `npm ci --omit=dev`, so `drizzle-kit`/`vitest`/`eslint` and their advisories stay out of
+  production.
+
+### Breaking
+
+- **Node.js floor raised from 22 to 24** (`engines`, Dockerfile, CI). Node 24 is the Active LTS.
+- **Tool arguments are now actually validated as strict.** All 62 schemas were declared
+  `.strict()`, but passing `Schema.shape` to the deprecated `server.tool()` discarded that —
+  unknown keys were silently stripped and never reported. Tools now reject unknown arguments
+  with a validation error, and `additionalProperties: false` is advertised in every tool's
+  input schema again.
+
+### Changed
+
+- Migrated all 62 tools from the deprecated `server.tool(name, desc, Schema.shape, handler)` to
+  `server.registerTool(name, { description, inputSchema: Schema }, handler)`. Passing the full
+  schema instead of its `.shape` is what preserves strictness through the SDK.
+- `MaintenanceService` repeatable jobs migrated to BullMQ v6 Job Schedulers
+  (`queue.upsertJobScheduler()`); `repeat` was removed from `JobsOptions` in v6.
+- Dropped the `as unknown as import("pino").Logger` cast in the Baileys adapter — rc14 accepts a
+  structural `ILogger`, so the logger is now type-checked instead of cast past the compiler.
+- TypeScript pinned to **6.0.3, not 7.x**: `typescript-eslint@8.70.0` still declares
+  `typescript: ">=4.8.4 <6.1.0"`, so TS 7 would break `npm run lint`.
+- `better-sqlite3 11 → 13`, `bullmq 5 → 6`, `ioredis 5 → 6`, `zod 3 → 4`, `pino 9 → 10`,
+  `dotenv 16 → 18`, `@modelcontextprotocol/sdk 1.27.1 → 1.30.0`, `vitest 4 → 5`,
+  `eslint 10.0.2 → 10.10.0`, `@types/node 22 → 24`, plus `drizzle-kit`, `tsx`, `prettier`.
+- CI matrix now runs Node 24.x and 26.x (was 22.x only).
+
+### Fixed
+
+- `VERSION` in `src/constants.ts` was hardcoded `"1.0.0"` while `package.json` read `1.1.1`. It
+  feeds the MCP server identity and `/health`. Both are now `2.0.0`, and a test asserts they
+  match so the drift cannot return.
+- `better-sqlite3@11` could not build on Node 24+ (no prebuilt binary, and the source fails
+  against modern V8) — `npm ci` simply failed. v13 ships N-API prebuilds including
+  `linuxmusl-x64`/`linuxmusl-arm64`, so Alpine needs no build toolchain.
+- README corrected from "63 tools" to **62**, the number actually registered.
+- Documented `WA_CLOUD_VERIFY_TOKEN` in `.env.example` and the README (required for Meta's
+  webhook GET handshake, previously undocumented).
+- Removed `WA_CLOUD_WEBHOOK_PORT` and the exposed port 3001: nothing reads them, the Cloud API
+  webhook is served by the main MCP server at `POST /cloud-webhook`.
+
+### Added
+
+- `.github/dependabot.yml` — weekly npm updates (minor/patch grouped, majors separate), monthly
+  GitHub Actions and Docker updates. The absence of this is what let the tree drift.
+
+[GHSA-qvv5-jq5g-4cgg]: https://github.com/advisories/GHSA-qvv5-jq5g-4cgg
+[GHSA-gpj5-g38j-94v9]: https://github.com/advisories/GHSA-gpj5-g38j-94v9
+
 ## [1.1.1] - 2026-03-02
 
 ### Fixed

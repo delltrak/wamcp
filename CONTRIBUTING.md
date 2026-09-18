@@ -4,7 +4,7 @@ Thanks for your interest in contributing to WA MCP! This guide will help you get
 
 ## Prerequisites
 
-- **Node.js >= 22** (check with `node --version`)
+- **Node.js >= 24** (check with `node --version`)
 - **Redis** running locally (for BullMQ queues)
 - **npm** for package management
 

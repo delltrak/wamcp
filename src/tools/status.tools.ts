@@ -19,10 +19,12 @@ export function registerStatusTools(
   instanceManager: InstanceManager,
   _messageQueue: MessageQueue,
 ): void {
-  server.tool(
+  server.registerTool(
     "wa_send_text_status",
-    "Post a text status/story update visible to contacts.",
-    SendTextStatusSchema.shape,
+    {
+      description: "Post a text status/story update visible to contacts.",
+      inputSchema: SendTextStatusSchema,
+    },
     async (params) => {
       const log = createRequestLogger("wa_send_text_status", params.instanceId);
       const start = Date.now();
@@ -42,10 +44,12 @@ export function registerStatusTools(
     },
   );
 
-  server.tool(
+  server.registerTool(
     "wa_send_image_status",
-    "Post an image status/story update visible to contacts.",
-    SendImageStatusSchema.shape,
+    {
+      description: "Post an image status/story update visible to contacts.",
+      inputSchema: SendImageStatusSchema,
+    },
     async (params) => {
       const log = createRequestLogger("wa_send_image_status", params.instanceId);
       const start = Date.now();
@@ -64,10 +68,12 @@ export function registerStatusTools(
     },
   );
 
-  server.tool(
+  server.registerTool(
     "wa_send_video_status",
-    "Post a video status/story update visible to contacts.",
-    SendVideoStatusSchema.shape,
+    {
+      description: "Post a video status/story update visible to contacts.",
+      inputSchema: SendVideoStatusSchema,
+    },
     async (params) => {
       const log = createRequestLogger("wa_send_video_status", params.instanceId);
       const start = Date.now();
