@@ -11,6 +11,18 @@ updates:
         update-types:
           - minor
           - patch
+    ignore:
+      # typescript-eslint peer-caps TypeScript at <6.1.0 and has no v9 yet, so TS 7
+      # makes `npm ci` fail outright with ERESOLVE. Drop this entry once the peer
+      # range opens up — that range is the signal to watch.
+      - dependency-name: "typescript"
+        update-types: ["version-update:semver-major"]
+      # @types/node must track the Node floor declared in `engines`, not the newest
+      # release. Ahead of the floor, tsc happily accepts APIs the supported runtime
+      # does not have — and CI stays green while it does. Bump this by hand, with
+      # `engines`, the Dockerfile and the CI matrix.
+      - dependency-name: "@types/node"
+        update-types: ["version-update:semver-major"]
     labels:
       - dependencies
 
@@ -25,5 +37,11 @@ updates:
     directory: "/"
     schedule:
       interval: monthly
+    ignore:
+      # Only even-numbered Node releases become LTS. A major bump here is a release
+      # decision that has to move `engines`, @types/node and the CI matrix with it,
+      # so it is not something to take from an automated PR.
+      - dependency-name: "node"
+        update-types: ["version-update:semver-major"]
     labels:
       - dependencies
