@@ -27,6 +27,9 @@ advisories; `npm audit` goes from **33 vulnerabilities to 4** (all moderate, all
 - The Docker runtime image no longer ships devDependencies — a dedicated `deps` stage installs
   with `npm ci --omit=dev`, so `drizzle-kit`/`vitest`/`eslint` and their advisories stay out of
   production.
+- `vitest 4.0.18 → 5.0.1` — 4.0.18 sat inside GHSA-5xrq-8626-4rwp (critical, CVSS 9.8,
+  `>=4.0.0 <4.1.0`). Dev-only, but it was the fourth critical in the tree.
+- CI now gates on `npm audit --omit=dev --audit-level=high` after the test step.
 
 ### Breaking
 
@@ -52,6 +55,14 @@ advisories; `npm audit` goes from **33 vulnerabilities to 4** (all moderate, all
   `dotenv 16 → 18`, `@modelcontextprotocol/sdk 1.27.1 → 1.30.0`, `vitest 4 → 5`,
   `eslint 10.0.2 → 10.10.0`, `@types/node 22 → 24`, plus `drizzle-kit`, `tsx`, `prettier`.
 - CI matrix now runs Node 24.x and 26.x (was 22.x only).
+- `tsconfig.json` now sets `"types": ["node"]`. Node globals previously resolved only through a
+  `/// <reference types="node" />` directive inside `@types/better-sqlite3`.
+- zod 4.5 changed `.min()`/`.max()` on strings from counting UTF-16 code units to counting code
+  points. This only loosens the limits (20 emoji now pass `.max(25)`, where they were 40 units
+  before) and it matches what the field descriptions already promised ("max 25 characters"), so
+  the schemas are left as they are — but the underlying WhatsApp limits are not code-point based,
+  so an over-long display name or group subject can now be rejected downstream rather than by the
+  schema.
 
 ### Fixed
 
@@ -66,6 +77,17 @@ advisories; `npm audit` goes from **33 vulnerabilities to 4** (all moderate, all
   webhook GET handshake, previously undocumented).
 - Removed `WA_CLOUD_WEBHOOK_PORT` and the exposed port 3001: nothing reads them, the Cloud API
   webhook is served by the main MCP server at `POST /cloud-webhook`.
+- **stdio transport could be killed by a large media payload.** MCP SDK 1.30.0 introduced a 10 MB
+  default read-buffer ceiling on `StdioServerTransport` (absent in 1.27.1); exceeding it makes the
+  transport call `close()`, dropping the whole session instead of failing one request. Media inputs
+  are allowed up to 100 MB, and base64 inflates by 4/3, so any document over ~7.5 MB would have
+  killed the session under `WA_TRANSPORT=stdio`. The transport is now constructed with an explicit
+  `maxBufferSize` derived from `MAX_BASE64_MEDIA_BYTES`.
+- `MAX_BASE64_MEDIA_BYTES` in `constants.ts` was exported but never imported — `validation.ts` kept
+  its own duplicate literal. It is now the single source of truth for both the base64 ceiling and
+  the stdio read buffer.
+- Declared `@vitest/coverage-v8`, which `vitest.config.ts` has always referenced but was never in
+  `devDependencies`.
 
 ### Added
 

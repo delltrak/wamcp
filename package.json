@@ -60,6 +60,7 @@
     "@eslint/js": "^10.0.1",
     "@types/better-sqlite3": "^9.6.0",
     "@types/node": "^24.13.5",
+    "@vitest/coverage-v8": "^5.0.1",
     "drizzle-kit": "^0.31.10",
     "eslint": "^10.10.0",
     "prettier": "^3.9.8",

@@ -76,3 +76,10 @@ export const HEALTH_ENDPOINT = "/health";
 
 // Max base64 media size (bytes)
 export const MAX_BASE64_MEDIA_BYTES = 100 * 1024 * 1024; // 100 MB
+
+// Read-buffer ceiling for the stdio transport.
+// MCP SDK 1.30.0 added a 10 MB default to StdioServerTransport; a single message
+// over it makes the transport call close(), killing the whole session rather than
+// failing one request. Base64 inflates by 4/3, so a MAX_BASE64_MEDIA_BYTES payload
+// needs that much on the wire, plus room for the JSON-RPC envelope and escaping.
+export const STDIO_MAX_BUFFER_BYTES = Math.ceil((MAX_BASE64_MEDIA_BYTES * 4) / 3) + 4 * 1024 * 1024;
