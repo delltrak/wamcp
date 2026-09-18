@@ -106,6 +106,14 @@ Everything that is not a "send a message" call (edit, delete, react, presence, g
 3. Add the method to `channel.interface.ts`, implement in Baileys, implement or throw-with-the-standard-wording in Cloud API.
 4. Update `README.md` and `docs/API_REFERENCE.md` tables.
 
+## Adding a resource
+
+Use `server.registerResource`, and for anything with a `{variable}` in the URI pass a real `ResourceTemplate` — never the URI as a plain string. A string is registered as a *literal* static URI, so the resource never appears in `resources/templates/list` and cannot be read with either the placeholder or a substituted value. That bug shipped for 8 of 10 resources until 2.0.0. `src/resources/resource-helpers.ts` has `perInstanceTemplate()` for the common `whatsapp://instances/{id}/...` shape; it also wires the `list` callback that makes concrete per-instance URIs discoverable.
+
+Read variables from the `(uri, variables)` callback argument via `varAsString()`. Do **not** parse them out of `uri.pathname`: in `whatsapp://instances/<id>/...` the segment `instances` is the URI *host*, not part of the path, so index-based path scraping silently yields `""`.
+
+Tests in `tests/resources.test.ts` guard both rules — one fails if any `src/` file reuses the deprecated `server.tool()`/`server.resource()`, the other if a placeholder URI is passed to `registerResource` as a static string.
+
 Domain files are fixed: `instance`, `messaging`, `chat`, `group`, `contact`, `profile`, `status`, `newsletter`, `call`. Registration happens in `server/mcp.ts`.
 
 ## Schema changes need three (sometimes four) edits

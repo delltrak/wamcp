@@ -5,6 +5,7 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { InstanceManager } from "../services/instance-manager.js";
 import type { MessageQueue } from "../services/message-queue.js";
+import { perInstanceTemplate, varAsString } from "./resource-helpers.js";
 
 export function registerInstancesResource(
   server: McpServer,
@@ -12,7 +13,7 @@ export function registerInstancesResource(
   messageQueue: MessageQueue,
 ): void {
   // List all instances
-  server.resource(
+  server.registerResource(
     "instances-list",
     "whatsapp://instances",
     {
@@ -44,15 +45,21 @@ export function registerInstancesResource(
   );
 
   // Single instance with queue stats
-  server.resource(
+  server.registerResource(
     "instance-detail",
-    "whatsapp://instances/{id}",
+    perInstanceTemplate(
+      instanceManager,
+      (id) => `whatsapp://instances/${id}`,
+      (name) => `Instance — ${name}`,
+    ),
     {
-      description: "Single instance details including uptime, message stats, and queue status",
+      description:
+        "Single instance details including uptime, message stats, and outbound queue status " +
+        "(waiting/active/completed/failed) — use this to check whether queued sends went through",
       mimeType: "application/json",
     },
-    async (uri) => {
-      const id = uri.pathname.split("/").pop() ?? "";
+    async (uri, variables) => {
+      const id = varAsString(variables, "id");
       const instance = instanceManager.getInstance(id);
       const stats = await messageQueue.getQueueStats(id);
       // Strip sensitive fields before returning to agents
