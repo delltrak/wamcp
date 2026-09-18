@@ -32,12 +32,7 @@ export type ParticipantAction = "add" | "remove" | "promote" | "demote";
 
 // Privacy setting keys
 export type PrivacySetting =
-  | "lastSeen"
-  | "online"
-  | "profilePic"
-  | "status"
-  | "readReceipts"
-  | "groupAdd";
+  "lastSeen" | "online" | "profilePic" | "status" | "readReceipts" | "groupAdd";
 
 // Privacy setting values
 export type PrivacyValue = "all" | "contacts" | "contact_blacklist" | "none";

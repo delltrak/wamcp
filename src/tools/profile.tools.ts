@@ -24,10 +24,13 @@ export function registerProfileTools(
   instanceManager: InstanceManager,
   _messageQueue: MessageQueue,
 ): void {
-  server.tool(
+  server.registerTool(
     "wa_update_profile_picture",
-    "Change the profile picture for a WhatsApp instance. Image can be provided as base64-encoded data or a URL.",
-    UpdateProfilePictureSchema.shape,
+    {
+      description:
+        "Change the profile picture for a WhatsApp instance. Image can be provided as base64-encoded data or a URL.",
+      inputSchema: UpdateProfilePictureSchema,
+    },
     async (params) => {
       const log = createRequestLogger("wa_update_profile_picture", params.instanceId);
       const start = Date.now();
@@ -43,10 +46,12 @@ export function registerProfileTools(
     },
   );
 
-  server.tool(
+  server.registerTool(
     "wa_remove_profile_picture",
-    "Remove the profile picture for a WhatsApp instance.",
-    RemoveProfilePictureSchema.shape,
+    {
+      description: "Remove the profile picture for a WhatsApp instance.",
+      inputSchema: RemoveProfilePictureSchema,
+    },
     async (params) => {
       const log = createRequestLogger("wa_remove_profile_picture", params.instanceId);
       const start = Date.now();
@@ -61,10 +66,12 @@ export function registerProfileTools(
     },
   );
 
-  server.tool(
+  server.registerTool(
     "wa_update_profile_name",
-    "Change the display name for a WhatsApp instance (max 25 characters).",
-    UpdateProfileNameSchema.shape,
+    {
+      description: "Change the display name for a WhatsApp instance (max 25 characters).",
+      inputSchema: UpdateProfileNameSchema,
+    },
     async (params) => {
       const log = createRequestLogger("wa_update_profile_name", params.instanceId);
       const start = Date.now();
@@ -79,10 +86,12 @@ export function registerProfileTools(
     },
   );
 
-  server.tool(
+  server.registerTool(
     "wa_update_profile_status",
-    "Change the text status/bio for a WhatsApp instance (max 139 characters).",
-    UpdateProfileStatusSchema.shape,
+    {
+      description: "Change the text status/bio for a WhatsApp instance (max 139 characters).",
+      inputSchema: UpdateProfileStatusSchema,
+    },
     async (params) => {
       const log = createRequestLogger("wa_update_profile_status", params.instanceId);
       const start = Date.now();
@@ -97,10 +106,13 @@ export function registerProfileTools(
     },
   );
 
-  server.tool(
+  server.registerTool(
     "wa_update_privacy",
-    "Update privacy settings (lastSeen, online, profilePic, status, readReceipts, groupAdd).",
-    UpdatePrivacySchema.shape,
+    {
+      description:
+        "Update privacy settings (lastSeen, online, profilePic, status, readReceipts, groupAdd).",
+      inputSchema: UpdatePrivacySchema,
+    },
     async (params) => {
       const log = createRequestLogger("wa_update_privacy", params.instanceId);
       const start = Date.now();

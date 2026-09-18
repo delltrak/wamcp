@@ -36,7 +36,7 @@
 
 **WA MCP** is a WhatsApp MCP server built with TypeScript that gives AI agents full access to WhatsApp through the [Model Context Protocol](https://modelcontextprotocol.io). It supports both **Baileys** (WhatsApp Web) and **Meta Cloud API** as dual-channel backends, deployable with **Docker** in a single command.
 
-Your agent connects once and auto-discovers **63 tools**, **10 resources**, and **12 real-time events** — zero configuration, zero REST wrappers, zero glue code.
+Your agent connects once and auto-discovers **62 tools**, **10 resources**, and **12 real-time events** — zero configuration, zero REST wrappers, zero glue code.
 
 ```
 Your AI Agent ←→ MCP Protocol ←→ WA MCP ←→ WhatsApp
@@ -61,7 +61,7 @@ That's it. WA MCP + Redis, ready on `http://localhost:3000/mcp`.
 ### Or run locally
 
 ```bash
-# Prerequisites: Node.js >= 22, Redis running
+# Prerequisites: Node.js >= 24, Redis running
 npm install
 cp .env.example .env
 
@@ -82,7 +82,7 @@ from google.adk.tools.mcp_tool import McpToolset
 
 tools = McpToolset(url="http://localhost:3000/mcp")
 
-# Agent auto-discovers 63 WhatsApp tools
+# Agent auto-discovers 62 WhatsApp tools
 # wa_create_instance, wa_send_text, wa_send_image, ...
 ```
 
@@ -144,7 +144,7 @@ Add to your `claude_desktop_config.json`:
 
 ## 🛠️ Tools
 
-WA MCP exposes **63 tools** across 9 domains. All tools use the `wa_` prefix.
+WA MCP exposes **62 tools** across 9 domains. All tools use the `wa_` prefix.
 
 <details>
 <summary>📋 <strong>Instance Management</strong> (8 tools)</summary>
@@ -337,7 +337,7 @@ Events are pushed to agents via SSE (Server-Sent Events):
 │  │  Layer 1 — MCP Transport (HTTP/stdio) │ │
 │  ├────────────────────────────────────────┤ │
 │  │  Layer 2 — MCP Core                   │ │
-│  │  63 Tools │ 10 Resources │ 12 Events  │ │
+│  │  62 Tools │ 10 Resources │ 12 Events  │ │
 │  ├────────────────────────────────────────┤ │
 │  │  Layer 3 — Services                   │ │
 │  │  Instance Manager │ Queue │ Dedup     │ │
@@ -385,8 +385,8 @@ Copy `.env.example` to `.env` and configure:
 | `WA_MESSAGE_RETENTION_DAYS` | `30`                     | Auto-delete old messages                 |
 | `WA_AUTO_RECONNECT`         | `true`                   | Auto-reconnect on disconnect             |
 | `WA_MEDIA_CACHE_MAX_MB`     | `500`                    | Media cache size limit                   |
-| `WA_CLOUD_WEBHOOK_SECRET`   | —                        | Meta webhook verification                |
-| `WA_CLOUD_WEBHOOK_PORT`     | `3001`                   | Webhook receiver port                    |
+| `WA_CLOUD_WEBHOOK_SECRET`   | —                        | Signing secret for the `x-hub-signature-256` header on `POST /cloud-webhook` |
+| `WA_CLOUD_VERIFY_TOKEN`     | —                        | Token for Meta's webhook GET verification handshake |
 | `WA_VERSION_CHECK`          | `true`                   | Daily WhatsApp Web version check         |
 
 ---
@@ -436,7 +436,7 @@ src/
 ├── index.ts                     # Entry point (HTTP/stdio)
 ├── constants.ts                 # Defaults and limits
 ├── server/mcp.ts                # MCP server setup
-├── tools/                       # 🔧 63 MCP tools (9 files)
+├── tools/                       # 🔧 62 MCP tools (9 files)
 ├── resources/                   # 📖 10 MCP resources (8 files)
 ├── notifications/events.ts      # 📡 12 event types
 ├── channels/

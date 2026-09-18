@@ -55,32 +55,24 @@ export class MaintenanceService {
       },
     });
 
-    // Set up repeatable jobs
-    await this.queue.add(
+    // Set up repeatable jobs. BullMQ v6 removed `repeat` from JobsOptions —
+    // repeatable jobs are now Job Schedulers, keyed by the scheduler id.
+    await this.queue.upsertJobScheduler(
       "prune-messages",
-      { type: "prune-messages" },
-      {
-        repeat: { pattern: PRUNE_MESSAGES_CRON },
-        jobId: "prune-messages",
-      },
+      { pattern: PRUNE_MESSAGES_CRON },
+      { name: "prune-messages", data: { type: "prune-messages" } },
     );
 
-    await this.queue.add(
+    await this.queue.upsertJobScheduler(
       "prune-dedup",
-      { type: "prune-dedup" },
-      {
-        repeat: { pattern: PRUNE_DEDUP_CRON },
-        jobId: "prune-dedup",
-      },
+      { pattern: PRUNE_DEDUP_CRON },
+      { name: "prune-dedup", data: { type: "prune-dedup" } },
     );
 
-    await this.queue.add(
+    await this.queue.upsertJobScheduler(
       "check-wa-version",
-      { type: "check-wa-version" },
-      {
-        repeat: { pattern: CHECK_VERSION_CRON },
-        jobId: "check-wa-version",
-      },
+      { pattern: CHECK_VERSION_CRON },
+      { name: "check-wa-version", data: { type: "check-wa-version" } },
     );
 
     // Worker to process maintenance jobs

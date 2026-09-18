@@ -21,10 +21,13 @@ export function registerContactTools(
   instanceManager: InstanceManager,
   _messageQueue: MessageQueue,
 ): void {
-  server.tool(
+  server.registerTool(
     "wa_check_number_exists",
-    "Check if a phone number is registered on WhatsApp. Returns the JID if the number exists.",
-    CheckNumberExistsSchema.shape,
+    {
+      description:
+        "Check if a phone number is registered on WhatsApp. Returns the JID if the number exists.",
+      inputSchema: CheckNumberExistsSchema,
+    },
     async (params) => {
       const log = createRequestLogger("wa_check_number_exists", params.instanceId);
       const start = Date.now();
@@ -39,10 +42,12 @@ export function registerContactTools(
     },
   );
 
-  server.tool(
+  server.registerTool(
     "wa_block_contact",
-    "Block a WhatsApp contact. Blocked contacts cannot send you messages.",
-    BlockContactSchema.shape,
+    {
+      description: "Block a WhatsApp contact. Blocked contacts cannot send you messages.",
+      inputSchema: BlockContactSchema,
+    },
     async (params) => {
       const log = createRequestLogger("wa_block_contact", params.instanceId);
       const start = Date.now();
@@ -57,10 +62,12 @@ export function registerContactTools(
     },
   );
 
-  server.tool(
+  server.registerTool(
     "wa_unblock_contact",
-    "Unblock a previously blocked WhatsApp contact.",
-    UnblockContactSchema.shape,
+    {
+      description: "Unblock a previously blocked WhatsApp contact.",
+      inputSchema: UnblockContactSchema,
+    },
     async (params) => {
       const log = createRequestLogger("wa_unblock_contact", params.instanceId);
       const start = Date.now();
@@ -75,10 +82,12 @@ export function registerContactTools(
     },
   );
 
-  server.tool(
+  server.registerTool(
     "wa_get_business_profile",
-    "Fetch the business profile information for a WhatsApp Business contact.",
-    GetBusinessProfileSchema.shape,
+    {
+      description: "Fetch the business profile information for a WhatsApp Business contact.",
+      inputSchema: GetBusinessProfileSchema,
+    },
     async (params) => {
       const log = createRequestLogger("wa_get_business_profile", params.instanceId);
       const start = Date.now();
@@ -93,10 +102,13 @@ export function registerContactTools(
     },
   );
 
-  server.tool(
+  server.registerTool(
     "wa_search_contact",
-    "Search contacts by name or phone number. Returns matching contacts from the local cache.",
-    SearchContactSchema.shape,
+    {
+      description:
+        "Search contacts by name or phone number. Returns matching contacts from the local cache.",
+      inputSchema: SearchContactSchema,
+    },
     async (params) => {
       const log = createRequestLogger("wa_search_contact", params.instanceId);
       const start = Date.now();

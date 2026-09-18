@@ -24,10 +24,13 @@ export function registerInstanceTools(
   instanceManager: InstanceManager,
   _messageQueue: MessageQueue,
 ): void {
-  server.tool(
+  server.registerTool(
     "wa_create_instance",
-    "Create a new WhatsApp instance. Specify a name and channel type (baileys for WhatsApp Web protocol, cloud for Meta Cloud API).",
-    CreateInstanceSchema.shape,
+    {
+      description:
+        "Create a new WhatsApp instance. Specify a name and channel type (baileys for WhatsApp Web protocol, cloud for Meta Cloud API).",
+      inputSchema: CreateInstanceSchema,
+    },
     async (params) => {
       const log = createRequestLogger("wa_create_instance");
       const start = Date.now();
@@ -41,10 +44,13 @@ export function registerInstanceTools(
     },
   );
 
-  server.tool(
+  server.registerTool(
     "wa_connect_instance",
-    "Connect a WhatsApp instance. For Baileys instances, this starts the WebSocket connection and generates a QR code for authentication.",
-    ConnectInstanceSchema.shape,
+    {
+      description:
+        "Connect a WhatsApp instance. For Baileys instances, this starts the WebSocket connection and generates a QR code for authentication.",
+      inputSchema: ConnectInstanceSchema,
+    },
     async (params) => {
       const log = createRequestLogger("wa_connect_instance", params.instanceId);
       const start = Date.now();
@@ -58,10 +64,13 @@ export function registerInstanceTools(
     },
   );
 
-  server.tool(
+  server.registerTool(
     "wa_disconnect_instance",
-    "Gracefully disconnect a WhatsApp instance. The session is preserved for reconnection.",
-    DisconnectInstanceSchema.shape,
+    {
+      description:
+        "Gracefully disconnect a WhatsApp instance. The session is preserved for reconnection.",
+      inputSchema: DisconnectInstanceSchema,
+    },
     async (params) => {
       const log = createRequestLogger("wa_disconnect_instance", params.instanceId);
       const start = Date.now();
@@ -75,10 +84,13 @@ export function registerInstanceTools(
     },
   );
 
-  server.tool(
+  server.registerTool(
     "wa_delete_instance",
-    "Permanently delete a WhatsApp instance and all its data including auth state, messages, contacts, and queue. This action cannot be undone.",
-    DeleteInstanceSchema.shape,
+    {
+      description:
+        "Permanently delete a WhatsApp instance and all its data including auth state, messages, contacts, and queue. This action cannot be undone.",
+      inputSchema: DeleteInstanceSchema,
+    },
     async (params) => {
       const log = createRequestLogger("wa_delete_instance", params.instanceId);
       const start = Date.now();
@@ -92,10 +104,13 @@ export function registerInstanceTools(
     },
   );
 
-  server.tool(
+  server.registerTool(
     "wa_restart_instance",
-    "Disconnect and reconnect a WhatsApp instance. Useful for recovering from errors.",
-    RestartInstanceSchema.shape,
+    {
+      description:
+        "Disconnect and reconnect a WhatsApp instance. Useful for recovering from errors.",
+      inputSchema: RestartInstanceSchema,
+    },
     async (params) => {
       const log = createRequestLogger("wa_restart_instance", params.instanceId);
       const start = Date.now();
@@ -109,10 +124,13 @@ export function registerInstanceTools(
     },
   );
 
-  server.tool(
+  server.registerTool(
     "wa_get_qr_code",
-    "Get the QR code as a base64 image for authenticating a Baileys instance. Returns null if no QR code is available (already authenticated or not yet connecting).",
-    GetQrCodeSchema.shape,
+    {
+      description:
+        "Get the QR code as a base64 image for authenticating a Baileys instance. Returns null if no QR code is available (already authenticated or not yet connecting).",
+      inputSchema: GetQrCodeSchema,
+    },
     async (params) => {
       const log = createRequestLogger("wa_get_qr_code", params.instanceId);
       const start = Date.now();
@@ -141,10 +159,13 @@ export function registerInstanceTools(
     },
   );
 
-  server.tool(
+  server.registerTool(
     "wa_get_pairing_code",
-    "Get a numeric pairing code for authenticating a Baileys instance. The code is entered on the phone in WhatsApp > Linked Devices > Link with phone number.",
-    GetPairingCodeSchema.shape,
+    {
+      description:
+        "Get a numeric pairing code for authenticating a Baileys instance. The code is entered on the phone in WhatsApp > Linked Devices > Link with phone number.",
+      inputSchema: GetPairingCodeSchema,
+    },
     async (params) => {
       const log = createRequestLogger("wa_get_pairing_code", params.instanceId);
       const start = Date.now();
@@ -159,10 +180,13 @@ export function registerInstanceTools(
     },
   );
 
-  server.tool(
+  server.registerTool(
     "wa_set_cloud_credentials",
-    "Configure Meta Cloud API credentials for a Cloud API instance. Required before connecting a Cloud API instance.",
-    SetCloudCredentialsSchema.shape,
+    {
+      description:
+        "Configure Meta Cloud API credentials for a Cloud API instance. Required before connecting a Cloud API instance.",
+      inputSchema: SetCloudCredentialsSchema,
+    },
     async (params) => {
       const log = createRequestLogger("wa_set_cloud_credentials", params.instanceId);
       const start = Date.now();

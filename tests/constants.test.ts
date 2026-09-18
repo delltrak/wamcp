@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { describe, it, expect } from "vitest";
 import {
   VERSION,
@@ -37,6 +38,13 @@ describe("Constants", () => {
   it("VERSION is a non-empty string", () => {
     expect(typeof VERSION).toBe("string");
     expect(VERSION.length).toBeGreaterThan(0);
+  });
+
+  it("VERSION matches package.json — it feeds the MCP server identity and /health", () => {
+    const pkg = JSON.parse(
+      readFileSync(new URL("../package.json", import.meta.url), "utf-8"),
+    ) as { version: string };
+    expect(VERSION).toBe(pkg.version);
   });
 
   it("SERVER_NAME is a non-empty string", () => {

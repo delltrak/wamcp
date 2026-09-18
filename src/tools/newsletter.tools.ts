@@ -19,10 +19,12 @@ export function registerNewsletterTools(
   instanceManager: InstanceManager,
   _messageQueue: MessageQueue,
 ): void {
-  server.tool(
+  server.registerTool(
     "wa_newsletter_follow",
-    "Follow a WhatsApp Channel/Newsletter. Baileys only.",
-    NewsletterFollowSchema.shape,
+    {
+      description: "Follow a WhatsApp Channel/Newsletter. Baileys only.",
+      inputSchema: NewsletterFollowSchema,
+    },
     async (params) => {
       const log = createRequestLogger("wa_newsletter_follow", params.instanceId);
       const start = Date.now();
@@ -37,10 +39,12 @@ export function registerNewsletterTools(
     },
   );
 
-  server.tool(
+  server.registerTool(
     "wa_newsletter_unfollow",
-    "Unfollow a WhatsApp Channel/Newsletter. Baileys only.",
-    NewsletterUnfollowSchema.shape,
+    {
+      description: "Unfollow a WhatsApp Channel/Newsletter. Baileys only.",
+      inputSchema: NewsletterUnfollowSchema,
+    },
     async (params) => {
       const log = createRequestLogger("wa_newsletter_unfollow", params.instanceId);
       const start = Date.now();
@@ -55,10 +59,12 @@ export function registerNewsletterTools(
     },
   );
 
-  server.tool(
+  server.registerTool(
     "wa_newsletter_send",
-    "Send a message to a WhatsApp Channel/Newsletter (must be admin). Baileys only.",
-    NewsletterSendSchema.shape,
+    {
+      description: "Send a message to a WhatsApp Channel/Newsletter (must be admin). Baileys only.",
+      inputSchema: NewsletterSendSchema,
+    },
     async (params) => {
       const log = createRequestLogger("wa_newsletter_send", params.instanceId);
       const start = Date.now();
