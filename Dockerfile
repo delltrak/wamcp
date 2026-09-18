@@ -7,7 +7,7 @@
 # Skipping install scripts lets the prebuild be used, and every native package in the
 # production tree resolves its binary at require time, so nothing is lost.
 
-FROM node:24-alpine AS builder
+FROM node:25-alpine AS builder
 
 WORKDIR /app
 COPY package.json package-lock.json ./
@@ -18,13 +18,13 @@ RUN npm run build
 
 # Production dependencies only — the runtime image must not ship devDependencies
 # (drizzle-kit/vitest/eslint and their transitive advisories).
-FROM node:24-alpine AS deps
+FROM node:25-alpine AS deps
 
 WORKDIR /app
 COPY package.json package-lock.json ./
 RUN npm ci --omit=dev --ignore-scripts
 
-FROM node:24-alpine AS runtime
+FROM node:25-alpine AS runtime
 
 WORKDIR /app
 COPY --from=deps /app/node_modules ./node_modules
