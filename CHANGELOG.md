@@ -88,6 +88,26 @@ advisories; `npm audit` goes from **33 vulnerabilities to 4** (all moderate, all
   the stdio read buffer.
 - Declared `@vitest/coverage-v8`, which `vitest.config.ts` has always referenced but was never in
   `devDependencies`.
+- **Eight of the ten resources were unreachable.** They were registered by passing a plain string
+  containing `{id}` to the deprecated `server.resource()`, which the SDK treats as a *literal*
+  static URI rather than a template. `resources/templates/list` returned nothing, and reading
+  either the placeholder URI or a substituted one returned "Resource not found". The URI parsing
+  behind them was dead too: `instances` is the **host** of a `whatsapp://` URI, not a path
+  segment, so `pathname.split("/").indexOf("instances")` was always `-1` and the extracted
+  instance id was always `""`. All ten now use `registerResource`, the nine per-instance ones with
+  a real `ResourceTemplate`, and variables arrive parsed instead of scraped from the path.
+- Per-instance resources now supply a `list` callback, so `resources/list` shows a **concrete URI
+  per existing instance** rather than only a `{id}` placeholder an agent cannot act on.
+- **The Cloud API channel could not be configured at all.** `wa_set_cloud_credentials` required an
+  adapter that only `wa_connect_instance` created, while `wa_connect_instance` refused to run
+  without credentials — a closed loop. The tool's own description says credentials are "required
+  before connecting", which was impossible. `InstanceManager.ensureAdapter()` now materializes the
+  adapter for configuration without connecting, and `connectInstance()` was refactored onto it.
+- The Cloud API error told agents to "Call setCredentials() first" — an internal method name that
+  is not a tool. It now names `wa_set_cloud_credentials`.
+- Queue stats are reachable again as a side effect of the resource fix: `whatsapp://instances/{id}`
+  carries outbound waiting/active/completed/failed counts, which is the only way for an agent to
+  learn whether a `{ status: "queued" }` send actually went through. Its description now says so.
 
 ### Added
 

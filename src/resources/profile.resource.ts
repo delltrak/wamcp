@@ -4,25 +4,26 @@
 
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { InstanceManager } from "../services/instance-manager.js";
+import { perInstanceTemplate, varAsString } from "./resource-helpers.js";
 
 export function registerProfileResource(server: McpServer, instanceManager: InstanceManager): void {
-  server.resource(
+  server.registerResource(
     "instance-profile",
-    "whatsapp://instances/{id}/profile",
-    { description: "Own profile: name, status, picture URL", mimeType: "application/json" },
-    async (uri) => {
-      const parts = uri.pathname.split("/");
-      const id = parts[parts.indexOf("instances") + 1] ?? "";
+    perInstanceTemplate(
+      instanceManager,
+      (id) => `whatsapp://instances/${id}/profile`,
+      (name) => `Profile — ${name}`,
+    ),
+    {
+      description: "Own profile for an instance: name, status, picture URL",
+      mimeType: "application/json",
+    },
+    async (uri, variables) => {
+      const id = varAsString(variables, "id");
       const adapter = instanceManager.getAdapter(id);
-      const profile = await adapter.getProfileInfo();
+      const data = await adapter.getProfileInfo();
       return {
-        contents: [
-          {
-            uri: uri.href,
-            mimeType: "application/json",
-            text: JSON.stringify(profile),
-          },
-        ],
+        contents: [{ uri: uri.href, mimeType: "application/json", text: JSON.stringify(data) }],
       };
     },
   );

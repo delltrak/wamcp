@@ -91,23 +91,32 @@ export class InstanceManager {
     return this.getInstanceFromDb(id);
   }
 
-  async connectInstance(id: string): Promise<void> {
-    const row = this.getInstanceFromDb(id);
-    let managed = this.adapters.get(id);
+  /**
+   * Return the adapter for an instance, creating and binding it if this is the
+   * first time it is needed. Unlike getAdapter(), this does not require the
+   * instance to have been connected — configuration steps (Cloud API
+   * credentials) have to run before a connection is possible.
+   */
+  ensureAdapter(id: string): ChannelAdapter {
+    const managed = this.adapters.get(id);
+    if (managed) return managed.adapter;
 
-    if (!managed) {
-      const adapter = this.createAdapter(id, row.channel as ChannelType);
-      managed = { adapter, channel: row.channel as ChannelType };
-      this.adapters.set(id, managed);
-      this.bindAdapterEvents(id, adapter);
-    }
+    const row = this.getInstanceFromDb(id);
+    const adapter = this.createAdapter(id, row.channel as ChannelType);
+    this.adapters.set(id, { adapter, channel: row.channel as ChannelType });
+    this.bindAdapterEvents(id, adapter);
+    return adapter;
+  }
+
+  async connectInstance(id: string): Promise<void> {
+    const adapter = this.ensureAdapter(id);
 
     db.update(instances)
       .set({ status: "connecting", updatedAt: Date.now() })
       .where(eq(instances.id, id))
       .run();
 
-    await managed.adapter.connect();
+    await adapter.connect();
   }
 
   async disconnectInstance(id: string): Promise<void> {

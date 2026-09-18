@@ -191,7 +191,9 @@ export function registerInstanceTools(
       const log = createRequestLogger("wa_set_cloud_credentials", params.instanceId);
       const start = Date.now();
       try {
-        const adapter = instanceManager.getAdapter(params.instanceId);
+        // ensureAdapter, not getAdapter: credentials are a prerequisite for
+        // connecting, so this has to work before the instance is connected.
+        const adapter = instanceManager.ensureAdapter(params.instanceId);
         await adapter.setCredentials({
           accessToken: params.accessToken,
           phoneNumberId: params.phoneNumberId,

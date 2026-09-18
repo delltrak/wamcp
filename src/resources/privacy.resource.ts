@@ -1,31 +1,29 @@
 // ============================================================
-// WA MCP — Privacy Settings Resource
+// WA MCP — Privacy Resource
 // ============================================================
 
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { InstanceManager } from "../services/instance-manager.js";
+import { perInstanceTemplate, varAsString } from "./resource-helpers.js";
 
 export function registerPrivacyResource(server: McpServer, instanceManager: InstanceManager): void {
-  server.resource(
+  server.registerResource(
     "instance-privacy",
-    "whatsapp://instances/{id}/privacy",
+    perInstanceTemplate(
+      instanceManager,
+      (id) => `whatsapp://instances/${id}/privacy`,
+      (name) => `Privacy — ${name}`,
+    ),
     {
-      description: "Privacy settings: lastSeen, online, profilePic, status, readReceipts, groupAdd",
+      description: "Privacy settings for an instance",
       mimeType: "application/json",
     },
-    async (uri) => {
-      const parts = uri.pathname.split("/");
-      const id = parts[parts.indexOf("instances") + 1] ?? "";
+    async (uri, variables) => {
+      const id = varAsString(variables, "id");
       const adapter = instanceManager.getAdapter(id);
-      const privacy = await adapter.getPrivacySettings();
+      const data = await adapter.getPrivacySettings();
       return {
-        contents: [
-          {
-            uri: uri.href,
-            mimeType: "application/json",
-            text: JSON.stringify(privacy),
-          },
-        ],
+        contents: [{ uri: uri.href, mimeType: "application/json", text: JSON.stringify(data) }],
       };
     },
   );

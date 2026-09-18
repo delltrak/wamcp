@@ -99,7 +99,7 @@ export class CloudApiAdapter implements ChannelAdapter {
 
   private getCredentials(): { accessToken: string; phoneNumberId: string } {
     if (!this.accessToken || !this.phoneNumberId) {
-      throw new Error("Cloud API credentials not set. Call setCredentials() first.");
+      throw new Error("Cloud API credentials not set. Call wa_set_cloud_credentials first.");
     }
     return { accessToken: this.accessToken, phoneNumberId: this.phoneNumberId };
   }
@@ -177,7 +177,7 @@ export class CloudApiAdapter implements ChannelAdapter {
 
   async connect(): Promise<void> {
     if (!this.accessToken || !this.phoneNumberId) {
-      throw new Error("Cloud API credentials not set. Call setCredentials() first.");
+      throw new Error("Cloud API credentials not set. Call wa_set_cloud_credentials first.");
     }
 
     this.status = "connecting";
