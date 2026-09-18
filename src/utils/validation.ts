@@ -4,6 +4,7 @@
 // ============================================================
 
 import { URL } from "node:url";
+import { MAX_BASE64_MEDIA_BYTES } from "../constants.js";
 
 // ---- JID Validation ----
 
@@ -93,8 +94,8 @@ export function validateMediaUrl(url: string): string | null {
 
 // ---- Base64 Size Limits ----
 
-/** Max base64 payload size: 100 MB decoded (generous for documents) */
-const MAX_BASE64_BYTES = 100 * 1024 * 1024;
+/** Max base64 payload size, decoded. Shared with the stdio read-buffer ceiling. */
+const MAX_BASE64_BYTES = MAX_BASE64_MEDIA_BYTES;
 
 /**
  * Validate that a base64 string does not exceed the size limit.

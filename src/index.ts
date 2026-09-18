@@ -10,6 +10,7 @@ import {
   DEFAULT_PORT,
   MCP_ENDPOINT,
   HEALTH_ENDPOINT,
+  STDIO_MAX_BUFFER_BYTES,
 } from "./constants.js";
 import { InstanceManager } from "./services/instance-manager.js";
 import { MessageQueue } from "./services/message-queue.js";
@@ -270,7 +271,9 @@ async function startHttp(): Promise<void> {
 async function startStdio(): Promise<void> {
   const { instanceManager, messageQueue } = await initServices();
   const mcpServer = createMcpServer(instanceManager, messageQueue);
-  const stdioTransport = new StdioServerTransport();
+  const stdioTransport = new StdioServerTransport(process.stdin, process.stdout, {
+    maxBufferSize: STDIO_MAX_BUFFER_BYTES,
+  });
   await mcpServer.connect(stdioTransport);
   logger.info({ transport: "stdio", version: VERSION }, `${SERVER_NAME} started on stdio`);
 }
