@@ -84,7 +84,6 @@ async function initServices() {
 
 async function startHttp(): Promise<void> {
   const { instanceManager, messageQueue } = await initServices();
-  const mcpServer = createMcpServer(instanceManager, messageQueue);
   const startTime = Date.now();
 
   // Map to track transports by session ID
@@ -144,7 +143,10 @@ async function startHttp(): Promise<void> {
             }
           };
 
-          await mcpServer.connect(mcpTransport);
+          // One Protocol/McpServer instance per transport/session. Reusing a
+          // single mcpServer across connects throws: "Already connected to a transport".
+          const sessionServer = createMcpServer(instanceManager, messageQueue);
+          await sessionServer.connect(mcpTransport);
         }
 
         await mcpTransport.handleRequest(req, res);

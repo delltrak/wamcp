@@ -44,7 +44,12 @@ import type {
 import { useSqliteAuthState, clearAuthState } from "./baileys.auth.js";
 import { getWaVersion } from "./baileys.version.js";
 import { db } from "../../db/client.js";
-import { contacts as contactsTable, messages as messagesTable } from "../../db/schema.js";
+import {
+  contacts as contactsTable,
+  messages as messagesTable,
+  chats as chatsTable,
+  groupsCache as groupsCacheTable,
+} from "../../db/schema.js";
 import { eq, and, like, or, desc } from "drizzle-orm";
 import {
   normalizeMessagesUpsert,
@@ -805,7 +810,74 @@ export class BaileysAdapter implements ChannelAdapter {
   }
 
   async getChats(): Promise<Chat[]> {
-    return [];
+    const rows = db
+      .select()
+      .from(chatsTable)
+      .where(eq(chatsTable.instanceId, this.instanceId))
+      .orderBy(desc(chatsTable.lastMessageAt))
+      .all();
+
+    if (rows.length > 0) {
+      return rows.map((r) => ({
+        jid: r.jid,
+        name: r.name ?? null,
+        isGroup: r.isGroup === 1,
+        unreadCount: r.unreadCount,
+        isPinned: r.isPinned === 1,
+        isMuted: r.isMuted === 1,
+        isArchived: r.isArchived === 1,
+        lastMessageAt: r.lastMessageAt ?? null,
+      }));
+    }
+
+    // Fallback: derive from distinct message chat_ids + contact/group names
+    const msgRows = db
+      .select({
+        chatId: messagesTable.chatId,
+        timestamp: messagesTable.timestamp,
+      })
+      .from(messagesTable)
+      .where(eq(messagesTable.instanceId, this.instanceId))
+      .orderBy(desc(messagesTable.timestamp))
+      .all();
+
+    const byChat = new Map<string, number>();
+    for (const m of msgRows) {
+      if (!byChat.has(m.chatId)) {
+        byChat.set(m.chatId, m.timestamp);
+      }
+    }
+
+    if (byChat.size === 0) return [];
+
+    const contactRows = db
+      .select()
+      .from(contactsTable)
+      .where(eq(contactsTable.instanceId, this.instanceId))
+      .all();
+    const contactName = new Map(
+      contactRows.map((c) => [c.jid, c.name ?? c.notifyName ?? null] as const),
+    );
+
+    const groupRows = db
+      .select()
+      .from(groupsCacheTable)
+      .where(eq(groupsCacheTable.instanceId, this.instanceId))
+      .all();
+    const groupName = new Map(groupRows.map((g) => [g.jid, g.subject ?? null] as const));
+
+    return Array.from(byChat.entries())
+      .map(([jid, lastMessageAt]) => ({
+        jid,
+        name: groupName.get(jid) ?? contactName.get(jid) ?? null,
+        isGroup: jid.endsWith("@g.us"),
+        unreadCount: 0,
+        isPinned: false,
+        isMuted: false,
+        isArchived: false,
+        lastMessageAt,
+      }))
+      .sort((a, b) => (b.lastMessageAt ?? 0) - (a.lastMessageAt ?? 0));
   }
 
   async getMessages(chatId: string, limit = 50): Promise<Message[]> {
@@ -879,6 +951,10 @@ export class BaileysAdapter implements ChannelAdapter {
           },
         })
         .run();
+
+      // Keep chats table in sync so list/recent UX works
+      this.upsertChatFromMessage(instanceId, chatId, message.id, message.timestamp);
+
       logger.info(
         { instanceId, messageId: message.id, chatId, fromMe: message.isFromMe },
         "Message persisted to DB",
@@ -886,6 +962,71 @@ export class BaileysAdapter implements ChannelAdapter {
     } catch (err) {
       logger.error({ err, messageId: event.message.id }, "Failed to persist message");
     }
+  }
+
+  private upsertChatFromMessage(
+    instanceId: string,
+    chatId: string,
+    messageId: string,
+    timestamp: number,
+  ): void {
+    const now = Date.now();
+    const isGroup = chatId.endsWith("@g.us") ? 1 : 0;
+
+    let name: string | null = null;
+    try {
+      if (isGroup) {
+        const g = db
+          .select({ subject: groupsCacheTable.subject })
+          .from(groupsCacheTable)
+          .where(
+            and(eq(groupsCacheTable.instanceId, instanceId), eq(groupsCacheTable.jid, chatId)),
+          )
+          .get();
+        name = g?.subject ?? null;
+      } else {
+        const c = db
+          .select({ name: contactsTable.name, notifyName: contactsTable.notifyName })
+          .from(contactsTable)
+          .where(and(eq(contactsTable.instanceId, instanceId), eq(contactsTable.jid, chatId)))
+          .get();
+        name = c?.name ?? c?.notifyName ?? null;
+      }
+    } catch {
+      // name lookup is best-effort
+    }
+
+    db.insert(chatsTable)
+      .values({
+        instanceId,
+        jid: chatId,
+        name,
+        isGroup,
+        unreadCount: 0,
+        isPinned: 0,
+        isMuted: 0,
+        muteUntil: null,
+        isArchived: 0,
+        lastMessageId: messageId,
+        lastMessageAt: timestamp,
+        updatedAt: now,
+      })
+      .onConflictDoUpdate({
+        target: [chatsTable.instanceId, chatsTable.jid],
+        set: name
+          ? {
+              lastMessageId: messageId,
+              lastMessageAt: timestamp,
+              updatedAt: now,
+              name,
+            }
+          : {
+              lastMessageId: messageId,
+              lastMessageAt: timestamp,
+              updatedAt: now,
+            },
+      })
+      .run();
   }
 
   private updateMessageStatus(messageId: string, status: MessageDeliveryStatus): void {
