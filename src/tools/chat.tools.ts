@@ -15,6 +15,7 @@ import {
   DeleteChatSchema,
   ClearChatSchema,
   GetMessagesSchema,
+  ListChatsSchema,
 } from "../schemas/chat.schema.js";
 
 export function registerChatTools(
@@ -127,6 +128,41 @@ export function registerChatTools(
         return toolSuccess({ success: true, cleared: true });
       } catch (err) {
         return handleToolError("wa_clear_chat", err, params.instanceId);
+      }
+    },
+  );
+
+
+  server.registerTool(
+    "wa_list_chats",
+    {
+      description:
+        "List recent chats for an instance. Returns JID, display name, group flag, unread/pin/mute/archive state, and last activity timestamp. Use this to discover chatIds for wa_get_messages.",
+      inputSchema: ListChatsSchema,
+    },
+    async (params) => {
+      const log = createRequestLogger("wa_list_chats", params.instanceId);
+      const start = Date.now();
+      try {
+        const adapter = instanceManager.getAdapter(params.instanceId);
+        let chats = await adapter.getChats();
+        if (params.query) {
+          const q = params.query.toLowerCase();
+          chats = chats.filter(
+            (c) =>
+              c.jid.toLowerCase().includes(q) ||
+              (c.name ? c.name.toLowerCase().includes(q) : false),
+          );
+        }
+        const limit = params.limit ?? 50;
+        chats = chats.slice(0, limit);
+        log.info(
+          { duration: Date.now() - start, count: chats.length, query: params.query ?? null },
+          "Chats listed",
+        );
+        return toolSuccess({ count: chats.length, chats });
+      } catch (err) {
+        return handleToolError("wa_list_chats", err, params.instanceId);
       }
     },
   );

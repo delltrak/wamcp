@@ -62,3 +62,21 @@ export const GetMessagesSchema = z
       .describe("Maximum number of messages to return (default 50, max 100)"),
   })
   .strict();
+
+export const ListChatsSchema = z
+  .object({
+    instanceId: z.string().min(1).describe("The instance ID"),
+    limit: z
+      .number()
+      .int()
+      .min(1)
+      .max(500)
+      .default(50)
+      .describe("Maximum number of chats to return (default 50, max 500)"),
+    query: z
+      .string()
+      .optional()
+      .describe("Optional filter matching chat JID or display name (case-insensitive)"),
+  })
+  .strict();
+
