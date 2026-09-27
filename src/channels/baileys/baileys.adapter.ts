@@ -9,6 +9,7 @@ import makeWASocket, {
   makeCacheableSignalKeyStore,
   generateForwardMessageContent,
   generateWAMessageFromContent,
+  downloadMediaMessage,
   type WASocket,
   type WAMessage,
   type AnyMessageContent,
@@ -62,6 +63,8 @@ import {
   extractMessageType,
   extractTextContent,
   extractQuotedMessageId,
+  extractMediaMimetype,
+  MEDIA_MESSAGE_TYPES,
   getChatJid,
   getSenderJid,
 } from "./baileys.events.js";
@@ -72,6 +75,9 @@ import {
   RECONNECT_MAX_ATTEMPTS,
 } from "../../constants.js";
 import { createChildLogger } from "../../utils/logger.js";
+import { MediaService } from "../../services/media.js";
+import { existsSync, statSync } from "node:fs";
+import { readFile } from "node:fs/promises";
 
 const logger = createChildLogger({ service: "baileys-adapter" });
 
@@ -98,6 +104,8 @@ export class BaileysAdapter implements ChannelAdapter {
 
   private readonly autoReconnect: boolean;
   private readonly listeners = new Map<ChannelEvent, Set<ChannelEventHandler<ChannelEvent>>>();
+  private readonly mediaService = new MediaService();
+  private mediaBackfillStarted = false;
 
   constructor(private readonly instanceId: string) {
     this.autoReconnect = process.env.WA_AUTO_RECONNECT !== "false" && DEFAULT_AUTO_RECONNECT;
@@ -817,19 +825,32 @@ export class BaileysAdapter implements ChannelAdapter {
       .limit(limit)
       .all();
 
-    return rows.map((r) => ({
-      id: r.id,
-      chatId: r.chatId,
-      senderId: r.senderId,
-      type: r.type as Message["type"],
-      content: r.content,
-      mediaUrl: r.mediaUrl,
-      quotedMessageId: r.quotedId,
-      isFromMe: r.isFromMe === 1,
-      isForwarded: r.isForwarded === 1,
-      status: r.status as Message["status"],
-      timestamp: r.timestamp,
-    }));
+    return rows.map((r) => {
+      let mediaSize: number | null = null;
+      if (r.mediaLocal && existsSync(r.mediaLocal)) {
+        try {
+          mediaSize = statSync(r.mediaLocal).size;
+        } catch {
+          mediaSize = null;
+        }
+      }
+      return {
+        id: r.id,
+        chatId: r.chatId,
+        senderId: r.senderId,
+        type: r.type as Message["type"],
+        content: r.content,
+        mediaUrl: r.mediaUrl,
+        mediaLocal: r.mediaLocal,
+        mediaMimetype: r.mediaMimetype,
+        mediaSize,
+        quotedMessageId: r.quotedId,
+        isFromMe: r.isFromMe === 1,
+        isForwarded: r.isForwarded === 1,
+        status: r.status as Message["status"],
+        timestamp: r.timestamp,
+      };
+    });
   }
 
   async getProfileInfo(): Promise<ProfileInfo> {
@@ -853,7 +874,15 @@ export class BaileysAdapter implements ChannelAdapter {
 
   // ---- Message Persistence ----
 
-  private persistMessage(event: NormalizedMessageEvent): void {
+  private persistMessage(
+    event: NormalizedMessageEvent,
+    extras?: {
+      mediaMimetype?: string | null;
+      rawData?: string | null;
+      mediaLocal?: string | null;
+      mediaUrl?: string | null;
+    },
+  ): void {
     try {
       const { message, chatId, instanceId } = event;
       db.insert(messagesTable)
@@ -864,27 +893,214 @@ export class BaileysAdapter implements ChannelAdapter {
           senderId: message.sender,
           type: message.type,
           content: message.content,
-          mediaUrl: message.mediaUrl,
+          mediaUrl: extras?.mediaUrl ?? message.mediaUrl,
+          mediaLocal: extras?.mediaLocal ?? null,
+          mediaMimetype: extras?.mediaMimetype ?? null,
           quotedId: message.quotedMessageId,
           isFromMe: message.isFromMe ? 1 : 0,
           isForwarded: 0,
           status: message.isFromMe ? "sent" : "received",
           timestamp: message.timestamp,
+          rawData: extras?.rawData ?? null,
         })
         .onConflictDoUpdate({
           target: [messagesTable.instanceId, messagesTable.id],
           set: {
             content: message.content,
             status: message.isFromMe ? "sent" : "received",
+            ...(extras?.mediaMimetype != null ? { mediaMimetype: extras.mediaMimetype } : {}),
+            ...(extras?.rawData != null ? { rawData: extras.rawData } : {}),
+            ...(extras?.mediaLocal != null ? { mediaLocal: extras.mediaLocal } : {}),
+            ...(extras?.mediaUrl != null ? { mediaUrl: extras.mediaUrl } : {}),
           },
         })
         .run();
+
       logger.info(
-        { instanceId, messageId: message.id, chatId, fromMe: message.isFromMe },
+        { instanceId, messageId: message.id, chatId, fromMe: message.isFromMe, type: message.type },
         "Message persisted to DB",
       );
     } catch (err) {
       logger.error({ err, messageId: event.message.id }, "Failed to persist message");
+    }
+  }
+
+  private updateMessageMedia(
+    messageId: string,
+    fields: { mediaLocal: string; mediaMimetype: string | null; mediaUrl?: string | null },
+  ): void {
+    try {
+      db.update(messagesTable)
+        .set({
+          mediaLocal: fields.mediaLocal,
+          mediaMimetype: fields.mediaMimetype,
+          ...(fields.mediaUrl !== undefined ? { mediaUrl: fields.mediaUrl } : {}),
+        })
+        .where(
+          and(eq(messagesTable.instanceId, this.instanceId), eq(messagesTable.id, messageId)),
+        )
+        .run();
+    } catch (err) {
+      logger.error({ err, messageId }, "Failed to update message media fields");
+    }
+  }
+
+  /** Download Baileys media for a WAMessage and persist under data/media/{instanceId}/ */
+  private async downloadAndPersistMedia(msg: WAMessage, messageId: string): Promise<string | null> {
+    const sock = this.sock;
+    if (!sock) {
+      logger.warn({ messageId }, "Cannot download media: socket unavailable");
+      return null;
+    }
+
+    const mimetype = extractMediaMimetype(msg);
+    try {
+      const buffer = (await downloadMediaMessage(
+        msg,
+        "buffer",
+        {},
+        {
+          logger: logger as never,
+          reuploadRequest: async (m) => sock.updateMediaMessage(m),
+        },
+      )) as Buffer;
+
+      const saved = await this.mediaService.persistMessageMedia(buffer, {
+        instanceId: this.instanceId,
+        messageId,
+        mimetype,
+      });
+      this.updateMessageMedia(messageId, {
+        mediaLocal: saved.path,
+        mediaMimetype: saved.mimetype,
+        mediaUrl: saved.path,
+      });
+      logger.info(
+        { messageId, path: saved.path, size: saved.size, mimetype: saved.mimetype },
+        "Media downloaded and persisted",
+      );
+      return saved.path;
+    } catch (err) {
+      logger.error({ err, messageId }, "Failed to download/persist media");
+      return null;
+    }
+  }
+
+  async downloadMediaForMessage(
+    chatId: string,
+    messageId: string,
+    opts?: { asBase64?: boolean },
+  ): Promise<{
+    mediaLocal: string;
+    mediaMimetype: string | null;
+    size: number;
+    base64?: string;
+  }> {
+    const row = db
+      .select()
+      .from(messagesTable)
+      .where(and(eq(messagesTable.instanceId, this.instanceId), eq(messagesTable.id, messageId)))
+      .get();
+
+    if (!row) {
+      throw new Error(`Message '${messageId}' not found`);
+    }
+    if (row.chatId !== chatId) {
+      throw new Error(`Message '${messageId}' does not belong to chat '${chatId}'`);
+    }
+    if (!MEDIA_MESSAGE_TYPES.has(row.type)) {
+      throw new Error(`Message '${messageId}' type '${row.type}' has no downloadable media`);
+    }
+
+    let mediaLocal = row.mediaLocal;
+    let mediaMimetype = row.mediaMimetype;
+
+    if (!mediaLocal || !existsSync(mediaLocal)) {
+      if (!row.rawData) {
+        throw new Error(
+          `Media for message '${messageId}' is not cached and raw WA message was not stored; cannot re-download`,
+        );
+      }
+      let parsed: { key?: WAMessage["key"]; message?: WAMessage["message"] };
+      try {
+        parsed = JSON.parse(row.rawData) as { key?: WAMessage["key"]; message?: WAMessage["message"] };
+      } catch {
+        throw new Error(`Corrupt raw_data for message '${messageId}'`);
+      }
+      const waMsg = { key: parsed.key, message: parsed.message } as WAMessage;
+      const path = await this.downloadAndPersistMedia(waMsg, messageId);
+      if (!path) {
+        throw new Error(`Failed to download media for message '${messageId}'`);
+      }
+      mediaLocal = path;
+      const refreshed = db
+        .select({ mediaMimetype: messagesTable.mediaMimetype })
+        .from(messagesTable)
+        .where(and(eq(messagesTable.instanceId, this.instanceId), eq(messagesTable.id, messageId)))
+        .get();
+      mediaMimetype = refreshed?.mediaMimetype ?? mediaMimetype;
+    }
+
+    const size = statSync(mediaLocal).size;
+    const result: {
+      mediaLocal: string;
+      mediaMimetype: string | null;
+      size: number;
+      base64?: string;
+    } = { mediaLocal, mediaMimetype, size };
+
+    if (opts?.asBase64) {
+      const MAX_B64 = 8 * 1024 * 1024; // 8 MB safety cap for MCP payloads
+      if (size > MAX_B64) {
+        throw new Error(
+          `Media is ${size} bytes; too large for base64 return (max ${MAX_B64}). Use mediaLocal path instead.`,
+        );
+      }
+      result.base64 = (await readFile(mediaLocal)).toString("base64");
+    }
+
+    return result;
+  }
+
+  /** Best-effort backfill for recent media rows that still have raw_data but no media_local */
+  private async backfillRecentMedia(limit = 25): Promise<void> {
+    if (this.mediaBackfillStarted) return;
+    this.mediaBackfillStarted = true;
+    try {
+      const rows = db
+        .select()
+        .from(messagesTable)
+        .where(eq(messagesTable.instanceId, this.instanceId))
+        .orderBy(desc(messagesTable.timestamp))
+        .limit(500)
+        .all()
+        .filter(
+          (r) =>
+            MEDIA_MESSAGE_TYPES.has(r.type) &&
+            !r.mediaLocal &&
+            !!r.rawData,
+        )
+        .slice(0, limit);
+
+      logger.info(
+        { instanceId: this.instanceId, candidates: rows.length },
+        "Starting media backfill",
+      );
+
+      for (const row of rows) {
+        try {
+          const parsed = JSON.parse(row.rawData!) as {
+            key?: WAMessage["key"];
+            message?: WAMessage["message"];
+          };
+          const waMsg = { key: parsed.key, message: parsed.message } as WAMessage;
+          await this.downloadAndPersistMedia(waMsg, row.id);
+        } catch (err) {
+          logger.warn({ err, messageId: row.id }, "Media backfill skipped for message");
+        }
+      }
+    } catch (err) {
+      logger.error({ err }, "Media backfill failed");
     }
   }
 
@@ -965,6 +1181,10 @@ export class BaileysAdapter implements ChannelAdapter {
         this.pairingCodeResolver = null;
         this.reconnectAttempt = 0;
         logger.info({ instanceId: this.instanceId }, "Connected to WhatsApp");
+        // Best-effort: download recent media that still has raw_data but no local file
+        void this.backfillRecentMedia(25).catch((err) => {
+          logger.error({ err }, "Media backfill error");
+        });
       }
 
       if (connection === "close") {
@@ -1137,6 +1357,14 @@ export class BaileysAdapter implements ChannelAdapter {
 
           // Persist ALL messages (notify + append) to DB
           if (msg.key.id && msg.key.remoteJid && !msg.message?.protocolMessage) {
+            const msgType = extractMessageType(msg);
+            const mimetype = MEDIA_MESSAGE_TYPES.has(msgType)
+              ? extractMediaMimetype(msg)
+              : null;
+            const rawData =
+              MEDIA_MESSAGE_TYPES.has(msgType) && msg.message
+                ? JSON.stringify({ key: msg.key, message: msg.message })
+                : null;
             const normalized: NormalizedMessageEvent = {
               instanceId: this.instanceId,
               chatId: getChatJid(msg),
@@ -1147,14 +1375,21 @@ export class BaileysAdapter implements ChannelAdapter {
                   typeof msg.messageTimestamp === "number"
                     ? msg.messageTimestamp
                     : Number(msg.messageTimestamp ?? 0),
-                type: extractMessageType(msg),
+                type: msgType,
                 content: extractTextContent(msg),
                 mediaUrl: null,
                 quotedMessageId: extractQuotedMessageId(msg),
                 isFromMe: msg.key.fromMe ?? false,
               },
             };
-            this.persistMessage(normalized);
+            this.persistMessage(normalized, { mediaMimetype: mimetype, rawData });
+
+            if (MEDIA_MESSAGE_TYPES.has(msgType)) {
+              const messageId = msg.key.id;
+              void this.downloadAndPersistMedia(msg, messageId).catch((err) => {
+                logger.error({ err, messageId }, "Async media persist failed");
+              });
+            }
           }
         }
 

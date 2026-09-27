@@ -15,6 +15,7 @@ import {
   DeleteChatSchema,
   ClearChatSchema,
   GetMessagesSchema,
+  DownloadMediaSchema,
 } from "../schemas/chat.schema.js";
 
 export function registerChatTools(
@@ -135,7 +136,7 @@ export function registerChatTools(
     "wa_get_messages",
     {
       description:
-        "Get recent messages from a chat. Returns messages ordered by most recent first, with sender, content, type, and timestamp.",
+        "Get recent messages from a chat. Returns messages ordered by most recent first, with sender, content, type, timestamp, and media fields (mediaLocal path under data/media/, mediaMimetype, mediaSize) when media was downloaded.",
       inputSchema: GetMessagesSchema,
     },
     async (params) => {
@@ -151,6 +152,45 @@ export function registerChatTools(
         return toolSuccess({ chatId: params.chatId, count: messages.length, messages });
       } catch (err) {
         return handleToolError("wa_get_messages", err, params.instanceId);
+      }
+    },
+  );
+
+  server.registerTool(
+    "wa_download_media",
+    {
+      description:
+        "Download (or return cached) media for a message. Persists under data/media/{instanceId}/{messageId}.{ext} on the wa-data volume. Returns mediaLocal path, mimetype, and size. Set asBase64=true to also get base64 (max 8MB).",
+      inputSchema: DownloadMediaSchema,
+    },
+    async (params) => {
+      const log = createRequestLogger("wa_download_media", params.instanceId);
+      const start = Date.now();
+      try {
+        const adapter = instanceManager.getAdapter(params.instanceId);
+        const result = await adapter.downloadMediaForMessage(params.chatId, params.messageId, {
+          asBase64: params.asBase64 ?? false,
+        });
+        log.info(
+          {
+            duration: Date.now() - start,
+            chatId: params.chatId,
+            messageId: params.messageId,
+            size: result.size,
+            path: result.mediaLocal,
+          },
+          "Media downloaded",
+        );
+        return toolSuccess({
+          chatId: params.chatId,
+          messageId: params.messageId,
+          mediaLocal: result.mediaLocal,
+          mediaMimetype: result.mediaMimetype,
+          size: result.size,
+          ...(result.base64 !== undefined ? { base64: result.base64 } : {}),
+        });
+      } catch (err) {
+        return handleToolError("wa_download_media", err, params.instanceId);
       }
     },
   );

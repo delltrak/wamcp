@@ -645,6 +645,21 @@ export class CloudApiAdapter implements ChannelAdapter {
     );
   }
 
+  async downloadMediaForMessage(
+    _chatId: string,
+    _messageId: string,
+    _opts?: { asBase64?: boolean },
+  ): Promise<{
+    mediaLocal: string;
+    mediaMimetype: string | null;
+    size: number;
+    base64?: string;
+  }> {
+    throw new Error(
+      "downloadMediaForMessage is not available on Cloud API. Use Cloud media IDs via downloadMedia.",
+    );
+  }
+
   async getProfileInfo(): Promise<ProfileInfo> {
     const { phoneNumberId } = this.getCredentials();
 

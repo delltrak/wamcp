@@ -89,6 +89,41 @@ export function extractQuotedMessageId(msg: WAMessage): string | null {
  * Swap LID/PN in message keys: when remoteJid is a LID and remoteJidAlt has the PN, use the PN.
  * This follows the Evolution API pattern for Baileys v7.
  */
+
+/**
+ * Extract media mimetype from a Baileys WAMessage (image/video/audio/doc/sticker).
+ */
+export function extractMediaMimetype(msg: WAMessage): string | null {
+  const m = msg.message;
+  if (!m) return null;
+
+  const candidates = [
+    m.imageMessage?.mimetype,
+    m.viewOnceMessage?.message?.imageMessage?.mimetype,
+    m.viewOnceMessageV2?.message?.imageMessage?.mimetype,
+    m.videoMessage?.mimetype,
+    m.viewOnceMessage?.message?.videoMessage?.mimetype,
+    m.viewOnceMessageV2?.message?.videoMessage?.mimetype,
+    m.audioMessage?.mimetype,
+    m.documentMessage?.mimetype,
+    m.documentWithCaptionMessage?.message?.documentMessage?.mimetype,
+    m.stickerMessage?.mimetype,
+  ];
+
+  for (const mime of candidates) {
+    if (mime) return mime;
+  }
+  return null;
+}
+
+export const MEDIA_MESSAGE_TYPES = new Set([
+  "image",
+  "video",
+  "audio",
+  "document",
+  "sticker",
+]);
+
 export function normalizeLidInMessage(msg: WAMessage): void {
   const key = msg.key as Record<string, unknown>;
   if (

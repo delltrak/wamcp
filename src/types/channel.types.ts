@@ -170,6 +170,9 @@ export interface Message {
   type: MessageType;
   content: string | null;
   mediaUrl: string | null;
+  mediaLocal: string | null;
+  mediaMimetype: string | null;
+  mediaSize: number | null;
   quotedMessageId: string | null;
   isFromMe: boolean;
   isForwarded: boolean;
