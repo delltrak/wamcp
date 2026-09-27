@@ -62,3 +62,19 @@ export const GetMessagesSchema = z
       .describe("Maximum number of messages to return (default 50, max 100)"),
   })
   .strict();
+
+
+export const DownloadMediaSchema = z
+  .object({
+    instanceId: z.string().min(1).describe("The instance ID"),
+    chatId: z.string().min(5).describe("Chat JID that owns the message"),
+    messageId: z.string().min(1).describe("WhatsApp message ID to download media for"),
+    asBase64: z
+      .boolean()
+      .optional()
+      .default(false)
+      .describe(
+        "If true, also return base64 (capped at 8MB). Prefer mediaLocal path for large files.",
+      ),
+  })
+  .strict();

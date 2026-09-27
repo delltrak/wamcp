@@ -114,6 +114,22 @@ export interface ChannelAdapter {
   getMessages(chatId: string, limit?: number): Promise<Message[]>;
   getProfileInfo(): Promise<ProfileInfo>;
 
+  /**
+   * Ensure media for a persisted message is on disk (download if needed).
+   * Returns local path under data/media/ plus mimetype and byte size.
+   * When asBase64 is true, also returns base64 (capped for safety by caller).
+   */
+  downloadMediaForMessage(
+    chatId: string,
+    messageId: string,
+    opts?: { asBase64?: boolean },
+  ): Promise<{
+    mediaLocal: string;
+    mediaMimetype: string | null;
+    size: number;
+    base64?: string;
+  }>;
+
   // ---- Events ----
   on<E extends ChannelEvent>(event: E, handler: ChannelEventHandler<E>): void;
   off<E extends ChannelEvent>(event: E, handler: ChannelEventHandler<E>): void;
