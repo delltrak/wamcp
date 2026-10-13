@@ -4,6 +4,7 @@
 // ============================================================
 
 import { URL } from "node:url";
+import { isIP } from "node:net";
 import { MAX_BASE64_MEDIA_BYTES } from "../constants.js";
 
 // ---- JID Validation ----
@@ -42,26 +43,72 @@ export function isValidJidOrPhone(input: string): boolean {
 
 /** Private/internal IP ranges that must not be fetched. */
 function isPrivateIp(hostname: string): boolean {
-  // IPv4 private ranges
-  if (/^127\./.test(hostname)) return true;
-  if (/^10\./.test(hostname)) return true;
-  if (/^172\.(1[6-9]|2\d|3[01])\./.test(hostname)) return true;
-  if (/^192\.168\./.test(hostname)) return true;
-  if (/^0\./.test(hostname)) return true;
-  if (hostname === "0.0.0.0") return true;
+  const lower = hostname
+    .toLowerCase()
+    .replace(/^\[|\]$/g, "")
+    .replace(/\.$/, "");
 
-  // IPv6 loopback and private
-  if (hostname === "::1" || hostname === "[::1]") return true;
-  if (hostname.startsWith("fc") || hostname.startsWith("fd")) return true;
-  if (hostname.startsWith("fe80")) return true;
+  if (isIP(lower) === 4) {
+    const [first = 0, second = 0] = lower.split(".").map(Number);
+    return (
+      first === 0 ||
+      first === 10 ||
+      first === 127 ||
+      (first === 100 && second >= 64 && second <= 127) ||
+      (first === 169 && second === 254) ||
+      (first === 172 && second >= 16 && second <= 31) ||
+      (first === 192 && (second === 0 || second === 168)) ||
+      (first === 198 && (second === 18 || second === 19)) ||
+      first >= 224
+    );
+  }
 
-  // Localhost names
-  const lower = hostname.toLowerCase();
-  if (lower === "localhost" || lower === "localhost.localdomain") return true;
+  if (isIP(lower) === 6) {
+    const [left, right] = lower.split("::");
+    const leftGroups = left ? left.split(":") : [];
+    const rightGroups = right ? right.split(":") : [];
+    const omittedGroups = 8 - leftGroups.length - rightGroups.length;
+    const groups = [
+      ...leftGroups,
+      ...Array(Math.max(0, omittedGroups)).fill("0"),
+      ...rightGroups,
+    ].map((group) => Number.parseInt(group, 16));
+
+    if (groups.length !== 8) return true;
+    const isMappedIpv4 = groups.slice(0, 5).every((group) => group === 0) && groups[5] === 0xffff;
+    if (isMappedIpv4) {
+      const first = (groups[6] ?? 0) >> 8;
+      const second = (groups[6] ?? 0) & 0xff;
+      const third = (groups[7] ?? 0) >> 8;
+      const fourth = (groups[7] ?? 0) & 0xff;
+      return isPrivateIp(`${first}.${second}.${third}.${fourth}`);
+    }
+
+    const firstGroup = groups[0] ?? 0;
+    return (
+      groups.slice(0, 6).every((group) => group === 0) ||
+      (firstGroup & 0xfe00) === 0xfc00 || // Unique local (fc00::/7)
+      (firstGroup & 0xffc0) === 0xfe80 || // Link local (fe80::/10)
+      (firstGroup & 0xff00) === 0xff00 || // Multicast (ff00::/8)
+      (firstGroup === 0x2001 && groups[1] === 0x0db8) // Documentation range
+    );
+  }
+
+  // Local and single-label hostnames do not identify public webhook targets.
+  if (
+    lower === "localhost" ||
+    lower === "localhost.localdomain" ||
+    !lower.includes(".") ||
+    lower.endsWith(".localhost") ||
+    lower.endsWith(".local") ||
+    lower.endsWith(".internal") ||
+    lower.endsWith(".home.arpa")
+  ) {
+    return true;
+  }
 
   // Metadata endpoints (cloud providers)
-  if (hostname === "169.254.169.254") return true;
-  if (lower === "metadata.google.internal") return true;
+  if (lower === "169.254.169.254" || lower === "metadata.google.internal") return true;
 
   return false;
 }
@@ -87,6 +134,33 @@ export function validateMediaUrl(url: string): string | null {
   // Block private/internal hosts
   if (isPrivateIp(parsed.hostname)) {
     return "URL points to a private/internal address";
+  }
+
+  return null;
+}
+
+/**
+ * Validate an outgoing webhook destination. HTTP is accepted only when the
+ * caller explicitly enables it; private and local destinations remain blocked.
+ */
+export function validateWebhookUrl(url: string, allowHttp = false): string | null {
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return "Invalid URL format";
+  }
+
+  if (parsed.protocol !== "https:" && !(allowHttp && parsed.protocol === "http:")) {
+    return "Webhook URL must use HTTPS unless HTTP is explicitly allowed";
+  }
+
+  if (parsed.username || parsed.password) {
+    return "Webhook URL must not contain credentials";
+  }
+
+  if (!parsed.hostname || isPrivateIp(parsed.hostname)) {
+    return "Webhook URL must use a public hostname";
   }
 
   return null;
