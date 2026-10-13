@@ -15,14 +15,13 @@ describe("ContactStore", () => {
     directory = undefined;
   });
 
-  it("keeps history-sync contacts available after reopening the database", () => {
+  const createStore = (instanceId = "inst_fake_sync") => {
     directory = mkdtempSync(join(tmpdir(), "wa-mcp-contact-store-"));
     const databasePath = join(directory, "contacts.db");
-    const instanceId = "inst_fake_sync";
 
-    const firstSqlite = new Database(databasePath);
-    firstSqlite.pragma("foreign_keys = ON");
-    firstSqlite.exec(`
+    const sqlite = new Database(databasePath);
+    sqlite.pragma("foreign_keys = ON");
+    sqlite.exec(`
       CREATE TABLE instances (
         id TEXT PRIMARY KEY,
         name TEXT NOT NULL,
@@ -45,14 +44,21 @@ describe("ContactStore", () => {
         PRIMARY KEY (instance_id, jid)
       );
     `);
-    firstSqlite
+    sqlite
       .prepare(
         "INSERT INTO instances (id, name, channel, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
       )
       .run(instanceId, "Fake sync instance", "baileys", "disconnected", 1, 1);
 
-    const firstStore = new ContactStore(instanceId, drizzle(firstSqlite, { schema }));
-    firstStore.handleHistorySync({
+    return { sqlite, store: new ContactStore(instanceId, drizzle(sqlite, { schema })) };
+  };
+
+  it("keeps history-sync contacts available after reopening the database", async () => {
+    const instanceId = "inst_fake_sync";
+    const { sqlite: firstSqlite, store: firstStore } = createStore();
+    const databasePath = join(directory!, "contacts.db");
+
+    await firstStore.handleHistorySync({
       contacts: [
         {
           id: "15555550123@s.whatsapp.net",
@@ -66,7 +72,9 @@ describe("ContactStore", () => {
     });
 
     expect(
-      firstSqlite.prepare("SELECT COUNT(*) AS count FROM contacts WHERE instance_id = ?").get(instanceId),
+      firstSqlite
+        .prepare("SELECT COUNT(*) AS count FROM contacts WHERE instance_id = ?")
+        .get(instanceId),
     ).toEqual({ count: 3 });
     firstSqlite.close();
 
@@ -88,5 +96,48 @@ describe("ContactStore", () => {
     expect(restartedStore.getContacts()).toHaveLength(3);
 
     restartedSqlite.close();
+  });
+
+  it("updates an LID-only contact when its phone mapping arrives", async () => {
+    const { sqlite, store } = createStore();
+    const lid = "123456789012345@lid";
+    const pn = "15555550123@s.whatsapp.net";
+
+    await store.upsertContacts([{ id: lid, name: "LID Contact" }]);
+    expect(store.getContacts("15555550123")).toEqual([]);
+
+    store.updateLidMapping(lid, pn);
+
+    expect(store.getContacts("15555550123")).toEqual([
+      {
+        jid: lid,
+        name: "LID Contact",
+        notifyName: null,
+        phone: "15555550123",
+        profilePicUrl: null,
+        isBusiness: false,
+        isBlocked: false,
+      },
+    ]);
+
+    sqlite.close();
+  });
+
+  it("resolves a LID to its phone number before persisting", async () => {
+    const { sqlite, store } = createStore();
+    const lid = "123456789012345@lid";
+    const pn = "15555550123@s.whatsapp.net";
+    const resolvePn = async (value: string) => (value === lid ? pn : null);
+
+    await store.upsertContacts([{ id: lid, name: "Resolved Contact" }], resolvePn);
+
+    expect(
+      sqlite
+        .prepare("SELECT jid, phone, lid FROM contacts WHERE instance_id = ?")
+        .get("inst_fake_sync"),
+    ).toEqual({ jid: pn, phone: "15555550123", lid });
+    expect(store.getContacts("15555550123")).toHaveLength(1);
+
+    sqlite.close();
   });
 });

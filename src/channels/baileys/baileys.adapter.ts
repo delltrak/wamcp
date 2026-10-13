@@ -74,7 +74,11 @@ import {
   RECONNECT_MAX_ATTEMPTS,
 } from "../../constants.js";
 import { createChildLogger } from "../../utils/logger.js";
-import { ContactStore, type ContactSyncRecord } from "../../services/contact-store.js";
+import {
+  ContactStore,
+  type ContactPnResolver,
+  type ContactSyncRecord,
+} from "../../services/contact-store.js";
 
 const logger = createChildLogger({ service: "baileys-adapter" });
 
@@ -108,7 +112,10 @@ export class BaileysAdapter implements ChannelAdapter {
   private readonly autoReconnect: boolean;
   private readonly listeners = new Map<ChannelEvent, Set<ChannelEventHandler<ChannelEvent>>>();
 
-  constructor(private readonly instanceId: string, contactStore?: ContactStore) {
+  constructor(
+    private readonly instanceId: string,
+    contactStore?: ContactStore,
+  ) {
     this.contactStore = contactStore ?? new ContactStore(instanceId, db);
     this.autoReconnect = process.env.WA_AUTO_RECONNECT !== "false" && DEFAULT_AUTO_RECONNECT;
   }
@@ -735,6 +742,10 @@ export class BaileysAdapter implements ChannelAdapter {
   // ---- Data access ----
 
   async getContacts(search?: string): Promise<Contact[]> {
+    for (const lid of this.contactStore.getUnresolvedLids()) {
+      const pn = await this.resolvePn(lid);
+      if (pn !== lid) this.contactStore.updateLidMapping(lid, pn);
+    }
     return this.contactStore.getContacts(search);
   }
 
@@ -996,12 +1007,21 @@ export class BaileysAdapter implements ChannelAdapter {
       await this.saveCreds?.();
     });
 
-    const persistContacts = (contacts: ContactSyncRecord[]) => {
-      this.contactStore.upsertContacts(contacts);
+    const resolveLidToPn: ContactPnResolver = async (lid) => {
+      try {
+        return await sock.signalRepository.lidMapping.getPNForLID(lid);
+      } catch (error) {
+        logger.debug({ instanceId: this.instanceId, lid, error }, "Failed to resolve contact LID");
+        return null;
+      }
+    };
+
+    const persistContacts = async (contacts: ContactSyncRecord[]) => {
+      await this.contactStore.upsertContacts(contacts, resolveLidToPn);
     };
 
     // Use ev.process() to receive ALL buffered events after sync flush
-    sock.ev.process((events) => {
+    sock.ev.process(async (events) => {
       const eventKeys = Object.keys(events);
       if (eventKeys.length > 0) {
         logger.info({ instanceId: this.instanceId, events: eventKeys }, "ev.process fired");
@@ -1010,6 +1030,7 @@ export class BaileysAdapter implements ChannelAdapter {
       // --- LID Mapping (v7+): store LID <-> PN mappings ---
       if (events["lid-mapping.update"]) {
         const mapping = events["lid-mapping.update"];
+        this.contactStore.updateLidMapping(mapping.lid, mapping.pn);
         logger.info(
           { instanceId: this.instanceId, lid: mapping.lid, pn: mapping.pn },
           "LID mapping updated",
@@ -1023,7 +1044,7 @@ export class BaileysAdapter implements ChannelAdapter {
             !!ch.id && !!ch.name && !ch.id.endsWith("@g.us") && !ch.id.endsWith("@broadcast"),
         );
         if (namedChats.length > 0) {
-          persistContacts(namedChats.map((ch) => ({ id: ch.id, name: ch.name })));
+          await persistContacts(namedChats.map((ch) => ({ id: ch.id, name: ch.name })));
           logger.info(
             { instanceId: this.instanceId, count: namedChats.length },
             "Contacts persisted from chat names (chats.upsert)",
@@ -1034,7 +1055,7 @@ export class BaileysAdapter implements ChannelAdapter {
       // --- Contacts (arrives buffered during initial sync) ---
       if (events["contacts.upsert"]) {
         const contacts = events["contacts.upsert"];
-        persistContacts(contacts);
+        await persistContacts(contacts);
         logger.info(
           { instanceId: this.instanceId, count: contacts.length },
           "Contacts persisted (upsert)",
@@ -1042,7 +1063,7 @@ export class BaileysAdapter implements ChannelAdapter {
       }
 
       if (events["contacts.update"]) {
-        persistContacts(events["contacts.update"]);
+        await persistContacts(events["contacts.update"]);
         const normalized = normalizeContactsUpdate(this.instanceId, events["contacts.update"]);
         for (const event of normalized) this.emit("contact.updated", event);
       }
@@ -1053,9 +1074,12 @@ export class BaileysAdapter implements ChannelAdapter {
         const contactCount = contacts.filter((contact) => contact.id).length;
         const chatContactCount = chats.filter(
           (chat) =>
-            !!chat.id && !!chat.name && !chat.id.endsWith("@g.us") && !chat.id.endsWith("@broadcast"),
+            !!chat.id &&
+            !!chat.name &&
+            !chat.id.endsWith("@g.us") &&
+            !chat.id.endsWith("@broadcast"),
         ).length;
-        this.contactStore.handleHistorySync({ contacts, chats });
+        await this.contactStore.handleHistorySync({ contacts, chats }, resolveLidToPn);
         if (contactCount > 0) {
           logger.info(
             { instanceId: this.instanceId, contacts: contactCount, chats: chats.length },
@@ -1087,7 +1111,7 @@ export class BaileysAdapter implements ChannelAdapter {
           }
 
           if (msg.pushName && msg.key.remoteJid && !msg.key.fromMe) {
-            persistContacts([{ id: msg.key.remoteJid, name: msg.pushName }]);
+            await persistContacts([{ id: msg.key.remoteJid, name: msg.pushName }]);
           }
 
           // Persist ALL messages (notify + append) to DB

@@ -3,7 +3,7 @@
 // Persists contacts received from Baileys and serves local lookups.
 // ============================================================
 
-import { and, eq, like, or } from "drizzle-orm";
+import { and, eq, isNotNull, isNull, like, or } from "drizzle-orm";
 import type { db as applicationDb } from "../db/client.js";
 import { contacts as contactsTable } from "../db/schema.js";
 import type { Contact } from "../types/channel.types.js";
@@ -22,31 +22,77 @@ export interface ContactHistorySync {
   chats?: { id?: string | null; name?: string | null }[];
 }
 
+export type ContactPnResolver = (lid: string) => Promise<string | null>;
+
 export class ContactStore {
+  private readonly lidMappings = new Map<string, string>();
+
   constructor(
     private readonly instanceId: string,
     private readonly database: typeof applicationDb,
   ) {}
 
   /** Persist contacts delivered through Baileys contacts.upsert or contacts.update. */
-  upsertContacts(contacts: ContactSyncRecord[]): void {
+  async upsertContacts(
+    contacts: ContactSyncRecord[],
+    resolvePn?: ContactPnResolver,
+  ): Promise<void> {
     for (const contact of contacts) {
-      this.upsertContact(contact);
+      const lid = contact.id?.endsWith("@lid") ? contact.id : (contact.lid ?? undefined);
+      let phoneNumber = contact.phoneNumber ?? (lid ? this.lidMappings.get(lid) : undefined);
+      if (!phoneNumber && lid && resolvePn) phoneNumber = (await resolvePn(lid)) ?? undefined;
+      if (phoneNumber && lid) this.lidMappings.set(lid, phoneNumber);
+
+      this.upsertContact(phoneNumber ? { ...contact, phoneNumber } : contact);
     }
   }
 
   /** Persist contacts and named one-to-one chats delivered by history sync. */
-  handleHistorySync(history: ContactHistorySync): void {
+  async handleHistorySync(
+    history: ContactHistorySync,
+    resolvePn?: ContactPnResolver,
+  ): Promise<void> {
     const contacts = (history.contacts ?? [])
       .filter((contact) => !!contact.id)
       .map((contact) => ({ ...contact, name: contact.name ?? contact.notify }));
-    this.upsertContacts(contacts);
+    await this.upsertContacts(contacts, resolvePn);
 
     const namedChats = (history.chats ?? []).filter(
       (chat): chat is typeof chat & { id: string; name: string } =>
         !!chat.id && !!chat.name && !chat.id.endsWith("@g.us") && !chat.id.endsWith("@broadcast"),
     );
-    this.upsertContacts(namedChats.map((chat) => ({ id: chat.id, name: chat.name })));
+    await this.upsertContacts(namedChats.map((chat) => ({ id: chat.id, name: chat.name })));
+  }
+
+  /** Apply a LID-to-phone mapping to contacts already persisted for this instance. */
+  updateLidMapping(lid: string, pn: string): void {
+    this.lidMappings.set(lid, pn);
+    this.database
+      .update(contactsTable)
+      .set({ phone: phoneFromJid(pn), updatedAt: Date.now() })
+      .where(
+        and(
+          eq(contactsTable.instanceId, this.instanceId),
+          or(eq(contactsTable.jid, lid), eq(contactsTable.lid, lid)),
+        ),
+      )
+      .run();
+  }
+
+  /** Return stored LIDs whose phone mapping can still be resolved at read time. */
+  getUnresolvedLids(): string[] {
+    const rows = this.database
+      .select({ lid: contactsTable.lid })
+      .from(contactsTable)
+      .where(
+        and(
+          eq(contactsTable.instanceId, this.instanceId),
+          isNull(contactsTable.phone),
+          isNotNull(contactsTable.lid),
+        ),
+      )
+      .all();
+    return [...new Set(rows.flatMap((row) => (row.lid ? [row.lid] : [])))];
   }
 
   getContacts(search?: string): Contact[] {
@@ -84,8 +130,8 @@ export class ContactStore {
     if (!id) return;
 
     const isLid = id.endsWith("@lid");
-    let jid = isLid && contact.phoneNumber ? contact.phoneNumber : id;
-    if (isLid && !contact.phoneNumber) {
+    let jid = id;
+    if (isLid) {
       const existingLid = this.database
         .select({ jid: contactsTable.jid })
         .from(contactsTable)
@@ -96,7 +142,7 @@ export class ContactStore {
           ),
         )
         .get();
-      jid = existingLid?.jid ?? id;
+      jid = existingLid?.jid ?? (contact.phoneNumber || id);
     }
 
     const existing = this.database
@@ -108,9 +154,7 @@ export class ContactStore {
     const name = hasPhonebookName ? existing.name : (contact.name ?? existing?.name ?? null);
     const notifyName = contact.notify ?? existing?.notifyName ?? null;
     const phoneSource = contact.phoneNumber ?? (jid.endsWith("@lid") ? null : jid);
-    const phone = phoneSource
-      ? phoneSource.split("@")[0].split(":")[0]
-      : (existing?.phone ?? null);
+    const phone = phoneSource ? phoneFromJid(phoneSource) : (existing?.phone ?? null);
     const lid = contact.lid ?? (isLid ? id : existing?.lid) ?? null;
     const now = Date.now();
 
@@ -143,4 +187,8 @@ export class ContactStore {
       })
       .run();
   }
+}
+
+function phoneFromJid(jid: string): string {
+  return jid.split("@")[0].split(":")[0];
 }
