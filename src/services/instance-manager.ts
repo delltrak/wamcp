@@ -40,8 +40,9 @@ export class InstanceManager {
   }
 
   /** Register a global event handler that receives all instance events */
-  onAnyEvent(handler: InstanceEventHandler): void {
+  onAnyEvent(handler: InstanceEventHandler): () => void {
     this.globalHandlers.add(handler);
+    return () => this.globalHandlers.delete(handler);
   }
 
   /** Initialize: load existing instances from DB and reconnect those with status "open"/connected */
