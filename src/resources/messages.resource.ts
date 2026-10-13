@@ -6,6 +6,7 @@ import { ResourceTemplate } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { InstanceManager } from "../services/instance-manager.js";
 import { varAsString } from "./resource-helpers.js";
+import { scheduleFetchedMessagesRead } from "../services/auto-read.js";
 
 export function registerMessagesResource(
   server: McpServer,
@@ -27,6 +28,7 @@ export function registerMessagesResource(
       const chatId = varAsString(variables, "chatId");
       const adapter = instanceManager.getAdapter(id);
       const data = await adapter.getMessages(chatId, 50);
+      scheduleFetchedMessagesRead(adapter, chatId, data, id);
       return {
         contents: [{ uri: uri.href, mimeType: "application/json", text: JSON.stringify(data) }],
       };

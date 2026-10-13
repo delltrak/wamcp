@@ -446,7 +446,7 @@ Returns: { status: "queued", jobId }`,
       const start = Date.now();
       try {
         const adapter = instanceManager.getAdapter(params.instanceId);
-        await adapter.markRead(params.chatId, params.messageIds);
+        await adapter.markRead(params.chatId, params.messageIds, params.participant);
         log.info({ duration: Date.now() - start }, "Messages marked read");
         return toolSuccess({ success: true });
       } catch (err) {

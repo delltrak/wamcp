@@ -467,6 +467,7 @@ Copy `.env.example` to `.env` and configure:
 | `WA_CLOUD_RATE_LIMIT`       | `80`                     | Messages/min per Cloud API instance      |
 | `WA_MESSAGE_RETENTION_DAYS` | `30`                     | Auto-delete old messages                 |
 | `WA_AUTO_RECONNECT`         | `true`                   | Auto-reconnect on disconnect             |
+| `WA_AUTO_READ`              | `false`                  | `on_fetch` marks incoming messages read when fetched; `on_receive` marks them read on arrival |
 | `WA_MEDIA_CACHE_MAX_MB`     | `500`                    | Media cache size limit                   |
 | `WA_TRANSCRIPTION_ENABLED`  | `false`                  | Enable transcription and audio notifications |
 | `WA_TRANSCRIPTION_API_KEY`  | —                        | API key for the transcription endpoint   |
@@ -483,6 +484,10 @@ Copy `.env.example` to `.env` and configure:
 | `WA_EVENT_WEBHOOK_PRESET` | — | `grok-bot` uses the compact payload and incoming-message filters |
 | `WA_EVENT_WEBHOOK_EVENTS` | `message.received` | Comma-separated events to forward |
 | `WA_EVENT_WEBHOOK_IGNORE_FROM_ME` | `true` | Ignore messages sent by this instance |
+
+`WA_AUTO_READ` accepts `false`, `on_fetch`, or `on_receive`. Invalid values disable automatic
+read receipts and produce a warning. Automatic receipts never delay message delivery or tool
+responses; receipt failures are logged.
 | `WA_EVENT_WEBHOOK_HEADERS` | — | Additional request headers as a JSON object of string values |
 | `WA_EVENT_WEBHOOK_AUTH_HEADER` / `WA_EVENT_WEBHOOK_AUTH_VALUE` | — | Authentication header name and value; Grok Bot defaults the name to `X-Grok-Bot-Key` when its preset is enabled |
 | `WA_EVENT_WEBHOOK_SECRET` | — | HMAC-SHA256 signing secret; adds timestamp and signature headers |
