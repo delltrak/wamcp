@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Optional incoming audio transcription for Baileys and Cloud API messages through an
+  OpenAI-compatible transcription endpoint, with a `wa_transcribe_audio` MCP tool and
+  asynchronous transcription text on successful audio message notifications.
+- Configurable transcription enablement, API URL/model/language, size ceiling, and timeout.
+
 ## [2.0.0] - 2026-09-18
 
 Dependency modernization after ~6.5 months of drift. Closes 4 critical and 17 high
@@ -89,7 +96,7 @@ advisories; `npm audit` goes from **33 vulnerabilities to 4** (all moderate, all
 - Declared `@vitest/coverage-v8`, which `vitest.config.ts` has always referenced but was never in
   `devDependencies`.
 - **Eight of the ten resources were unreachable.** They were registered by passing a plain string
-  containing `{id}` to the deprecated `server.resource()`, which the SDK treats as a *literal*
+  containing `{id}` to the deprecated `server.resource()`, which the SDK treats as a _literal_
   static URI rather than a template. `resources/templates/list` returned nothing, and reading
   either the placeholder URI or a substituted one returned "Resource not found". The URI parsing
   behind them was dead too: `instances` is the **host** of a `whatsapp://` URI, not a path

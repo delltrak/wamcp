@@ -61,6 +61,7 @@ const CHANNEL_ADAPTER_METHODS: (keyof ChannelAdapter)[] = [
   "getContacts",
   "getChats",
   "getMessages",
+  "downloadMessageAudio",
   "getProfileInfo",
   // Events
   "on",

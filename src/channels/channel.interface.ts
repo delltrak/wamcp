@@ -112,6 +112,11 @@ export interface ChannelAdapter {
   getContacts(search?: string): Promise<Contact[]>;
   getChats(): Promise<Chat[]>;
   getMessages(chatId: string, limit?: number): Promise<Message[]>;
+  downloadMessageAudio(
+    messageId: string,
+    maxBytes?: number,
+    timeoutMs?: number,
+  ): Promise<{ data: Buffer; mimeType: string }>;
   getProfileInfo(): Promise<ProfileInfo>;
 
   // ---- Events ----
