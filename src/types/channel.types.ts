@@ -244,6 +244,10 @@ export interface CloudCredentials {
 export interface NormalizedMessageEvent {
   instanceId: string;
   chatId: string;
+  /** Optional display metadata used by outgoing integrations. */
+  chatName?: string | null;
+  senderName?: string | null;
+  isGroup?: boolean;
   message: {
     id: string;
     sender: string;

@@ -135,9 +135,14 @@ export function normalizeMessagesUpsert(
 
   return data.messages.map((msg) => {
     normalizeLidInMessage(msg);
+    const chatId = getChatJid(msg);
+    const isGroup = chatId.endsWith("@g.us");
     return {
       instanceId,
-      chatId: getChatJid(msg),
+      chatId,
+      chatName: isGroup ? null : (msg.pushName ?? null),
+      senderName: msg.pushName ?? null,
+      isGroup,
       message: {
         id: msg.key.id ?? "",
         sender: getSenderJid(msg),
