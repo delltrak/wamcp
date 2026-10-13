@@ -337,8 +337,16 @@ Delivery runs through BullMQ with exponential retries, so HTTP failures do not
 interrupt WhatsApp message processing. The default filter is
 `message.received`, and messages sent by this instance are ignored by default.
 Webhook targets must use HTTPS and a public host. Set
-`WA_EVENT_WEBHOOK_ALLOW_HTTP=true` to permit HTTP for an explicitly trusted
-public endpoint; local and private-network targets remain blocked.
+`WA_EVENT_WEBHOOK_ALLOW_HTTP=true` to permit the HTTP scheme; local and
+private-network targets remain blocked. Each delivery checks all DNS A and AAAA
+answers and pins the connection to a validated public address while keeping the
+hostname for TLS and the HTTP Host header.
+
+Webhook jobs use a deployment-specific queue namespace, derived from
+`WA_DEPLOYMENT_ID`, `HOSTNAME`, or the operating-system hostname. Set
+`WA_EVENT_WEBHOOK_QUEUE_PREFIX` to the same value for replicas in one deployment
+and a different value for separate deployments. Workers reject jobs whose
+destination settings do not match their configured destination.
 
 #### Connect a Grok Bot routine
 
@@ -479,7 +487,8 @@ Copy `.env.example` to `.env` and configure:
 | `WA_EVENT_WEBHOOK_AUTH_HEADER` / `WA_EVENT_WEBHOOK_AUTH_VALUE` | — | Authentication header name and value; Grok Bot defaults the name to `X-Grok-Bot-Key` when its preset is enabled |
 | `WA_EVENT_WEBHOOK_SECRET` | — | HMAC-SHA256 signing secret; adds timestamp and signature headers |
 | `WA_EVENT_WEBHOOK_DEBOUNCE_MS` | `0` | Single-destination batch window, from 0 to 30000 ms |
-| `WA_EVENT_WEBHOOK_ALLOW_HTTP` | `false` | Permit HTTP targets; public-host validation still applies |
+| `WA_EVENT_WEBHOOK_ALLOW_HTTP` | `false` | Permit the HTTP scheme; public-host validation still applies |
+| `WA_EVENT_WEBHOOK_QUEUE_PREFIX` | Host/deployment hash | BullMQ namespace; share across replicas and use a different value per deployment |
 | `WA_EVENT_WEBHOOK_TIMEOUT_MS` | `10000` | Per-request timeout in milliseconds |
 | `WA_EVENT_WEBHOOK_RETRY_ATTEMPTS` | `5` | BullMQ delivery attempts, including the first attempt |
 | `WA_EVENT_WEBHOOK_RETRY_DELAY_MS` | `1000` | Initial exponential retry delay in milliseconds |

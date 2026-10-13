@@ -3,16 +3,21 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { InstanceManager } from "../src/services/instance-manager.js";
 import {
   createEventWebhookHeaders,
+  createPinnedWebhookConnectionOptions,
+  eventWebhookDestinationIdentity,
   eventWebhookJobOptions,
   normalizeGrokBotWebhookPayload,
   normalizeEventWebhookPayload,
   postEventWebhook,
+  processEventWebhookJob,
   registerEventWebhookHandler,
   shouldSendEventWebhook,
   type EventWebhookJob,
 } from "../src/services/event-webhook.js";
 import { loadEventWebhookConfig } from "../src/services/event-webhook-config.js";
 import type { ChannelEventPayload } from "../src/types/channel.types.js";
+import { createShutdownHandler, installShutdownHandlers } from "../src/utils/shutdown.js";
+import { isNonPublicIp } from "../src/utils/validation.js";
 
 type EventHandler = Parameters<InstanceManager["onAnyEvent"]>[0];
 
@@ -55,6 +60,40 @@ describe("outgoing event webhook config", () => {
     expect(config.timeoutMs).toBe(10_000);
     expect(config.retryAttempts).toBe(5);
     expect(config.retryDelayMs).toBe(1_000);
+  });
+
+  it.each([
+    "0.0.0.0",
+    "10.0.0.8",
+    "100.64.0.1",
+    "127.0.0.1",
+    "169.254.169.254",
+    "172.16.0.1",
+    "192.168.0.1",
+    "224.0.0.1",
+    "::",
+    "::1",
+    "::ffff:10.0.0.8",
+    "fc00::1",
+    "fe80::1",
+    "ff02::1",
+  ])("blocks non-public address %s", (address) => {
+    expect(isNonPublicIp(address)).toBe(true);
+  });
+
+  it("uses a deployment-specific queue prefix unless an explicit prefix is configured", () => {
+    const first = loadEventWebhookConfig({ HOSTNAME: "deployment-a" }).queuePrefix;
+    const second = loadEventWebhookConfig({ HOSTNAME: "deployment-b" }).queuePrefix;
+    const configured = loadEventWebhookConfig({
+      HOSTNAME: "deployment-a",
+      WA_EVENT_WEBHOOK_QUEUE_PREFIX: "production-webhooks",
+    }).queuePrefix;
+
+    expect(first).not.toBe(second);
+    expect(configured).toBe("production-webhooks");
+    expect(() =>
+      loadEventWebhookConfig({ WA_EVENT_WEBHOOK_QUEUE_PREFIX: "invalid:prefix" }),
+    ).toThrow("Invalid WA_EVENT_WEBHOOK_QUEUE_PREFIX");
   });
 
   it("parses filters, timeouts, retries, JSON headers, and auth header settings", () => {
@@ -486,6 +525,60 @@ describe("outgoing event webhook events", () => {
     expect(enqueue).toHaveBeenCalledTimes(2);
     expect(enqueue.mock.calls[1]?.[0].payload).toMatchObject({ messageId: "message-25" });
   });
+
+  it("flushes buffered webhook events before a shutdown handler exits", async () => {
+    let eventHandler: EventHandler | undefined;
+    const instanceManager = {
+      onAnyEvent: (handler: EventHandler) => {
+        eventHandler = handler;
+        return () => {
+          eventHandler = undefined;
+        };
+      },
+    } as unknown as InstanceManager;
+    const config = configuredWebhook({ WA_EVENT_WEBHOOK_DEBOUNCE_MS: "30000" });
+    const enqueue = vi.fn<(_: EventWebhookJob) => Promise<unknown>>(() => Promise.resolve());
+    const unsubscribe = registerEventWebhookHandler(instanceManager, config, enqueue);
+    let resolveExited: (() => void) | undefined;
+    const exited = new Promise<void>((resolve) => {
+      resolveExited = resolve;
+    });
+    const exit = vi.fn(() => resolveExited?.());
+    const removeShutdownHandlers = installShutdownHandlers(
+      async () => {
+        unsubscribe();
+        await unsubscribe.flush();
+      },
+      { exit, timeoutMs: 500 },
+    );
+
+    eventHandler?.("message.received", "inst_1234abcd", incomingMessage());
+    expect(enqueue).not.toHaveBeenCalled();
+
+    process.emit("SIGTERM");
+    await exited;
+    removeShutdownHandlers();
+
+    expect(enqueue).toHaveBeenCalledOnce();
+    expect(exit).toHaveBeenCalledWith(0);
+  });
+
+  it("exits with an error when shutdown cleanup exceeds its timeout", async () => {
+    const exit = vi.fn();
+    const onError = vi.fn();
+    const shutdown = createShutdownHandler(() => new Promise<void>(() => undefined), {
+      exit,
+      onError,
+      timeoutMs: 1,
+    });
+
+    await shutdown("SIGINT");
+
+    expect(onError).toHaveBeenCalledWith(
+      expect.objectContaining({ message: "Shutdown exceeded 1 ms" }),
+    );
+    expect(exit).toHaveBeenCalledWith(1);
+  });
 });
 
 describe("outgoing event webhook delivery", () => {
@@ -521,12 +614,14 @@ describe("outgoing event webhook delivery", () => {
     const fetchRequest = vi.fn<typeof fetch>(() =>
       Promise.reject(new Error(`${url} ${authValue} ${hmacSecret}`)),
     );
+    const resolveDns = vi.fn(async () => [{ address: "93.184.216.34", family: 4 }]);
 
     const failure = postEventWebhook(
       destination,
       normalizeEventWebhookPayload("message.received", "inst_1234abcd", incomingMessage()),
       1_000,
       fetchRequest,
+      resolveDns,
     );
     await expect(failure).rejects.toThrow("Event webhook delivery failed");
 
@@ -548,5 +643,108 @@ describe("outgoing event webhook delivery", () => {
       expect(message).not.toContain(authValue);
       expect(message).not.toContain(hmacSecret);
     }
+  });
+
+  it("rejects a hostname that resolves to a private address before sending", async () => {
+    const fetchRequest = vi.fn<typeof fetch>(() =>
+      Promise.resolve(new Response(null, { status: 200 })),
+    );
+    const resolveDns = vi.fn(async () => [{ address: "10.0.0.8", family: 4 }]);
+
+    await expect(
+      postEventWebhook(configuredWebhook().destinations[0]!, {}, 1_000, fetchRequest, resolveDns),
+    ).rejects.toThrow("Event webhook delivery failed");
+
+    expect(resolveDns).toHaveBeenCalledWith("hooks.example.test");
+    expect(fetchRequest).not.toHaveBeenCalled();
+  });
+
+  it("rejects mixed public and private DNS answers", async () => {
+    const fetchRequest = vi.fn<typeof fetch>(() =>
+      Promise.resolve(new Response(null, { status: 200 })),
+    );
+    const resolveDns = vi.fn(async () => [
+      { address: "93.184.216.34", family: 4 },
+      { address: "10.0.0.8", family: 4 },
+    ]);
+
+    await expect(
+      postEventWebhook(configuredWebhook().destinations[0]!, {}, 1_000, fetchRequest, resolveDns),
+    ).rejects.toThrow("Event webhook delivery failed");
+
+    expect(fetchRequest).not.toHaveBeenCalled();
+  });
+
+  it("uses a validated public address while keeping the hostname for HTTPS", async () => {
+    const destination = configuredWebhook().destinations[0]!;
+    const fetchRequest = vi.fn<typeof fetch>(() =>
+      Promise.resolve(new Response(null, { status: 200 })),
+    );
+    const resolveDns = vi.fn(async () => [{ address: "93.184.216.34", family: 4 }]);
+
+    await postEventWebhook(destination, {}, 1_000, fetchRequest, resolveDns);
+
+    const [requestUrl, request] = fetchRequest.mock.calls[0] as [
+      string,
+      RequestInit & { dispatcher?: unknown },
+    ];
+    expect(requestUrl).toBe(destination.url);
+    expect(request.dispatcher).toBeDefined();
+
+    const connection = createPinnedWebhookConnectionOptions(
+      "hooks.example.test",
+      "93.184.216.34",
+      4,
+      "https:",
+    );
+    expect(connection.servername).toBe("hooks.example.test");
+    const lookupResult = await new Promise<unknown>((resolve, reject) => {
+      connection.lookup?.("hooks.example.test", { all: true }, (error, address) => {
+        if (error) reject(error);
+        else resolve(address);
+      });
+    });
+    expect(lookupResult).toEqual([{ address: "93.184.216.34", family: 4 }]);
+  });
+
+  it.each([200, 503])("cancels the response body after status %i", async (status) => {
+    const cancel = vi.fn();
+    const responseBody = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode("response"));
+      },
+      cancel,
+    });
+    const fetchRequest = vi.fn<typeof fetch>(() =>
+      Promise.resolve(new Response(responseBody, { status })),
+    );
+    const resolveDns = vi.fn(async () => [{ address: "93.184.216.34", family: 4 }]);
+    const delivery = postEventWebhook(
+      configuredWebhook().destinations[0]!,
+      {},
+      1_000,
+      fetchRequest,
+      resolveDns,
+    );
+
+    if (status >= 400) await expect(delivery).rejects.toThrow("Event webhook delivery failed");
+    else await expect(delivery).resolves.toBeUndefined();
+
+    expect(cancel).toHaveBeenCalledOnce();
+  });
+
+  it("rejects queued jobs when the destination configuration differs", async () => {
+    const destination = configuredWebhook().destinations[0]!;
+    const delivery = vi.fn<typeof postEventWebhook>(() => Promise.resolve());
+    const job: EventWebhookJob = {
+      destinationId: destination.id,
+      destinationIdentity: `${eventWebhookDestinationIdentity(destination)}-other`,
+      payload: {},
+    };
+
+    await expect(
+      processEventWebhookJob(job, new Map([[destination.id, destination]]), 1_000, delivery),
+    ).rejects.toThrow("Event webhook destination does not match this service configuration");
+    expect(delivery).not.toHaveBeenCalled();
   });
 });

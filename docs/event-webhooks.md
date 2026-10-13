@@ -4,13 +4,19 @@ Outgoing event webhooks let an external endpoint receive normalized channel
 events without keeping an MCP connection open. Delivery uses a dedicated
 BullMQ queue. Requests have a timeout and retry with exponential backoff;
 queue and delivery errors do not interrupt incoming WhatsApp message handling.
+Each runtime gets a deployment-specific queue prefix by default. The worker
+checks the destination identity on every job before using its configured URL or
+credentials.
 
 ## Configuration
 
 Copy `.env.example` to `.env`. Set either the single-destination
 `WA_EVENT_WEBHOOK_URL` or the multi-destination `WA_EVENT_WEBHOOKS`, not both.
 HTTPS and public hosts are required by default. `WA_EVENT_WEBHOOK_ALLOW_HTTP=true`
-allows HTTP only for public hosts; private and local addresses remain blocked.
+allows the `http` scheme only; private and local addresses remain blocked. Each
+delivery checks every DNS A and AAAA answer and pins the connection to one of
+the validated addresses while retaining the URL hostname for TLS SNI and the
+HTTP Host header.
 
 | Variable | Default | Description |
 | --- | --- | --- |
@@ -24,7 +30,8 @@ allows HTTP only for public hosts; private and local addresses remain blocked.
 | `WA_EVENT_WEBHOOK_AUTH_VALUE` | unset | Single-destination authentication value. |
 | `WA_EVENT_WEBHOOK_SECRET` | unset | HMAC-SHA256 signing key; adds timestamp and signature headers. |
 | `WA_EVENT_WEBHOOK_DEBOUNCE_MS` | `0` | Single-destination batch window, from 0 to 30000 ms. |
-| `WA_EVENT_WEBHOOK_ALLOW_HTTP` | `false` | Allow HTTP destinations; private/local hosts remain blocked. |
+| `WA_EVENT_WEBHOOK_ALLOW_HTTP` | `false` | Allow the `http` scheme; private/local hosts remain blocked. |
+| `WA_EVENT_WEBHOOK_QUEUE_PREFIX` | Host/deployment hash | BullMQ namespace; use the same value for replicas and a unique value per deployment. |
 | `WA_EVENT_WEBHOOK_TIMEOUT_MS` | `10000` | Per-request timeout, from 1 to 300000 ms. |
 | `WA_EVENT_WEBHOOK_RETRY_ATTEMPTS` | `5` | Total BullMQ attempts per delivery, including the first. |
 | `WA_EVENT_WEBHOOK_RETRY_DELAY_MS` | `1000` | Initial exponential retry delay, from 1 to 300000 ms. |
@@ -35,6 +42,13 @@ header in `WA_EVENT_WEBHOOK_HEADERS`. For multi-destination entries, use
 work the same way for HMAC signing. Environment references contain the name of
 another environment variable, so routine keys do not need to appear inside the
 JSON configuration.
+
+When no queue prefix is configured, the namespace is derived from
+`WA_DEPLOYMENT_ID`, then `HOSTNAME`, then the operating-system hostname. Set
+`WA_EVENT_WEBHOOK_QUEUE_PREFIX` to a shared value for replicas that should
+consume the same jobs, and use a different value for each separate deployment.
+Jobs also carry a hash of their destination settings; a worker rejects a job if
+its URL, credentials, or other destination settings do not match.
 
 Example with two routines:
 
