@@ -467,6 +467,7 @@ Copy `.env.example` to `.env` and configure:
 | `WA_CLOUD_RATE_LIMIT`       | `80`                     | Messages/min per Cloud API instance      |
 | `WA_MESSAGE_RETENTION_DAYS` | `30`                     | Auto-delete old messages                 |
 | `WA_AUTO_RECONNECT`         | `true`                   | Auto-reconnect on disconnect             |
+| `WA_MARK_ONLINE_ON_CONNECT` | `false`                  | Mark the Baileys account online when its socket connects |
 | `WA_MEDIA_CACHE_MAX_MB`     | `500`                    | Media cache size limit                   |
 | `WA_TRANSCRIPTION_ENABLED`  | `false`                  | Enable transcription and audio notifications |
 | `WA_TRANSCRIPTION_API_KEY`  | —                        | API key for the transcription endpoint   |
@@ -495,6 +496,7 @@ Copy `.env.example` to `.env` and configure:
 | `WA_VERSION_CHECK`          | `true`                   | Daily WhatsApp Web version check         |
 
 See [Audio transcription](docs/audio-transcription.md) for tool examples and event behavior.
+See [Baileys presence](docs/baileys-presence.md) for online status configuration.
 
 ---
 
