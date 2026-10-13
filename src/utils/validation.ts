@@ -41,56 +41,87 @@ export function isValidJidOrPhone(input: string): boolean {
 
 // ---- URL Safety (SSRF Prevention) ----
 
-/** Private/internal IP ranges that must not be fetched. */
-function isPrivateIp(hostname: string): boolean {
+const NON_PUBLIC_IPV4_RANGES: readonly [string, number][] = [
+  ["0.0.0.0", 8],
+  ["10.0.0.0", 8],
+  ["100.64.0.0", 10],
+  ["127.0.0.0", 8],
+  ["169.254.0.0", 16],
+  ["172.16.0.0", 12],
+  ["192.0.0.0", 24],
+  ["192.0.2.0", 24],
+  ["192.88.99.0", 24],
+  ["192.168.0.0", 16],
+  ["198.18.0.0", 15],
+  ["198.51.100.0", 24],
+  ["203.0.113.0", 24],
+  ["224.0.0.0", 4],
+  ["240.0.0.0", 4],
+];
+
+function ipv4InRange(address: string, network: string, prefix: number): boolean {
+  const toNumber = (value: string): number =>
+    value.split(".").reduce((result, part) => (result << 8) | Number(part), 0) >>> 0;
+  const mask = (0xffffffff << (32 - prefix)) >>> 0;
+  return (toNumber(address) & mask) === (toNumber(network) & mask);
+}
+
+function parseIpv6Groups(address: string): number[] | null {
+  let normalized = address.toLowerCase();
+  if (normalized.includes(".")) {
+    const lastColon = normalized.lastIndexOf(":");
+    const ipv4 = normalized.slice(lastColon + 1);
+    if (isIP(ipv4) !== 4) return null;
+    const octets = ipv4.split(".").map(Number);
+    const high = ((octets[0] ?? 0) << 8) | (octets[1] ?? 0);
+    const low = ((octets[2] ?? 0) << 8) | (octets[3] ?? 0);
+    normalized = `${normalized.slice(0, lastColon)}:${high.toString(16)}:${low.toString(16)}`;
+  }
+
+  const halves = normalized.split("::");
+  if (halves.length > 2) return null;
+  const left = halves[0] ? halves[0].split(":") : [];
+  const right = halves.length === 2 && halves[1] ? halves[1].split(":") : [];
+  const missing = 8 - left.length - right.length;
+  if ((halves.length === 1 && missing !== 0) || (halves.length === 2 && missing < 1)) {
+    return null;
+  }
+  const groups = [...left, ...Array(Math.max(0, missing)).fill("0"), ...right].map((group) =>
+    Number.parseInt(group, 16),
+  );
+  return groups.length === 8 && groups.every(Number.isInteger) ? groups : null;
+}
+
+/** Private, special-use, or non-global IP ranges that must not receive a webhook. */
+export function isNonPublicIp(hostname: string): boolean {
   const lower = hostname
     .toLowerCase()
     .replace(/^\[|\]$/g, "")
     .replace(/\.$/, "");
 
   if (isIP(lower) === 4) {
-    const [first = 0, second = 0] = lower.split(".").map(Number);
-    return (
-      first === 0 ||
-      first === 10 ||
-      first === 127 ||
-      (first === 100 && second >= 64 && second <= 127) ||
-      (first === 169 && second === 254) ||
-      (first === 172 && second >= 16 && second <= 31) ||
-      (first === 192 && (second === 0 || second === 168)) ||
-      (first === 198 && (second === 18 || second === 19)) ||
-      first >= 224
-    );
+    return NON_PUBLIC_IPV4_RANGES.some(([network, prefix]) => ipv4InRange(lower, network, prefix));
   }
 
   if (isIP(lower) === 6) {
-    const [left, right] = lower.split("::");
-    const leftGroups = left ? left.split(":") : [];
-    const rightGroups = right ? right.split(":") : [];
-    const omittedGroups = 8 - leftGroups.length - rightGroups.length;
-    const groups = [
-      ...leftGroups,
-      ...Array(Math.max(0, omittedGroups)).fill("0"),
-      ...rightGroups,
-    ].map((group) => Number.parseInt(group, 16));
-
-    if (groups.length !== 8) return true;
+    const groups = parseIpv6Groups(lower);
+    if (!groups) return true;
     const isMappedIpv4 = groups.slice(0, 5).every((group) => group === 0) && groups[5] === 0xffff;
     if (isMappedIpv4) {
       const first = (groups[6] ?? 0) >> 8;
       const second = (groups[6] ?? 0) & 0xff;
       const third = (groups[7] ?? 0) >> 8;
       const fourth = (groups[7] ?? 0) & 0xff;
-      return isPrivateIp(`${first}.${second}.${third}.${fourth}`);
+      return isNonPublicIp(`${first}.${second}.${third}.${fourth}`);
     }
 
     const firstGroup = groups[0] ?? 0;
     return (
-      groups.slice(0, 6).every((group) => group === 0) ||
-      (firstGroup & 0xfe00) === 0xfc00 || // Unique local (fc00::/7)
-      (firstGroup & 0xffc0) === 0xfe80 || // Link local (fe80::/10)
-      (firstGroup & 0xff00) === 0xff00 || // Multicast (ff00::/8)
-      (firstGroup === 0x2001 && groups[1] === 0x0db8) // Documentation range
+      firstGroup < 0x2000 ||
+      firstGroup > 0x3fff ||
+      (firstGroup === 0x2001 && groups[1] === 0x0db8) || // Documentation range
+      firstGroup === 0x2002 || // 6to4 embeds an IPv4 address
+      (firstGroup === 0x2001 && groups[1] === 0x0000) // Teredo embeds IPv4 addresses
     );
   }
 
@@ -132,7 +163,7 @@ export function validateMediaUrl(url: string): string | null {
   }
 
   // Block private/internal hosts
-  if (isPrivateIp(parsed.hostname)) {
+  if (isNonPublicIp(parsed.hostname)) {
     return "URL points to a private/internal address";
   }
 
@@ -159,7 +190,7 @@ export function validateWebhookUrl(url: string, allowHttp = false): string | nul
     return "Webhook URL must not contain credentials";
   }
 
-  if (!parsed.hostname || isPrivateIp(parsed.hostname)) {
+  if (!parsed.hostname || isNonPublicIp(parsed.hostname)) {
     return "Webhook URL must use a public hostname";
   }
 

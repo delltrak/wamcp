@@ -1,5 +1,9 @@
-import { createHmac } from "node:crypto";
+import { createHash, createHmac } from "node:crypto";
+import { lookup as lookupDns } from "node:dns/promises";
+import { isIP } from "node:net";
+import type { ConnectionOptions } from "node:tls";
 import { Queue, Worker, type Job, type JobsOptions } from "bullmq";
+import { Agent } from "undici";
 import type { InstanceManager } from "./instance-manager.js";
 import { QUEUE_COMPLETED_AGE_S, QUEUE_FAILED_AGE_S } from "../constants.js";
 import type { ChannelEvent, ChannelEventPayload } from "../types/channel.types.js";
@@ -10,6 +14,7 @@ import {
   type EventWebhookConfig,
   type EventWebhookDestination,
 } from "./event-webhook-config.js";
+import { isNonPublicIp } from "../utils/validation.js";
 
 const logger = createChildLogger({ service: "event-webhook" });
 const WEBHOOK_QUEUE_NAME = "wa-mcp-event-webhooks";
@@ -46,8 +51,16 @@ export type EventWebhookBody =
 
 export interface EventWebhookJob {
   destinationId: string;
+  destinationIdentity: string;
   payload: EventWebhookBody;
 }
+
+export interface EventWebhookDnsAddress {
+  address: string;
+  family: number;
+}
+
+export type EventWebhookDnsResolver = (hostname: string) => Promise<EventWebhookDnsAddress[]>;
 
 type EnqueueWebhookJob = (job: EventWebhookJob) => Promise<unknown>;
 const MAX_BATCH_SIZE = 25;
@@ -58,6 +71,73 @@ interface BufferedDestinationEvents {
 }
 
 export type EventWebhookUnsubscribe = (() => void) & { flush: () => Promise<void> };
+
+const resolveWebhookDns: EventWebhookDnsResolver = (hostname) =>
+  lookupDns(hostname, { all: true, verbatim: true });
+
+export function createPinnedWebhookConnectionOptions(
+  hostname: string,
+  address: string,
+  family: 4 | 6,
+  protocol: string,
+): ConnectionOptions {
+  return {
+    lookup: (_hostname, options, callback) => {
+      if (options.all) {
+        callback(null, [{ address, family }]);
+        return;
+      }
+      callback(null, address, family);
+    },
+    ...(protocol === "https:" && isIP(hostname) === 0 ? { servername: hostname } : {}),
+  };
+}
+
+async function resolvePinnedWebhookAddress(
+  url: URL,
+  resolveDns: EventWebhookDnsResolver,
+): Promise<{ hostname: string; address: string; family: 4 | 6 }> {
+  const hostname = url.hostname.replace(/^\[|\]$/g, "");
+  const literalFamily = isIP(hostname);
+  const addresses = literalFamily
+    ? [{ address: hostname, family: literalFamily }]
+    : await resolveDns(hostname);
+  const normalized = addresses.map(({ address }) => ({ address, family: isIP(address) }));
+
+  if (
+    normalized.length === 0 ||
+    normalized.some(
+      ({ address, family }) => (family !== 4 && family !== 6) || isNonPublicIp(address),
+    )
+  ) {
+    throw new Error("Webhook destination must resolve only to public IP addresses");
+  }
+
+  const pinned = normalized[0];
+  if (!pinned || (pinned.family !== 4 && pinned.family !== 6)) {
+    throw new Error("Webhook destination must resolve to a public IP address");
+  }
+
+  return { hostname, address: pinned.address, family: pinned.family };
+}
+
+export function eventWebhookDestinationIdentity(destination: EventWebhookDestination): string {
+  const identity = {
+    id: destination.id,
+    url: destination.url,
+    headers: Object.entries(destination.headers).sort(([left], [right]) =>
+      left.localeCompare(right),
+    ),
+    secret: destination.secret ?? null,
+    preset: destination.preset ?? null,
+    events: [...destination.events].sort(),
+    ignoreFromMe: destination.ignoreFromMe,
+    chatAllowlist: destination.chatAllowlist ? [...destination.chatAllowlist].sort() : null,
+    senderAllowlist: destination.senderAllowlist ? [...destination.senderAllowlist].sort() : null,
+    debounceMs: destination.debounceMs,
+  };
+  return createHash("sha256").update(JSON.stringify(identity)).digest("hex");
+}
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -183,7 +263,13 @@ export function registerEventWebhookHandler(
   ): Promise<void> => {
     let enqueueResult: Promise<unknown>;
     try {
-      enqueueResult = Promise.resolve(enqueue({ destinationId: destination.id, payload }));
+      enqueueResult = Promise.resolve(
+        enqueue({
+          destinationId: destination.id,
+          destinationIdentity: eventWebhookDestinationIdentity(destination),
+          payload,
+        }),
+      );
     } catch {
       safeFailureNotice();
       return Promise.resolve();
@@ -309,21 +395,59 @@ export async function postEventWebhook(
   payload: EventWebhookBody,
   timeoutMs: number,
   fetchRequest: typeof fetch = fetch,
+  resolveDns: EventWebhookDnsResolver = resolveWebhookDns,
 ): Promise<void> {
+  let response: Response | undefined;
+  let dispatcher: Agent | undefined;
   try {
+    const url = new URL(destination.url);
+    const pinned = await resolvePinnedWebhookAddress(url, resolveDns);
+    dispatcher = new Agent({
+      connect: createPinnedWebhookConnectionOptions(
+        pinned.hostname,
+        pinned.address,
+        pinned.family,
+        url.protocol,
+      ),
+    });
     const body = JSON.stringify(payload);
-    const response = await fetchRequest(destination.url, {
+    response = await fetchRequest(destination.url, {
       method: "POST",
       headers: createEventWebhookHeaders(body, destination),
       body,
       signal: AbortSignal.timeout(timeoutMs),
       redirect: "error",
-    });
+      dispatcher,
+    } as RequestInit & { dispatcher: Agent });
     if (!response.ok) throw new Error();
   } catch {
     // Never include the URL, response body, headers, or underlying network error.
     throw new Error("Event webhook delivery failed");
+  } finally {
+    try {
+      await response?.body?.cancel();
+    } catch {
+      // Response cleanup must not expose endpoint details or mask the delivery result.
+    }
+    try {
+      await dispatcher?.close();
+    } catch {
+      // The request dispatcher is scoped to this attempt and must not be reused.
+    }
   }
+}
+
+export async function processEventWebhookJob(
+  job: EventWebhookJob,
+  destinations: ReadonlyMap<string, EventWebhookDestination>,
+  timeoutMs: number,
+  deliver: typeof postEventWebhook = postEventWebhook,
+): Promise<void> {
+  const destination = destinations.get(job.destinationId);
+  if (!destination || job.destinationIdentity !== eventWebhookDestinationIdentity(destination)) {
+    throw new Error("Event webhook destination does not match this service configuration");
+  }
+  await deliver(destination, job.payload, timeoutMs);
 }
 
 /** Dedicated BullMQ queue for outgoing normalized channel events. */
@@ -343,16 +467,14 @@ export class EventWebhookService {
     const destinations = new Map(this.config.destinations.map((item) => [item.id, item]));
     this.queue = new Queue<EventWebhookJob>(WEBHOOK_QUEUE_NAME, {
       connection: getRedisConnectionOptions(),
+      prefix: this.config.queuePrefix,
       defaultJobOptions: eventWebhookJobOptions(this.config),
     });
     this.worker = new Worker<EventWebhookJob>(
       WEBHOOK_QUEUE_NAME,
-      async (job: Job<EventWebhookJob>) => {
-        const destination = destinations.get(job.data.destinationId);
-        if (!destination) throw new Error("Unknown event webhook destination");
-        await postEventWebhook(destination, job.data.payload, this.config.timeoutMs);
-      },
-      { connection: getRedisConnectionOptions() },
+      (job: Job<EventWebhookJob>) =>
+        processEventWebhookJob(job.data, destinations, this.config.timeoutMs),
+      { connection: getRedisConnectionOptions(), prefix: this.config.queuePrefix },
     );
     this.worker.on("failed", () => {
       logger.warn("Outgoing event webhook delivery attempt failed");

@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+import { hostname } from "node:os";
 import type { ChannelEvent } from "../types/channel.types.js";
 import { validateWebhookUrl } from "../utils/validation.js";
 
@@ -46,6 +48,7 @@ export interface EventWebhookDestination {
 
 export interface EventWebhookConfig {
   destinations: EventWebhookDestination[];
+  queuePrefix: string;
   /** Retained for callers and for the backward-compatible single destination. */
   events: ChannelEvent[];
   ignoreFromMe: boolean;
@@ -318,6 +321,14 @@ function parseDestination(
 
 /** Parse and validate webhook settings without exposing secrets in errors. */
 export function loadEventWebhookConfig(env: Environment = process.env): EventWebhookConfig {
+  const configuredQueuePrefix = env.WA_EVENT_WEBHOOK_QUEUE_PREFIX?.trim();
+  if (configuredQueuePrefix && !/^[A-Za-z0-9_-]{1,64}$/.test(configuredQueuePrefix)) {
+    throw new Error("Invalid WA_EVENT_WEBHOOK_QUEUE_PREFIX; use 1-64 letters, digits, _ or -");
+  }
+  const deploymentId = env.WA_DEPLOYMENT_ID?.trim() || env.HOSTNAME?.trim() || hostname();
+  const queuePrefix =
+    configuredQueuePrefix ||
+    `wa-event-webhooks-${createHash("sha256").update(deploymentId).digest("hex").slice(0, 16)}`;
   const allowHttp = parseBoolean(env, "WA_EVENT_WEBHOOK_ALLOW_HTTP", false);
   const ignoreFromMe = parseBoolean(env, "WA_EVENT_WEBHOOK_IGNORE_FROM_ME", true);
   const timeoutMs = parsePositiveInteger(env, "WA_EVENT_WEBHOOK_TIMEOUT_MS", 10_000, 300_000);
@@ -361,7 +372,15 @@ export function loadEventWebhookConfig(env: Environment = process.env): EventWeb
     const destinations = parsed.map((item, index) =>
       parseDestination(item, index, env, global, ids),
     );
-    return { destinations, events, ignoreFromMe, timeoutMs, retryAttempts, retryDelayMs };
+    return {
+      destinations,
+      queuePrefix,
+      events,
+      ignoreFromMe,
+      timeoutMs,
+      retryAttempts,
+      retryDelayMs,
+    };
   }
 
   const headers = parseJsonHeaders(env.WA_EVENT_WEBHOOK_HEADERS);
@@ -382,7 +401,15 @@ export function loadEventWebhookConfig(env: Environment = process.env): EventWeb
   }
 
   if (!url) {
-    return { destinations: [], events, ignoreFromMe, timeoutMs, retryAttempts, retryDelayMs };
+    return {
+      destinations: [],
+      queuePrefix,
+      events,
+      ignoreFromMe,
+      timeoutMs,
+      retryAttempts,
+      retryDelayMs,
+    };
   }
 
   return {
@@ -398,6 +425,7 @@ export function loadEventWebhookConfig(env: Environment = process.env): EventWeb
         debounceMs,
       },
     ],
+    queuePrefix,
     events,
     ignoreFromMe,
     timeoutMs,

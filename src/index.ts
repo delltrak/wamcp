@@ -20,6 +20,7 @@ import { createMcpServer } from "./server/mcp.js";
 import { verifyWebhookSignature } from "./channels/cloud-api/cloud.auth.js";
 import { normalizeWebhookPayload } from "./channels/cloud-api/cloud.events.js";
 import type { MetaWebhookPayload } from "./channels/cloud-api/cloud.events.js";
+import { installShutdownHandlers, SHUTDOWN_TIMEOUT_MS } from "./utils/shutdown.js";
 import { logger } from "./utils/logger.js";
 
 const CLOUD_WEBHOOK_PATH = "/cloud-webhook";
@@ -82,11 +83,11 @@ async function initServices() {
 
   logger.info("Services initialized");
 
-  return { instanceManager, messageQueue, eventWebhook };
+  return { instanceManager, messageQueue, eventWebhook, maintenance };
 }
 
 async function startHttp(): Promise<void> {
-  const { instanceManager, messageQueue, eventWebhook } = await initServices();
+  const { instanceManager, messageQueue, eventWebhook, maintenance } = await initServices();
   const mcpSessions = new McpHttpSessionManager(instanceManager, messageQueue);
   const startTime = Date.now();
 
@@ -201,13 +202,38 @@ async function startHttp(): Promise<void> {
     res.end(JSON.stringify({ error: "Not found" }));
   });
 
+  let servicesClosePromise: Promise<void> | null = null;
+  const closeServices = (): Promise<void> => {
+    servicesClosePromise ??= Promise.all([
+      messageQueue.close(),
+      eventWebhook.close(),
+      maintenance.stop(),
+    ]).then(() => undefined);
+    return servicesClosePromise;
+  };
   httpServer.on("close", () => {
-    void Promise.all([mcpSessions.closeAll(), messageQueue.close(), eventWebhook.close()]).catch(
-      () => {
-        logger.error("Failed to close server services");
-      },
-    );
+    void closeServices().catch((err: unknown) => {
+      logger.error({ err }, "Failed to close server services");
+    });
   });
+
+  installShutdownHandlers(
+    async (signal) => {
+      logger.info({ signal }, "Stopping HTTP server");
+      try {
+        const serverClosed = new Promise<void>((resolve, reject) => {
+          httpServer.close((error) => (error ? reject(error) : resolve()));
+        });
+        await Promise.all([serverClosed, mcpSessions.closeAll()]);
+      } finally {
+        await closeServices();
+      }
+    },
+    {
+      timeoutMs: SHUTDOWN_TIMEOUT_MS,
+      onError: (err) => logger.error({ err }, "Failed to shut down HTTP server"),
+    },
+  );
 
   httpServer.listen(port, () => {
     logger.info(
@@ -218,15 +244,35 @@ async function startHttp(): Promise<void> {
 }
 
 async function startStdio(): Promise<void> {
-  const { instanceManager, messageQueue, eventWebhook } = await initServices();
+  const { instanceManager, messageQueue, eventWebhook, maintenance } = await initServices();
   const { server: mcpServer } = createMcpServer(instanceManager, messageQueue);
   const onServerClose = mcpServer.server.onclose;
+  let servicesClosePromise: Promise<void> | null = null;
+  const closeServices = (): Promise<void> => {
+    servicesClosePromise ??= Promise.all([
+      messageQueue.close(),
+      eventWebhook.close(),
+      maintenance.stop(),
+    ]).then(() => undefined);
+    return servicesClosePromise;
+  };
   mcpServer.server.onclose = () => {
     onServerClose?.();
-    void Promise.all([messageQueue.close(), eventWebhook.close()]).catch(() => {
-      logger.error("Failed to close server services");
+    void closeServices().catch((err: unknown) => {
+      logger.error({ err }, "Failed to close server services");
     });
   };
+  installShutdownHandlers(
+    async (signal) => {
+      logger.info({ signal }, "Stopping stdio server");
+      await mcpServer.close();
+      await closeServices();
+    },
+    {
+      timeoutMs: SHUTDOWN_TIMEOUT_MS,
+      onError: (err) => logger.error({ err }, "Failed to shut down stdio server"),
+    },
+  );
   const stdioTransport = new StdioServerTransport(process.stdin, process.stdout, {
     maxBufferSize: STDIO_MAX_BUFFER_BYTES,
   });
