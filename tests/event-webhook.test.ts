@@ -4,6 +4,7 @@ import type { InstanceManager } from "../src/services/instance-manager.js";
 import {
   createEventWebhookHeaders,
   eventWebhookJobOptions,
+  normalizeGrokBotWebhookPayload,
   normalizeEventWebhookPayload,
   postEventWebhook,
   registerEventWebhookHandler,
@@ -40,6 +41,7 @@ function configuredWebhook(overrides: Record<string, string | undefined> = {}) {
 }
 
 afterEach(() => {
+  vi.useRealTimers();
   vi.restoreAllMocks();
 });
 
@@ -126,6 +128,66 @@ describe("outgoing event webhook config", () => {
       }),
     ).toThrow("must be configured together");
   });
+
+  it("loads multiple destinations with independent presets, secrets, events and allowlists", () => {
+    const config = loadEventWebhookConfig({
+      WA_EVENT_WEBHOOKS: JSON.stringify([
+        {
+          id: "owner",
+          url: "https://hooks.example.test/owner",
+          preset: "grok-bot",
+          authHeader: "X-Owner-Key",
+          authEnv: "OWNER_ROUTINE_KEY",
+          secretEnv: "OWNER_HMAC_SECRET",
+          chatAllowlist: ["chat-1"],
+          senderAllowlist: ["sender-1"],
+          debounceMs: 2_000,
+        },
+        {
+          id: "audit",
+          url: "https://hooks.example.test/audit",
+          headers: { "X-Audit": "enabled" },
+          events: ["message.edited"],
+        },
+      ]),
+      OWNER_ROUTINE_KEY: "routine-secret",
+      OWNER_HMAC_SECRET: "hmac-secret",
+    });
+
+    expect(config.destinations).toHaveLength(2);
+    expect(config.destinations[0]).toMatchObject({
+      id: "owner",
+      preset: "grok-bot",
+      headers: { "x-owner-key": "routine-secret" },
+      secret: "hmac-secret",
+      events: ["message.received"],
+      chatAllowlist: ["chat-1"],
+      senderAllowlist: ["sender-1"],
+      debounceMs: 2_000,
+    });
+    expect(config.destinations[1]).toMatchObject({
+      id: "audit",
+      events: ["message.edited"],
+      headers: { "x-audit": "enabled" },
+      ignoreFromMe: true,
+      debounceMs: 0,
+    });
+  });
+
+  it("keeps the legacy single destination variables working with the Grok Bot preset", () => {
+    const config = configuredWebhook({
+      WA_EVENT_WEBHOOK_PRESET: "grok-bot",
+      WA_EVENT_WEBHOOK_AUTH_VALUE: "routine-secret",
+    });
+
+    expect(config.destinations[0]).toMatchObject({
+      id: "default",
+      preset: "grok-bot",
+      headers: { "x-grok-bot-key": "routine-secret" },
+      events: ["message.received"],
+      ignoreFromMe: true,
+    });
+  });
 });
 
 describe("outgoing event webhook events", () => {
@@ -167,6 +229,110 @@ describe("outgoing event webhook events", () => {
     });
   });
 
+  it("filters Grok Bot self messages, statuses, broadcasts and allowlists", () => {
+    const destination = loadEventWebhookConfig({
+      WA_EVENT_WEBHOOKS: JSON.stringify([
+        {
+          id: "grok",
+          url: "https://hooks.example.test/grok",
+          preset: "grok-bot",
+          chatAllowlist: ["allowed-chat"],
+          senderAllowlist: ["allowed-sender"],
+        },
+      ]),
+    }).destinations[0];
+    const allowedMessage = {
+      ...incomingMessage(),
+      chatId: "allowed-chat",
+      message: { ...incomingMessage().message, sender: "allowed-sender" },
+    };
+
+    expect(shouldSendEventWebhook("message.received", allowedMessage, destination)).toBe(true);
+    expect(
+      shouldSendEventWebhook(
+        "message.received",
+        { ...allowedMessage, message: { ...allowedMessage.message, isFromMe: true } },
+        destination,
+      ),
+    ).toBe(false);
+    expect(
+      shouldSendEventWebhook(
+        "message.received",
+        { ...allowedMessage, chatId: "status@broadcast" },
+        destination,
+      ),
+    ).toBe(false);
+    expect(
+      shouldSendEventWebhook(
+        "message.received",
+        { ...allowedMessage, chatId: "1234567890@broadcast" },
+        destination,
+      ),
+    ).toBe(false);
+    expect(
+      shouldSendEventWebhook(
+        "message.received",
+        { ...allowedMessage, chatId: "other-chat" },
+        destination,
+      ),
+    ).toBe(false);
+    expect(
+      shouldSendEventWebhook(
+        "message.received",
+        { ...allowedMessage, message: { ...allowedMessage.message, sender: "other-sender" } },
+        destination,
+      ),
+    ).toBe(false);
+    expect(
+      shouldSendEventWebhook(
+        "message.edited",
+        {
+          instanceId: "inst_1234abcd",
+          chatId: "allowed-chat",
+          messageId: "message",
+          newContent: "updated",
+          editedAt: 1,
+        },
+        destination,
+      ),
+    ).toBe(false);
+  });
+
+  it("normalizes a lean Grok Bot body with names and media metadata only", () => {
+    const incoming = incomingMessage();
+    const grokMessage = {
+      ...incoming,
+      chatName: null,
+      senderName: "Alex",
+      message: {
+        ...incoming.message,
+        type: "image" as const,
+        content: "caption",
+        mediaUrl: "cloud-media-123",
+      },
+    };
+
+    expect(normalizeGrokBotWebhookPayload("inst_1234abcd", grokMessage)).toEqual({
+      instanceId: "inst_1234abcd",
+      chatId: "5511888888888@s.whatsapp.net",
+      chatName: "Alex",
+      senderId: "5511888888888@s.whatsapp.net",
+      senderName: "Alex",
+      isGroup: false,
+      type: "image",
+      text: "caption",
+      timestamp: 1_700_000_000,
+      messageId: "wamid.abc123",
+      media: { id: "cloud-media-123" },
+    });
+
+    const binaryUrl = {
+      ...grokMessage,
+      message: { ...grokMessage.message, mediaUrl: "data:application/octet-stream;base64,AAAA" },
+    };
+    expect(normalizeGrokBotWebhookPayload("inst_1234abcd", binaryUrl)).not.toHaveProperty("media");
+  });
+
   it("does not let queue failures escape the channel event handler", async () => {
     let eventHandler: EventHandler | undefined;
     const instanceManager = {
@@ -187,6 +353,138 @@ describe("outgoing event webhook events", () => {
     expect(eventHandler?.("message.received", "inst_1234abcd", incomingMessage())).toBeUndefined();
     await vi.waitFor(() => expect(warning).toHaveBeenCalledOnce());
     expect(warning).toHaveBeenCalledWith();
+  });
+
+  it("delivers each event to its configured destination using its selected payload", async () => {
+    let eventHandler: EventHandler | undefined;
+    const instanceManager = {
+      onAnyEvent: (handler: EventHandler) => {
+        eventHandler = handler;
+        return () => {
+          eventHandler = undefined;
+        };
+      },
+    } as unknown as InstanceManager;
+    const config = loadEventWebhookConfig({
+      WA_EVENT_WEBHOOKS: JSON.stringify([
+        { id: "grok", url: "https://hooks.example.test/grok", preset: "grok-bot" },
+        { id: "legacy", url: "https://hooks.example.test/legacy" },
+      ]),
+    });
+    const enqueue = vi.fn<(_: EventWebhookJob) => Promise<unknown>>(() => Promise.resolve());
+    registerEventWebhookHandler(instanceManager, config, enqueue);
+
+    eventHandler?.("message.received", "inst_1234abcd", incomingMessage());
+    await vi.waitFor(() => expect(enqueue).toHaveBeenCalledTimes(2));
+
+    expect(enqueue).toHaveBeenCalledWith(
+      expect.objectContaining({
+        destinationId: "grok",
+        payload: expect.objectContaining({
+          chatId: "5511888888888@s.whatsapp.net",
+          messageId: "wamid.abc123",
+        }),
+      }),
+    );
+    expect(enqueue).toHaveBeenCalledWith(
+      expect.objectContaining({
+        destinationId: "legacy",
+        payload: expect.objectContaining({
+          event: "message.received",
+          chat: "5511888888888@s.whatsapp.net",
+        }),
+      }),
+    );
+  });
+
+  it("batches without dropping messages and flushes on the configured window", async () => {
+    vi.useFakeTimers();
+    let eventHandler: EventHandler | undefined;
+    const instanceManager = {
+      onAnyEvent: (handler: EventHandler) => {
+        eventHandler = handler;
+        return () => {
+          eventHandler = undefined;
+        };
+      },
+    } as unknown as InstanceManager;
+    const config = loadEventWebhookConfig({
+      WA_EVENT_WEBHOOKS: JSON.stringify([
+        {
+          id: "grok",
+          url: "https://hooks.example.test/grok",
+          preset: "grok-bot",
+          debounceMs: 1_000,
+        },
+      ]),
+    });
+    const enqueue = vi.fn<(_: EventWebhookJob) => Promise<unknown>>(() => Promise.resolve());
+    const unsubscribe = registerEventWebhookHandler(instanceManager, config, enqueue);
+
+    eventHandler?.("message.received", "inst_1234abcd", incomingMessage());
+    eventHandler?.("message.received", "inst_1234abcd", {
+      ...incomingMessage(),
+      message: { ...incomingMessage().message, id: "wamid.second", content: "second" },
+    });
+    expect(enqueue).not.toHaveBeenCalled();
+
+    await vi.advanceTimersByTimeAsync(1_000);
+    await vi.waitFor(() => expect(enqueue).toHaveBeenCalledOnce());
+    expect(enqueue.mock.calls[0]?.[0]).toMatchObject({
+      destinationId: "grok",
+      payload: {
+        messages: [
+          { messageId: "wamid.abc123", text: "hello" },
+          { messageId: "wamid.second", text: "second" },
+        ],
+      },
+    });
+    unsubscribe();
+    await unsubscribe.flush();
+  });
+
+  it("flushes a bounded batch at 25 messages and retains the overflow message", async () => {
+    vi.useFakeTimers();
+    let eventHandler: EventHandler | undefined;
+    const instanceManager = {
+      onAnyEvent: (handler: EventHandler) => {
+        eventHandler = handler;
+        return () => {
+          eventHandler = undefined;
+        };
+      },
+    } as unknown as InstanceManager;
+    const config = loadEventWebhookConfig({
+      WA_EVENT_WEBHOOKS: JSON.stringify([
+        {
+          id: "grok",
+          url: "https://hooks.example.test/grok",
+          preset: "grok-bot",
+          debounceMs: 30_000,
+        },
+      ]),
+    });
+    const enqueue = vi.fn<(_: EventWebhookJob) => Promise<unknown>>(() => Promise.resolve());
+    const unsubscribe = registerEventWebhookHandler(instanceManager, config, enqueue);
+
+    for (let index = 0; index < 26; index += 1) {
+      eventHandler?.("message.received", "inst_1234abcd", {
+        ...incomingMessage(),
+        message: { ...incomingMessage().message, id: `message-${index}` },
+      });
+    }
+    expect(enqueue).toHaveBeenCalledOnce();
+    const firstBatch = enqueue.mock.calls[0]?.[0].payload as {
+      messages: { messageId: string }[];
+    };
+    expect(firstBatch.messages.map((message) => message.messageId)).toEqual(
+      Array.from({ length: 25 }, (_, index) => `message-${index}`),
+    );
+
+    unsubscribe();
+    await unsubscribe.flush();
+    expect(enqueue).toHaveBeenCalledTimes(2);
+    expect(enqueue.mock.calls[1]?.[0].payload).toMatchObject({ messageId: "message-25" });
   });
 });
 

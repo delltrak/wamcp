@@ -24,12 +24,40 @@ export interface EventWebhookPayload {
   timestamp: number | null;
 }
 
+export interface GrokBotWebhookPayload {
+  instanceId: string;
+  chatId: string;
+  chatName: string | null;
+  senderId: string | null;
+  senderName: string | null;
+  isGroup: boolean;
+  type: string;
+  text: string | null;
+  timestamp: number | null;
+  messageId: string;
+  media?: { id: string };
+}
+
+export type EventWebhookBody =
+  | EventWebhookPayload
+  | GrokBotWebhookPayload
+  | { events: EventWebhookPayload[] }
+  | { messages: GrokBotWebhookPayload[] };
+
 export interface EventWebhookJob {
   destinationId: string;
-  payload: EventWebhookPayload;
+  payload: EventWebhookBody;
 }
 
 type EnqueueWebhookJob = (job: EventWebhookJob) => Promise<unknown>;
+const MAX_BATCH_SIZE = 25;
+
+interface BufferedDestinationEvents {
+  payloads: (EventWebhookPayload | GrokBotWebhookPayload)[];
+  timer: ReturnType<typeof setTimeout>;
+}
+
+export type EventWebhookUnsubscribe = (() => void) & { flush: () => Promise<void> };
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -71,19 +99,59 @@ export function normalizeEventWebhookPayload(
   };
 }
 
+/** Build the compact Grok Bot body. Message content carries captions/text only; media bytes are never copied. */
+export function normalizeGrokBotWebhookPayload(
+  instanceId: string,
+  payload: ChannelEventPayload["message.received"],
+): GrokBotWebhookPayload {
+  const mediaId = payload.message.mediaUrl;
+  const safeMediaId =
+    mediaId && mediaId.length <= 256 && /^[A-Za-z0-9_.:-]+$/.test(mediaId) ? mediaId : undefined;
+  const isGroup = payload.isGroup ?? payload.chatId.toLowerCase().endsWith("@g.us");
+
+  return {
+    instanceId,
+    chatId: payload.chatId,
+    chatName: payload.chatName ?? (isGroup ? null : (payload.senderName ?? null)),
+    senderId: payload.message.sender || null,
+    senderName: payload.senderName ?? null,
+    isGroup,
+    type: payload.message.type,
+    text: payload.message.content,
+    timestamp: payload.message.timestamp,
+    messageId: payload.message.id,
+    ...(safeMediaId ? { media: { id: safeMediaId } } : {}),
+  };
+}
+
 export function shouldSendEventWebhook(
   event: ChannelEvent,
   payload: ChannelEventPayload[ChannelEvent],
-  config: Pick<EventWebhookConfig, "events" | "ignoreFromMe">,
+  config: Pick<EventWebhookConfig, "events" | "ignoreFromMe"> &
+    Partial<Pick<EventWebhookDestination, "preset" | "chatAllowlist" | "senderAllowlist">>,
 ): boolean {
   if (!config.events.includes(event)) return false;
-  if (
-    event === "message.received" &&
-    config.ignoreFromMe &&
-    (payload as ChannelEventPayload["message.received"]).message.isFromMe
-  ) {
-    return false;
+  if (config.preset === "grok-bot" && event !== "message.received") return false;
+
+  const data = payload as unknown as Record<string, unknown>;
+  const message = isRecord(data.message) ? data.message : {};
+  const chatId = typeof data.chatId === "string" ? data.chatId : "";
+  const senderId = typeof message.sender === "string" ? message.sender : "";
+
+  if (event === "message.received") {
+    if (config.ignoreFromMe && message.isFromMe === true) return false;
+    if (
+      config.preset === "grok-bot" &&
+      (chatId.toLowerCase() === "status@broadcast" ||
+        chatId.toLowerCase().endsWith("@broadcast") ||
+        chatId.toLowerCase().endsWith("@newsletter"))
+    ) {
+      return false;
+    }
   }
+
+  if (config.chatAllowlist && !config.chatAllowlist.includes(chatId)) return false;
+  if (config.senderAllowlist && !config.senderAllowlist.includes(senderId)) return false;
   return true;
 }
 
@@ -97,31 +165,111 @@ export function registerEventWebhookHandler(
   enqueue: EnqueueWebhookJob,
   onEnqueueFailure: () => void = () =>
     logger.warn("Unable to enqueue outgoing event webhook; message processing continues"),
-): () => void {
-  return instanceManager.onAnyEvent(
+): EventWebhookUnsubscribe {
+  const buffers = new Map<string, BufferedDestinationEvents>();
+  const pendingEnqueues = new Set<Promise<void>>();
+
+  const safeFailureNotice = (): void => {
+    try {
+      onEnqueueFailure();
+    } catch {
+      // A reporting callback must not interrupt the channel event handler.
+    }
+  };
+
+  const enqueuePayload = (
+    destination: EventWebhookDestination,
+    payload: EventWebhookBody,
+  ): Promise<void> => {
+    let enqueueResult: Promise<unknown>;
+    try {
+      enqueueResult = Promise.resolve(enqueue({ destinationId: destination.id, payload }));
+    } catch {
+      safeFailureNotice();
+      return Promise.resolve();
+    }
+    const pending = enqueueResult.then(() => undefined).catch(() => safeFailureNotice());
+    pendingEnqueues.add(pending);
+    void pending.then(() => pendingEnqueues.delete(pending));
+    return pending;
+  };
+
+  const flushDestination = (destination: EventWebhookDestination): Promise<void> => {
+    const buffer = buffers.get(destination.id);
+    if (!buffer) return Promise.resolve();
+    clearTimeout(buffer.timer);
+    buffers.delete(destination.id);
+    if (buffer.payloads.length === 1) {
+      return enqueuePayload(destination, buffer.payloads[0] as EventWebhookBody);
+    }
+    const payload: EventWebhookBody =
+      destination.preset === "grok-bot"
+        ? { messages: buffer.payloads as GrokBotWebhookPayload[] }
+        : { events: buffer.payloads as EventWebhookPayload[] };
+    return enqueuePayload(destination, payload);
+  };
+
+  const queuePayload = (
+    destination: EventWebhookDestination,
+    payload: EventWebhookPayload | GrokBotWebhookPayload,
+  ): void => {
+    if (destination.debounceMs === 0) {
+      void enqueuePayload(destination, payload);
+      return;
+    }
+
+    let buffer = buffers.get(destination.id);
+    if (!buffer) {
+      const timer = setTimeout(() => {
+        void flushDestination(destination);
+      }, destination.debounceMs);
+      buffer = { payloads: [], timer };
+      buffers.set(destination.id, buffer);
+    }
+    buffer.payloads.push(payload);
+    if (buffer.payloads.length >= MAX_BATCH_SIZE) void flushDestination(destination);
+  };
+
+  const removeListener = instanceManager.onAnyEvent(
     <E extends ChannelEvent>(event: E, instanceId: string, payload: ChannelEventPayload[E]) => {
       try {
-        if (!shouldSendEventWebhook(event, payload, config)) return;
-
-        const webhookPayload = normalizeEventWebhookPayload(
-          event,
-          instanceId,
-          payload as ChannelEventPayload[ChannelEvent],
-        );
         for (const destination of config.destinations) {
-          try {
-            void Promise.resolve(
-              enqueue({ destinationId: destination.id, payload: webhookPayload }),
-            ).catch(() => onEnqueueFailure());
-          } catch {
-            onEnqueueFailure();
+          if (!shouldSendEventWebhook(event, payload, destination)) continue;
+
+          if (destination.preset === "grok-bot" && event === "message.received") {
+            queuePayload(
+              destination,
+              normalizeGrokBotWebhookPayload(
+                instanceId,
+                payload as ChannelEventPayload["message.received"],
+              ),
+            );
+          } else {
+            queuePayload(
+              destination,
+              normalizeEventWebhookPayload(
+                event,
+                instanceId,
+                payload as ChannelEventPayload[ChannelEvent],
+              ),
+            );
           }
         }
       } catch {
-        onEnqueueFailure();
+        safeFailureNotice();
       }
     },
   );
+
+  const unsubscribe = (() => {
+    removeListener();
+    void unsubscribe.flush();
+  }) as EventWebhookUnsubscribe;
+  unsubscribe.flush = async () => {
+    for (const destination of config.destinations) void flushDestination(destination);
+    while (pendingEnqueues.size > 0) await Promise.all([...pendingEnqueues]);
+  };
+  return unsubscribe;
 }
 
 /** BullMQ applies exponential backoff between failed delivery attempts. */
@@ -158,7 +306,7 @@ export function createEventWebhookHeaders(
 /** Make one bounded HTTP attempt. Rejections are generic so errors cannot leak URL secrets. */
 export async function postEventWebhook(
   destination: EventWebhookDestination,
-  payload: EventWebhookPayload,
+  payload: EventWebhookBody,
   timeoutMs: number,
   fetchRequest: typeof fetch = fetch,
 ): Promise<void> {
@@ -183,7 +331,7 @@ export class EventWebhookService {
   private readonly config: EventWebhookConfig;
   private queue: Queue<EventWebhookJob> | null = null;
   private worker: Worker<EventWebhookJob> | null = null;
-  private removeEventHandler: (() => void) | null = null;
+  private removeEventHandler: EventWebhookUnsubscribe | null = null;
 
   constructor(config = loadEventWebhookConfig()) {
     this.config = config;
@@ -220,8 +368,11 @@ export class EventWebhookService {
   }
 
   async close(): Promise<void> {
-    this.removeEventHandler?.();
+    const removeEventHandler = this.removeEventHandler;
+    removeEventHandler?.();
     this.removeEventHandler = null;
+
+    await removeEventHandler?.flush();
 
     const worker = this.worker;
     const queue = this.queue;

@@ -235,6 +235,9 @@ export function normalizeWebhookPayload(payload: MetaWebhookPayload): Normalized
           const messageEvent: NormalizedMessageEvent = {
             instanceId: "", // filled by caller
             chatId: `${msg.from}@s.whatsapp.net`,
+            chatName: contactNames.get(msg.from) ?? null,
+            senderName: contactNames.get(msg.from) ?? null,
+            isGroup: false,
             message: {
               id: msg.id,
               sender: `${msg.from}@s.whatsapp.net`,
