@@ -142,6 +142,16 @@ describe("MediaService", () => {
       expect(result).toBeInstanceOf(Buffer);
       expect(result.toString()).toBe("test data");
     });
+
+    it("enforces a caller-provided maximum for direct audio input", async () => {
+      const { MediaService } = await import("../src/services/media.js");
+      const media = new MediaService();
+      const base64 = Buffer.from("five!").toString("base64");
+
+      await expect(media.getMediaBuffer(base64, { maxBytes: 4 })).rejects.toThrow(
+        /Base64 payload exceeds maximum size/,
+      );
+    });
   });
 
   describe("cacheMedia", () => {

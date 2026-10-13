@@ -11,6 +11,63 @@ import { validateMediaUrl, validateBase64Size } from "../utils/validation.js";
 
 const MEDIA_DIR = "data/media";
 
+export interface MediaBufferOptions {
+  maxBytes?: number;
+  timeoutMs?: number;
+}
+
+function sizeLabel(maxBytes: number): string {
+  return maxBytes < 1024 * 1024 ? `${maxBytes} bytes` : `${Math.round(maxBytes / 1024 / 1024)} MB`;
+}
+
+function assertMaxBytes(size: number, maxBytes: number): void {
+  if (size > maxBytes) {
+    throw new Error(`Media exceeds maximum size of ${sizeLabel(maxBytes)}`);
+  }
+}
+
+export async function mediaResponseToBuffer(
+  response: Response,
+  maxBytes?: number,
+): Promise<Buffer> {
+  if (maxBytes !== undefined) {
+    const contentLength = Number(response.headers.get("content-length"));
+    if (Number.isFinite(contentLength) && contentLength > 0) {
+      assertMaxBytes(contentLength, maxBytes);
+    }
+
+    if (response.body) {
+      const reader = response.body.getReader();
+      const chunks: Uint8Array[] = [];
+      let size = 0;
+
+      try {
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          size += value.byteLength;
+          if (size > maxBytes) {
+            await reader.cancel();
+            assertMaxBytes(size, maxBytes);
+          }
+          chunks.push(value);
+        }
+      } finally {
+        reader.releaseLock();
+      }
+
+      return Buffer.concat(
+        chunks.map((chunk) => Buffer.from(chunk)),
+        size,
+      );
+    }
+  }
+
+  const buffer = Buffer.from(await response.arrayBuffer());
+  if (maxBytes !== undefined) assertMaxBytes(buffer.length, maxBytes);
+  return buffer;
+}
+
 export class MediaService {
   private readonly maxCacheBytes: number;
 
@@ -25,32 +82,35 @@ export class MediaService {
   }
 
   /** Download media from an HTTPS URL (with SSRF protection) */
-  async downloadMedia(url: string): Promise<Buffer> {
+  async downloadMedia(url: string, options: MediaBufferOptions = {}): Promise<Buffer> {
     const urlError = validateMediaUrl(url);
     if (urlError) {
       throw new Error(`Invalid media URL: ${urlError}`);
     }
-    const response = await fetch(url);
+    const response = options.timeoutMs
+      ? await fetch(url, { signal: AbortSignal.timeout(options.timeoutMs) })
+      : await fetch(url);
     if (!response.ok) {
       throw new Error(`Failed to download media: HTTP ${response.status}`);
     }
-    const arrayBuffer = await response.arrayBuffer();
-    return Buffer.from(arrayBuffer);
+    return mediaResponseToBuffer(response, options.maxBytes);
   }
 
   /** Decode base64 media to a buffer (with size limit) */
-  decodeBase64Media(base64: string): Buffer {
-    const sizeError = validateBase64Size(base64);
+  decodeBase64Media(base64: string, maxBytes?: number): Buffer {
+    const sizeError = validateBase64Size(base64, maxBytes);
     if (sizeError) {
       throw new Error(sizeError);
     }
-    return Buffer.from(base64, "base64");
+    const buffer = Buffer.from(base64, "base64");
+    if (maxBytes !== undefined) assertMaxBytes(buffer.length, maxBytes);
+    return buffer;
   }
 
   /** Auto-detect URL vs base64, return Buffer */
-  async getMediaBuffer(input: string): Promise<Buffer> {
+  async getMediaBuffer(input: string, options: MediaBufferOptions = {}): Promise<Buffer> {
     if (input.startsWith("https://")) {
-      return this.downloadMedia(input);
+      return this.downloadMedia(input, options);
     }
     if (input.startsWith("http://")) {
       throw new Error("Media URLs must use HTTPS");
@@ -58,7 +118,7 @@ export class MediaService {
     if (input.startsWith("file://") || input.startsWith("data:")) {
       throw new Error("file:// and data: URLs are not allowed");
     }
-    return this.decodeBase64Media(input);
+    return this.decodeBase64Media(input, options.maxBytes);
   }
 
   /** Cache media buffer to disk, return local path */

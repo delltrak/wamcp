@@ -251,6 +251,7 @@ export interface NormalizedMessageEvent {
     type: MessageType;
     content: string | null;
     mediaUrl: string | null;
+    transcription?: string;
     quotedMessageId: string | null;
     isFromMe: boolean;
   };

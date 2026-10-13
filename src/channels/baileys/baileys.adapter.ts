@@ -6,6 +6,8 @@
 
 import makeWASocket, {
   DisconnectReason,
+  BufferJSON,
+  downloadMediaMessage,
   makeCacheableSignalKeyStore,
   generateForwardMessageContent,
   generateWAMessageFromContent,
@@ -74,6 +76,21 @@ import {
 import { createChildLogger } from "../../utils/logger.js";
 
 const logger = createChildLogger({ service: "baileys-adapter" });
+
+function serializeIncomingAudioMessage(message?: WAMessage): string | null {
+  const audioMessage = message?.message?.audioMessage;
+  if (!message || !audioMessage) return null;
+
+  // Keep only the message key and audio payload needed to download it again.
+  return JSON.stringify(
+    {
+      key: message.key,
+      message: { audioMessage },
+      messageTimestamp: message.messageTimestamp,
+    } as WAMessage,
+    BufferJSON.replacer,
+  );
+}
 
 type ContactCache = {
   id: string;
@@ -832,6 +849,68 @@ export class BaileysAdapter implements ChannelAdapter {
     }));
   }
 
+  async downloadMessageAudio(
+    messageId: string,
+    maxBytes?: number,
+    timeoutMs?: number,
+  ): Promise<{ data: Buffer; mimeType: string }> {
+    const row = db
+      .select({
+        type: messagesTable.type,
+        rawData: messagesTable.rawData,
+        mimetype: messagesTable.mediaMimetype,
+      })
+      .from(messagesTable)
+      .where(and(eq(messagesTable.instanceId, this.instanceId), eq(messagesTable.id, messageId)))
+      .get();
+
+    if (!row) throw new Error(`Message '${messageId}' not found`);
+    if (row.type !== "audio") throw new Error(`Message '${messageId}' is not audio`);
+    if (!row.rawData) {
+      throw new Error(`Audio media for message '${messageId}' is no longer available`);
+    }
+
+    const message = JSON.parse(row.rawData, BufferJSON.reviver) as WAMessage;
+    const audioMessage = message.message?.audioMessage;
+    if (!audioMessage) throw new Error(`Audio media for message '${messageId}' is unavailable`);
+
+    if (maxBytes !== undefined && audioMessage.fileLength !== undefined) {
+      const fileLength = Number(audioMessage.fileLength);
+      if (Number.isFinite(fileLength) && fileLength > maxBytes) {
+        throw new Error(
+          `Audio exceeds maximum transcription size of ${Math.round(maxBytes / 1024 / 1024)} MB`,
+        );
+      }
+    }
+
+    const sock = this.getSock();
+    const downloadOptions = timeoutMs
+      ? { options: { signal: AbortSignal.timeout(timeoutMs) } }
+      : {};
+    const stream = await downloadMediaMessage(message, "stream", downloadOptions, {
+      logger: logger.child({ instanceId: this.instanceId, messageId }),
+      reuploadRequest: sock.updateMediaMessage,
+    });
+    const chunks: Buffer[] = [];
+    let size = 0;
+    for await (const chunk of stream) {
+      const buffer = Buffer.from(chunk);
+      size += buffer.length;
+      if (maxBytes !== undefined && size > maxBytes) {
+        stream.destroy();
+        throw new Error(
+          `Audio exceeds maximum transcription size of ${Math.round(maxBytes / 1024 / 1024)} MB`,
+        );
+      }
+      chunks.push(buffer);
+    }
+
+    return {
+      data: Buffer.concat(chunks, size),
+      mimeType: row.mimetype ?? audioMessage.mimetype ?? "audio/ogg",
+    };
+  }
+
   async getProfileInfo(): Promise<ProfileInfo> {
     const sock = this.getSock();
     const meJid = this.getMeJid();
@@ -853,9 +932,13 @@ export class BaileysAdapter implements ChannelAdapter {
 
   // ---- Message Persistence ----
 
-  private persistMessage(event: NormalizedMessageEvent): void {
+  private persistMessage(event: NormalizedMessageEvent, source?: WAMessage): void {
     try {
       const { message, chatId, instanceId } = event;
+      const rawData =
+        message.type === "audio" && !message.isFromMe
+          ? serializeIncomingAudioMessage(source)
+          : null;
       db.insert(messagesTable)
         .values({
           id: message.id,
@@ -865,17 +948,21 @@ export class BaileysAdapter implements ChannelAdapter {
           type: message.type,
           content: message.content,
           mediaUrl: message.mediaUrl,
+          mediaMimetype: source?.message?.audioMessage?.mimetype ?? null,
           quotedId: message.quotedMessageId,
           isFromMe: message.isFromMe ? 1 : 0,
           isForwarded: 0,
           status: message.isFromMe ? "sent" : "received",
           timestamp: message.timestamp,
+          rawData,
         })
         .onConflictDoUpdate({
           target: [messagesTable.instanceId, messagesTable.id],
           set: {
             content: message.content,
             status: message.isFromMe ? "sent" : "received",
+            mediaMimetype: source?.message?.audioMessage?.mimetype ?? null,
+            rawData,
           },
         })
         .run();
@@ -1154,7 +1241,7 @@ export class BaileysAdapter implements ChannelAdapter {
                 isFromMe: msg.key.fromMe ?? false,
               },
             };
-            this.persistMessage(normalized);
+            this.persistMessage(normalized, msg);
           }
         }
 

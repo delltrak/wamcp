@@ -5,6 +5,10 @@
 // ============================================================
 
 import type { ChannelAdapter, ChannelEventHandler } from "../channel.interface.js";
+import { and, eq } from "drizzle-orm";
+import { db } from "../../db/client.js";
+import { messages as messagesTable } from "../../db/schema.js";
+import { mediaResponseToBuffer } from "../../services/media.js";
 import type {
   ConnectionStatus,
   MessageContent,
@@ -27,6 +31,7 @@ import type {
   CloudCredentials,
   ChannelEvent,
   ChannelEventPayload,
+  NormalizedMessageEvent,
 } from "../../types/channel.types.js";
 import { createChildLogger } from "../../utils/logger.js";
 
@@ -60,7 +65,7 @@ interface CloudApiMediaUrlResponse {
   url: string;
   mime_type: string;
   sha256: string;
-  file_size: number;
+  file_size?: number;
   id: string;
   messaging_product: string;
 }
@@ -695,29 +700,63 @@ export class CloudApiAdapter implements ChannelAdapter {
     return (body as CloudApiMediaUploadResponse).id;
   }
 
-  async getMediaUrl(mediaId: string): Promise<{ url: string; mimeType: string }> {
+  async getMediaUrl(
+    mediaId: string,
+    signal?: AbortSignal,
+  ): Promise<{ url: string; mimeType: string; fileSize?: number }> {
     const url = `${GRAPH_API_BASE}/${mediaId}`;
-    const res = await this.request<CloudApiMediaUrlResponse>(url);
-    return { url: res.url, mimeType: res.mime_type };
+    const res = await this.request<CloudApiMediaUrlResponse>(url, signal ? { signal } : {});
+    return { url: res.url, mimeType: res.mime_type, fileSize: res.file_size };
   }
 
-  async downloadMedia(mediaId: string): Promise<{ data: Buffer; mimeType: string }> {
+  async downloadMedia(
+    mediaId: string,
+    maxBytes?: number,
+    timeoutMs?: number,
+  ): Promise<{ data: Buffer; mimeType: string }> {
     const { accessToken } = this.getCredentials();
+    const signal = timeoutMs ? AbortSignal.timeout(timeoutMs) : undefined;
 
     // Step 1: Get the media URL
-    const { url, mimeType } = await this.getMediaUrl(mediaId);
+    const { url, mimeType, fileSize } = await this.getMediaUrl(mediaId, signal);
+    if (maxBytes !== undefined && fileSize !== undefined && fileSize > maxBytes) {
+      throw new Error(
+        `Audio exceeds maximum transcription size of ${Math.round(maxBytes / 1024 / 1024)} MB`,
+      );
+    }
 
     // Step 2: Download the actual file (URL expires in 5 minutes)
-    const response = await fetch(url, {
-      headers: { Authorization: `Bearer ${accessToken}` },
-    });
+    const options: RequestInit = { headers: { Authorization: `Bearer ${accessToken}` } };
+    if (signal) options.signal = signal;
+    const response = await fetch(url, options);
 
     if (!response.ok) {
       throw new Error(`Media download failed: HTTP ${response.status}`);
     }
 
-    const arrayBuffer = await response.arrayBuffer();
-    return { data: Buffer.from(arrayBuffer), mimeType };
+    const data = await mediaResponseToBuffer(response, maxBytes);
+    return { data, mimeType };
+  }
+
+  async downloadMessageAudio(
+    messageId: string,
+    maxBytes?: number,
+    timeoutMs?: number,
+  ): Promise<{ data: Buffer; mimeType: string }> {
+    const row = db
+      .select({
+        type: messagesTable.type,
+        mediaUrl: messagesTable.mediaUrl,
+      })
+      .from(messagesTable)
+      .where(and(eq(messagesTable.instanceId, this.instanceId), eq(messagesTable.id, messageId)))
+      .get();
+
+    if (!row) throw new Error(`Message '${messageId}' not found`);
+    if (row.type !== "audio") throw new Error(`Message '${messageId}' is not audio`);
+    if (!row.mediaUrl) throw new Error(`Audio media for message '${messageId}' is unavailable`);
+
+    return this.downloadMedia(row.mediaUrl, maxBytes, timeoutMs);
   }
 
   async deleteMedia(mediaId: string): Promise<void> {
@@ -745,6 +784,10 @@ export class CloudApiAdapter implements ChannelAdapter {
 
   /** Emit an event to registered listeners. Public so the webhook handler can use it. */
   emit<E extends ChannelEvent>(event: E, payload: ChannelEventPayload[E]): void {
+    if (event === "message.received") {
+      this.persistAudioMessage(payload as ChannelEventPayload["message.received"]);
+    }
+
     const handlers = this.listeners.get(event);
     if (handlers) {
       for (const handler of handlers) {
@@ -754,6 +797,43 @@ export class CloudApiAdapter implements ChannelAdapter {
           logger.error({ err, event }, "Error in event handler");
         }
       }
+    }
+  }
+
+  private persistAudioMessage(event: NormalizedMessageEvent): void {
+    if (event.message.type !== "audio") return;
+
+    try {
+      db.insert(messagesTable)
+        .values({
+          id: event.message.id,
+          instanceId: this.instanceId,
+          chatId: event.chatId,
+          senderId: event.message.sender,
+          type: "audio",
+          content: event.message.content,
+          mediaUrl: event.message.mediaUrl,
+          mediaMimetype: null,
+          quotedId: event.message.quotedMessageId,
+          isFromMe: event.message.isFromMe ? 1 : 0,
+          isForwarded: 0,
+          status: "received",
+          timestamp: event.message.timestamp,
+        })
+        .onConflictDoUpdate({
+          target: [messagesTable.instanceId, messagesTable.id],
+          set: {
+            mediaUrl: event.message.mediaUrl,
+            mediaMimetype: null,
+            content: event.message.content,
+          },
+        })
+        .run();
+    } catch (err) {
+      logger.error(
+        { err, messageId: event.message.id },
+        "Failed to persist Cloud API audio message",
+      );
     }
   }
 }

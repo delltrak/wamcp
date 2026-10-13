@@ -36,7 +36,7 @@
 
 **WA MCP** is a WhatsApp MCP server built with TypeScript that gives AI agents full access to WhatsApp through the [Model Context Protocol](https://modelcontextprotocol.io). It supports both **Baileys** (WhatsApp Web) and **Meta Cloud API** as dual-channel backends, deployable with **Docker** in a single command.
 
-Your agent connects once and auto-discovers **62 tools**, **10 resources**, and **12 real-time events** — zero configuration, zero REST wrappers, zero glue code.
+Your agent connects once and auto-discovers **63 tools**, **10 resources**, and **12 real-time events** — zero configuration, zero REST wrappers, zero glue code.
 
 ```
 Your AI Agent ←→ MCP Protocol ←→ WA MCP ←→ WhatsApp
@@ -82,7 +82,7 @@ from google.adk.tools.mcp_tool import McpToolset
 
 tools = McpToolset(url="http://localhost:3000/mcp")
 
-# Agent auto-discovers 62 WhatsApp tools
+# Agent auto-discovers 63 WhatsApp tools
 # wa_create_instance, wa_send_text, wa_send_image, ...
 ```
 
@@ -132,6 +132,7 @@ Add to your `claude_desktop_config.json`:
 | 📱  | **Dual-channel**       | Baileys (WhatsApp Web) + Meta Cloud API — same interface.                                                 |
 | 🔄  | **Multi-instance**     | Run 1–50 WhatsApp numbers from a single server.                                                           |
 | 📨  | **Full messaging**     | Text, images, video, audio, documents, polls, reactions, replies, forwards, edits, deletes, view-once.    |
+| 🎙️  | **Audio transcription** | Optional incoming audio transcription for Baileys and Cloud API messages.                                 |
 | 👥  | **Groups**             | Create, manage members, promote/demote admins, settings, invite links, join requests, ephemeral messages. |
 | 👤  | **Contacts & Profile** | Number check, block/unblock, business profiles, privacy, status updates.                                  |
 | 📡  | **Real-time events**   | 12 notification types via SSE: messages, typing, groups, calls, connection status.                        |
@@ -144,7 +145,7 @@ Add to your `claude_desktop_config.json`:
 
 ## 🛠️ Tools
 
-WA MCP exposes **62 tools** across 9 domains. All tools use the `wa_` prefix.
+WA MCP exposes **63 tools** across 10 domains. All tools use the `wa_` prefix.
 
 <details>
 <summary>📋 <strong>Instance Management</strong> (8 tools)</summary>
@@ -184,6 +185,15 @@ WA MCP exposes **62 tools** across 9 domains. All tools use the `wa_` prefix.
 | `wa_send_view_once`    | Send view-once media    |
 | `wa_send_presence`     | Show typing / recording |
 | `wa_mark_read`         | Mark messages as read   |
+
+</details>
+
+<details>
+<summary>🎙️ <strong>Audio Transcription</strong> (1 tool)</summary>
+
+| Tool                  | Description                                                |
+| --------------------- | ---------------------------------------------------------- |
+| `wa_transcribe_audio` | Transcribe an incoming audio message or direct audio input |
 
 </details>
 
@@ -337,7 +347,7 @@ Events are pushed to agents via SSE (Server-Sent Events):
 │  │  Layer 1 — MCP Transport (HTTP/stdio) │ │
 │  ├────────────────────────────────────────┤ │
 │  │  Layer 2 — MCP Core                   │ │
-│  │  62 Tools │ 10 Resources │ 12 Events  │ │
+│  │  63 Tools │ 10 Resources │ 12 Events  │ │
 │  ├────────────────────────────────────────┤ │
 │  │  Layer 3 — Services                   │ │
 │  │  Instance Manager │ Queue │ Dedup     │ │
@@ -385,9 +395,18 @@ Copy `.env.example` to `.env` and configure:
 | `WA_MESSAGE_RETENTION_DAYS` | `30`                     | Auto-delete old messages                 |
 | `WA_AUTO_RECONNECT`         | `true`                   | Auto-reconnect on disconnect             |
 | `WA_MEDIA_CACHE_MAX_MB`     | `500`                    | Media cache size limit                   |
+| `WA_TRANSCRIPTION_ENABLED`  | `false`                  | Enable transcription and audio notifications |
+| `WA_TRANSCRIPTION_API_KEY`  | —                        | API key for the transcription endpoint   |
+| `WA_TRANSCRIPTION_BASE_URL` | `https://api.openai.com/v1` | OpenAI-compatible API base URL           |
+| `WA_TRANSCRIPTION_MODEL`    | `whisper-1`               | Transcription model                      |
+| `WA_TRANSCRIPTION_LANGUAGE` | —                        | Optional ISO-639-1 language hint         |
+| `WA_TRANSCRIPTION_MAX_MB`   | `16`                      | Maximum audio input size in MB           |
+| `WA_TRANSCRIPTION_TIMEOUT_MS` | `60000`                 | Transcription and media download timeout |
 | `WA_CLOUD_WEBHOOK_SECRET`   | —                        | Signing secret for the `x-hub-signature-256` header on `POST /cloud-webhook` |
 | `WA_CLOUD_VERIFY_TOKEN`     | —                        | Token for Meta's webhook GET verification handshake |
 | `WA_VERSION_CHECK`          | `true`                   | Daily WhatsApp Web version check         |
+
+See [Audio transcription](docs/audio-transcription.md) for tool examples and event behavior.
 
 ---
 
@@ -436,7 +455,7 @@ src/
 ├── index.ts                     # Entry point (HTTP/stdio)
 ├── constants.ts                 # Defaults and limits
 ├── server/mcp.ts                # MCP server setup
-├── tools/                       # 🔧 62 MCP tools (9 files)
+├── tools/                       # 🔧 63 MCP tools (10 files)
 ├── resources/                   # 📖 10 MCP resources (8 files)
 ├── notifications/events.ts      # 📡 12 event types
 ├── channels/
@@ -447,11 +466,12 @@ src/
 │   ├── instance-manager.ts      # Instance lifecycle
 │   ├── message-queue.ts         # BullMQ rate limiting
 │   ├── dedup.ts                 # Message deduplication
-│   └── media.ts                 # Media handling
+│   ├── media.ts                 # Media handling
+│   └── transcription.ts         # Speech-to-text provider
 ├── db/
 │   ├── schema.ts                # Drizzle table definitions
 │   └── client.ts                # SQLite connection
-├── schemas/                     # Zod validation (9 files)
+├── schemas/                     # Zod validation (10 files)
 └── types/                       # TypeScript definitions
 ```
 
