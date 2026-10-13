@@ -59,13 +59,13 @@ function createConcurrencyLimiter(concurrency: number) {
 export function registerEventNotifications(
   server: McpServer,
   instanceManager: InstanceManager,
-): void {
+): () => void {
   const transcriptionService = new TranscriptionService();
   const limitTranscriptions = createConcurrencyLimiter(
     positiveInteger(process.env.TRANSCRIPTION_CONCURRENCY, 2),
   );
 
-  instanceManager.onAnyEvent(
+  return instanceManager.onAnyEvent(
     <E extends ChannelEvent>(event: E, instanceId: string, payload: ChannelEventPayload[E]) => {
       const method = EVENT_TO_METHOD[event];
       if (!method) return;
