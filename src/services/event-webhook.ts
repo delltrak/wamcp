@@ -2,7 +2,7 @@ import { createHash, createHmac } from "node:crypto";
 import { lookup as lookupDns } from "node:dns/promises";
 import { isIP } from "node:net";
 import type { ConnectionOptions } from "node:tls";
-import { Queue, Worker, type Job, type JobsOptions } from "bullmq";
+import { Queue, UnrecoverableError, Worker, type Job, type JobsOptions } from "bullmq";
 import { Agent } from "undici";
 import type { InstanceManager } from "./instance-manager.js";
 import { QUEUE_COMPLETED_AGE_S, QUEUE_FAILED_AGE_S } from "../constants.js";
@@ -18,6 +18,8 @@ import { isNonPublicIp } from "../utils/validation.js";
 
 const logger = createChildLogger({ service: "event-webhook" });
 const WEBHOOK_QUEUE_NAME = "wa-mcp-event-webhooks";
+const MAX_WEBHOOK_RETRY_DELAY_MS = 5 * 60 * 1_000;
+const WEBHOOK_BACKOFF_JITTER = 0.2;
 
 export interface EventWebhookPayload {
   event: ChannelEvent;
@@ -61,6 +63,16 @@ export interface EventWebhookDnsAddress {
 }
 
 export type EventWebhookDnsResolver = (hostname: string) => Promise<EventWebhookDnsAddress[]>;
+
+export class EventWebhookRetryableError extends Error {
+  readonly retryAfterMs: number | undefined;
+
+  constructor(retryAfterMs?: number) {
+    super("Event webhook delivery failed transiently");
+    this.name = "EventWebhookRetryableError";
+    this.retryAfterMs = retryAfterMs;
+  }
+}
 
 type EnqueueWebhookJob = (job: EventWebhookJob) => Promise<unknown>;
 const MAX_BATCH_SIZE = 25;
@@ -110,12 +122,12 @@ async function resolvePinnedWebhookAddress(
       ({ address, family }) => (family !== 4 && family !== 6) || isNonPublicIp(address),
     )
   ) {
-    throw new Error("Webhook destination must resolve only to public IP addresses");
+    throw new UnrecoverableError("Event webhook delivery failed permanently");
   }
 
   const pinned = normalized[0];
   if (!pinned || (pinned.family !== 4 && pinned.family !== 6)) {
-    throw new Error("Webhook destination must resolve to a public IP address");
+    throw new UnrecoverableError("Event webhook delivery failed permanently");
   }
 
   return { hostname, address: pinned.address, family: pinned.family };
@@ -141,6 +153,56 @@ export function eventWebhookDestinationIdentity(destination: EventWebhookDestina
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+const RETRYABLE_NETWORK_ERROR_CODES = new Set([
+  "ECONNRESET",
+  "ECONNREFUSED",
+  "EAI_AGAIN",
+  "ENETDOWN",
+  "ENETUNREACH",
+  "ENOTFOUND",
+  "EHOSTDOWN",
+  "EHOSTUNREACH",
+  "EPIPE",
+  "ETIMEDOUT",
+  "UND_ERR_ABORTED",
+  "UND_ERR_BODY_TIMEOUT",
+  "UND_ERR_CONNECT_TIMEOUT",
+  "UND_ERR_HEADERS_TIMEOUT",
+  "UND_ERR_SOCKET",
+]);
+
+function errorProperty(value: unknown, property: string): unknown {
+  return typeof value === "object" && value !== null && property in value
+    ? (value as Record<string, unknown>)[property]
+    : undefined;
+}
+
+function isRetryableNetworkError(error: unknown): boolean {
+  const isFetchTypeError = error instanceof TypeError;
+  let current = error;
+  let hasCause = false;
+  const visited = new Set<unknown>();
+
+  while (current && !visited.has(current)) {
+    visited.add(current);
+    const name = errorProperty(current, "name");
+    const code = errorProperty(current, "code");
+    const message = errorProperty(current, "message");
+    if (message === "unexpected redirect") return false;
+    if (name === "TimeoutError" || name === "AbortError") return true;
+    if (typeof code === "string" && RETRYABLE_NETWORK_ERROR_CODES.has(code)) return true;
+
+    const cause = errorProperty(current, "cause");
+    if (cause === undefined) break;
+    hasCause = true;
+    current = cause;
+  }
+
+  // Fetch uses TypeError for network failures. Errors with an unrecognized cause
+  // (such as TLS certificate failures or refused redirects) are permanent.
+  return isFetchTypeError && !hasCause;
 }
 
 function firstString(...values: unknown[]): string | null {
@@ -358,11 +420,56 @@ export function registerEventWebhookHandler(
   return unsubscribe;
 }
 
-/** BullMQ applies exponential backoff between failed delivery attempts. */
+/** Parse Retry-After as delta-seconds or an HTTP date, with a five-minute ceiling. */
+export function parseEventWebhookRetryAfter(
+  value: string | null,
+  nowMs = Date.now(),
+  maxDelayMs = MAX_WEBHOOK_RETRY_DELAY_MS,
+): number | undefined {
+  if (value === null || value.trim() === "") return undefined;
+
+  const retryAfter = value.trim();
+  if (/^\d+$/.test(retryAfter)) {
+    const seconds = Number(retryAfter);
+    if (seconds >= maxDelayMs / 1_000) return maxDelayMs;
+    return Math.max(0, seconds * 1_000);
+  }
+  if (/^[+-]?\d+(?:\.\d+)?$/.test(retryAfter)) return undefined;
+
+  const retryAtMs = Date.parse(retryAfter);
+  if (!Number.isFinite(retryAtMs)) return undefined;
+  return Math.min(maxDelayMs, Math.max(0, retryAtMs - nowMs));
+}
+
+/** Calculate capped exponential backoff with 20% downward jitter and a Retry-After floor. */
+export function calculateEventWebhookBackoff(
+  attemptsMade: number,
+  retryDelayMs: number,
+  retryAfterMs?: number,
+  randomValue = Math.random(),
+): number {
+  const attempt = Number.isFinite(attemptsMade) ? Math.max(1, Math.floor(attemptsMade)) : 1;
+  const exponentialDelay = Math.min(MAX_WEBHOOK_RETRY_DELAY_MS, retryDelayMs * 2 ** (attempt - 1));
+  const random = Number.isFinite(randomValue) ? Math.min(1, Math.max(0, randomValue)) : 0.5;
+  const jitteredDelay = Math.floor(
+    exponentialDelay * (1 - WEBHOOK_BACKOFF_JITTER + random * WEBHOOK_BACKOFF_JITTER),
+  );
+  const retryAfter = Math.min(MAX_WEBHOOK_RETRY_DELAY_MS, Math.max(0, retryAfterMs ?? 0));
+  return Math.min(MAX_WEBHOOK_RETRY_DELAY_MS, Math.max(jitteredDelay, retryAfter));
+}
+
+export function eventWebhookBackoffStrategy(retryDelayMs: number) {
+  return (attemptsMade: number, _type?: string, error?: Error): number => {
+    if (!(error instanceof EventWebhookRetryableError)) return -1;
+    return calculateEventWebhookBackoff(attemptsMade, retryDelayMs, error.retryAfterMs);
+  };
+}
+
+/** BullMQ retries only errors explicitly classified as transient. */
 export function eventWebhookJobOptions(config: EventWebhookConfig): JobsOptions {
   return {
     attempts: config.retryAttempts,
-    backoff: { type: "exponential", delay: config.retryDelayMs },
+    backoff: { type: "wa-event-webhook", delay: config.retryDelayMs },
     removeOnComplete: { age: QUEUE_COMPLETED_AGE_S },
     removeOnFail: { age: QUEUE_FAILED_AGE_S },
   };
@@ -401,7 +508,14 @@ export async function postEventWebhook(
   let dispatcher: Agent | undefined;
   try {
     const url = new URL(destination.url);
-    const pinned = await resolvePinnedWebhookAddress(url, resolveDns);
+    let pinned: { hostname: string; address: string; family: 4 | 6 };
+    try {
+      pinned = await resolvePinnedWebhookAddress(url, resolveDns);
+    } catch (error) {
+      if (error instanceof UnrecoverableError) throw error;
+      if (isRetryableNetworkError(error)) throw new EventWebhookRetryableError();
+      throw new UnrecoverableError("Event webhook delivery failed permanently");
+    }
     dispatcher = new Agent({
       connect: createPinnedWebhookConnectionOptions(
         pinned.hostname,
@@ -411,18 +525,34 @@ export async function postEventWebhook(
       ),
     });
     const body = JSON.stringify(payload);
-    response = await fetchRequest(destination.url, {
-      method: "POST",
-      headers: createEventWebhookHeaders(body, destination),
-      body,
-      signal: AbortSignal.timeout(timeoutMs),
-      redirect: "error",
-      dispatcher,
-    } as RequestInit & { dispatcher: Agent });
-    if (!response.ok) throw new Error();
-  } catch {
+    try {
+      response = await fetchRequest(destination.url, {
+        method: "POST",
+        headers: createEventWebhookHeaders(body, destination),
+        body,
+        signal: AbortSignal.timeout(timeoutMs),
+        redirect: "error",
+        dispatcher,
+      } as RequestInit & { dispatcher: Agent });
+    } catch (error) {
+      if (isRetryableNetworkError(error)) throw new EventWebhookRetryableError();
+      throw new UnrecoverableError("Event webhook delivery failed permanently");
+    }
+
+    if (response.status === 429 || response.status >= 500) {
+      throw new EventWebhookRetryableError(
+        parseEventWebhookRetryAfter(response.headers.get("retry-after")),
+      );
+    }
+    if (!response.ok) {
+      throw new UnrecoverableError("Event webhook delivery failed permanently");
+    }
+  } catch (error) {
+    if (error instanceof EventWebhookRetryableError || error instanceof UnrecoverableError) {
+      throw error;
+    }
     // Never include the URL, response body, headers, or underlying network error.
-    throw new Error("Event webhook delivery failed");
+    throw new UnrecoverableError("Event webhook delivery failed permanently");
   } finally {
     try {
       await response?.body?.cancel();
@@ -445,7 +575,9 @@ export async function processEventWebhookJob(
 ): Promise<void> {
   const destination = destinations.get(job.destinationId);
   if (!destination || job.destinationIdentity !== eventWebhookDestinationIdentity(destination)) {
-    throw new Error("Event webhook destination does not match this service configuration");
+    throw new UnrecoverableError(
+      "Event webhook destination does not match this service configuration",
+    );
   }
   await deliver(destination, job.payload, timeoutMs);
 }
@@ -474,7 +606,11 @@ export class EventWebhookService {
       WEBHOOK_QUEUE_NAME,
       (job: Job<EventWebhookJob>) =>
         processEventWebhookJob(job.data, destinations, this.config.timeoutMs),
-      { connection: getRedisConnectionOptions(), prefix: this.config.queuePrefix },
+      {
+        connection: getRedisConnectionOptions(),
+        prefix: this.config.queuePrefix,
+        settings: { backoffStrategy: eventWebhookBackoffStrategy(this.config.retryDelayMs) },
+      },
     );
     this.worker.on("failed", () => {
       logger.warn("Outgoing event webhook delivery attempt failed");

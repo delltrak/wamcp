@@ -1,13 +1,18 @@
 import { createHmac } from "node:crypto";
+import { UnrecoverableError } from "bullmq";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { InstanceManager } from "../src/services/instance-manager.js";
 import {
+  calculateEventWebhookBackoff,
   createEventWebhookHeaders,
   createPinnedWebhookConnectionOptions,
+  EventWebhookRetryableError,
+  eventWebhookBackoffStrategy,
   eventWebhookDestinationIdentity,
   eventWebhookJobOptions,
   normalizeGrokBotWebhookPayload,
   normalizeEventWebhookPayload,
+  parseEventWebhookRetryAfter,
   postEventWebhook,
   processEventWebhookJob,
   registerEventWebhookHandler,
@@ -121,7 +126,7 @@ describe("outgoing event webhook config", () => {
     });
     expect(eventWebhookJobOptions(config)).toMatchObject({
       attempts: 4,
-      backoff: { type: "exponential", delay: 300 },
+      backoff: { type: "wa-event-webhook", delay: 300 },
     });
   });
 
@@ -582,6 +587,130 @@ describe("outgoing event webhook events", () => {
 });
 
 describe("outgoing event webhook delivery", () => {
+  const resolvePublicDns = vi.fn(async () => [{ address: "93.184.216.34", family: 4 }]);
+
+  it.each([
+    [
+      "network error",
+      new TypeError("fetch failed", { cause: Object.assign(new Error(), { code: "ECONNRESET" }) }),
+    ],
+    ["timeout", new DOMException("The operation timed out", "TimeoutError")],
+  ])("classifies %s as retryable", async (_label, failure) => {
+    const fetchRequest = vi.fn<typeof fetch>(async () => {
+      throw failure;
+    });
+
+    await expect(
+      postEventWebhook(
+        configuredWebhook().destinations[0]!,
+        {},
+        1_000,
+        fetchRequest,
+        resolvePublicDns,
+      ),
+    ).rejects.toBeInstanceOf(EventWebhookRetryableError);
+  });
+
+  it("retries transient DNS lookup errors", async () => {
+    const fetchRequest = vi.fn<typeof fetch>();
+    const resolveDns = vi.fn(async () => {
+      throw Object.assign(new Error("temporary DNS failure"), { code: "EAI_AGAIN" });
+    });
+
+    await expect(
+      postEventWebhook(
+        configuredWebhook().destinations[0]!,
+        {},
+        1_000,
+        fetchRequest,
+        resolveDns,
+      ),
+    ).rejects.toBeInstanceOf(EventWebhookRetryableError);
+    expect(fetchRequest).not.toHaveBeenCalled();
+  });
+
+  it("does not retry unclassified DNS lookup errors", async () => {
+    const fetchRequest = vi.fn<typeof fetch>();
+    const resolveDns = vi.fn(async () => {
+      throw new Error("resolver misconfigured");
+    });
+
+    await expect(
+      postEventWebhook(
+        configuredWebhook().destinations[0]!,
+        {},
+        1_000,
+        fetchRequest,
+        resolveDns,
+      ),
+    ).rejects.toBeInstanceOf(UnrecoverableError);
+    expect(fetchRequest).not.toHaveBeenCalled();
+  });
+
+  it.each([429, 500, 503])("classifies HTTP %i as retryable", async (status) => {
+    const fetchRequest = vi.fn<typeof fetch>(() => Promise.resolve(new Response(null, { status })));
+
+    await expect(
+      postEventWebhook(
+        configuredWebhook().destinations[0]!,
+        {},
+        1_000,
+        fetchRequest,
+        resolvePublicDns,
+      ),
+    ).rejects.toBeInstanceOf(EventWebhookRetryableError);
+  });
+
+  it.each([400, 401, 404])("classifies HTTP %i as permanent", async (status) => {
+    const fetchRequest = vi.fn<typeof fetch>(() => Promise.resolve(new Response(null, { status })));
+
+    await expect(
+      postEventWebhook(
+        configuredWebhook().destinations[0]!,
+        {},
+        1_000,
+        fetchRequest,
+        resolvePublicDns,
+      ),
+    ).rejects.toBeInstanceOf(UnrecoverableError);
+  });
+
+  it("uses a capped Retry-After header as a minimum retry delay", async () => {
+    const fetchRequest = vi.fn<typeof fetch>(() =>
+      Promise.resolve(new Response(null, { status: 429, headers: { "retry-after": "999" } })),
+    );
+
+    await expect(
+      postEventWebhook(
+        configuredWebhook().destinations[0]!,
+        {},
+        1_000,
+        fetchRequest,
+        resolvePublicDns,
+      ),
+    ).rejects.toMatchObject({ retryAfterMs: 300_000 });
+  });
+
+  it("parses Retry-After seconds and HTTP dates, and ignores invalid or past values", () => {
+    const now = Date.parse("2025-01-01T00:00:00.000Z");
+
+    expect(parseEventWebhookRetryAfter("12", now)).toBe(12_000);
+    expect(parseEventWebhookRetryAfter(new Date(now + 45_000).toUTCString(), now)).toBe(45_000);
+    expect(parseEventWebhookRetryAfter(new Date(now - 1_000).toUTCString(), now)).toBe(0);
+    expect(parseEventWebhookRetryAfter("999", now)).toBe(300_000);
+    expect(parseEventWebhookRetryAfter("not a date", now)).toBeUndefined();
+  });
+
+  it("applies exponential backoff with bounded jitter and a capped Retry-After floor", () => {
+    expect(calculateEventWebhookBackoff(1, 1_000, undefined, 0)).toBe(800);
+    expect(calculateEventWebhookBackoff(1, 1_000, undefined, 1)).toBe(1_000);
+    expect(calculateEventWebhookBackoff(4, 1_000, undefined, 0)).toBe(6_400);
+    expect(calculateEventWebhookBackoff(4, 1_000, undefined, 1)).toBe(8_000);
+    expect(calculateEventWebhookBackoff(1, 1_000, 30_000, 0)).toBe(30_000);
+    expect(calculateEventWebhookBackoff(100, 1_000, 600_000, 1)).toBe(300_000);
+    expect(eventWebhookBackoffStrategy(1_000)(1, "wa-event-webhook", new Error())).toBe(-1);
+  });
+
   it("signs timestamp plus exact request body with HMAC-SHA256", () => {
     const destination = {
       id: "default",
