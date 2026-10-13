@@ -46,8 +46,8 @@ import type {
 import { useSqliteAuthState, clearAuthState } from "./baileys.auth.js";
 import { getWaVersion } from "./baileys.version.js";
 import { db } from "../../db/client.js";
-import { contacts as contactsTable, messages as messagesTable } from "../../db/schema.js";
-import { eq, and, like, or, desc } from "drizzle-orm";
+import { messages as messagesTable } from "../../db/schema.js";
+import { eq, and, desc } from "drizzle-orm";
 import {
   normalizeMessagesUpsert,
   normalizeMessagesUpdate,
@@ -74,6 +74,7 @@ import {
   RECONNECT_MAX_ATTEMPTS,
 } from "../../constants.js";
 import { createChildLogger } from "../../utils/logger.js";
+import { ContactStore, type ContactSyncRecord } from "../../services/contact-store.js";
 
 const logger = createChildLogger({ service: "baileys-adapter" });
 
@@ -92,18 +93,9 @@ function serializeIncomingAudioMessage(message?: WAMessage): string | null {
   );
 }
 
-type ContactCache = {
-  id: string;
-  name?: string;
-  notify?: string;
-  verifiedName?: string;
-  phoneNumber?: string;
-  lid?: string;
-};
-
 export class BaileysAdapter implements ChannelAdapter {
   private sock: WASocket | null = null;
-  private contactCache = new Map<string, ContactCache>();
+  private readonly contactStore: ContactStore;
   private status: ConnectionStatus = "disconnected";
   private qrCode: string | null = null;
   private pairingPhone: string | null = null;
@@ -116,7 +108,8 @@ export class BaileysAdapter implements ChannelAdapter {
   private readonly autoReconnect: boolean;
   private readonly listeners = new Map<ChannelEvent, Set<ChannelEventHandler<ChannelEvent>>>();
 
-  constructor(private readonly instanceId: string) {
+  constructor(private readonly instanceId: string, contactStore?: ContactStore) {
+    this.contactStore = contactStore ?? new ContactStore(instanceId, db);
     this.autoReconnect = process.env.WA_AUTO_RECONNECT !== "false" && DEFAULT_AUTO_RECONNECT;
   }
 
@@ -742,83 +735,7 @@ export class BaileysAdapter implements ChannelAdapter {
   // ---- Data access ----
 
   async getContacts(search?: string): Promise<Contact[]> {
-    // Flush in-memory cache into DB (contacts arrive via contacts.upsert event)
-    if (this.contactCache.size > 0) {
-      const now = Date.now();
-      for (const c of this.contactCache.values()) {
-        let lid: string | null = c.lid ?? null;
-        const extractPhone = (jid: string): string => jid.split("@")[0].split(":")[0];
-
-        let phone: string | null;
-        if (c.phoneNumber) {
-          phone = extractPhone(c.phoneNumber);
-        } else if (c.id.endsWith("@lid")) {
-          lid = c.id;
-          try {
-            const pn = await this.resolvePn(c.id);
-            phone = pn !== c.id ? extractPhone(pn) : null;
-          } catch {
-            phone = null;
-          }
-        } else {
-          phone = extractPhone(c.id);
-        }
-
-        db.insert(contactsTable)
-          .values({
-            instanceId: this.instanceId,
-            jid: c.id,
-            name: c.name ?? null,
-            notifyName: c.notify ?? null,
-            phone,
-            lid,
-            isBusiness: c.verifiedName ? 1 : 0,
-            isBlocked: 0,
-            updatedAt: now,
-          })
-          .onConflictDoUpdate({
-            target: [contactsTable.instanceId, contactsTable.jid],
-            set: { name: c.name ?? null, notifyName: c.notify ?? null, phone, lid, updatedAt: now },
-          })
-          .run();
-      }
-      this.contactCache.clear();
-    }
-
-    let rows;
-    if (search) {
-      // Split query into words and match any word against any field
-      const words = search.trim().split(/\s+/).filter(Boolean);
-      const wordConditions = words.map((w) =>
-        or(
-          like(contactsTable.name, `%${w}%`),
-          like(contactsTable.notifyName, `%${w}%`),
-          like(contactsTable.phone, `%${w}%`),
-          like(contactsTable.lid, `%${w}%`),
-        ),
-      );
-      rows = db
-        .select()
-        .from(contactsTable)
-        .where(and(eq(contactsTable.instanceId, this.instanceId), or(...wordConditions)))
-        .all();
-    } else {
-      rows = db
-        .select()
-        .from(contactsTable)
-        .where(eq(contactsTable.instanceId, this.instanceId))
-        .all();
-    }
-
-    return rows.map((r) => ({
-      jid: r.jid,
-      name: r.name ?? r.notifyName ?? null,
-      notifyName: r.notifyName ?? null,
-      phone: r.phone ?? null,
-      profilePicUrl: r.profilePicUrl ?? null,
-      isBusiness: r.isBusiness === 1,
-      isBlocked: r.isBlocked === 1,
-    }));
+    return this.contactStore.getContacts(search);
   }
 
   async getChats(): Promise<Chat[]> {
@@ -1079,41 +996,8 @@ export class BaileysAdapter implements ChannelAdapter {
       await this.saveCreds?.();
     });
 
-    const cacheContacts = (
-      contacts: {
-        id: string;
-        name?: string;
-        notify?: string;
-        verifiedName?: string;
-        phoneNumber?: string;
-        lid?: string;
-      }[],
-    ) => {
-      for (const c of contacts) {
-        if (!c.id) continue;
-
-        // When contact arrives as LID with a phoneNumber, use PN as primary key
-        let primaryId = c.id;
-        let lid = c.lid;
-        if (c.id.endsWith("@lid") && c.phoneNumber) {
-          lid = c.id;
-          primaryId = c.phoneNumber;
-        }
-
-        const existing = this.contactCache.get(primaryId);
-        // Preserve phonebook name (from app-state contactAction) if it differs from notify
-        const existingHasPhonebookName = existing?.name && existing.name !== existing.notify;
-        const newName = existingHasPhonebookName ? existing.name : (c.name ?? existing?.name);
-
-        this.contactCache.set(primaryId, {
-          id: primaryId,
-          name: newName,
-          notify: c.notify ?? existing?.notify,
-          verifiedName: c.verifiedName ?? existing?.verifiedName,
-          phoneNumber: c.phoneNumber ?? existing?.phoneNumber,
-          lid: lid ?? existing?.lid,
-        });
-      }
+    const persistContacts = (contacts: ContactSyncRecord[]) => {
+      this.contactStore.upsertContacts(contacts);
     };
 
     // Use ev.process() to receive ALL buffered events after sync flush
@@ -1139,10 +1023,10 @@ export class BaileysAdapter implements ChannelAdapter {
             !!ch.id && !!ch.name && !ch.id.endsWith("@g.us") && !ch.id.endsWith("@broadcast"),
         );
         if (namedChats.length > 0) {
-          cacheContacts(namedChats.map((ch) => ({ id: ch.id, name: ch.name })));
+          persistContacts(namedChats.map((ch) => ({ id: ch.id, name: ch.name })));
           logger.info(
             { instanceId: this.instanceId, count: namedChats.length },
-            "Contacts cached from chat names (chats.upsert)",
+            "Contacts persisted from chat names (chats.upsert)",
           );
         }
       }
@@ -1150,14 +1034,15 @@ export class BaileysAdapter implements ChannelAdapter {
       // --- Contacts (arrives buffered during initial sync) ---
       if (events["contacts.upsert"]) {
         const contacts = events["contacts.upsert"];
-        cacheContacts(contacts);
+        persistContacts(contacts);
         logger.info(
           { instanceId: this.instanceId, count: contacts.length },
-          "Contacts cached (upsert)",
+          "Contacts persisted (upsert)",
         );
       }
 
       if (events["contacts.update"]) {
+        persistContacts(events["contacts.update"]);
         const normalized = normalizeContactsUpdate(this.instanceId, events["contacts.update"]);
         for (const event of normalized) this.emit("contact.updated", event);
       }
@@ -1165,39 +1050,22 @@ export class BaileysAdapter implements ChannelAdapter {
       // --- History sync: contacts arrive here during first sync ---
       if (events["messaging-history.set"]) {
         const { contacts = [], chats = [] } = events["messaging-history.set"];
-        const filtered = contacts.filter((c) => c.id && (c.notify || c.name));
-        if (filtered.length > 0) {
-          cacheContacts(
-            filtered.map((c) => ({
-              id: c.id,
-              name: c.name ?? c.notify,
-              notify: c.notify,
-              verifiedName: c.verifiedName,
-              phoneNumber: c.phoneNumber,
-              lid: c.lid,
-            })),
-          );
+        const contactCount = contacts.filter((contact) => contact.id).length;
+        const chatContactCount = chats.filter(
+          (chat) =>
+            !!chat.id && !!chat.name && !chat.id.endsWith("@g.us") && !chat.id.endsWith("@broadcast"),
+        ).length;
+        this.contactStore.handleHistorySync({ contacts, chats });
+        if (contactCount > 0) {
           logger.info(
-            { instanceId: this.instanceId, contacts: filtered.length, chats: chats.length },
-            "Contacts cached (history sync)",
+            { instanceId: this.instanceId, contacts: contactCount, chats: chats.length },
+            "Contacts persisted (history sync)",
           );
         }
-
-        // Extract contact names from chat list (may include phonebook names)
-        const chatContacts = chats.filter(
-          (ch): ch is typeof ch & { id: string; name: string } =>
-            !!ch.id && !!ch.name && !ch.id.endsWith("@g.us") && !ch.id.endsWith("@broadcast"),
-        );
-        if (chatContacts.length > 0) {
-          cacheContacts(
-            chatContacts.map((ch) => ({
-              id: ch.id,
-              name: ch.name,
-            })),
-          );
+        if (chatContactCount > 0) {
           logger.info(
-            { instanceId: this.instanceId, chatContacts: chatContacts.length },
-            "Contacts cached from chat names",
+            { instanceId: this.instanceId, chatContacts: chatContactCount },
+            "Contacts persisted from chat names",
           );
         }
       }
@@ -1219,7 +1087,7 @@ export class BaileysAdapter implements ChannelAdapter {
           }
 
           if (msg.pushName && msg.key.remoteJid && !msg.key.fromMe) {
-            cacheContacts([{ id: msg.key.remoteJid, name: msg.pushName }]);
+            persistContacts([{ id: msg.key.remoteJid, name: msg.pushName }]);
           }
 
           // Persist ALL messages (notify + append) to DB
