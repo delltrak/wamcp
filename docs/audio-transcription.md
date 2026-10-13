@@ -14,12 +14,15 @@ WA_TRANSCRIPTION_MODEL=whisper-1
 WA_TRANSCRIPTION_LANGUAGE=en
 WA_TRANSCRIPTION_MAX_MB=16
 WA_TRANSCRIPTION_TIMEOUT_MS=60000
+TRANSCRIPTION_CONCURRENCY=2
 ```
 
 The provider URL, model, optional language, maximum input size, and timeout can
-be changed for compatible providers. If transcription is disabled or the key is
-missing, `wa_transcribe_audio` returns a transcription-not-configured error and
-incoming message notifications omit the transcription field.
+be changed for compatible providers. `TRANSCRIPTION_CONCURRENCY` limits how many
+incoming audio downloads and transcriptions run at once. If transcription is
+disabled or the key is missing, `wa_transcribe_audio` returns a
+transcription-not-configured error and incoming message notifications omit the
+transcription field.
 
 ## MCP tool
 

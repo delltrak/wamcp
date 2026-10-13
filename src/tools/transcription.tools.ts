@@ -11,6 +11,47 @@ import { toolSuccess } from "../types/mcp.types.js";
 import { createRequestLogger } from "../utils/logger.js";
 import { handleToolError } from "../utils/tool-handler.js";
 
+function responseMimeType(contentType: string | undefined): string | undefined {
+  const normalized = contentType?.split(";")[0]?.trim().toLowerCase();
+  if (
+    !normalized ||
+    [
+      "application/octet-stream",
+      "application/x-octet-stream",
+      "application/x-binary",
+      "binary/octet-stream",
+    ].includes(normalized)
+  ) {
+    return undefined;
+  }
+  return contentType?.trim();
+}
+
+function urlMimeType(input: string): string | undefined {
+  try {
+    const extension = new URL(input).pathname.split(".").pop()?.toLowerCase();
+    switch (extension) {
+      case "mp3":
+        return "audio/mpeg";
+      case "mp4":
+      case "m4a":
+        return "audio/mp4";
+      case "wav":
+        return "audio/wav";
+      case "webm":
+        return "audio/webm";
+      case "ogg":
+      case "oga":
+      case "opus":
+        return "audio/ogg";
+      default:
+        return undefined;
+    }
+  } catch {
+    return undefined;
+  }
+}
+
 export function registerTranscriptionTools(
   server: McpServer,
   instanceManager: InstanceManager,
@@ -32,7 +73,7 @@ export function registerTranscriptionTools(
         transcriptionService.assertConfigured();
 
         let audio: Buffer;
-        let mimeType = params.mimeType ?? "audio/ogg";
+        let mimeType = params.mimeType;
 
         if (params.messageId) {
           const adapter = instanceManager.getAdapter(params.instanceId!);
@@ -44,13 +85,20 @@ export function registerTranscriptionTools(
           audio = media.data;
           mimeType = params.mimeType ?? media.mimeType;
         } else {
-          audio = await mediaService.getMediaBuffer(params.audio!, {
+          const media = await mediaService.getMediaBuffer(params.audio!, {
             maxBytes: transcriptionService.maxBytes,
             timeoutMs: transcriptionService.timeoutMs,
+            includeContentType: true,
           });
+          audio = media.data;
+          mimeType =
+            params.mimeType ??
+            responseMimeType(media.contentType) ??
+            urlMimeType(params.audio!) ??
+            "audio/ogg";
         }
 
-        const result = await transcriptionService.transcribe(audio, mimeType);
+        const result = await transcriptionService.transcribe(audio, mimeType ?? "audio/ogg");
         log.info({ duration: Date.now() - start, bytes: audio.length }, "Audio transcribed");
         return toolSuccess({ text: result.text });
       } catch (err) {

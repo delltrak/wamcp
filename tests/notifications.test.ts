@@ -12,17 +12,18 @@ const ENV_KEYS = [
   "WA_TRANSCRIPTION_LANGUAGE",
   "WA_TRANSCRIPTION_MAX_MB",
   "WA_TRANSCRIPTION_TIMEOUT_MS",
+  "TRANSCRIPTION_CONCURRENCY",
 ] as const;
 const originalEnv = new Map(ENV_KEYS.map((key) => [key, process.env[key]]));
 
 type EventHandler = Parameters<InstanceManager["onAnyEvent"]>[0];
 
-function audioEvent(): ChannelEventPayload["message.received"] {
+function audioEvent(messageId = "audio-message-id"): ChannelEventPayload["message.received"] {
   return {
     instanceId: "inst_1234abcd",
     chatId: "5511888888888@s.whatsapp.net",
     message: {
-      id: "audio-message-id",
+      id: messageId,
       sender: "5511888888888@s.whatsapp.net",
       timestamp: 1_700_000_000,
       type: "audio",
@@ -98,6 +99,82 @@ describe("audio message notifications", () => {
     };
     expect(sent.params.message.transcription).toBe("recognized words");
     expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("limits concurrent incoming audio downloads and transcriptions", async () => {
+    process.env.WA_TRANSCRIPTION_ENABLED = "true";
+    process.env.WA_TRANSCRIPTION_API_KEY = "unit-test-key";
+    process.env.TRANSCRIPTION_CONCURRENCY = "2";
+
+    const downloadResolvers: Array<(result: { data: Buffer; mimeType: string }) => void> = [];
+    const adapter = {
+      downloadMessageAudio: vi.fn(
+        () =>
+          new Promise<{ data: Buffer; mimeType: string }>((resolve) => {
+            downloadResolvers.push(resolve);
+          }),
+      ),
+    };
+    const transcriptionResolvers: Array<() => void> = [];
+    let activeTranscriptions = 0;
+    let maxActiveTranscriptions = 0;
+    const fetchMock = vi.fn().mockImplementation(
+      () =>
+        new Promise<Response>((resolve) => {
+          activeTranscriptions++;
+          maxActiveTranscriptions = Math.max(maxActiveTranscriptions, activeTranscriptions);
+          transcriptionResolvers.push(() => {
+            activeTranscriptions--;
+            resolve(new Response(JSON.stringify({ text: "recognized words" }), { status: 200 }));
+          });
+        }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    let eventHandler: EventHandler | undefined;
+    const instanceManager = {
+      onAnyEvent: (handler: EventHandler) => {
+        eventHandler = handler;
+      },
+      getAdapter: () => adapter,
+    } as unknown as InstanceManager;
+    const notification = vi.fn().mockResolvedValue(undefined);
+    const server = {
+      server: {
+        notification,
+        sendLoggingMessage: vi.fn().mockResolvedValue(undefined),
+      },
+    } as unknown as McpServer;
+
+    registerEventNotifications(server, instanceManager);
+    const eventCount = 4;
+    for (let index = 0; index < eventCount; index++) {
+      eventHandler!("message.received", "inst_1234abcd", audioEvent(`audio-${index}`));
+    }
+
+    expect(adapter.downloadMessageAudio).toHaveBeenCalledTimes(2);
+    downloadResolvers[0]!({ data: Buffer.from("audio"), mimeType: "audio/ogg" });
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
+    expect(adapter.downloadMessageAudio).toHaveBeenCalledTimes(2);
+
+    transcriptionResolvers[0]!();
+    await vi.waitFor(() => expect(adapter.downloadMessageAudio).toHaveBeenCalledTimes(3));
+    downloadResolvers[1]!({ data: Buffer.from("audio"), mimeType: "audio/ogg" });
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
+    expect(adapter.downloadMessageAudio).toHaveBeenCalledTimes(3);
+
+    transcriptionResolvers[1]!();
+    await vi.waitFor(() => expect(adapter.downloadMessageAudio).toHaveBeenCalledTimes(4));
+    downloadResolvers[2]!({ data: Buffer.from("audio"), mimeType: "audio/ogg" });
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(3));
+    downloadResolvers[3]!({ data: Buffer.from("audio"), mimeType: "audio/ogg" });
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(4));
+    transcriptionResolvers[2]!();
+    transcriptionResolvers[3]!();
+
+    await vi.waitFor(() => expect(notification).toHaveBeenCalledTimes(eventCount));
+    expect(maxActiveTranscriptions).toBeLessThanOrEqual(2);
+    expect(maxActiveTranscriptions).toBeGreaterThan(0);
   });
 
   it("forwards audio without a transcription when transcription is not configured", () => {

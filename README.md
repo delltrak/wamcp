@@ -402,6 +402,7 @@ Copy `.env.example` to `.env` and configure:
 | `WA_TRANSCRIPTION_LANGUAGE` | —                        | Optional ISO-639-1 language hint         |
 | `WA_TRANSCRIPTION_MAX_MB`   | `16`                      | Maximum audio input size in MB           |
 | `WA_TRANSCRIPTION_TIMEOUT_MS` | `60000`                 | Transcription and media download timeout |
+| `TRANSCRIPTION_CONCURRENCY` | `2`                       | Concurrent incoming audio downloads and transcriptions |
 | `WA_CLOUD_WEBHOOK_SECRET`   | —                        | Signing secret for the `x-hub-signature-256` header on `POST /cloud-webhook` |
 | `WA_CLOUD_VERIFY_TOKEN`     | —                        | Token for Meta's webhook GET verification handshake |
 | `WA_VERSION_CHECK`          | `true`                   | Daily WhatsApp Web version check         |

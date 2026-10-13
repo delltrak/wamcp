@@ -25,6 +25,33 @@ const EVENT_TO_METHOD: Record<ChannelEvent, string> = {
   "call.received": "whatsapp/call.received",
 };
 
+function positiveInteger(value: string | undefined, fallback: number): number {
+  if (!value) return fallback;
+  const parsed = Number.parseInt(value, 10);
+  return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+function createConcurrencyLimiter(concurrency: number) {
+  let active = 0;
+  const waiting: Array<() => void> = [];
+
+  return async <T>(task: () => Promise<T>): Promise<T> => {
+    if (active >= concurrency) {
+      await new Promise<void>((resolve) => waiting.push(resolve));
+    } else {
+      active++;
+    }
+
+    try {
+      return await task();
+    } finally {
+      const next = waiting.shift();
+      if (next) next();
+      else active--;
+    }
+  };
+}
+
 /**
  * Wire instance manager events to MCP server notifications.
  * Every channel event from any instance gets forwarded as an MCP notification.
@@ -34,6 +61,9 @@ export function registerEventNotifications(
   instanceManager: InstanceManager,
 ): void {
   const transcriptionService = new TranscriptionService();
+  const limitTranscriptions = createConcurrencyLimiter(
+    positiveInteger(process.env.TRANSCRIPTION_CONCURRENCY, 2),
+  );
 
   instanceManager.onAnyEvent(
     <E extends ChannelEvent>(event: E, instanceId: string, payload: ChannelEventPayload[E]) => {
@@ -50,14 +80,16 @@ export function registerEventNotifications(
         ) {
           const messageEvent = payload as ChannelEventPayload["message.received"];
           try {
-            const media = await instanceManager
-              .getAdapter(instanceId)
-              .downloadMessageAudio(
-                messageEvent.message.id,
-                transcriptionService.maxBytes,
-                transcriptionService.timeoutMs,
-              );
-            const result = await transcriptionService.transcribe(media.data, media.mimeType);
+            const result = await limitTranscriptions(async () => {
+              const media = await instanceManager
+                .getAdapter(instanceId)
+                .downloadMessageAudio(
+                  messageEvent.message.id,
+                  transcriptionService.maxBytes,
+                  transcriptionService.timeoutMs,
+                );
+              return transcriptionService.transcribe(media.data, media.mimeType);
+            });
             notificationPayload = {
               ...messageEvent,
               message: { ...messageEvent.message, transcription: result.text },

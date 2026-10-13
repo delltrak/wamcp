@@ -16,6 +16,11 @@ export interface MediaBufferOptions {
   timeoutMs?: number;
 }
 
+export interface MediaBufferWithContentType {
+  data: Buffer;
+  contentType?: string;
+}
+
 function sizeLabel(maxBytes: number): string {
   return maxBytes < 1024 * 1024 ? `${maxBytes} bytes` : `${Math.round(maxBytes / 1024 / 1024)} MB`;
 }
@@ -83,6 +88,13 @@ export class MediaService {
 
   /** Download media from an HTTPS URL (with SSRF protection) */
   async downloadMedia(url: string, options: MediaBufferOptions = {}): Promise<Buffer> {
+    return (await this.downloadMediaWithContentType(url, options)).data;
+  }
+
+  private async downloadMediaWithContentType(
+    url: string,
+    options: MediaBufferOptions = {},
+  ): Promise<MediaBufferWithContentType> {
     const urlError = validateMediaUrl(url);
     if (urlError) {
       throw new Error(`Invalid media URL: ${urlError}`);
@@ -93,7 +105,10 @@ export class MediaService {
     if (!response.ok) {
       throw new Error(`Failed to download media: HTTP ${response.status}`);
     }
-    return mediaResponseToBuffer(response, options.maxBytes);
+    return {
+      data: await mediaResponseToBuffer(response, options.maxBytes),
+      contentType: response.headers?.get("content-type") ?? undefined,
+    };
   }
 
   /** Decode base64 media to a buffer (with size limit) */
@@ -107,18 +122,28 @@ export class MediaService {
     return buffer;
   }
 
-  /** Auto-detect URL vs base64, return Buffer */
-  async getMediaBuffer(input: string, options: MediaBufferOptions = {}): Promise<Buffer> {
+  /** Auto-detect URL vs base64, optionally returning the HTTP Content-Type */
+  async getMediaBuffer(
+    input: string,
+    options: MediaBufferOptions & { includeContentType: true },
+  ): Promise<MediaBufferWithContentType>;
+  async getMediaBuffer(input: string, options?: MediaBufferOptions): Promise<Buffer>;
+  async getMediaBuffer(
+    input: string,
+    options: MediaBufferOptions & { includeContentType?: boolean } = {},
+  ): Promise<Buffer | MediaBufferWithContentType> {
+    let media: MediaBufferWithContentType;
     if (input.startsWith("https://")) {
-      return this.downloadMedia(input, options);
-    }
-    if (input.startsWith("http://")) {
+      media = await this.downloadMediaWithContentType(input, options);
+    } else if (input.startsWith("http://")) {
       throw new Error("Media URLs must use HTTPS");
-    }
-    if (input.startsWith("file://") || input.startsWith("data:")) {
+    } else if (input.startsWith("file://") || input.startsWith("data:")) {
       throw new Error("file:// and data: URLs are not allowed");
+    } else {
+      media = { data: this.decodeBase64Media(input, options.maxBytes) };
     }
-    return this.decodeBase64Media(input, options.maxBytes);
+
+    return options.includeContentType ? media : media.data;
   }
 
   /** Cache media buffer to disk, return local path */
