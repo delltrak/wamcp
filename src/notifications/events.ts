@@ -31,8 +31,8 @@ const EVENT_TO_METHOD: Record<ChannelEvent, string> = {
 export function registerEventNotifications(
   server: McpServer,
   instanceManager: InstanceManager,
-): void {
-  instanceManager.onAnyEvent(
+): () => void {
+  return instanceManager.onAnyEvent(
     <E extends ChannelEvent>(event: E, instanceId: string, payload: ChannelEventPayload[E]) => {
       const method = EVENT_TO_METHOD[event];
       if (!method) return;

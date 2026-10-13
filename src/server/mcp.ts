@@ -36,7 +36,7 @@ import { registerEventNotifications } from "../notifications/events.js";
 export function createMcpServer(
   instanceManager: InstanceManager,
   messageQueue: MessageQueue,
-): McpServer {
+): { server: McpServer; dispose: () => void; close: () => Promise<void> } {
   const server = new McpServer(
     {
       name: SERVER_NAME,
@@ -71,7 +71,22 @@ export function createMcpServer(
   registerBlocklistResource(server, instanceManager);
 
   // Register event notifications
-  registerEventNotifications(server, instanceManager);
+  const removeEventNotifications = registerEventNotifications(server, instanceManager);
+  let disposed = false;
+  const dispose = () => {
+    if (disposed) return;
+    disposed = true;
+    removeEventNotifications();
+  };
 
-  return server;
+  server.server.onclose = dispose;
+
+  return {
+    server,
+    dispose,
+    async close() {
+      dispose();
+      await server.close();
+    },
+  };
 }
