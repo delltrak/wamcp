@@ -151,4 +151,62 @@ describe("MCP HTTP sessions", () => {
     expect(eventSubscribers.size).toBe(0);
     expect(serverErrors).toEqual([]);
   });
+
+  it("removes a session when initialize params are invalid", async () => {
+    eventSubscribers = new Set();
+    serverErrors = [];
+    const instanceManager = {
+      onAnyEvent(handler: unknown) {
+        eventSubscribers!.add(handler);
+        return () => eventSubscribers!.delete(handler);
+      },
+    } as unknown as InstanceManager;
+    sessionManager = new McpHttpSessionManager(instanceManager, {} as MessageQueue);
+
+    httpServer = createServer((req, res) => {
+      void sessionManager!.handleRequest(req, res).catch((error: unknown) => {
+        serverErrors!.push(error);
+        if (!res.headersSent) {
+          res.writeHead(500);
+          res.end();
+        }
+      });
+    });
+
+    const address = await new Promise<{ port: number }>((resolve, reject) => {
+      httpServer!.once("error", reject);
+      httpServer!.listen(0, "127.0.0.1", () => {
+        const boundAddress = httpServer!.address();
+        if (!boundAddress || typeof boundAddress === "string") {
+          reject(new Error("Expected a TCP address"));
+          return;
+        }
+        resolve(boundAddress);
+      });
+    });
+
+    const response = await fetch(`http://127.0.0.1:${address.port}/mcp`, {
+      method: "POST",
+      headers: {
+        Accept: "application/json, text/event-stream",
+        "Content-Type": "application/json",
+        "MCP-Protocol-Version": "2025-03-26",
+      },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: 1,
+        method: "initialize",
+        params: {
+          capabilities: {},
+          clientInfo: { name: "invalid-client", version: "1.0.0" },
+        },
+      }),
+    });
+
+    expect(response.status).toBe(400);
+    expect(await response.json()).toHaveProperty("error");
+    expect(sessionManager.sessionCount).toBe(0);
+    expect(eventSubscribers.size).toBe(0);
+    expect(serverErrors).toEqual([]);
+  });
 });

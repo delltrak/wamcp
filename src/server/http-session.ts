@@ -77,9 +77,16 @@ export class McpHttpSessionManager {
       await session.mcpServer.server.connect(session.transport);
       await session.transport.handleRequest(req, res);
 
+      if (session.sessionId) {
+        // The transport dispatches MCP requests without awaiting their handlers.
+        // Give initialize handling a turn to populate the client capabilities.
+        await new Promise<void>((resolve) => setImmediate(resolve));
+      }
+
       // Requests without a successful initialize must not leave an unused MCP
       // server and event subscription behind.
-      if (!session.sessionId) {
+      if (session.mcpServer.server.server.getClientCapabilities() === undefined) {
+        this.removeSession(session);
         await session.mcpServer.close();
       }
     } catch (error) {
