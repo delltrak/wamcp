@@ -128,7 +128,7 @@ Add to your `claude_desktop_config.json`:
 
 |     | Feature                | Description                                                                                               |
 | --- | ---------------------- | --------------------------------------------------------------------------------------------------------- |
-| 🔌  | **MCP-native**         | Streamable HTTP + stdio transports. No REST, no webhooks.                                                 |
+| 🔌  | **MCP-native**         | Streamable HTTP + stdio transports, with optional outgoing event webhooks.                                |
 | 📱  | **Dual-channel**       | Baileys (WhatsApp Web) + Meta Cloud API — same interface.                                                 |
 | 🔄  | **Multi-instance**     | Run 1–50 WhatsApp numbers from a single server.                                                           |
 | 📨  | **Full messaging**     | Text, images, video, audio, documents, polls, reactions, replies, forwards, edits, deletes, view-once.    |
@@ -313,7 +313,7 @@ Resources expose read-only WhatsApp state via `whatsapp://` URIs:
 
 ## 📡 Real-time Notifications
 
-Events are pushed to agents via SSE (Server-Sent Events):
+Events are pushed to connected agents via MCP notifications over SSE (Server-Sent Events):
 
 | Event                                 | Trigger                                        |
 | ------------------------------------- | ---------------------------------------------- |
@@ -329,6 +329,23 @@ Events are pushed to agents via SSE (Server-Sent Events):
 | `whatsapp/contact.updated`            | Contact info changed                           |
 | `whatsapp/connection.changed`         | Instance status change (includes QR as base64) |
 | `whatsapp/call.received`              | Incoming call                                  |
+
+### Outgoing event webhooks
+
+Set `WA_EVENT_WEBHOOK_URL` to POST normalized events to an automation endpoint.
+Delivery runs through BullMQ with exponential retries, so HTTP failures do not
+interrupt WhatsApp message processing. The default filter is
+`message.received`, and messages sent by this instance are ignored by default.
+Webhook targets must use HTTPS and a public host. Set
+`WA_EVENT_WEBHOOK_ALLOW_HTTP=true` to permit HTTP for an explicitly trusted
+public endpoint; local and private-network targets remain blocked.
+
+The JSON body includes `event`, `instanceId`, `chat`, `sender`, `type`, `text`,
+and `timestamp`. When `WA_EVENT_WEBHOOK_SECRET` is set, the request includes
+`X-WA-Event-Timestamp` and `X-WA-Event-Signature`. The signature is
+`sha256=<hex HMAC-SHA256>` over `<timestamp>.<exact JSON body>`.
+
+See [Outgoing event webhooks](docs/event-webhooks.md) for configuration details.
 
 ---
 
@@ -405,6 +422,16 @@ Copy `.env.example` to `.env` and configure:
 | `TRANSCRIPTION_CONCURRENCY` | `2`                       | Concurrent incoming audio downloads and transcriptions |
 | `WA_CLOUD_WEBHOOK_SECRET`   | —                        | Signing secret for the `x-hub-signature-256` header on `POST /cloud-webhook` |
 | `WA_CLOUD_VERIFY_TOKEN`     | —                        | Token for Meta's webhook GET verification handshake |
+| `WA_EVENT_WEBHOOK_URL` | — | Outgoing event destination; unset disables delivery |
+| `WA_EVENT_WEBHOOK_EVENTS` | `message.received` | Comma-separated events to forward |
+| `WA_EVENT_WEBHOOK_IGNORE_FROM_ME` | `true` | Ignore messages sent by this instance |
+| `WA_EVENT_WEBHOOK_HEADERS` | — | Additional request headers as a JSON object of string values |
+| `WA_EVENT_WEBHOOK_AUTH_HEADER` / `WA_EVENT_WEBHOOK_AUTH_VALUE` | — | Optional authentication header name and value; overrides the same name in `HEADERS` |
+| `WA_EVENT_WEBHOOK_SECRET` | — | HMAC-SHA256 signing secret; adds timestamp and signature headers |
+| `WA_EVENT_WEBHOOK_ALLOW_HTTP` | `false` | Permit HTTP targets; public-host validation still applies |
+| `WA_EVENT_WEBHOOK_TIMEOUT_MS` | `10000` | Per-request timeout in milliseconds |
+| `WA_EVENT_WEBHOOK_RETRY_ATTEMPTS` | `5` | BullMQ delivery attempts, including the first attempt |
+| `WA_EVENT_WEBHOOK_RETRY_DELAY_MS` | `1000` | Initial exponential retry delay in milliseconds |
 | `WA_VERSION_CHECK`          | `true`                   | Daily WhatsApp Web version check         |
 
 See [Audio transcription](docs/audio-transcription.md) for tool examples and event behavior.
