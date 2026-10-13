@@ -6,7 +6,6 @@ import { Queue, Worker, type Job } from "bullmq";
 import type { ChannelAdapter } from "../channels/channel.interface.js";
 import type { MessageContent } from "../types/channel.types.js";
 import {
-  DEFAULT_REDIS_URL,
   DEFAULT_BAILEYS_RATE_LIMIT,
   DEFAULT_CLOUD_RATE_LIMIT,
   QUEUE_RETRY_ATTEMPTS,
@@ -15,6 +14,7 @@ import {
   QUEUE_FAILED_AGE_S,
 } from "../constants.js";
 import { createChildLogger } from "../utils/logger.js";
+import { getRedisConnectionOptions } from "./redis.js";
 
 const logger = createChildLogger({ service: "message-queue" });
 
@@ -36,18 +36,8 @@ export interface QueueStats {
   failed: number;
 }
 
-function getRedisOpts(): { host: string; port: number; maxRetriesPerRequest: null } {
-  const url = process.env.WA_REDIS_URL ?? DEFAULT_REDIS_URL;
-  const parsed = new URL(url);
-  return {
-    host: parsed.hostname || "localhost",
-    port: parseInt(parsed.port || "6379", 10),
-    maxRetriesPerRequest: null,
-  };
-}
-
 export class MessageQueue {
-  private readonly redisOpts = getRedisOpts();
+  private readonly redisOpts = getRedisConnectionOptions();
   private readonly queues = new Map<string, Queue>();
   private readonly workers = new Map<string, Worker>();
   private getAdapter: ((instanceId: string) => ChannelAdapter) | null = null;

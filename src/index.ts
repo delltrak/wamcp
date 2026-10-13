@@ -14,6 +14,7 @@ import {
 } from "./constants.js";
 import { InstanceManager } from "./services/instance-manager.js";
 import { MessageQueue } from "./services/message-queue.js";
+import { EventWebhookService } from "./services/event-webhook.js";
 import { MaintenanceService } from "./services/maintenance.js";
 import { createMcpServer } from "./server/mcp.js";
 import { verifyWebhookSignature } from "./channels/cloud-api/cloud.auth.js";
@@ -66,9 +67,11 @@ async function initServices() {
   // Initialize services
   const instanceManager = new InstanceManager();
   const messageQueue = new MessageQueue();
+  const eventWebhook = new EventWebhookService();
 
   // Wire them together
   instanceManager.setMessageQueue(messageQueue);
+  eventWebhook.start(instanceManager);
 
   // Load existing instances from DB and reconnect
   await instanceManager.init();
@@ -79,11 +82,11 @@ async function initServices() {
 
   logger.info("Services initialized");
 
-  return { instanceManager, messageQueue };
+  return { instanceManager, messageQueue, eventWebhook };
 }
 
 async function startHttp(): Promise<void> {
-  const { instanceManager, messageQueue } = await initServices();
+  const { instanceManager, messageQueue, eventWebhook } = await initServices();
   const mcpSessions = new McpHttpSessionManager(instanceManager, messageQueue);
   const startTime = Date.now();
 
@@ -199,9 +202,11 @@ async function startHttp(): Promise<void> {
   });
 
   httpServer.on("close", () => {
-    void mcpSessions.closeAll().catch((err) => {
-      logger.error({ err }, "Failed to close MCP sessions");
-    });
+    void Promise.all([mcpSessions.closeAll(), messageQueue.close(), eventWebhook.close()]).catch(
+      () => {
+        logger.error("Failed to close server services");
+      },
+    );
   });
 
   httpServer.listen(port, () => {
@@ -213,8 +218,15 @@ async function startHttp(): Promise<void> {
 }
 
 async function startStdio(): Promise<void> {
-  const { instanceManager, messageQueue } = await initServices();
+  const { instanceManager, messageQueue, eventWebhook } = await initServices();
   const { server: mcpServer } = createMcpServer(instanceManager, messageQueue);
+  const onServerClose = mcpServer.server.onclose;
+  mcpServer.server.onclose = () => {
+    onServerClose?.();
+    void Promise.all([messageQueue.close(), eventWebhook.close()]).catch(() => {
+      logger.error("Failed to close server services");
+    });
+  };
   const stdioTransport = new StdioServerTransport(process.stdin, process.stdout, {
     maxBufferSize: STDIO_MAX_BUFFER_BYTES,
   });
