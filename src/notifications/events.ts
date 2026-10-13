@@ -52,6 +52,58 @@ function createConcurrencyLimiter(concurrency: number) {
   };
 }
 
+interface SharedTranscriptionState {
+  transcriptionService: TranscriptionService;
+  limitTranscriptions: <T>(task: () => Promise<T>) => Promise<T>;
+  inFlight: Map<string, Promise<string>>;
+}
+
+const transcriptionByInstanceManager = new WeakMap<InstanceManager, SharedTranscriptionState>();
+
+function getSharedTranscriptionState(instanceManager: InstanceManager): SharedTranscriptionState {
+  let state = transcriptionByInstanceManager.get(instanceManager);
+  if (!state) {
+    state = {
+      transcriptionService: new TranscriptionService(),
+      limitTranscriptions: createConcurrencyLimiter(
+        positiveInteger(process.env.TRANSCRIPTION_CONCURRENCY, 2),
+      ),
+      inFlight: new Map(),
+    };
+    transcriptionByInstanceManager.set(instanceManager, state);
+  }
+  return state;
+}
+
+function transcribeIncomingAudio(
+  instanceManager: InstanceManager,
+  state: SharedTranscriptionState,
+  instanceId: string,
+  messageEvent: ChannelEventPayload["message.received"],
+): Promise<string> {
+  const key = JSON.stringify([instanceId, messageEvent.message.id]);
+  const inFlight = state.inFlight.get(key);
+  if (inFlight) return inFlight;
+
+  const transcription = state.limitTranscriptions(async () => {
+    const media = await instanceManager
+      .getAdapter(instanceId)
+      .downloadMessageAudio(
+        messageEvent.message.id,
+        state.transcriptionService.maxBytes,
+        state.transcriptionService.timeoutMs,
+      );
+    const result = await state.transcriptionService.transcribe(media.data, media.mimeType);
+    return result.text;
+  });
+  state.inFlight.set(key, transcription);
+  const removeInFlight = () => {
+    if (state.inFlight.get(key) === transcription) state.inFlight.delete(key);
+  };
+  void transcription.then(removeInFlight, removeInFlight);
+  return transcription;
+}
+
 /**
  * Wire instance manager events to MCP server notifications.
  * Every channel event from any instance gets forwarded as an MCP notification.
@@ -60,10 +112,7 @@ export function registerEventNotifications(
   server: McpServer,
   instanceManager: InstanceManager,
 ): () => void {
-  const transcriptionService = new TranscriptionService();
-  const limitTranscriptions = createConcurrencyLimiter(
-    positiveInteger(process.env.TRANSCRIPTION_CONCURRENCY, 2),
-  );
+  const transcriptionState = getSharedTranscriptionState(instanceManager);
 
   return instanceManager.onAnyEvent(
     <E extends ChannelEvent>(event: E, instanceId: string, payload: ChannelEventPayload[E]) => {
@@ -75,24 +124,20 @@ export function registerEventNotifications(
 
         if (
           event === "message.received" &&
-          transcriptionService.isConfigured() &&
+          transcriptionState.transcriptionService.isConfigured() &&
           (payload as ChannelEventPayload["message.received"]).message.type === "audio"
         ) {
           const messageEvent = payload as ChannelEventPayload["message.received"];
           try {
-            const result = await limitTranscriptions(async () => {
-              const media = await instanceManager
-                .getAdapter(instanceId)
-                .downloadMessageAudio(
-                  messageEvent.message.id,
-                  transcriptionService.maxBytes,
-                  transcriptionService.timeoutMs,
-                );
-              return transcriptionService.transcribe(media.data, media.mimeType);
-            });
+            const transcription = await transcribeIncomingAudio(
+              instanceManager,
+              transcriptionState,
+              instanceId,
+              messageEvent,
+            );
             notificationPayload = {
               ...messageEvent,
-              message: { ...messageEvent.message, transcription: result.text },
+              message: { ...messageEvent.message, transcription },
             };
           } catch (err) {
             logger.warn(
