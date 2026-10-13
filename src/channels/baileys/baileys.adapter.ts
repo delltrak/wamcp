@@ -446,7 +446,7 @@ export class BaileysAdapter implements ChannelAdapter {
           ),
         )
         .get();
-      const messageParticipant = participant ?? storedMessage?.senderId;
+      const messageParticipant = storedMessage?.senderId || participant;
 
       if (!messageParticipant || messageParticipant === "me") {
         logger.warn(

@@ -253,6 +253,62 @@ describe("BaileysAdapter.markRead", () => {
     ]);
   });
 
+  it("uses stored group senders before the supplied participant fallback", async () => {
+    const groupJid = "120363000000000000@g.us";
+    db.insert(messages)
+      .values([
+        {
+          id: "stored-group-one",
+          instanceId,
+          chatId: groupJid,
+          senderId: "5511888888888@s.whatsapp.net",
+          type: "text",
+          isFromMe: 0,
+          status: "received",
+          timestamp: 1,
+        },
+        {
+          id: "stored-group-two",
+          instanceId,
+          chatId: groupJid,
+          senderId: "5511777777777@s.whatsapp.net",
+          type: "text",
+          isFromMe: 0,
+          status: "received",
+          timestamp: 2,
+        },
+      ])
+      .run();
+    const { adapter, readMessages } = connectedAdapter();
+
+    await adapter.markRead(
+      groupJid,
+      ["stored-group-one", "stored-group-two", "unstored-group"],
+      "5511999999999@s.whatsapp.net",
+    );
+
+    expect(readMessages).toHaveBeenCalledWith([
+      {
+        remoteJid: groupJid,
+        id: "stored-group-one",
+        participant: "5511888888888@s.whatsapp.net",
+        fromMe: false,
+      },
+      {
+        remoteJid: groupJid,
+        id: "stored-group-two",
+        participant: "5511777777777@s.whatsapp.net",
+        fromMe: false,
+      },
+      {
+        remoteJid: groupJid,
+        id: "unstored-group",
+        participant: "5511999999999@s.whatsapp.net",
+        fromMe: false,
+      },
+    ]);
+  });
+
   it("accepts an optional participant while preserving old mark-read inputs", () => {
     expect(
       MarkReadSchema.parse({
