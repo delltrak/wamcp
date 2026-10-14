@@ -14,6 +14,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Optional ElevenLabs text-to-speech voice notes through a provider interface, with voice listing,
+  base64 previews, text chunk continuity, retry handling, and OGG/Opus output for Baileys.
+- Configurable TTS enablement, provider, voice, model, language, output format, text limit, API host,
+  timeout, and ffmpeg executable path.
 - Optional `WA_AUTO_READ=false|on_fetch|on_receive` behavior for incoming messages, with receipts
   scheduled in the background so message handling and tool/resource responses continue promptly.
 - Optional `participant` input for `wa_mark_read`; Baileys group receipt keys now include the

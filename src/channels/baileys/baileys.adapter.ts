@@ -410,8 +410,11 @@ export class BaileysAdapter implements ChannelAdapter {
         msg = {
           audio: this.resolveMedia(content.audio),
           ptt: content.ptt ?? false,
-          mimetype: "audio/ogg; codecs=opus",
+          mimetype: content.mimeType ?? "audio/ogg; codecs=opus",
         };
+        if (content.quotedMessageId) {
+          opts.quoted = this.makeQuotedStub(jid, content.quotedMessageId);
+        }
         break;
       case "document":
         msg = {

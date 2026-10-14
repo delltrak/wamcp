@@ -63,6 +63,8 @@ export interface AudioContent {
   type: "audio";
   audio: string; // URL or base64
   ptt?: boolean; // voice note
+  mimeType?: string;
+  quotedMessageId?: string;
 }
 
 export interface DocumentContent {

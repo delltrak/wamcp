@@ -39,6 +39,7 @@ export const SendAudioSchema = z
     to: z.string().min(5).describe("Recipient phone number or group JID"),
     audio: z.string().min(1).describe("Audio URL or base64-encoded data"),
     ptt: z.boolean().default(false).describe("Send as voice note (push-to-talk)"),
+    quotedMessageId: z.string().optional().describe("Message ID to reply to"),
   })
   .strict();
 

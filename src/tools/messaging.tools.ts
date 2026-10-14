@@ -141,7 +141,12 @@ Returns: { status: "queued", jobId }`,
         const result = await messageQueue.enqueueMessage(
           params.instanceId,
           params.to,
-          { type: "audio", audio: params.audio, ptt: params.ptt },
+          {
+            type: "audio",
+            audio: params.audio,
+            ptt: params.ptt,
+            quotedMessageId: params.quotedMessageId,
+          },
           channel,
         );
         log.info({ duration: Date.now() - start, to: params.to }, "Audio message queued");

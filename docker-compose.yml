@@ -13,6 +13,17 @@ services:
       - WA_MESSAGE_RETENTION_DAYS=30
       - WA_BAILEYS_RATE_LIMIT=20
       - WA_MARK_ONLINE_ON_CONNECT=${WA_MARK_ONLINE_ON_CONNECT:-false}
+      - WA_TTS_ENABLED=${WA_TTS_ENABLED:-false}
+      - WA_TTS_PROVIDER=${WA_TTS_PROVIDER:-elevenlabs}
+      - WA_TTS_API_KEY=${WA_TTS_API_KEY:-}
+      - WA_TTS_DEFAULT_VOICE_ID=${WA_TTS_DEFAULT_VOICE_ID:-}
+      - WA_TTS_MODEL=${WA_TTS_MODEL:-eleven_v3}
+      - WA_TTS_LANGUAGE=${WA_TTS_LANGUAGE:-}
+      - WA_TTS_OUTPUT_FORMAT=${WA_TTS_OUTPUT_FORMAT:-opus_48000_64}
+      - WA_TTS_MAX_CHARS=${WA_TTS_MAX_CHARS:-5000}
+      - WA_TTS_BASE_URL=${WA_TTS_BASE_URL:-https://api.elevenlabs.io}
+      - WA_TTS_TIMEOUT_MS=${WA_TTS_TIMEOUT_MS:-60000}
+      - WA_TTS_FFMPEG_PATH=${WA_TTS_FFMPEG_PATH:-}
     volumes:
       - wa-data:/app/data
     depends_on:
