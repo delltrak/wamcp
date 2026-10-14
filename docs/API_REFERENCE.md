@@ -9,9 +9,9 @@
 1. [Overview](#1-overview)
 2. [Tools Reference](#2-tools-reference)
    - [Instance Management](#21-instance-management-8-tools)
-   - [Messaging](#22-messaging-17-tools)
+   - [Messaging](#22-messaging-20-tools)
    - [Chat Management](#23-chat-management-6-tools)
-   - [Group Management](#24-group-management-14-tools)
+   - [Group Management](#24-group-management-18-tools)
    - [Contact Management](#25-contact-management-6-tools)
    - [Profile Management](#26-profile-management-6-tools)
    - [Status / Stories](#27-status--stories-3-tools)
@@ -61,6 +61,10 @@ Tools marked **Baileys only** are not available on Cloud API instances.
 - **`to`** -- Recipient for send operations. Use a phone number (e.g. `"5511999999999"`) or a group JID (e.g. `"120363...@g.us"`).
 - **JID** -- Jabber ID, WhatsApp's internal identifier. Individual: `5511999999999@s.whatsapp.net`. Group: `120363...@g.us`.
 - **Media** -- Image/video/audio/document fields accept a URL (`https://...`) or base64-encoded data.
+  Stickers and GIFs are converted to WhatsApp-compatible formats with ffmpeg. Received media can
+  be saved under `WA_MEDIA_DOWNLOAD_DIR` (default `data/media-downloads`) or returned as base64.
+  `WA_MEDIA_DOWNLOAD_MAX_BYTES` defaults to 25 MB, and base64 mode is capped at 5 MB. Docker
+  includes ffmpeg; `WA_MEDIA_FFMPEG_PATH` and `WA_MEDIA_FFMPEG_TIMEOUT_MS` configure conversions.
 - **Automatic read receipts** -- `WA_AUTO_READ=false` (default), `on_fetch` to mark incoming
   messages read when a tool or resource returns them, or `on_receive` to mark them read when they
   arrive. Invalid values disable the feature and log a warning.
@@ -69,7 +73,7 @@ Tools marked **Baileys only** are not available on Cloud API instances.
 
 ## 2. Tools Reference
 
-WA MCP exposes **68 tools** grouped by domain. All tools return MCP-standard responses.
+WA MCP exposes **75 tools** grouped by domain. All tools return MCP-standard responses.
 
 ### Success Response Format
 
@@ -290,7 +294,7 @@ Configure Meta Cloud API credentials for a Cloud API instance. Required before c
 
 ---
 
-### 2.2 Messaging (17 tools)
+### 2.2 Messaging (20 tools)
 
 Tools for sending messages, media, reactions, and managing message state.
 
@@ -368,6 +372,47 @@ Send a video to a WhatsApp contact or group.
 
 ---
 
+#### `wa_send_sticker`
+
+Send a native WhatsApp sticker. PNG/JPG images and GIFs are converted to 512x512 WebP with
+transparent padding. Static stickers are limited to 100 KB and animated stickers to 500 KB. Static
+WebP files that are not 512x512 are normalized with ffmpeg; animated WebP passes through only at
+512x512 because ffmpeg cannot safely resize animated WebP. Send a GIF to convert an animated sticker
+to 512x512. Correctly sized WebP files pass through unchanged when they are within their size limit.
+
+| Parameter         | Type    | Required | Description                                      |
+| ----------------- | ------- | -------- | ------------------------------------------------ |
+| `instanceId`      | string  | Yes      | The instance to send from                        |
+| `to`              | string  | Yes      | Recipient phone number or group JID              |
+| `sticker`         | string  | Yes      | PNG, JPG, GIF, or WebP URL or base64 data        |
+| `animated`        | boolean | No       | Hint to retain or flatten GIF animation          |
+| `quotedMessageId` | string  | No       | Message ID to reply to                           |
+
+**Channel support:** Both. Cloud API uploads the prepared WebP before sending it.
+
+**Response:** The standard queued message response.
+
+---
+
+#### `wa_send_gif`
+
+Send a GIF as a looping WhatsApp video. GIF or MP4 input is converted to silent H.264 MP4 with
+`yuv420p` pixel format and even dimensions, then sent with Baileys `gifPlayback: true`.
+
+| Parameter         | Type   | Required | Description                          |
+| ----------------- | ------ | -------- | ------------------------------------ |
+| `instanceId`      | string | Yes      | The instance to send from            |
+| `to`              | string | Yes      | Recipient phone number or group JID  |
+| `gif`             | string | Yes      | GIF or MP4 URL or base64 data        |
+| `caption`         | string | No       | Optional caption                     |
+| `quotedMessageId` | string | No       | Message ID to reply to               |
+
+**Channel support:** Baileys only. Cloud API does not expose the GIF playback option.
+
+**Response:** The standard queued message response.
+
+---
+
 #### `wa_send_audio`
 
 Send an audio file or voice note to a WhatsApp contact or group.
@@ -414,6 +459,32 @@ Send a document/file to a WhatsApp contact or group.
   "jobId": "job_127"
 }
 ```
+
+---
+
+#### `wa_download_media`
+
+Download received image, video, audio, document, or sticker media. File mode saves it under
+`WA_MEDIA_DOWNLOAD_DIR`; base64 mode returns inline data without writing a file.
+
+| Parameter    | Type            | Required | Description                                      |
+| ------------ | --------------- | -------- | ------------------------------------------------ |
+| `instanceId` | string          | Yes      | The instance that received the message           |
+| `messageId`  | string          | Yes      | Received message ID                              |
+| `chatId`     | string          | No       | Chat JID used to verify the message              |
+| `mode`       | `file` | `base64` | No (default: `file`) | Return a saved path or base64 data |
+
+**Channel support:** Both. Cloud API downloads media through Meta's media endpoint.
+
+The default maximum is 25 MB (`WA_MEDIA_DOWNLOAD_MAX_BYTES`). Base64 mode has a 5 MB maximum, or
+the lower configured download limit. Incoming path separators, `..` sequences, and control
+characters are stripped from filenames and names are limited to 120 characters. Saved paths receive
+a generated unique prefix and are checked to remain inside the configured directory, so a remote
+filename with traversal components cannot choose its save path.
+
+**File response:** `{ "path": "...", "fileName": "report.pdf", "mimeType": "application/pdf", "size": 4096 }`
+
+**Base64 response:** `{ "path": null, "fileName": "report.pdf", "mimeType": "application/pdf", "size": 4096, "base64": "..." }`
 
 ---
 
@@ -884,9 +955,125 @@ Clear all messages in a chat. The chat remains but all messages are removed.
 
 ---
 
-### 2.4 Group Management (14 tools)
+### 2.4 Group Management (18 tools)
 
 Tools for creating and managing WhatsApp groups.
+
+#### `wa_list_groups`
+
+List the groups the connected account participates in, ordered by subject. Each entry includes the
+group JID, subject, description, participant count, and whether this account is an admin or
+superadmin. Baileys compares the account's PN and LID identities when determining its role.
+
+| Parameter    | Type   | Required | Description     |
+| ------------ | ------ | -------- | --------------- |
+| `instanceId` | string | Yes      | The instance ID |
+
+**Channel support:** Baileys only
+
+**Response:**
+
+```json
+[
+  {
+    "jid": "120363000000000000@g.us",
+    "subject": "Support group",
+    "description": "Customer support",
+    "participantCount": 8,
+    "isAdmin": true,
+    "isSuperAdmin": false
+  }
+]
+```
+
+---
+
+#### `wa_get_group_info`
+
+Get group metadata and its participants. Participant roles are `admin`, `superadmin`, or `member`;
+phone numbers are included when available, including when a LID can be resolved to a PN.
+
+| Parameter    | Type   | Required | Description                        |
+| ------------ | ------ | -------- | ---------------------------------- |
+| `instanceId` | string | Yes      | The instance ID                    |
+| `groupId`    | string | Yes      | Group JID or bare numeric group ID |
+
+**Channel support:** Baileys only
+
+**Response:**
+
+```json
+{
+  "jid": "120363000000000000@g.us",
+  "subject": "Support group",
+  "description": "Customer support",
+  "owner": "5511999990000@s.whatsapp.net",
+  "ownerJid": "5511999990000@s.whatsapp.net",
+  "creation": 1700000000,
+  "createdAt": 1700000000,
+  "announce": false,
+  "restrict": true,
+  "ephemeralDuration": 86400,
+  "size": 8,
+  "participantCount": 8,
+  "participants": [
+    {
+      "jid": "5511999990000@s.whatsapp.net",
+      "phone": "5511999990000",
+      "role": "superadmin",
+      "isAdmin": true,
+      "isSuperAdmin": true
+    }
+  ]
+}
+```
+
+---
+
+#### `wa_group_update_picture`
+
+Set a group's picture. The image may be an HTTPS URL or base64-encoded PNG, JPG, GIF, or WebP; it is
+size-limited and converted to a square JPEG before upload. The connected account must be a group
+admin.
+
+| Parameter    | Type   | Required | Description                        |
+| ------------ | ------ | -------- | ---------------------------------- |
+| `instanceId` | string | Yes      | The instance ID                    |
+| `groupId`    | string | Yes      | Group JID or bare numeric group ID |
+| `image`      | string | Yes      | HTTPS URL or base64-encoded image  |
+
+**Channel support:** Baileys only
+
+**Response:**
+
+```json
+{
+  "success": true
+}
+```
+
+---
+
+#### `wa_group_remove_picture`
+
+Remove a group's picture. The connected account must be a group admin.
+
+| Parameter    | Type   | Required | Description                        |
+| ------------ | ------ | -------- | ---------------------------------- |
+| `instanceId` | string | Yes      | The instance ID                    |
+| `groupId`    | string | Yes      | Group JID or bare numeric group ID |
+
+**Channel support:** Baileys only
+
+**Response:**
+
+```json
+{
+  "success": true
+}
+```
+
+---
 
 #### `wa_create_group`
 
@@ -2045,6 +2232,10 @@ Fired when a new message is received in any chat.
     "content": "Synthetic account notice\nReview the details below.\nButton: See details — https://example.com/details",
     "mediaUrl": "https://example.com/synthetic-header.jpg",
     "mediaMimetype": "image/jpeg",
+    "mimeType": "image/jpeg",
+    "fileName": "photo.jpg",
+    "caption": "Review the photo",
+    "size": 12345,
     "buttons": [
       {
         "type": "url",
@@ -2058,9 +2249,14 @@ Fired when a new message is received in any chat.
 }
 ```
 
-`mediaMimetype`, `buttons`, and `rawType` are optional additions to the message object. Business
-template, interactive, list, and button messages include their readable text in `content`; unknown
-Baileys content types use `type: "text"` and include their source name in `rawType`.
+`mediaMimetype`, `mimeType`, `fileName`, `caption`, `size`, `buttons`, and `rawType` are optional
+additions to the message object. Media details are included when available from the channel; media
+bytes are not copied into notifications or outgoing event webhooks. Business template, interactive,
+list, and button messages include their readable text in `content`; unknown Baileys content types
+use `type: "text"` and include their source name in `rawType`.
+
+Outgoing generic and Grok Bot event webhooks also include available media metadata as `mimeType`,
+`fileName`, `caption`, and `size`. The top-level `type` field identifies the media type.
 
 ---
 
@@ -2410,7 +2606,7 @@ tools = toolkit.get_tools()
 | Instance Management   | 8      | Both (2 Baileys only, 1 Cloud only) |
 | Messaging             | 17     | Both                                |
 | Chat Management       | 6      | Both                                |
-| Group Management      | 14     | Both                                |
+| Group Management      | 18     | Baileys                             |
 | Contact Management    | 5      | Both                                |
 | Profile Management    | 5      | Both                                |
 | Status / Stories      | 3      | Baileys only                        |

@@ -9,6 +9,10 @@ import { toolSuccess } from "../types/mcp.types.js";
 import { handleToolError } from "../utils/tool-handler.js";
 import { createRequestLogger } from "../utils/logger.js";
 import {
+  ListGroupsSchema,
+  GetGroupInfoSchema,
+  UpdateGroupPictureSchema,
+  RemoveGroupPictureSchema,
   CreateGroupSchema,
   AddParticipantsSchema,
   RemoveParticipantsSchema,
@@ -30,6 +34,86 @@ export function registerGroupTools(
   instanceManager: InstanceManager,
   _messageQueue: MessageQueue,
 ): void {
+  server.registerTool(
+    "wa_list_groups",
+    {
+      description: "List WhatsApp groups with participant counts and this account's admin role.",
+      inputSchema: ListGroupsSchema,
+    },
+    async (params) => {
+      const log = createRequestLogger("wa_list_groups", params.instanceId);
+      const start = Date.now();
+      try {
+        const adapter = instanceManager.getAdapter(params.instanceId);
+        const groups = await adapter.listGroups();
+        log.info({ duration: Date.now() - start, count: groups.length }, "Groups listed");
+        return toolSuccess(groups);
+      } catch (err) {
+        return handleToolError("wa_list_groups", err, params.instanceId);
+      }
+    },
+  );
+
+  server.registerTool(
+    "wa_get_group_info",
+    {
+      description: "Get WhatsApp group metadata and participants with their roles.",
+      inputSchema: GetGroupInfoSchema,
+    },
+    async (params) => {
+      const log = createRequestLogger("wa_get_group_info", params.instanceId);
+      const start = Date.now();
+      try {
+        const adapter = instanceManager.getAdapter(params.instanceId);
+        const info = await adapter.getGroupMetadata(params.groupId);
+        log.info({ duration: Date.now() - start }, "Group information retrieved");
+        return toolSuccess(info);
+      } catch (err) {
+        return handleToolError("wa_get_group_info", err, params.instanceId);
+      }
+    },
+  );
+
+  server.registerTool(
+    "wa_group_update_picture",
+    {
+      description: "Set a WhatsApp group picture from an HTTPS URL or base64 image.",
+      inputSchema: UpdateGroupPictureSchema,
+    },
+    async (params) => {
+      const log = createRequestLogger("wa_group_update_picture", params.instanceId);
+      const start = Date.now();
+      try {
+        const adapter = instanceManager.getAdapter(params.instanceId);
+        await adapter.updateGroupPicture(params.groupId, params.image);
+        log.info({ duration: Date.now() - start }, "Group picture updated");
+        return toolSuccess({ success: true });
+      } catch (err) {
+        return handleToolError("wa_group_update_picture", err, params.instanceId);
+      }
+    },
+  );
+
+  server.registerTool(
+    "wa_group_remove_picture",
+    {
+      description: "Remove the WhatsApp group picture.",
+      inputSchema: RemoveGroupPictureSchema,
+    },
+    async (params) => {
+      const log = createRequestLogger("wa_group_remove_picture", params.instanceId);
+      const start = Date.now();
+      try {
+        const adapter = instanceManager.getAdapter(params.instanceId);
+        await adapter.removeGroupPicture(params.groupId);
+        log.info({ duration: Date.now() - start }, "Group picture removed");
+        return toolSuccess({ success: true });
+      } catch (err) {
+        return handleToolError("wa_group_remove_picture", err, params.instanceId);
+      }
+    },
+  );
+
   server.registerTool(
     "wa_create_group",
     {

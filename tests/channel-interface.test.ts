@@ -28,10 +28,13 @@ const CHANNEL_ADAPTER_METHODS: (keyof ChannelAdapter)[] = [
   // Chats
   "modifyChat",
   // Groups
+  "listGroups",
   "createGroup",
   "modifyGroup",
   "modifyParticipants",
   "getGroupMetadata",
+  "updateGroupPicture",
+  "removeGroupPicture",
   "getGroupInviteCode",
   "joinGroup",
   "handleJoinRequest",
@@ -63,6 +66,7 @@ const CHANNEL_ADAPTER_METHODS: (keyof ChannelAdapter)[] = [
   "getChats",
   "getMessages",
   "downloadMessageAudio",
+  "downloadMessageMedia",
   "getProfileInfo",
   // Events
   "on",

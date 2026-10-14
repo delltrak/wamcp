@@ -104,6 +104,11 @@ describe("normalizeWebhookPayload", () => {
       expect(msg.type).toBe("image");
       expect(msg.content).toBe("Check this photo");
       expect(msg.mediaUrl).toBe("media_id_123");
+      expect(msg).toMatchObject({
+        mimeType: "image/jpeg",
+        mediaMimetype: "image/jpeg",
+        caption: "Check this photo",
+      });
     });
 
     it("normalizes an image message without caption", () => {
@@ -126,6 +131,36 @@ describe("normalizeWebhookPayload", () => {
       expect(msg.type).toBe("image");
       expect(msg.content).toBeNull();
       expect(msg.mediaUrl).toBe("media_id_456");
+    });
+  });
+
+  it("normalizes document filename and known media size", () => {
+    const payload = makePayload({
+      messages: [
+        {
+          from: "5511888888888",
+          id: "wamid.pdf123",
+          timestamp: "1700000003",
+          type: "document",
+          document: {
+            id: "media_pdf_123",
+            mime_type: "application/pdf",
+            filename: "report.pdf",
+            caption: "Quarterly report",
+            file_size: 4096,
+          },
+        },
+      ],
+    });
+
+    const events = normalizeWebhookPayload(payload);
+    const msg = (events[0]!.payload as { message: Record<string, unknown> }).message;
+    expect(msg).toMatchObject({
+      type: "document",
+      mimeType: "application/pdf",
+      fileName: "report.pdf",
+      caption: "Quarterly report",
+      size: 4096,
     });
   });
 

@@ -297,6 +297,43 @@ describe("outgoing event webhook events", () => {
     });
   });
 
+  it("adds media MIME type, filename, caption, and known size to webhook payloads", () => {
+    const mediaMessage: ChannelEventPayload["message.received"] = {
+      ...incomingMessage(),
+      message: {
+        ...incomingMessage().message,
+        type: "document",
+        content: "Quarterly report",
+        mediaUrl: "cloud-media-123",
+        mediaMimetype: "application/pdf",
+        mimeType: "application/pdf",
+        mediaFileName: "report.pdf",
+        fileName: "report.pdf",
+        mediaSize: 4096,
+        size: 4096,
+        mediaCaption: "Quarterly report",
+        caption: "Quarterly report",
+      },
+    };
+
+    expect(
+      normalizeEventWebhookPayload("message.received", "inst_1234abcd", mediaMessage),
+    ).toMatchObject({
+      type: "document",
+      mimeType: "application/pdf",
+      fileName: "report.pdf",
+      caption: "Quarterly report",
+      size: 4096,
+    });
+    expect(normalizeGrokBotWebhookPayload("inst_1234abcd", mediaMessage)).toMatchObject({
+      type: "document",
+      mimeType: "application/pdf",
+      fileName: "report.pdf",
+      caption: "Quarterly report",
+      size: 4096,
+    });
+  });
+
   it("filters Grok Bot self messages, statuses, broadcasts and allowlists", () => {
     const destination = loadEventWebhookConfig({
       WA_EVENT_WEBHOOKS: JSON.stringify([

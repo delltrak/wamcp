@@ -12,6 +12,7 @@ import makeWASocket, {
   generateForwardMessageContent,
   generateWAMessageFromContent,
   type WASocket,
+  type GroupParticipant as BaileysGroupParticipant,
   type WAMessage,
   type BaileysEventMap,
   type AnyMessageContent,
@@ -35,6 +36,7 @@ import type {
   ContactResyncResult,
   Chat,
   Message,
+  GroupSummary,
   GroupMetadata,
   ChatModification,
   GroupModification,
@@ -87,6 +89,7 @@ import { createChildLogger } from "../../utils/logger.js";
 import { scheduleBaileysMessagesRead } from "../../services/auto-read.js";
 import { QuotedMessageResolutionError } from "../../utils/quoted-message.js";
 import { isValidStatusRecipient } from "../../utils/validation.js";
+import { normalizeGroupJid } from "../../utils/group-jid.js";
 import { MediaService } from "../../services/media.js";
 import { resolveFfmpegTimeoutMs, WHATSAPP_VOICE_MIME_TYPE } from "../../tts/audio.js";
 import { preparePttAudio } from "../../tts/waveform.js";
@@ -100,6 +103,37 @@ const logger = createChildLogger({ service: "baileys-adapter" });
 const mediaService = new MediaService();
 const DEFAULT_STATUS_MAX_RECIPIENTS = 256;
 const STATUS_BROADCAST_JID = "status@broadcast";
+
+function sizeLabel(maxBytes: number): string {
+  return maxBytes < 1024 * 1024 ? `${maxBytes} bytes` : `${Math.round(maxBytes / 1024 / 1024)} MB`;
+}
+
+function groupPictureFailure(error: unknown, operation: "update" | "remove"): Error {
+  const errorObject =
+    typeof error === "object" && error !== null ? (error as Record<string, unknown>) : undefined;
+  const output = errorObject?.output;
+  const statusCode =
+    typeof output === "object" && output !== null && "statusCode" in output
+      ? (output as Record<string, unknown>).statusCode
+      : errorObject?.statusCode;
+  const message = error instanceof Error ? error.message : String(error);
+  const lowered = message.toLowerCase();
+
+  if (
+    statusCode === 404 ||
+    /item-not-found|group (?:was )?not found|group does not exist/.test(lowered)
+  ) {
+    return new Error("Group not found");
+  }
+  if (
+    statusCode === 401 ||
+    statusCode === 403 ||
+    /not-authorized|not authorized|not an admin|admin permission|forbidden/.test(lowered)
+  ) {
+    return new Error(`Only a group admin can ${operation} this group's picture`);
+  }
+  return error instanceof Error ? error : new Error(message);
+}
 
 function parseBooleanEnv(value: string | undefined, key: string, fallback: boolean): boolean {
   if (value === undefined || value.trim() === "") return fallback;
@@ -499,7 +533,17 @@ export class BaileysAdapter implements ChannelAdapter {
         }
         break;
       case "video":
-        msg = { video: this.resolveMedia(content.video), caption: content.caption };
+        msg = {
+          video: this.resolveMedia(content.video),
+          caption: content.caption,
+          ...(content.gifPlayback ? { gifPlayback: true } : {}),
+        };
+        if (content.quotedMessageId) {
+          opts.quoted = this.getQuotedMessage(jid, content.quotedMessageId);
+        }
+        break;
+      case "sticker":
+        msg = { sticker: this.resolveMedia(content.sticker) };
         if (content.quotedMessageId) {
           opts.quoted = this.getQuotedMessage(jid, content.quotedMessageId);
         }
@@ -828,28 +872,177 @@ export class BaileysAdapter implements ChannelAdapter {
     await sock.groupParticipantsUpdate(jid, jids, action);
   }
 
+  async listGroups(): Promise<GroupSummary[]> {
+    const sock = this.getSock();
+    const groups = await sock.groupFetchAllParticipating();
+    const ownJids = await this.getOwnGroupParticipantJids(sock);
+    const summaries = await Promise.all(
+      Object.entries(groups).map(async ([key, metadata]) => {
+        const role = await this.getOwnGroupRole(metadata.participants ?? [], ownJids);
+        return {
+          jid: metadata.id || key,
+          subject: metadata.subject ?? "",
+          description: metadata.desc ?? null,
+          participantCount: metadata.participants?.length ?? 0,
+          isAdmin: role.isAdmin,
+          isSuperAdmin: role.isSuperAdmin,
+        } satisfies GroupSummary;
+      }),
+    );
+
+    return summaries.sort(
+      (left, right) =>
+        left.subject.localeCompare(right.subject, undefined, { sensitivity: "base" }) ||
+        left.jid.localeCompare(right.jid),
+    );
+  }
+
   async getGroupMetadata(groupId: string): Promise<GroupMetadata> {
     const sock = this.getSock();
-    const jid = this.normalizeJid(groupId);
+    const jid = normalizeGroupJid(groupId);
     const meta = await sock.groupMetadata(jid);
+    const participants = await Promise.all(
+      (meta.participants ?? []).map(async (participant) => {
+        const role: "admin" | "superadmin" | "member" =
+          participant.admin === "superadmin"
+            ? "superadmin"
+            : participant.admin === "admin"
+              ? "admin"
+              : "member";
+        const participantJids = await this.getGroupParticipantIdentities(participant);
+        const phoneJid = participant.phoneNumber
+          ? jidNormalizedUser(participant.phoneNumber)
+          : [...participantJids].find((candidate) => candidate.endsWith("@s.whatsapp.net"));
+        const phone = phoneJid?.endsWith("@s.whatsapp.net")
+          ? (phoneJid.split("@")[0]?.split(":")[0] ?? null)
+          : null;
+
+        return {
+          jid: participant.id,
+          role,
+          phone,
+          isAdmin: role === "admin" || role === "superadmin",
+          isSuperAdmin: role === "superadmin",
+        };
+      }),
+    );
+    const participantCount = meta.participants?.length ?? 0;
 
     return {
       jid: meta.id,
       subject: meta.subject,
       description: meta.desc ?? null,
+      owner: meta.owner ?? null,
       ownerJid: meta.owner ?? null,
-      participants: meta.participants.map((p) => ({
-        jid: p.id,
-        isAdmin: p.admin === "admin" || p.admin === "superadmin",
-        isSuperAdmin: p.admin === "superadmin",
-      })),
-      participantCount: meta.participants.length,
+      creation: meta.creation ?? null,
+      participants,
+      participantCount,
+      size: participantCount,
+      announce: meta.announce ?? false,
+      restrict: meta.restrict ?? false,
       isAnnounce: meta.announce ?? false,
       isLocked: meta.restrict ?? false,
       ephemeralDuration: meta.ephemeralDuration ?? null,
       inviteCode: null,
       createdAt: meta.creation ?? null,
     };
+  }
+
+  async updateGroupPicture(groupId: string, image: string): Promise<void> {
+    const sock = this.getSock();
+    const jid = normalizeGroupJid(groupId);
+    await this.requireGroupPictureAdmin(sock, jid, "update");
+    const jpeg = await mediaService.prepareGroupProfilePicture(image);
+    try {
+      await sock.updateProfilePicture(jid, jpeg);
+    } catch (error) {
+      throw groupPictureFailure(error, "update");
+    }
+  }
+
+  async removeGroupPicture(groupId: string): Promise<void> {
+    const sock = this.getSock();
+    const jid = normalizeGroupJid(groupId);
+    await this.requireGroupPictureAdmin(sock, jid, "remove");
+    try {
+      await sock.removeProfilePicture(jid);
+    } catch (error) {
+      throw groupPictureFailure(error, "remove");
+    }
+  }
+
+  private async getOwnGroupParticipantJids(sock: WASocket): Promise<Set<string>> {
+    return this.getNormalizedGroupIdentities([sock.user?.id, sock.user?.lid]);
+  }
+
+  private async getGroupParticipantIdentities(
+    participant: Pick<BaileysGroupParticipant, "id" | "phoneNumber" | "lid">,
+  ): Promise<Set<string>> {
+    return this.getNormalizedGroupIdentities([
+      participant.id,
+      participant.phoneNumber,
+      participant.lid,
+    ]);
+  }
+
+  private async getNormalizedGroupIdentities(
+    candidates: Array<string | undefined>,
+  ): Promise<Set<string>> {
+    const identities = new Set(
+      candidates
+        .filter((candidate): candidate is string => candidate !== undefined && candidate.length > 0)
+        .map((candidate) => jidNormalizedUser(candidate)),
+    );
+
+    if ([...identities].some((identity) => identity.endsWith("@s.whatsapp.net"))) {
+      return identities;
+    }
+
+    for (const identity of identities) {
+      if (!identity.endsWith("@lid")) continue;
+      try {
+        const phoneJid = jidNormalizedUser(await this.resolvePn(identity));
+        if (phoneJid !== identity) identities.add(phoneJid);
+      } catch {
+        // The direct LID identities still support comparisons when no phone mapping exists.
+      }
+    }
+    return identities;
+  }
+
+  private async getOwnGroupRole(
+    participants: BaileysGroupParticipant[],
+    ownJids: Set<string>,
+  ): Promise<{ isAdmin: boolean; isSuperAdmin: boolean }> {
+    let isAdmin = false;
+    let isSuperAdmin = false;
+    for (const participant of participants) {
+      const participantJids = await this.getGroupParticipantIdentities(participant);
+      if (![...participantJids].some((participantJid) => ownJids.has(participantJid))) continue;
+      if (participant.admin === "admin" || participant.admin === "superadmin") isAdmin = true;
+      if (participant.admin === "superadmin") isSuperAdmin = true;
+    }
+    return { isAdmin, isSuperAdmin };
+  }
+
+  private async requireGroupPictureAdmin(
+    sock: WASocket,
+    groupJid: string,
+    operation: "update" | "remove",
+  ): Promise<void> {
+    let metadata: Awaited<ReturnType<WASocket["groupMetadata"]>>;
+    try {
+      metadata = await sock.groupMetadata(groupJid);
+    } catch (error) {
+      throw groupPictureFailure(error, operation);
+    }
+    if (!metadata) throw new Error("Group not found");
+
+    const ownJids = await this.getOwnGroupParticipantJids(sock);
+    const role = await this.getOwnGroupRole(metadata.participants ?? [], ownJids);
+    if (!role.isAdmin) {
+      throw new Error(`Only a group admin can ${operation} this group's picture`);
+    }
   }
 
   async getGroupInviteCode(groupId: string): Promise<string> {
@@ -1174,6 +1367,16 @@ export class BaileysAdapter implements ChannelAdapter {
         ...(r.mediaMimetype || details?.mediaMimetype
           ? { mediaMimetype: r.mediaMimetype ?? details?.mediaMimetype }
           : {}),
+        ...(r.mediaMimetype || details?.mediaMimetype
+          ? { mimeType: r.mediaMimetype ?? details?.mediaMimetype }
+          : {}),
+        ...(details?.mediaFileName
+          ? { mediaFileName: details.mediaFileName, fileName: details.mediaFileName }
+          : {}),
+        ...(details?.mediaSize ? { mediaSize: details.mediaSize, size: details.mediaSize } : {}),
+        ...(details?.mediaCaption
+          ? { mediaCaption: details.mediaCaption, caption: details.mediaCaption }
+          : {}),
         ...(details?.buttons ? { buttons: details.buttons } : {}),
         ...(details?.rawType ? { rawType: details.rawType } : {}),
         quotedMessageId: r.quotedId,
@@ -1245,6 +1448,87 @@ export class BaileysAdapter implements ChannelAdapter {
     return {
       data: Buffer.concat(chunks, size),
       mimeType: row.mimetype ?? audioMessage.mimetype ?? "audio/ogg",
+    };
+  }
+
+  async downloadMessageMedia(
+    messageId: string,
+    chatId?: string,
+    maxBytes?: number,
+    timeoutMs?: number,
+  ): Promise<{ data: Buffer; mimeType: string; fileName?: string }> {
+    const where = chatId
+      ? and(
+          eq(messagesTable.instanceId, this.instanceId),
+          eq(messagesTable.id, messageId),
+          eq(messagesTable.chatId, chatId),
+        )
+      : and(eq(messagesTable.instanceId, this.instanceId), eq(messagesTable.id, messageId));
+    const row = db
+      .select({
+        type: messagesTable.type,
+        rawData: messagesTable.rawData,
+        mimetype: messagesTable.mediaMimetype,
+      })
+      .from(messagesTable)
+      .where(where)
+      .get();
+
+    if (!row) throw new Error(`Message '${messageId}' not found`);
+    const mediaFields: Record<string, string> = {
+      image: "imageMessage",
+      video: "videoMessage",
+      audio: "audioMessage",
+      document: "documentMessage",
+      sticker: "stickerMessage",
+    };
+    const mediaField = mediaFields[row.type];
+    if (!mediaField) throw new Error(`Message '${messageId}' does not contain downloadable media`);
+    if (!row.rawData) {
+      throw new Error(`Media for message '${messageId}' is no longer available`);
+    }
+
+    const message = JSON.parse(row.rawData, BufferJSON.reviver) as WAMessage;
+    const unwrapped = unwrapMessageContent(message.message);
+    const media = unwrapped?.[mediaField];
+    if (!media || typeof media !== "object") {
+      throw new Error(`Media for message '${messageId}' is unavailable`);
+    }
+    const mediaMessage = media as Record<string, unknown>;
+    const fileLength = Number(mediaMessage.fileLength);
+    if (maxBytes !== undefined && Number.isFinite(fileLength) && fileLength > maxBytes) {
+      throw new Error(`Media exceeds maximum download size of ${sizeLabel(maxBytes)}`);
+    }
+
+    const sock = this.getSock();
+    const downloadOptions = timeoutMs
+      ? { options: { signal: AbortSignal.timeout(timeoutMs) } }
+      : {};
+    const stream = await downloadMediaMessage(message, "stream", downloadOptions, {
+      logger: logger.child({ instanceId: this.instanceId, messageId }),
+      reuploadRequest: sock.updateMediaMessage,
+    });
+    const chunks: Buffer[] = [];
+    let size = 0;
+    for await (const chunk of stream) {
+      const buffer = Buffer.from(chunk);
+      size += buffer.length;
+      if (maxBytes !== undefined && size > maxBytes) {
+        stream.destroy();
+        throw new Error(`Media exceeds maximum download size of ${sizeLabel(maxBytes)}`);
+      }
+      chunks.push(buffer);
+    }
+
+    const mimeType =
+      row.mimetype ??
+      (typeof mediaMessage.mimetype === "string"
+        ? mediaMessage.mimetype
+        : "application/octet-stream");
+    return {
+      data: Buffer.concat(chunks, size),
+      mimeType,
+      ...(typeof mediaMessage.fileName === "string" ? { fileName: mediaMessage.fileName } : {}),
     };
   }
 
