@@ -495,6 +495,12 @@ export class MediaService {
             { cause: error },
           );
         }
+        if (error instanceof Error && /unknown encoder|encoder not found/i.test(error.message)) {
+          const encoder = animated ? "libwebp_anim" : "libwebp";
+          throw new Error(`ffmpeg lacks ${encoder} support required for stickers`, {
+            cause: error,
+          });
+        }
         if (error instanceof Error && error.message.includes("output exceeded")) {
           lastSizeError = stickerSizeError(limit + 1, animated);
           if (!animated && attempt === 0) continue;

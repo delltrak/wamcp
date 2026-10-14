@@ -1,5 +1,5 @@
 import { execFileSync, spawnSync } from "node:child_process";
-import { existsSync } from "node:fs";
+import { existsSync, realpathSync } from "node:fs";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
@@ -19,8 +19,27 @@ import { MEDIA_LIMITS } from "../src/constants.js";
 import { registerMessagingTools } from "../src/tools/messaging.tools.js";
 import { DownloadMediaSchema, SendGifSchema } from "../src/schemas/messaging.schema.js";
 
-const ffmpegAvailable = spawnSync("ffmpeg", ["-version"], { stdio: "ignore" }).status === 0;
+const ffmpegEncoderResult = spawnSync("ffmpeg", ["-hide_banner", "-encoders"], {
+  encoding: "utf8",
+});
+const ffmpegAvailable = ffmpegEncoderResult.status === 0;
+const ffmpegEncoderOutput = `${ffmpegEncoderResult.stdout ?? ""}\n${ffmpegEncoderResult.stderr ?? ""}`;
+const hasLibwebpEncoder = ffmpegAvailable && /^\s*\S+\s+libwebp(?:\s|$)/m.test(ffmpegEncoderOutput);
+const hasLibwebpAnimEncoder =
+  ffmpegAvailable && /^\s*\S+\s+libwebp_anim(?:\s|$)/m.test(ffmpegEncoderOutput);
 const ffprobeAvailable = spawnSync("ffprobe", ["-version"], { stdio: "ignore" }).status === 0;
+const staticStickerSkipReason = !ffmpegAvailable
+  ? "ffmpeg is unavailable"
+  : !hasLibwebpEncoder
+    ? "ffmpeg lacks the libwebp encoder"
+    : !ffprobeAvailable
+      ? "ffprobe is unavailable"
+      : undefined;
+const animatedStickerSkipReason = !ffmpegAvailable
+  ? "ffmpeg is unavailable"
+  : !hasLibwebpAnimEncoder
+    ? "ffmpeg lacks the libwebp_anim encoder"
+    : undefined;
 
 function registerTools(adapter: Record<string, unknown>, enqueueMessage = vi.fn()) {
   const tools = new Map<string, (params: unknown) => Promise<unknown>>();
@@ -120,8 +139,8 @@ describe("media conversions and received media downloads", () => {
     );
   });
 
-  it.skipIf(!ffmpegAvailable || !ffprobeAvailable)(
-    "converts PNG to a 512x512 WebP sticker",
+  it.skipIf(staticStickerSkipReason !== undefined)(
+    `converts PNG to a 512x512 WebP sticker${staticStickerSkipReason ? ` (skipped: ${staticStickerSkipReason})` : ""}`,
     async () => {
       const ppm = Buffer.concat([
         Buffer.from("P6\n120 60\n255\n"),
@@ -199,6 +218,16 @@ describe("media conversions and received media downloads", () => {
     expect(runner.mock.calls[0]![4]).toBe(MEDIA_LIMITS.stickerStatic);
   });
 
+  it("reports when ffmpeg lacks the libwebp encoder for stickers", async () => {
+    vi.spyOn(audioTools, "runFfmpegCommand").mockRejectedValue(
+      new Error("ffmpeg exited with code 8. Stderr tail: Unknown encoder 'libwebp'"),
+    );
+
+    await expect(
+      new MediaService().prepareSticker(vp8WebP(320, 240).toString("base64")),
+    ).rejects.toThrow("ffmpeg lacks libwebp support required for stickers");
+  });
+
   it("normalizes WebP when dimensions cannot be read and passes 512x512 WebP through", async () => {
     const unknownDimensions = webPFile(webPChunk("VP8 ", Buffer.from([0, 1])));
     const output = vp8lWebP(512, 512);
@@ -255,20 +284,23 @@ describe("media conversions and received media downloads", () => {
     expect(runner.mock.calls[1]![4]).toBe(MEDIA_LIMITS.stickerStatic);
   });
 
-  it.skipIf(!ffmpegAvailable)("converts animated GIF input to animated WebP", async () => {
-    const sticker = await new MediaService().prepareSticker(gifFixture().toString("base64"));
-    let hasAnimationFrame = false;
-    for (let offset = 12; offset + 8 <= sticker.data.length;) {
-      const kind = sticker.data.subarray(offset, offset + 4).toString("ascii");
-      const length = sticker.data.readUInt32LE(offset + 4);
-      if (kind === "ANMF") hasAnimationFrame = true;
-      offset += 8 + length + (length % 2);
-    }
-    expect(sticker.animated).toBe(true);
-    expect(hasAnimationFrame).toBe(true);
-    const passthrough = await new MediaService().prepareSticker(sticker.data.toString("base64"));
-    expect(passthrough).toMatchObject({ data: sticker.data, animated: true });
-  });
+  it.skipIf(animatedStickerSkipReason !== undefined)(
+    `converts animated GIF input to animated WebP${animatedStickerSkipReason ? ` (skipped: ${animatedStickerSkipReason})` : ""}`,
+    async () => {
+      const sticker = await new MediaService().prepareSticker(gifFixture().toString("base64"));
+      let hasAnimationFrame = false;
+      for (let offset = 12; offset + 8 <= sticker.data.length;) {
+        const kind = sticker.data.subarray(offset, offset + 4).toString("ascii");
+        const length = sticker.data.readUInt32LE(offset + 4);
+        if (kind === "ANMF") hasAnimationFrame = true;
+        offset += 8 + length + (length % 2);
+      }
+      expect(sticker.animated).toBe(true);
+      expect(hasAnimationFrame).toBe(true);
+      const passthrough = await new MediaService().prepareSticker(sticker.data.toString("base64"));
+      expect(passthrough).toMatchObject({ data: sticker.data, animated: true });
+    },
+  );
 
   it.skipIf(!ffmpegAvailable || !ffprobeAvailable)(
     "normalizes GIF videos to silent H.264 MP4 with even dimensions",
@@ -528,7 +560,7 @@ describe("media conversions and received media downloads", () => {
     const savedPath = String(body.path);
 
     expect(body.fileName).toBe("outside.pdf");
-    expect(resolve(dirname(savedPath))).toBe(resolve(directory));
+    expect(resolve(dirname(savedPath))).toBe(realpathSync(directory));
     expect(basename(savedPath)).not.toContain("..");
     expect(await readFile(savedPath)).toEqual(data);
     expect(existsSync(join(dirname(directory), "outside.pdf"))).toBe(false);
