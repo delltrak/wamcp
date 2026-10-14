@@ -15,6 +15,7 @@ import makeWASocket, {
   type WAMessage,
   type AnyMessageContent,
   type MiscMessageGenerationOptions,
+  jidNormalizedUser,
 } from "@whiskeysockets/baileys";
 import { Boom } from "@hapi/boom";
 import type { ChannelAdapter, ChannelEventHandler } from "../channel.interface.js";
@@ -36,6 +37,7 @@ import type {
   GroupModification,
   ParticipantAction,
   StatusContent,
+  StatusSendResult,
   CloudCredentials,
   ChannelEvent,
   ChannelEventPayload,
@@ -77,6 +79,7 @@ import {
 import { createChildLogger } from "../../utils/logger.js";
 import { scheduleBaileysMessagesRead } from "../../services/auto-read.js";
 import { QuotedMessageResolutionError } from "../../utils/quoted-message.js";
+import { isValidStatusRecipient } from "../../utils/validation.js";
 import { MediaService } from "../../services/media.js";
 import { resolveFfmpegTimeoutMs, WHATSAPP_VOICE_MIME_TYPE } from "../../tts/audio.js";
 import { preparePttAudio } from "../../tts/waveform.js";
@@ -88,12 +91,25 @@ import {
 
 const logger = createChildLogger({ service: "baileys-adapter" });
 const mediaService = new MediaService();
+const DEFAULT_STATUS_MAX_RECIPIENTS = 256;
 
 function parseBooleanEnv(value: string | undefined, key: string, fallback: boolean): boolean {
   if (value === undefined || value.trim() === "") return fallback;
   if (value.trim().toLowerCase() === "true") return true;
   if (value.trim().toLowerCase() === "false") return false;
   throw new Error(`Invalid ${key}; expected true or false`);
+}
+
+function parsePositiveIntegerEnv(value: string | undefined, key: string, fallback: number): number {
+  if (value === undefined || value.trim() === "") return fallback;
+  if (!/^\d+$/.test(value.trim())) {
+    throw new Error(`Invalid ${key}; expected a positive integer`);
+  }
+  const parsed = Number(value.trim());
+  if (!Number.isSafeInteger(parsed) || parsed < 1) {
+    throw new Error(`Invalid ${key}; expected a positive integer`);
+  }
+  return parsed;
 }
 
 function serializeIncomingMessage(message?: WAMessage): string | null {
@@ -122,6 +138,7 @@ export class BaileysAdapter implements ChannelAdapter {
 
   private readonly autoReconnect: boolean;
   private readonly markOnlineOnConnect: boolean;
+  private readonly maxStatusRecipients: number;
   private readonly listeners = new Map<ChannelEvent, Set<ChannelEventHandler<ChannelEvent>>>();
 
   constructor(
@@ -134,6 +151,11 @@ export class BaileysAdapter implements ChannelAdapter {
       process.env.WA_MARK_ONLINE_ON_CONNECT,
       "WA_MARK_ONLINE_ON_CONNECT",
       false,
+    );
+    this.maxStatusRecipients = parsePositiveIntegerEnv(
+      process.env.WA_STATUS_MAX_RECIPIENTS,
+      "WA_STATUS_MAX_RECIPIENTS",
+      DEFAULT_STATUS_MAX_RECIPIENTS,
     );
   }
 
@@ -150,6 +172,71 @@ export class BaileysAdapter implements ChannelAdapter {
     if (input.includes("@")) return input;
     const cleaned = input.replace(/[^0-9]/g, "");
     return `${cleaned}@s.whatsapp.net`;
+  }
+
+  private normalizeStatusRecipient(input: string): string | null {
+    const value = input.trim();
+    if (!isValidStatusRecipient(value)) return null;
+
+    const jid = value.includes("@")
+      ? jidNormalizedUser(value)
+      : jidNormalizedUser(`${value.replace(/[^0-9]/g, "")}@s.whatsapp.net`);
+    return jid && isValidStatusRecipient(jid) ? jid : null;
+  }
+
+  private resolveStatusAudience(
+    sock: WASocket,
+    requestedJids?: string[],
+  ): { statusJidList: string[]; omittedRecipientCount: number; warning?: string } {
+    const recipients: string[] = [];
+    const seen = new Set<string>();
+    const addRecipient = (input: string, explicit: boolean): void => {
+      const jid = this.normalizeStatusRecipient(input);
+      if (!jid) {
+        if (explicit) {
+          throw new Error(
+            `Invalid status recipient '${input}'; expected an individual WhatsApp phone number or JID`,
+          );
+        }
+        return;
+      }
+      if (seen.has(jid)) return;
+      seen.add(jid);
+      recipients.push(jid);
+    };
+
+    const ownJid = sock.user?.id ? this.normalizeStatusRecipient(sock.user.id) : null;
+    if (ownJid) addRecipient(ownJid, false);
+
+    const audienceJids =
+      requestedJids ?? this.contactStore.getContacts().map((contact) => contact.jid);
+    for (const jid of audienceJids) addRecipient(jid, requestedJids !== undefined);
+
+    if (recipients.length === 0) {
+      throw new Error(
+        "Cannot send status: the audience is empty. Connect the account or provide at least one individual phone number or JID.",
+      );
+    }
+
+    const statusJidList = recipients.slice(0, this.maxStatusRecipients);
+    const omittedRecipientCount = recipients.length - statusJidList.length;
+    const warning =
+      omittedRecipientCount > 0
+        ? `Status audience exceeded WA_STATUS_MAX_RECIPIENTS (${this.maxStatusRecipients}); the list was truncated and ${omittedRecipientCount} recipient(s) were omitted.`
+        : undefined;
+    if (warning) {
+      logger.warn(
+        {
+          instanceId: this.instanceId,
+          maxRecipients: this.maxStatusRecipients,
+          recipientCount: statusJidList.length,
+          omittedRecipientCount,
+        },
+        "Status recipient list truncated to configured cap",
+      );
+    }
+
+    return { statusJidList, omittedRecipientCount, warning };
   }
 
   /** Resolve a PN JID from a LID using the signal repository mapping */
@@ -878,31 +965,56 @@ export class BaileysAdapter implements ChannelAdapter {
 
   // ---- Status / Stories ----
 
-  async sendStatus(content: StatusContent): Promise<void> {
+  async sendStatus(content: StatusContent): Promise<StatusSendResult> {
     const sock = this.getSock();
     const statusJid = "status@broadcast";
+    const audience = this.resolveStatusAudience(sock, content.statusJidList);
+    const messageOptions: MiscMessageGenerationOptions = {
+      statusJidList: audience.statusJidList,
+      broadcast: true,
+      ...(content.type === "text" && content.backgroundColor !== undefined
+        ? { backgroundColor: content.backgroundColor }
+        : {}),
+      ...(content.type === "text" && content.font !== undefined ? { font: content.font } : {}),
+    };
 
     switch (content.type) {
       case "text":
-        await sock.sendMessage(statusJid, {
-          text: content.text ?? "",
-          backgroundColor: content.backgroundColor,
-          font: content.font,
-        } as AnyMessageContent);
+        await sock.sendMessage(
+          statusJid,
+          {
+            text: content.text ?? "",
+          },
+          messageOptions,
+        );
         break;
       case "image":
-        await sock.sendMessage(statusJid, {
-          image: this.resolveMedia(content.media ?? ""),
-          caption: content.caption,
-        });
+        await sock.sendMessage(
+          statusJid,
+          {
+            image: this.resolveMedia(content.media ?? ""),
+            caption: content.caption,
+          },
+          messageOptions,
+        );
         break;
       case "video":
-        await sock.sendMessage(statusJid, {
-          video: this.resolveMedia(content.media ?? ""),
-          caption: content.caption,
-        });
+        await sock.sendMessage(
+          statusJid,
+          {
+            video: this.resolveMedia(content.media ?? ""),
+            caption: content.caption,
+          },
+          messageOptions,
+        );
         break;
     }
+
+    return {
+      recipientCount: audience.statusJidList.length,
+      omittedRecipientCount: audience.omittedRecipientCount,
+      ...(audience.warning ? { warning: audience.warning } : {}),
+    };
   }
 
   // ---- Newsletter / Channels ----

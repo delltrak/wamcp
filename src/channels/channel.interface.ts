@@ -22,6 +22,7 @@ import type {
   GroupModification,
   ParticipantAction,
   StatusContent,
+  StatusSendResult,
   CloudCredentials,
   ChannelEvent,
   ChannelEventPayload,
@@ -98,7 +99,7 @@ export interface ChannelAdapter {
   getProfilePicture(jid: string): Promise<string | null>;
 
   // ---- Status / Stories ----
-  sendStatus(content: StatusContent): Promise<void>;
+  sendStatus(content: StatusContent): Promise<StatusSendResult>;
 
   // ---- Newsletter / Channels ----
   newsletterFollow(jid: string): Promise<void>;
