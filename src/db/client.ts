@@ -66,6 +66,7 @@ function initializeDatabase(): void {
       is_forwarded    INTEGER NOT NULL DEFAULT 0,
       status          TEXT NOT NULL DEFAULT 'received',
       timestamp       INTEGER NOT NULL,
+      push_name       TEXT,
       raw_data        TEXT,
       PRIMARY KEY (instance_id, id)
     );
@@ -91,6 +92,7 @@ function initializeDatabase(): void {
       instance_id     TEXT NOT NULL REFERENCES instances(id) ON DELETE CASCADE,
       jid             TEXT NOT NULL,
       name            TEXT,
+      name_source     TEXT,
       notify_name     TEXT,
       phone           TEXT,
       lid             TEXT,
@@ -158,6 +160,18 @@ function initializeDatabase(): void {
 // Must run BEFORE initializeDatabase() so the index creation succeeds
 try {
   sqlite.exec(`ALTER TABLE contacts ADD COLUMN lid TEXT`);
+} catch {
+  // column already exists or table doesn't exist yet — ignore
+}
+
+try {
+  sqlite.exec(`ALTER TABLE contacts ADD COLUMN name_source TEXT`);
+} catch {
+  // column already exists or table doesn't exist yet — ignore
+}
+
+try {
+  sqlite.exec(`ALTER TABLE messages ADD COLUMN push_name TEXT`);
 } catch {
   // column already exists or table doesn't exist yet — ignore
 }

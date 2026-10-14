@@ -38,3 +38,9 @@ export const SearchContactSchema = z
     query: z.string().min(1).describe("Search term — matches name, notify name, or phone number"),
   })
   .strict();
+
+export const ResyncContactsSchema = z
+  .object({
+    instanceId: z.string().min(1).describe("The existing WhatsApp instance ID"),
+  })
+  .strict();

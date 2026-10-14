@@ -15,6 +15,7 @@ import type {
   PrivacySettings,
   PrivacyUpdate,
   Contact,
+  ContactResyncResult,
   Chat,
   Message,
   GroupMetadata,
@@ -88,6 +89,7 @@ export interface ChannelAdapter {
   unblockContact(jid: string): Promise<void>;
   getBlocklist(): Promise<string[]>;
   getBusinessProfile(jid: string): Promise<BusinessProfile | null>;
+  resyncContacts(): Promise<ContactResyncResult>;
 
   // ---- Profile ----
   updateProfilePicture(image: Buffer): Promise<void>;
