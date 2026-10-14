@@ -58,7 +58,7 @@ import {
   messages as messagesTable,
   statusAudiences as statusAudiencesTable,
 } from "../../db/schema.js";
-import { eq, and, desc, sql } from "drizzle-orm";
+import { eq, and, desc, ne, sql } from "drizzle-orm";
 import {
   normalizeMessagesUpsert,
   normalizeMessagesUpdate,
@@ -106,6 +106,17 @@ const STATUS_BROADCAST_JID = "status@broadcast";
 
 function sizeLabel(maxBytes: number): string {
   return maxBytes < 1024 * 1024 ? `${maxBytes} bytes` : `${Math.round(maxBytes / 1024 / 1024)} MB`;
+}
+
+function isContactEligibleChatNameJid(jid: string): boolean {
+  const normalizedJid = jid.toLowerCase();
+  const server = normalizedJid.slice(normalizedJid.lastIndexOf("@") + 1);
+  return (
+    normalizedJid !== STATUS_BROADCAST_JID &&
+    server !== "g.us" &&
+    server !== "broadcast" &&
+    server !== "newsletter"
+  );
 }
 
 function groupPictureFailure(error: unknown, operation: "update" | "remove"): Error {
@@ -280,6 +291,28 @@ export class BaileysAdapter implements ChannelAdapter {
     }
 
     return { statusJidList, omittedRecipientCount, warning };
+  }
+
+  private reuseStoredStatusAudience(sock: WASocket, storedJids: string[]): string[] {
+    const statusJidList: string[] = [];
+    const seen = new Set<string>();
+    const addRecipient = (jid: string): void => {
+      const normalized = this.normalizeStatusRecipient(jid);
+      if (!normalized || seen.has(normalized)) return;
+      seen.add(normalized);
+      statusJidList.push(jid);
+    };
+
+    const ownJid = sock.user?.id ? this.normalizeStatusRecipient(sock.user.id) : null;
+    if (ownJid) addRecipient(ownJid);
+    for (const jid of storedJids) addRecipient(jid);
+
+    if (statusJidList.length === 0) {
+      throw new Error(
+        "Cannot revoke status: the saved audience is empty and the account JID is unavailable.",
+      );
+    }
+    return statusJidList;
   }
 
   /** Resolve a PN JID from a LID using the signal repository mapping */
@@ -655,21 +688,37 @@ export class BaileysAdapter implements ChannelAdapter {
   async deleteMessage(chatId: string, msgId: string, requestedJids?: string[]): Promise<void> {
     const sock = this.getSock();
     const jid = this.normalizeJid(chatId);
+    const storedMessage = db
+      .select({ chatId: messagesTable.chatId, isFromMe: messagesTable.isFromMe })
+      .from(messagesTable)
+      .where(and(eq(messagesTable.instanceId, this.instanceId), eq(messagesTable.id, msgId)))
+      .get();
+    if (storedMessage && (storedMessage.isFromMe !== 1 || storedMessage.chatId !== jid)) {
+      throw new Error(
+        `Cannot revoke message '${msgId}': the stored message is not an outgoing message in chat '${jid}'.`,
+      );
+    }
+
     if (jid === STATUS_BROADCAST_JID) {
       const storedJids =
         requestedJids === undefined ? this.getStoredStatusAudience(msgId) : undefined;
-      const audience = this.resolveStatusAudience(sock, requestedJids ?? storedJids);
+      const statusJidList =
+        requestedJids !== undefined
+          ? this.resolveStatusAudience(sock, requestedJids).statusJidList
+          : storedJids !== undefined
+            ? this.reuseStoredStatusAudience(sock, storedJids)
+            : this.resolveStatusAudience(sock).statusJidList;
       await sock.sendMessage(
         jid,
         { delete: { remoteJid: jid, id: msgId, fromMe: true } },
-        { statusJidList: audience.statusJidList },
+        { statusJidList },
       );
     } else {
       await sock.sendMessage(jid, {
         delete: { remoteJid: jid, id: msgId, fromMe: true },
       });
     }
-    this.updateMessageStatus(msgId, "revoked");
+    this.updateMessageStatus(msgId, "revoked", jid, 1);
   }
 
   async forwardMessage(to: string, msgId: string, fromChat: string): Promise<MessageResponse> {
@@ -1588,7 +1637,7 @@ export class BaileysAdapter implements ChannelAdapter {
           set: {
             type: message.type === "text" ? sql`${messagesTable.type}` : message.type,
             content: message.content,
-            status: message.isFromMe ? "sent" : "received",
+            status: sql`CASE WHEN ${messagesTable.status} = 'revoked' THEN 'revoked' ELSE excluded.status END`,
             pushName: sql`coalesce(excluded.push_name, ${messagesTable.pushName})`,
             mediaUrl: sql`coalesce(excluded.media_url, ${messagesTable.mediaUrl})`,
             mediaMimetype: sql`coalesce(excluded.media_mimetype, ${messagesTable.mediaMimetype})`,
@@ -1632,11 +1681,24 @@ export class BaileysAdapter implements ChannelAdapter {
     }
   }
 
-  private updateMessageStatus(messageId: string, status: MessageDeliveryStatus): void {
+  private updateMessageStatus(
+    messageId: string,
+    status: MessageDeliveryStatus,
+    chatId?: string,
+    isFromMe?: number,
+  ): void {
     try {
+      const filters = [
+        eq(messagesTable.instanceId, this.instanceId),
+        eq(messagesTable.id, messageId),
+        ne(messagesTable.status, "revoked"),
+      ];
+      if (chatId !== undefined) filters.push(eq(messagesTable.chatId, chatId));
+      if (isFromMe !== undefined) filters.push(eq(messagesTable.isFromMe, isFromMe));
+
       db.update(messagesTable)
         .set({ status })
-        .where(and(eq(messagesTable.instanceId, this.instanceId), eq(messagesTable.id, messageId)))
+        .where(and(...filters))
         .run();
     } catch (err) {
       logger.error({ err, messageId }, "Failed to update message status");
@@ -1826,7 +1888,7 @@ export class BaileysAdapter implements ChannelAdapter {
         this.persistChats(events["chats.upsert"]);
         const namedChats = events["chats.upsert"].filter(
           (ch): ch is typeof ch & { id: string; name: string } =>
-            !!ch.id && !!ch.name && !ch.id.endsWith("@g.us") && !ch.id.endsWith("@broadcast"),
+            !!ch.id && !!ch.name && isContactEligibleChatNameJid(ch.id),
         );
         if (namedChats.length > 0) {
           await persistContacts(namedChats.map((ch) => ({ id: ch.id, name: ch.name })));
@@ -1840,7 +1902,8 @@ export class BaileysAdapter implements ChannelAdapter {
       if (events["chats.update"]) {
         this.persistChats(events["chats.update"]);
         const namedChats = events["chats.update"].filter(
-          (ch): ch is typeof ch & { id: string; name: string } => !!ch.id && !!ch.name,
+          (ch): ch is typeof ch & { id: string; name: string } =>
+            !!ch.id && !!ch.name && isContactEligibleChatNameJid(ch.id),
         );
         if (namedChats.length > 0) {
           await persistContacts(namedChats.map((ch) => ({ id: ch.id, name: ch.name })));

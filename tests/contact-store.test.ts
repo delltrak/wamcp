@@ -83,7 +83,13 @@ describe("ContactStore", () => {
         },
         { id: "15555550124@s.whatsapp.net" },
       ],
-      chats: [{ id: "15555550125@s.whatsapp.net", name: "Example Chat Contact" }],
+      chats: [
+        { id: "15555550125@s.whatsapp.net", name: "Example Chat Contact" },
+        { id: "120363000000000000@g.us", name: "Group title" },
+        { id: "12345@broadcast", name: "Broadcast list" },
+        { id: "12345@newsletter", name: "Channel" },
+        { id: "status@broadcast", name: "Status" },
+      ],
     });
 
     expect(
@@ -250,6 +256,34 @@ describe("ContactStore", () => {
     expect(store.getContacts().map((contact) => contact.jid)).not.toEqual(
       expect.arrayContaining([groupJid, "status@broadcast", "12345@newsletter"]),
     );
+
+    sqlite.close();
+  });
+
+  it("deduplicates recovered message contacts and keeps the latest non-empty push name", async () => {
+    const { sqlite, store } = createStore();
+    const jid = "15555550131@s.whatsapp.net";
+    const insertMessage = sqlite.prepare(
+      "INSERT INTO messages (id, instance_id, chat_id, sender_id, is_from_me, timestamp, push_name) VALUES (?, ?, ?, ?, ?, ?, ?)",
+    );
+    insertMessage.run("latest-old", "inst_fake_sync", jid, jid, 0, 10, "Old name");
+    insertMessage.run("latest-name", "inst_fake_sync", jid, jid, 0, 20, "Latest name");
+    insertMessage.run("latest-empty", "inst_fake_sync", jid, jid, 0, 30, "   ");
+
+    const recovery = await store.recoverFromLocalData();
+
+    expect(recovery.messages).toEqual({ candidates: 1, contactsAdded: 1 });
+    expect(store.getContacts()).toEqual([
+      {
+        jid,
+        name: "Latest name",
+        notifyName: "Latest name",
+        phone: "15555550131",
+        profilePicUrl: null,
+        isBusiness: false,
+        isBlocked: false,
+      },
+    ]);
 
     sqlite.close();
   });
