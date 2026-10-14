@@ -9,6 +9,7 @@ import type {
   MessageContent,
   MessageResponse,
   GroupResponse,
+  GroupSummary,
   NumberExistsResponse,
   BusinessProfile,
   ProfileInfo,
@@ -67,6 +68,7 @@ export interface ChannelAdapter {
   modifyChat(chatId: string, modification: ChatModification): Promise<void>;
 
   // ---- Groups ----
+  listGroups(): Promise<GroupSummary[]>;
   createGroup(name: string, participants: string[]): Promise<GroupResponse>;
   modifyGroup(groupId: string, modification: GroupModification): Promise<void>;
   modifyParticipants(
@@ -75,6 +77,8 @@ export interface ChannelAdapter {
     action: ParticipantAction,
   ): Promise<void>;
   getGroupMetadata(groupId: string): Promise<GroupMetadata>;
+  updateGroupPicture(groupId: string, image: string): Promise<void>;
+  removeGroupPicture(groupId: string): Promise<void>;
   getGroupInviteCode(groupId: string): Promise<string>;
   joinGroup(inviteCode: string): Promise<string>;
   handleJoinRequest(

@@ -15,6 +15,7 @@ import type {
   MessageContent,
   MessageResponse,
   GroupResponse,
+  GroupSummary,
   NumberExistsResponse,
   BusinessProfile,
   ProfileInfo,
@@ -510,6 +511,10 @@ export class CloudApiAdapter implements ChannelAdapter {
 
   // ---- Groups ----
 
+  async listGroups(): Promise<GroupSummary[]> {
+    throw new Error("Listing groups is not supported on Cloud API");
+  }
+
   async createGroup(_name: string, _participants: string[]): Promise<GroupResponse> {
     throw new Error("Group management is not supported on Cloud API");
   }
@@ -527,7 +532,15 @@ export class CloudApiAdapter implements ChannelAdapter {
   }
 
   async getGroupMetadata(_groupId: string): Promise<GroupMetadata> {
-    throw new Error("Group management is not supported on Cloud API");
+    throw new Error("Group metadata is not supported on Cloud API");
+  }
+
+  async updateGroupPicture(_groupId: string, _image: string): Promise<void> {
+    throw new Error("Updating a group picture is not supported on Cloud API");
+  }
+
+  async removeGroupPicture(_groupId: string): Promise<void> {
+    throw new Error("Removing a group picture is not supported on Cloud API");
   }
 
   async getGroupInviteCode(_groupId: string): Promise<string> {

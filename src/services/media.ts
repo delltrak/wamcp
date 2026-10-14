@@ -19,6 +19,7 @@ export const DEFAULT_MEDIA_DOWNLOAD_MAX_BYTES = 25 * 1024 * 1024;
 export const DEFAULT_MEDIA_DOWNLOAD_BASE64_MAX_BYTES = 5 * 1024 * 1024;
 export const DEFAULT_MEDIA_DOWNLOAD_DIR = "data/media-downloads";
 const MAX_MEDIA_FILE_NAME_LENGTH = 120;
+const GROUP_PROFILE_PICTURE_MAX_BYTES = 5 * 1024 * 1024;
 
 export interface PreparedSticker {
   data: Buffer;
@@ -530,6 +531,63 @@ export class MediaService {
     if (converted.length > limit)
       throw new Error(`Converted ${stickerSizeError(converted.length, animated).message}`);
     return { data: converted, animated };
+  }
+
+  /** Convert supported image media to a square JPEG suitable for a group profile picture. */
+  async prepareGroupProfilePicture(input: string): Promise<Buffer> {
+    const source = await this.getMediaBuffer(input, { maxBytes: MEDIA_LIMITS.image });
+    const format = detectMediaInputFormat(source);
+    if (format !== "gif" && format !== "webp" && format !== "png" && format !== "jpeg") {
+      throw new Error("Group picture input must be PNG, JPG, GIF, or WebP image media");
+    }
+
+    let converted: Buffer;
+    try {
+      converted = await runFfmpegCommand(
+        [source],
+        [
+          "-i",
+          "pipe:0",
+          "-map",
+          "0:v:0",
+          "-frames:v",
+          "1",
+          "-vf",
+          "scale=640:640:force_original_aspect_ratio=increase:flags=lanczos,crop=640:640",
+          "-an",
+          "-c:v",
+          "mjpeg",
+          "-q:v",
+          "3",
+          "-f",
+          "image2pipe",
+          "pipe:1",
+        ],
+        mediaFfmpegExecutable(),
+        mediaFfmpegTimeoutMs(),
+        GROUP_PROFILE_PICTURE_MAX_BYTES,
+      );
+    } catch (error) {
+      if (error instanceof Error && "code" in error && error.code === "ENOENT") {
+        throw new Error(
+          "ffmpeg is required to prepare group pictures. Install ffmpeg or set WA_MEDIA_FFMPEG_PATH.",
+          { cause: error },
+        );
+      }
+      if (error instanceof Error && error.message.includes("output exceeded")) {
+        throw new Error(
+          `Converted group picture exceeds the ${sizeLabel(GROUP_PROFILE_PICTURE_MAX_BYTES)} limit`,
+          { cause: error },
+        );
+      }
+      throw error;
+    }
+
+    if (converted.length < 3 || detectMediaInputFormat(converted) !== "jpeg") {
+      throw new Error("ffmpeg did not produce a valid JPEG group picture");
+    }
+    assertMaxBytes(converted.length, GROUP_PROFILE_PICTURE_MAX_BYTES);
+    return converted;
   }
 
   /** Convert a GIF or video input to a silent H.264 MP4 suitable for GIF playback. */

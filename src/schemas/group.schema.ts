@@ -3,6 +3,39 @@
 // ============================================================
 
 import { z } from "zod";
+import { isValidGroupId } from "../utils/group-jid.js";
+
+const GroupIdSchema = z
+  .string()
+  .trim()
+  .min(1)
+  .refine(isValidGroupId, "Expected a WhatsApp group ID or a JID ending in @g.us");
+
+export const ListGroupsSchema = z
+  .object({ instanceId: z.string().min(1).describe("The instance ID") })
+  .strict();
+
+export const GetGroupInfoSchema = z
+  .object({
+    instanceId: z.string().min(1).describe("The instance ID"),
+    groupId: GroupIdSchema.describe("WhatsApp group JID or bare group ID"),
+  })
+  .strict();
+
+export const UpdateGroupPictureSchema = z
+  .object({
+    instanceId: z.string().min(1).describe("The instance ID"),
+    groupId: GroupIdSchema.describe("WhatsApp group JID or bare group ID"),
+    image: z.string().min(1).describe("Group picture as an HTTPS URL or base64-encoded image"),
+  })
+  .strict();
+
+export const RemoveGroupPictureSchema = z
+  .object({
+    instanceId: z.string().min(1).describe("The instance ID"),
+    groupId: GroupIdSchema.describe("WhatsApp group JID or bare group ID"),
+  })
+  .strict();
 
 export const CreateGroupSchema = z
   .object({

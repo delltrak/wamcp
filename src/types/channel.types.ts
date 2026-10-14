@@ -154,6 +154,15 @@ export interface GroupResponse {
   inviteCode?: string;
 }
 
+export interface GroupSummary {
+  jid: string;
+  subject: string;
+  description: string | null;
+  participantCount: number;
+  isAdmin: boolean;
+  isSuperAdmin: boolean;
+}
+
 export interface NumberExistsResponse {
   exists: boolean;
   jid: string | null;
@@ -241,9 +250,14 @@ export interface GroupMetadata {
   jid: string;
   subject: string;
   description: string | null;
+  owner: string | null;
   ownerJid: string | null;
+  creation: number | null;
   participants: GroupParticipant[];
   participantCount: number;
+  size: number;
+  announce: boolean;
+  restrict: boolean;
   isAnnounce: boolean;
   isLocked: boolean;
   ephemeralDuration: number | null;
@@ -253,6 +267,8 @@ export interface GroupMetadata {
 
 export interface GroupParticipant {
   jid: string;
+  role: "admin" | "superadmin" | "member";
+  phone: string | null;
   isAdmin: boolean;
   isSuperAdmin: boolean;
 }

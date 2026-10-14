@@ -11,7 +11,7 @@
    - [Instance Management](#21-instance-management-8-tools)
    - [Messaging](#22-messaging-20-tools)
    - [Chat Management](#23-chat-management-6-tools)
-   - [Group Management](#24-group-management-14-tools)
+   - [Group Management](#24-group-management-18-tools)
    - [Contact Management](#25-contact-management-6-tools)
    - [Profile Management](#26-profile-management-6-tools)
    - [Status / Stories](#27-status--stories-3-tools)
@@ -73,7 +73,7 @@ Tools marked **Baileys only** are not available on Cloud API instances.
 
 ## 2. Tools Reference
 
-WA MCP exposes **71 tools** grouped by domain. All tools return MCP-standard responses.
+WA MCP exposes **75 tools** grouped by domain. All tools return MCP-standard responses.
 
 ### Success Response Format
 
@@ -955,9 +955,125 @@ Clear all messages in a chat. The chat remains but all messages are removed.
 
 ---
 
-### 2.4 Group Management (14 tools)
+### 2.4 Group Management (18 tools)
 
 Tools for creating and managing WhatsApp groups.
+
+#### `wa_list_groups`
+
+List the groups the connected account participates in, ordered by subject. Each entry includes the
+group JID, subject, description, participant count, and whether this account is an admin or
+superadmin. Baileys compares the account's PN and LID identities when determining its role.
+
+| Parameter    | Type   | Required | Description     |
+| ------------ | ------ | -------- | --------------- |
+| `instanceId` | string | Yes      | The instance ID |
+
+**Channel support:** Baileys only
+
+**Response:**
+
+```json
+[
+  {
+    "jid": "120363000000000000@g.us",
+    "subject": "Support group",
+    "description": "Customer support",
+    "participantCount": 8,
+    "isAdmin": true,
+    "isSuperAdmin": false
+  }
+]
+```
+
+---
+
+#### `wa_get_group_info`
+
+Get group metadata and its participants. Participant roles are `admin`, `superadmin`, or `member`;
+phone numbers are included when available, including when a LID can be resolved to a PN.
+
+| Parameter    | Type   | Required | Description                        |
+| ------------ | ------ | -------- | ---------------------------------- |
+| `instanceId` | string | Yes      | The instance ID                    |
+| `groupId`    | string | Yes      | Group JID or bare numeric group ID |
+
+**Channel support:** Baileys only
+
+**Response:**
+
+```json
+{
+  "jid": "120363000000000000@g.us",
+  "subject": "Support group",
+  "description": "Customer support",
+  "owner": "5511999990000@s.whatsapp.net",
+  "ownerJid": "5511999990000@s.whatsapp.net",
+  "creation": 1700000000,
+  "createdAt": 1700000000,
+  "announce": false,
+  "restrict": true,
+  "ephemeralDuration": 86400,
+  "size": 8,
+  "participantCount": 8,
+  "participants": [
+    {
+      "jid": "5511999990000@s.whatsapp.net",
+      "phone": "5511999990000",
+      "role": "superadmin",
+      "isAdmin": true,
+      "isSuperAdmin": true
+    }
+  ]
+}
+```
+
+---
+
+#### `wa_group_update_picture`
+
+Set a group's picture. The image may be an HTTPS URL or base64-encoded PNG, JPG, GIF, or WebP; it is
+size-limited and converted to a square JPEG before upload. The connected account must be a group
+admin.
+
+| Parameter    | Type   | Required | Description                        |
+| ------------ | ------ | -------- | ---------------------------------- |
+| `instanceId` | string | Yes      | The instance ID                    |
+| `groupId`    | string | Yes      | Group JID or bare numeric group ID |
+| `image`      | string | Yes      | HTTPS URL or base64-encoded image  |
+
+**Channel support:** Baileys only
+
+**Response:**
+
+```json
+{
+  "success": true
+}
+```
+
+---
+
+#### `wa_group_remove_picture`
+
+Remove a group's picture. The connected account must be a group admin.
+
+| Parameter    | Type   | Required | Description                        |
+| ------------ | ------ | -------- | ---------------------------------- |
+| `instanceId` | string | Yes      | The instance ID                    |
+| `groupId`    | string | Yes      | Group JID or bare numeric group ID |
+
+**Channel support:** Baileys only
+
+**Response:**
+
+```json
+{
+  "success": true
+}
+```
+
+---
 
 #### `wa_create_group`
 
@@ -2490,7 +2606,7 @@ tools = toolkit.get_tools()
 | Instance Management   | 8      | Both (2 Baileys only, 1 Cloud only) |
 | Messaging             | 17     | Both                                |
 | Chat Management       | 6      | Both                                |
-| Group Management      | 14     | Both                                |
+| Group Management      | 18     | Baileys                             |
 | Contact Management    | 5      | Both                                |
 | Profile Management    | 5      | Both                                |
 | Status / Stories      | 3      | Baileys only                        |

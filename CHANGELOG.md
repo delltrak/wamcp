@@ -16,6 +16,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Added Baileys group listing and detailed participant roles, plus admin-only group picture updates
+  and removal. Picture inputs accept HTTPS URLs or base64 images and are converted to square JPEGs.
 - Added `wa_send_sticker`, `wa_send_gif`, and `wa_download_media`. Sticker conversion uses ffmpeg
   when needed, GIFs are normalized to silent H.264 MP4 for Baileys playback, and received media can
   be saved to a dedicated directory or returned as size-limited base64. Received media events now
