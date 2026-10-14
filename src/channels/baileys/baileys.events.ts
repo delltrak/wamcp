@@ -41,6 +41,9 @@ export interface BaileysMessageDetails {
   content: string | null;
   mediaUrl: string | null;
   mediaMimetype?: string;
+  mediaFileName?: string;
+  mediaSize?: number;
+  mediaCaption?: string;
   buttons?: MessageButton[];
   rawType?: string;
 }
@@ -59,6 +62,11 @@ function firstString(...values: unknown[]): string | undefined {
     if (text) return text;
   }
   return undefined;
+}
+
+function positiveSize(value: unknown): number | undefined {
+  const parsed = Number(value);
+  return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : undefined;
 }
 
 function asRecord(value: unknown): MessageRecord | undefined {
@@ -267,10 +275,15 @@ function collectButtonsMessageButtons(buttons: unknown, result: MessageButton[])
   }
 }
 
-function collectMedia(
-  candidate: MessageRecord | undefined,
-):
-  | { type: MessageType; mediaUrl: string | null; mediaMimetype?: string; caption?: string }
+function collectMedia(candidate: MessageRecord | undefined):
+  | {
+      type: MessageType;
+      mediaUrl: string | null;
+      mediaMimetype?: string;
+      mediaFileName?: string;
+      mediaSize?: number;
+      caption?: string;
+    }
   | undefined {
   if (!candidate) return undefined;
   for (const [key, type] of [
@@ -278,14 +291,21 @@ function collectMedia(
     ["videoMessage", "video"],
     ["documentMessage", "document"],
     ["audioMessage", "audio"],
+    ["stickerMessage", "sticker"],
   ] as const) {
     const media = recordAt(candidate, key);
     if (!media) continue;
+    const mediaMimetype = firstString(media.mimetype);
+    const mediaFileName = firstString(media.fileName);
+    const mediaSize = positiveSize(media.fileLength);
+    const caption = firstString(media.caption);
     return {
       type,
       mediaUrl: firstString(media.url) ?? null,
-      ...(firstString(media.mimetype) ? { mediaMimetype: firstString(media.mimetype) } : {}),
-      ...(firstString(media.caption) ? { caption: firstString(media.caption) } : {}),
+      ...(mediaMimetype ? { mediaMimetype } : {}),
+      ...(mediaFileName ? { mediaFileName } : {}),
+      ...(mediaSize ? { mediaSize } : {}),
+      ...(caption ? { caption } : {}),
     };
   }
   return undefined;
@@ -552,6 +572,9 @@ function messageDetails(content: MessageRecord | undefined): BaileysMessageDetai
     content: contentText,
     mediaUrl: media?.mediaUrl ?? null,
     ...(media?.mediaMimetype ? { mediaMimetype: media.mediaMimetype } : {}),
+    ...(media?.mediaFileName ? { mediaFileName: media.mediaFileName } : {}),
+    ...(media?.mediaSize ? { mediaSize: media.mediaSize } : {}),
+    ...(media?.caption ? { mediaCaption: media.caption } : {}),
     ...(uniqueButtons.length ? { buttons: uniqueButtons } : {}),
     ...(unknownRawType ? { rawType: unknownRawType } : {}),
   };
@@ -653,6 +676,14 @@ export function normalizeMessagesUpsert(
           content: details.content,
           mediaUrl: details.mediaUrl,
           ...(details.mediaMimetype ? { mediaMimetype: details.mediaMimetype } : {}),
+          ...(details.mediaMimetype ? { mimeType: details.mediaMimetype } : {}),
+          ...(details.mediaFileName
+            ? { mediaFileName: details.mediaFileName, fileName: details.mediaFileName }
+            : {}),
+          ...(details.mediaSize ? { mediaSize: details.mediaSize, size: details.mediaSize } : {}),
+          ...(details.mediaCaption
+            ? { mediaCaption: details.mediaCaption, caption: details.mediaCaption }
+            : {}),
           ...(details.buttons ? { buttons: details.buttons } : {}),
           ...(details.rawType ? { rawType: details.rawType } : {}),
           quotedMessageId: extractQuotedMessageId(msg),

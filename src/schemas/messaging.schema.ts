@@ -34,6 +34,38 @@ export const SendVideoSchema = z
   })
   .strict();
 
+export const SendStickerSchema = z
+  .object({
+    instanceId: z.string().min(1).describe("The instance ID to send from"),
+    to: z.string().min(5).describe("Recipient phone number or group JID"),
+    sticker: z.string().min(1).describe("Sticker image URL or base64-encoded data"),
+    animated: z
+      .boolean()
+      .optional()
+      .describe("Optional hint that a GIF sticker input should retain its animation"),
+    quotedMessageId: z.string().optional().describe("Message ID to reply to"),
+  })
+  .strict();
+
+export const SendGifSchema = z
+  .object({
+    instanceId: z.string().min(1).describe("The instance ID to send from"),
+    to: z.string().min(5).describe("Recipient phone number or group JID"),
+    gif: z.string().min(1).describe("GIF or MP4 URL or base64-encoded data"),
+    caption: z.string().optional().describe("Optional caption"),
+    quotedMessageId: z.string().optional().describe("Message ID to reply to"),
+  })
+  .strict();
+
+export const DownloadMediaSchema = z
+  .object({
+    instanceId: z.string().min(1).describe("The instance ID with the received message"),
+    messageId: z.string().min(1).describe("Received message ID to download"),
+    chatId: z.string().min(5).optional().describe("Optional chat JID to verify the message"),
+    mode: z.enum(["file", "base64"]).default("file").describe("Return a saved path or base64 data"),
+  })
+  .strict();
+
 export const SendAudioSchema = z
   .object({
     instanceId: z.string().min(1).describe("The instance ID to send from"),

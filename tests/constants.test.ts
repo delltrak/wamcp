@@ -41,9 +41,9 @@ describe("Constants", () => {
   });
 
   it("VERSION matches package.json — it feeds the MCP server identity and /health", () => {
-    const pkg = JSON.parse(
-      readFileSync(new URL("../package.json", import.meta.url), "utf-8"),
-    ) as { version: string };
+    const pkg = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf-8")) as {
+      version: string;
+    };
     expect(VERSION).toBe(pkg.version);
   });
 
@@ -140,13 +140,15 @@ describe("Constants", () => {
     expect(MEDIA_LIMITS).toHaveProperty("video");
     expect(MEDIA_LIMITS).toHaveProperty("audio");
     expect(MEDIA_LIMITS).toHaveProperty("document");
-    expect(MEDIA_LIMITS).toHaveProperty("sticker");
+    expect(MEDIA_LIMITS).toHaveProperty("stickerStatic");
+    expect(MEDIA_LIMITS).toHaveProperty("stickerAnimated");
 
     expect(MEDIA_LIMITS.image).toBeGreaterThan(0);
     expect(MEDIA_LIMITS.video).toBeGreaterThan(0);
     expect(MEDIA_LIMITS.audio).toBeGreaterThan(0);
     expect(MEDIA_LIMITS.document).toBeGreaterThan(0);
-    expect(MEDIA_LIMITS.sticker).toBeGreaterThan(0);
+    expect(MEDIA_LIMITS.stickerStatic).toBe(100 * 1024);
+    expect(MEDIA_LIMITS.stickerAnimated).toBe(500 * 1024);
     expect(MEDIA_LIMITS.document).toBeGreaterThan(MEDIA_LIMITS.image);
   });
 

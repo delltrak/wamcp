@@ -32,7 +32,7 @@ COPY --from=builder /app/dist ./dist
 COPY package.json ./
 
 RUN apk add --no-cache ffmpeg \
-    && mkdir -p /app/data/sessions /app/data/media
+    && mkdir -p /app/data/sessions /app/data/media /app/data/media-downloads
 
 # Fail the build instead of the container if the native prebuild did not resolve.
 RUN node -e "const D=require('better-sqlite3'); new D(':memory:').exec('create table t(a)'); console.log('better-sqlite3 OK')"

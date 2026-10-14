@@ -8,7 +8,8 @@ import type { ChannelAdapter, ChannelEventHandler } from "../channel.interface.j
 import { and, eq } from "drizzle-orm";
 import { db } from "../../db/client.js";
 import { messages as messagesTable } from "../../db/schema.js";
-import { mediaResponseToBuffer } from "../../services/media.js";
+import { getWebPInfo, mediaResponseToBuffer } from "../../services/media.js";
+import { MEDIA_LIMITS } from "../../constants.js";
 import type {
   ConnectionStatus,
   MessageContent,
@@ -39,6 +40,10 @@ import { getAutoReadMode, scheduleIncomingMessageRead } from "../../services/aut
 const logger = createChildLogger({ service: "cloud-api-adapter" });
 
 const GRAPH_API_BASE = "https://graph.facebook.com/v21.0";
+
+function sizeLimitLabel(maxBytes: number): string {
+  return maxBytes < 1024 * 1024 ? `${maxBytes} bytes` : `${Math.round(maxBytes / 1024 / 1024)} MB`;
+}
 
 // ---- Cloud API response/error types ----
 
@@ -274,6 +279,11 @@ export class CloudApiAdapter implements ChannelAdapter {
       }
 
       case "video": {
+        if (content.gifPlayback) {
+          throw new Error(
+            "GIF playback sending is not supported on Cloud API; use a Baileys instance",
+          );
+        }
         const mediaFields: Record<string, unknown> = {};
         if (content.caption) mediaFields.caption = content.caption;
         const media = this.resolveMediaPayload(content.video, "video", mediaFields);
@@ -281,6 +291,40 @@ export class CloudApiAdapter implements ChannelAdapter {
           recipient_type: "individual",
           to: phone,
           ...media,
+        };
+        if (content.quotedMessageId) {
+          payload.context = { message_id: content.quotedMessageId };
+        }
+        const res = await this.sendRaw(payload);
+        return this.toMessageResponse(res);
+      }
+
+      case "sticker": {
+        const sticker = Buffer.from(content.sticker, "base64");
+        if (sticker.length > MEDIA_LIMITS.stickerAnimated) {
+          throw new Error(
+            `Sticker exceeds the ${MEDIA_LIMITS.stickerAnimated} byte WhatsApp sticker limit`,
+          );
+        }
+        const stickerInfo = getWebPInfo(sticker);
+        if (!stickerInfo) {
+          throw new Error("Cloud API sticker messages require a valid WebP sticker");
+        }
+        const stickerLimit = stickerInfo.animated
+          ? MEDIA_LIMITS.stickerAnimated
+          : MEDIA_LIMITS.stickerStatic;
+        if (sticker.length > stickerLimit) {
+          const type = stickerInfo.animated ? "animated" : "static";
+          throw new Error(
+            `${type[0]!.toUpperCase()}${type.slice(1)} sticker exceeds the ${sizeLimitLabel(stickerLimit)} WhatsApp sticker limit`,
+          );
+        }
+        const mediaId = await this.uploadMedia(sticker, "image/webp", "sticker.webp");
+        const payload: Record<string, unknown> = {
+          recipient_type: "individual",
+          to: phone,
+          type: "sticker",
+          sticker: { id: mediaId },
         };
         if (content.quotedMessageId) {
           payload.context = { message_id: content.quotedMessageId };
@@ -729,9 +773,7 @@ export class CloudApiAdapter implements ChannelAdapter {
     // Step 1: Get the media URL
     const { url, mimeType, fileSize } = await this.getMediaUrl(mediaId, signal);
     if (maxBytes !== undefined && fileSize !== undefined && fileSize > maxBytes) {
-      throw new Error(
-        `Audio exceeds maximum transcription size of ${Math.round(maxBytes / 1024 / 1024)} MB`,
-      );
+      throw new Error(`Media exceeds maximum download size of ${sizeLimitLabel(maxBytes)}`);
     }
 
     // Step 2: Download the actual file (URL expires in 5 minutes)
@@ -768,6 +810,53 @@ export class CloudApiAdapter implements ChannelAdapter {
     return this.downloadMedia(row.mediaUrl, maxBytes, timeoutMs);
   }
 
+  async downloadMessageMedia(
+    messageId: string,
+    chatId?: string,
+    maxBytes?: number,
+    timeoutMs?: number,
+  ): Promise<{ data: Buffer; mimeType: string; fileName?: string }> {
+    const where = chatId
+      ? and(
+          eq(messagesTable.instanceId, this.instanceId),
+          eq(messagesTable.id, messageId),
+          eq(messagesTable.chatId, chatId),
+        )
+      : and(eq(messagesTable.instanceId, this.instanceId), eq(messagesTable.id, messageId));
+    const row = db
+      .select({
+        type: messagesTable.type,
+        mediaUrl: messagesTable.mediaUrl,
+        mimetype: messagesTable.mediaMimetype,
+        rawData: messagesTable.rawData,
+      })
+      .from(messagesTable)
+      .where(where)
+      .get();
+
+    if (!row) throw new Error(`Message '${messageId}' not found`);
+    if (!["image", "video", "audio", "document", "sticker"].includes(row.type)) {
+      throw new Error(`Message '${messageId}' does not contain downloadable media`);
+    }
+    if (!row.mediaUrl) throw new Error(`Media for message '${messageId}' is unavailable`);
+
+    const downloaded = await this.downloadMedia(row.mediaUrl, maxBytes, timeoutMs);
+    let metadata: { fileName?: unknown } = {};
+    if (row.rawData) {
+      try {
+        metadata = JSON.parse(row.rawData) as { fileName?: unknown };
+      } catch {
+        // Stored media IDs remain usable when optional metadata is malformed.
+      }
+    }
+    const fileName = typeof metadata.fileName === "string" ? metadata.fileName : undefined;
+    return {
+      ...downloaded,
+      mimeType: row.mimetype ?? downloaded.mimeType,
+      ...(fileName ? { fileName } : {}),
+    };
+  }
+
   async deleteMedia(mediaId: string): Promise<void> {
     const url = `${GRAPH_API_BASE}/${mediaId}`;
     await this.request(url, { method: "DELETE" });
@@ -795,7 +884,7 @@ export class CloudApiAdapter implements ChannelAdapter {
   emit<E extends ChannelEvent>(event: E, payload: ChannelEventPayload[E]): void {
     if (event === "message.received") {
       const messageEvent = payload as ChannelEventPayload["message.received"];
-      this.persistAudioMessage(messageEvent);
+      this.persistMediaMessage(messageEvent);
       if (getAutoReadMode() === "on_receive") {
         scheduleIncomingMessageRead(
           this,
@@ -819,39 +908,45 @@ export class CloudApiAdapter implements ChannelAdapter {
     }
   }
 
-  private persistAudioMessage(event: NormalizedMessageEvent): void {
-    if (event.message.type !== "audio") return;
+  private persistMediaMessage(event: NormalizedMessageEvent): void {
+    if (!["image", "video", "audio", "document", "sticker"].includes(event.message.type)) return;
 
     try {
+      const rawData = JSON.stringify({
+        fileName: event.message.fileName ?? event.message.mediaFileName ?? null,
+        size: event.message.size ?? event.message.mediaSize ?? null,
+      });
       db.insert(messagesTable)
         .values({
           id: event.message.id,
           instanceId: this.instanceId,
           chatId: event.chatId,
           senderId: event.message.sender,
-          type: "audio",
+          type: event.message.type,
           content: event.message.content,
           mediaUrl: event.message.mediaUrl,
-          mediaMimetype: null,
+          mediaMimetype: event.message.mimeType ?? event.message.mediaMimetype ?? null,
           quotedId: event.message.quotedMessageId,
           isFromMe: event.message.isFromMe ? 1 : 0,
           isForwarded: 0,
           status: "received",
           timestamp: event.message.timestamp,
+          rawData,
         })
         .onConflictDoUpdate({
           target: [messagesTable.instanceId, messagesTable.id],
           set: {
             mediaUrl: event.message.mediaUrl,
-            mediaMimetype: null,
+            mediaMimetype: event.message.mimeType ?? event.message.mediaMimetype ?? null,
             content: event.message.content,
+            rawData,
           },
         })
         .run();
     } catch (err) {
       logger.error(
         { err, messageId: event.message.id },
-        "Failed to persist Cloud API audio message",
+        "Failed to persist Cloud API media message",
       );
     }
   }
