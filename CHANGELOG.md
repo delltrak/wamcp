@@ -29,6 +29,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Baileys business templates, interactive messages, button/list messages, and their selection
+  responses now retain readable content, button metadata, and header media details across storage,
+  `wa_get_messages`, MCP notifications, and event webhooks. Unknown Baileys content types retain
+  their raw type name. Structured message metadata is recovered from the existing `raw_data`
+  column, so no database migration is needed.
 - Baileys PTT voice notes now include a 64-byte waveform and duration when ffmpeg can decode the
   audio; non-Opus input is converted to OGG/Opus, with sends falling back gracefully on failure.
 - Baileys quoted text, image, and video sends now resolve the referenced message from the same

@@ -6,7 +6,7 @@ import { Queue, UnrecoverableError, Worker, type Job, type JobsOptions } from "b
 import { Agent } from "undici";
 import type { InstanceManager } from "./instance-manager.js";
 import { QUEUE_COMPLETED_AGE_S, QUEUE_FAILED_AGE_S } from "../constants.js";
-import type { ChannelEvent, ChannelEventPayload } from "../types/channel.types.js";
+import type { ChannelEvent, ChannelEventPayload, MessageButton } from "../types/channel.types.js";
 import { createChildLogger } from "../utils/logger.js";
 import { getRedisConnectionOptions } from "./redis.js";
 import {
@@ -29,6 +29,10 @@ export interface EventWebhookPayload {
   type: string;
   text: string | null;
   timestamp: number | null;
+  mediaUrl?: string | null;
+  mediaMimetype?: string;
+  buttons?: MessageButton[];
+  rawType?: string;
 }
 
 export interface GrokBotWebhookPayload {
@@ -43,6 +47,10 @@ export interface GrokBotWebhookPayload {
   timestamp: number | null;
   messageId: string;
   media?: { id: string };
+  mediaUrl?: string;
+  mediaMimetype?: string;
+  buttons?: MessageButton[];
+  rawType?: string;
 }
 
 export type EventWebhookBody =
@@ -213,6 +221,26 @@ function firstNumber(...values: unknown[]): number | null {
   return values.find((value): value is number => typeof value === "number") ?? null;
 }
 
+function safeDirectMediaUrl(value: string | null): string | undefined {
+  if (!value) return undefined;
+  try {
+    const url = new URL(value);
+    if (url.protocol !== "https:" || url.username || url.password) return undefined;
+    return url.toString();
+  } catch {
+    return undefined;
+  }
+}
+
+function messageButtons(value: unknown): MessageButton[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const buttons = value.filter(
+    (item): item is MessageButton =>
+      isRecord(item) && typeof item.type === "string" && typeof item.text === "string",
+  );
+  return buttons.length ? buttons : undefined;
+}
+
 /** Flatten a normalized channel event into the stable outgoing webhook shape. */
 export function normalizeEventWebhookPayload(
   event: ChannelEvent,
@@ -222,6 +250,7 @@ export function normalizeEventWebhookPayload(
   const data = payload as unknown as Record<string, unknown>;
   const message = isRecord(data.message) ? data.message : {};
   const changes = isRecord(data.changes) ? data.changes : {};
+  const buttons = messageButtons(message.buttons);
 
   return {
     event,
@@ -238,6 +267,10 @@ export function normalizeEventWebhookPayload(
     type: firstString(message.type, data.action, data.status) ?? event,
     text: firstString(message.content, data.newContent, data.emoji, changes.text),
     timestamp: firstNumber(message.timestamp, data.editedAt),
+    ...(typeof message.mediaUrl === "string" ? { mediaUrl: message.mediaUrl } : {}),
+    ...(typeof message.mediaMimetype === "string" ? { mediaMimetype: message.mediaMimetype } : {}),
+    ...(buttons ? { buttons } : {}),
+    ...(typeof message.rawType === "string" ? { rawType: message.rawType } : {}),
   };
 }
 
@@ -249,6 +282,7 @@ export function normalizeGrokBotWebhookPayload(
   const mediaId = payload.message.mediaUrl;
   const safeMediaId =
     mediaId && mediaId.length <= 256 && /^[A-Za-z0-9_.:-]+$/.test(mediaId) ? mediaId : undefined;
+  const directMediaUrl = safeDirectMediaUrl(mediaId);
   const isGroup = payload.isGroup ?? payload.chatId.toLowerCase().endsWith("@g.us");
 
   return {
@@ -263,6 +297,10 @@ export function normalizeGrokBotWebhookPayload(
     timestamp: payload.message.timestamp,
     messageId: payload.message.id,
     ...(safeMediaId ? { media: { id: safeMediaId } } : {}),
+    ...(directMediaUrl ? { mediaUrl: directMediaUrl } : {}),
+    ...(payload.message.mediaMimetype ? { mediaMimetype: payload.message.mediaMimetype } : {}),
+    ...(payload.message.buttons ? { buttons: payload.message.buttons } : {}),
+    ...(payload.message.rawType ? { rawType: payload.message.rawType } : {}),
   };
 }
 

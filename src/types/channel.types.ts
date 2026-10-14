@@ -24,6 +24,15 @@ export type MessageType =
   | "reaction"
   | "sticker";
 
+/** A display-safe action exposed by a business template or interactive message. */
+export interface MessageButton {
+  type: string;
+  text: string;
+  url?: string;
+  id?: string;
+  phone?: string;
+}
+
 // Message delivery status
 export type MessageDeliveryStatus = "received" | "sent" | "delivered" | "read" | "played";
 
@@ -172,6 +181,9 @@ export interface Message {
   type: MessageType;
   content: string | null;
   mediaUrl: string | null;
+  mediaMimetype?: string | null;
+  buttons?: MessageButton[];
+  rawType?: string;
   quotedMessageId: string | null;
   isFromMe: boolean;
   isForwarded: boolean;
@@ -257,6 +269,9 @@ export interface NormalizedMessageEvent {
     type: MessageType;
     content: string | null;
     mediaUrl: string | null;
+    mediaMimetype?: string;
+    buttons?: MessageButton[];
+    rawType?: string;
     transcription?: string;
     quotedMessageId: string | null;
     isFromMe: boolean;

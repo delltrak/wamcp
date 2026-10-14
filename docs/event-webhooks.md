@@ -104,9 +104,10 @@ The preset body is a compact object with these stable fields:
   "senderId": "5511888888888@s.whatsapp.net",
   "senderName": "Alex",
   "isGroup": false,
-  "type": "text",
-  "text": "Hello",
+  "type": "image",
+  "text": "Synthetic account notice\nReview the details below.",
   "timestamp": 1700000000,
+  "mediaUrl": "https://example.com/synthetic-header.jpg",
   "messageId": "wamid.abc123"
 }
 ```
@@ -146,11 +147,27 @@ generic shape:
   "instanceId": "inst_1234abcd",
   "chat": "5511888888888@s.whatsapp.net",
   "sender": "5511888888888@s.whatsapp.net",
-  "type": "text",
-  "text": "Hello",
-  "timestamp": 1700000000
+  "type": "image",
+  "text": "Synthetic account notice\nReview the details below.",
+  "timestamp": 1700000000,
+  "mediaUrl": "https://example.com/synthetic-header.jpg",
+  "buttons": [
+    {
+      "type": "url",
+      "text": "See details",
+      "url": "https://example.com/details"
+    }
+  ],
+  "mediaMimetype": "image/jpeg"
 }
 ```
+
+`buttons`, `rawType`, `mediaUrl`, and `mediaMimetype` are optional additive fields. Business
+template and interactive message text is flattened into `text`; action labels and links are also
+available in `buttons`. Unrecognized Baileys content types use `type: "text"`; their source content
+name is available in `rawType`.
+For the `grok-bot` preset, `mediaUrl`, `mediaMimetype`, `buttons`, and `rawType` are forwarded
+when present; media identifiers remain subject to the preset's existing safe-ID filtering.
 
 When `WA_EVENT_WEBHOOK_SECRET` or a destination `secret` is configured, requests
 include `X-WA-Event-Timestamp` (Unix seconds) and
