@@ -1,8 +1,10 @@
 import { spawn } from "node:child_process";
+import { MAX_BASE64_MEDIA_BYTES } from "../constants.js";
 import type { TtsAudio } from "./provider.js";
 
 export const WHATSAPP_VOICE_MIME_TYPE = "audio/ogg; codecs=opus";
 export const DEFAULT_FFMPEG_TIMEOUT_MS = 60_000;
+export const DEFAULT_MAX_FFMPEG_OUTPUT_BYTES = MAX_BASE64_MEDIA_BYTES;
 const STDERR_TAIL_MAX_BYTES = 2 * 1024;
 const FFMPEG_FORMAT_ARGS = [
   "-vn",
@@ -25,7 +27,18 @@ export type FfmpegRunner = (
   chunks: Buffer[],
   executable: string,
   timeoutMs: number,
+  maxOutputBytes?: number,
 ) => Promise<Buffer>;
+
+export function resolveFfmpegExecutable(): string {
+  return process.env.WA_TTS_FFMPEG_PATH?.trim() || "ffmpeg";
+}
+
+export function resolveFfmpegTimeoutMs(value: string | undefined): number {
+  if (!value?.trim()) return DEFAULT_FFMPEG_TIMEOUT_MS;
+  const parsed = Number(value);
+  return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : DEFAULT_FFMPEG_TIMEOUT_MS;
+}
 
 export function isOggContainer(audio: Buffer): boolean {
   return audio.length >= 4 && audio.subarray(0, 4).toString("ascii") === "OggS";
@@ -33,9 +46,9 @@ export function isOggContainer(audio: Buffer): boolean {
 
 export async function normalizeToWhatsAppVoiceNote(
   chunks: TtsAudio[],
-  executable = process.env.WA_TTS_FFMPEG_PATH?.trim() || "ffmpeg",
+  executable = resolveFfmpegExecutable(),
   runFfmpeg: FfmpegRunner = transcodeWithFfmpeg,
-  timeoutMs = DEFAULT_FFMPEG_TIMEOUT_MS,
+  timeoutMs = resolveFfmpegTimeoutMs(process.env.WA_TTS_TIMEOUT_MS),
 ): Promise<TtsAudio> {
   if (chunks.length === 0) throw new Error("TTS provider returned no audio chunks.");
   if (chunks.length === 1 && isOggContainer(chunks[0]!.audio)) {
@@ -67,27 +80,61 @@ export async function normalizeToWhatsAppVoiceNote(
   }
 }
 
+/** Convert arbitrary audio to the mono 48 kHz OGG/Opus format used for WhatsApp voice notes. */
+export async function convertToWhatsAppVoiceNote(
+  audio: Buffer,
+  executable = resolveFfmpegExecutable(),
+  runFfmpeg: FfmpegRunner = transcodeWithFfmpeg,
+  timeoutMs = resolveFfmpegTimeoutMs(process.env.WA_TTS_TIMEOUT_MS),
+): Promise<TtsAudio> {
+  const converted = await runFfmpeg(
+    [audio],
+    executable,
+    timeoutMs,
+    DEFAULT_MAX_FFMPEG_OUTPUT_BYTES,
+  );
+  if (converted.length > DEFAULT_MAX_FFMPEG_OUTPUT_BYTES) {
+    throw new Error(`ffmpeg output exceeded the ${DEFAULT_MAX_FFMPEG_OUTPUT_BYTES} byte limit.`);
+  }
+  if (!isOggContainer(converted)) {
+    throw new Error("ffmpeg did not produce an OGG container.");
+  }
+  return { audio: converted, mimeType: WHATSAPP_VOICE_MIME_TYPE };
+}
+
 function transcodeWithFfmpeg(
   chunks: Buffer[],
   executable: string,
-  timeoutMs = DEFAULT_FFMPEG_TIMEOUT_MS,
+  timeoutMs = resolveFfmpegTimeoutMs(process.env.WA_TTS_TIMEOUT_MS),
+  maxOutputBytes?: number,
+): Promise<Buffer> {
+  const inputFileDescriptors = chunks.map((_, index) => (index === 0 ? 0 : index + 2));
+  const args: string[] = [];
+  for (const descriptor of inputFileDescriptors) args.push("-i", `pipe:${descriptor}`);
+
+  if (chunks.length > 1) {
+    const inputs = chunks.map((_, index) => `[${index}:a:0]`).join("");
+    args.push(
+      "-filter_complex",
+      `${inputs}concat=n=${chunks.length}:v=0:a=1[out]`,
+      "-map",
+      "[out]",
+    );
+  }
+  args.push(...FFMPEG_FORMAT_ARGS);
+  return runFfmpegCommand(chunks, args, executable, timeoutMs, maxOutputBytes);
+}
+
+/** Run ffmpeg with stdin pipes, a timeout, and an optional bound on stdout size. */
+export function runFfmpegCommand(
+  chunks: Buffer[],
+  args: string[],
+  executable: string,
+  timeoutMs = resolveFfmpegTimeoutMs(process.env.WA_TTS_TIMEOUT_MS),
+  maxOutputBytes?: number,
 ): Promise<Buffer> {
   return new Promise((resolve, reject) => {
     const inputFileDescriptors = chunks.map((_, index) => (index === 0 ? 0 : index + 2));
-    const args: string[] = [];
-    for (const descriptor of inputFileDescriptors) args.push("-i", `pipe:${descriptor}`);
-
-    if (chunks.length > 1) {
-      const inputs = chunks.map((_, index) => `[${index}:a:0]`).join("");
-      args.push(
-        "-filter_complex",
-        `${inputs}concat=n=${chunks.length}:v=0:a=1[out]`,
-        "-map",
-        "[out]",
-      );
-    }
-    args.push(...FFMPEG_FORMAT_ARGS);
-
     const stdio: Array<"pipe" | "ignore"> = ["pipe", "pipe", "pipe"];
     for (let index = 1; index < chunks.length; index += 1) stdio.push("pipe");
 
@@ -100,9 +147,10 @@ function transcodeWithFfmpeg(
     }
 
     const output: Buffer[] = [];
+    let outputBytes = 0;
     let stderrTail = Buffer.alloc(0);
     let settled = false;
-    let timedOut = false;
+    let stopped = false;
     const clearTimer = (): void => clearTimeout(timeout);
     const finishReject = (error: Error): void => {
       if (settled) return;
@@ -117,7 +165,7 @@ function transcodeWithFfmpeg(
       resolve(audio);
     };
     const timeout = setTimeout(() => {
-      timedOut = true;
+      stopped = true;
       try {
         child.kill("SIGKILL");
       } catch {
@@ -127,7 +175,21 @@ function transcodeWithFfmpeg(
         new Error(appendStderrTail(`ffmpeg timed out after ${timeoutMs} ms.`, stderrTail)),
       );
     }, timeoutMs);
-    child.stdout?.on("data", (chunk: Buffer) => output.push(Buffer.from(chunk)));
+    child.stdout?.on("data", (chunk: Buffer) => {
+      const data = Buffer.from(chunk);
+      outputBytes += data.length;
+      if (maxOutputBytes !== undefined && outputBytes > maxOutputBytes) {
+        stopped = true;
+        try {
+          child.kill("SIGKILL");
+        } catch {
+          // The output size error remains the useful failure.
+        }
+        finishReject(new Error(`ffmpeg output exceeded the ${maxOutputBytes} byte limit.`));
+        return;
+      }
+      output.push(data);
+    });
     child.stderr?.on("data", (chunk: Buffer) => {
       const data = Buffer.from(chunk);
       const combined = Buffer.concat([stderrTail, data]);
@@ -135,7 +197,7 @@ function transcodeWithFfmpeg(
     });
     child.on("error", (error) => finishReject(error));
     child.on("close", (code) => {
-      if (timedOut) return;
+      if (stopped || settled) return;
       if (code === 0) finishResolve(Buffer.concat(output));
       else {
         finishReject(
