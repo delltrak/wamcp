@@ -500,6 +500,7 @@ Copy `.env.example` to `.env` and configure:
 | `WA_TTS_MAX_CHARS`          | `5000`                   | Maximum input text length |
 | `WA_TTS_BASE_URL`           | `https://api.elevenlabs.io` | Provider API host, including residency hosts |
 | `WA_TTS_TIMEOUT_MS`         | `60000`                  | Timeout for each provider request |
+| `TTS_CONCURRENCY`           | `2`                      | Maximum concurrent TTS synthesis and ffmpeg conversions |
 | `WA_TTS_FFMPEG_PATH`        | `ffmpeg` from `PATH`     | Optional ffmpeg executable path for conversion and chunk joining |
 | `WA_CLOUD_WEBHOOK_SECRET`   | —                        | Signing secret for the `x-hub-signature-256` header on `POST /cloud-webhook` |
 | `WA_CLOUD_VERIFY_TOKEN`     | —                        | Token for Meta's webhook GET verification handshake |

@@ -1,4 +1,4 @@
-import type { TtsConfig } from "./config.js";
+import { validateTtsBaseUrl, type TtsConfig } from "./config.js";
 import type { TtsAudio, TtsProvider, TtsSynthesizeOptions, TtsVoice } from "./provider.js";
 
 interface ElevenLabsVoice {
@@ -18,7 +18,11 @@ export interface ElevenLabsDependencies {
   sleep?: (milliseconds: number) => Promise<void>;
   random?: () => number;
   maxAttempts?: number;
+  maxResponseBytes?: number;
 }
+
+export const DEFAULT_MAX_TTS_RESPONSE_BYTES = 25 * 1024 * 1024;
+const MAX_RETRY_AFTER_MS = 30_000;
 
 function delay(milliseconds: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, milliseconds));
@@ -27,6 +31,66 @@ function delay(milliseconds: number): Promise<void> {
 function endpointBase(baseUrl: string): string {
   const normalized = baseUrl.replace(/\/+$/, "");
   return normalized.endsWith("/v1") ? normalized : `${normalized}/v1`;
+}
+
+function parseRetryAfter(value: string | null): number | undefined {
+  if (!value) return undefined;
+  const seconds = Number(value);
+  if (Number.isFinite(seconds) && seconds >= 0) {
+    return Math.min(seconds * 1000, MAX_RETRY_AFTER_MS);
+  }
+  const timestamp = Date.parse(value);
+  if (Number.isNaN(timestamp)) return undefined;
+  return Math.min(Math.max(0, timestamp - Date.now()), MAX_RETRY_AFTER_MS);
+}
+
+async function cancelResponseBody(response: Response): Promise<void> {
+  try {
+    await response.body?.cancel();
+  } catch {
+    // Cancellation is best-effort; the provider error remains the useful failure.
+  }
+}
+
+function responseTooLargeError(maxBytes: number): Error {
+  return new Error(
+    `ElevenLabs audio response exceeded the maximum allowed size of ${maxBytes} bytes.`,
+  );
+}
+
+async function readAudioResponse(response: Response, maxBytes: number): Promise<Buffer> {
+  const contentLength = response.headers.get("content-length");
+  if (contentLength !== null) {
+    const length = Number(contentLength);
+    if (Number.isSafeInteger(length) && length > maxBytes) {
+      await cancelResponseBody(response);
+      throw responseTooLargeError(maxBytes);
+    }
+  }
+
+  if (!response.body) return Buffer.alloc(0);
+  const reader = response.body.getReader();
+  const chunks: Buffer[] = [];
+  let totalBytes = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      totalBytes += value.byteLength;
+      if (totalBytes > maxBytes) {
+        try {
+          await reader.cancel();
+        } catch {
+          // The size limit is still enforced if stream cancellation fails.
+        }
+        throw responseTooLargeError(maxBytes);
+      }
+      chunks.push(Buffer.from(value));
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  return Buffer.concat(chunks, totalBytes);
 }
 
 function mapResponseError(status: number): Error {
@@ -63,6 +127,7 @@ export class ElevenLabsProvider implements TtsProvider {
   private readonly sleep: (milliseconds: number) => Promise<void>;
   private readonly random: () => number;
   private readonly maxAttempts: number;
+  private readonly maxResponseBytes: number;
   private readonly baseUrl: string;
 
   constructor(
@@ -73,7 +138,8 @@ export class ElevenLabsProvider implements TtsProvider {
     this.sleep = dependencies.sleep ?? delay;
     this.random = dependencies.random ?? Math.random;
     this.maxAttempts = dependencies.maxAttempts ?? 3;
-    this.baseUrl = endpointBase(config.baseUrl);
+    this.maxResponseBytes = dependencies.maxResponseBytes ?? DEFAULT_MAX_TTS_RESPONSE_BYTES;
+    this.baseUrl = endpointBase(validateTtsBaseUrl(config.baseUrl));
   }
 
   async synthesize(text: string, opts: TtsSynthesizeOptions): Promise<TtsAudio> {
@@ -110,7 +176,7 @@ export class ElevenLabsProvider implements TtsProvider {
       body: JSON.stringify(body),
     });
     return {
-      audio: Buffer.from(await response.arrayBuffer()),
+      audio: await readAudioResponse(response, this.maxResponseBytes),
       mimeType: response.headers.get("content-type") ?? "application/octet-stream",
     };
   }
@@ -144,6 +210,7 @@ export class ElevenLabsProvider implements TtsProvider {
             "xi-api-key": this.config.apiKey,
           },
           signal: AbortSignal.timeout(this.config.timeoutMs),
+          redirect: "error",
         });
       } catch (error) {
         if (error instanceof Error && error.name === "TimeoutError") {
@@ -159,9 +226,16 @@ export class ElevenLabsProvider implements TtsProvider {
       if (response.ok) return response;
 
       const shouldRetry = response.status === 429 || response.status >= 500;
+      const retryAfter =
+        response.status === 429 || response.status === 503
+          ? parseRetryAfter(response.headers.get("retry-after"))
+          : undefined;
+      await cancelResponseBody(response);
       if (shouldRetry && attempt < this.maxAttempts) {
-        const backoff = Math.min(1000 * 2 ** (attempt - 1), 8000);
-        await this.sleep(Math.round(backoff * (0.5 + this.random())));
+        const backoff = retryAfter ?? Math.min(1000 * 2 ** (attempt - 1), 8000);
+        const waitTime =
+          retryAfter === undefined ? Math.round(backoff * (0.5 + this.random())) : backoff;
+        await this.sleep(waitTime);
         continue;
       }
       throw mapResponseError(response.status);

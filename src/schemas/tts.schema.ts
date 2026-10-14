@@ -1,4 +1,14 @@
 import { z } from "zod";
+import { getTtsCodePoints } from "../tts/text.js";
+
+const MAX_TTS_TOOL_TEXT_LENGTH = 65_536;
+const synthesisTextSchema = z
+  .string()
+  .min(1)
+  .refine((text) => getTtsCodePoints(text).length <= MAX_TTS_TOOL_TEXT_LENGTH, {
+    error: `Text must contain at most ${MAX_TTS_TOOL_TEXT_LENGTH} characters.`,
+  })
+  .describe("Text to synthesize");
 
 const voiceOptions = {
   voiceId: z.string().min(1).optional().describe("Provider voice ID"),
@@ -17,14 +27,14 @@ export const SendVoiceSchema = synthesisOptionsSchema
   .extend({
     instanceId: z.string().min(1).describe("The Baileys instance to send from"),
     to: z.string().min(5).describe("Recipient phone number or group JID"),
-    text: z.string().min(1).max(65536).describe("Text to synthesize into a voice note"),
+    text: synthesisTextSchema.describe("Text to synthesize into a voice note"),
     quotedMessageId: z.string().optional().describe("Message ID to reply to"),
   })
   .strict();
 
 export const TtsPreviewSchema = synthesisOptionsSchema
   .extend({
-    text: z.string().min(1).max(65536).describe("Text to synthesize into a preview"),
+    text: synthesisTextSchema.describe("Text to synthesize into a preview"),
   })
   .strict();
 

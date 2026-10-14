@@ -8,6 +8,7 @@ import type { InstanceManager } from "../services/instance-manager.js";
 import type { ChannelEvent, ChannelEventPayload } from "../types/channel.types.js";
 import { logger } from "../utils/logger.js";
 import { TranscriptionService } from "../services/transcription.js";
+import { createConcurrencyLimiter } from "../utils/concurrency.js";
 
 /** Mapping from channel event names to MCP notification method names */
 const EVENT_TO_METHOD: Record<ChannelEvent, string> = {
@@ -29,27 +30,6 @@ function positiveInteger(value: string | undefined, fallback: number): number {
   if (!value) return fallback;
   const parsed = Number.parseInt(value, 10);
   return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : fallback;
-}
-
-function createConcurrencyLimiter(concurrency: number) {
-  let active = 0;
-  const waiting: Array<() => void> = [];
-
-  return async <T>(task: () => Promise<T>): Promise<T> => {
-    if (active >= concurrency) {
-      await new Promise<void>((resolve) => waiting.push(resolve));
-    } else {
-      active++;
-    }
-
-    try {
-      return await task();
-    } finally {
-      const next = waiting.shift();
-      if (next) next();
-      else active--;
-    }
-  };
 }
 
 interface SharedTranscriptionState {

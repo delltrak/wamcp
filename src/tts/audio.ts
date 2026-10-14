@@ -2,6 +2,8 @@ import { spawn } from "node:child_process";
 import type { TtsAudio } from "./provider.js";
 
 export const WHATSAPP_VOICE_MIME_TYPE = "audio/ogg; codecs=opus";
+export const DEFAULT_FFMPEG_TIMEOUT_MS = 60_000;
+const STDERR_TAIL_MAX_BYTES = 2 * 1024;
 const FFMPEG_FORMAT_ARGS = [
   "-vn",
   "-ac",
@@ -19,7 +21,11 @@ const FFMPEG_FORMAT_ARGS = [
   "pipe:1",
 ];
 
-export type FfmpegRunner = (chunks: Buffer[], executable: string) => Promise<Buffer>;
+export type FfmpegRunner = (
+  chunks: Buffer[],
+  executable: string,
+  timeoutMs: number,
+) => Promise<Buffer>;
 
 export function isOggContainer(audio: Buffer): boolean {
   return audio.length >= 4 && audio.subarray(0, 4).toString("ascii") === "OggS";
@@ -29,6 +35,7 @@ export async function normalizeToWhatsAppVoiceNote(
   chunks: TtsAudio[],
   executable = process.env.WA_TTS_FFMPEG_PATH?.trim() || "ffmpeg",
   runFfmpeg: FfmpegRunner = transcodeWithFfmpeg,
+  timeoutMs = DEFAULT_FFMPEG_TIMEOUT_MS,
 ): Promise<TtsAudio> {
   if (chunks.length === 0) throw new Error("TTS provider returned no audio chunks.");
   if (chunks.length === 1 && isOggContainer(chunks[0]!.audio)) {
@@ -39,6 +46,7 @@ export async function normalizeToWhatsAppVoiceNote(
     const audio = await runFfmpeg(
       chunks.map((chunk) => chunk.audio),
       executable,
+      timeoutMs,
     );
     if (!isOggContainer(audio)) {
       throw new Error("ffmpeg did not produce an OGG container.");
@@ -59,7 +67,11 @@ export async function normalizeToWhatsAppVoiceNote(
   }
 }
 
-function transcodeWithFfmpeg(chunks: Buffer[], executable: string): Promise<Buffer> {
+function transcodeWithFfmpeg(
+  chunks: Buffer[],
+  executable: string,
+  timeoutMs = DEFAULT_FFMPEG_TIMEOUT_MS,
+): Promise<Buffer> {
   return new Promise((resolve, reject) => {
     const inputFileDescriptors = chunks.map((_, index) => (index === 0 ? 0 : index + 2));
     const args: string[] = [];
@@ -88,12 +100,48 @@ function transcodeWithFfmpeg(chunks: Buffer[], executable: string): Promise<Buff
     }
 
     const output: Buffer[] = [];
+    let stderrTail = Buffer.alloc(0);
+    let settled = false;
+    let timedOut = false;
+    const clearTimer = (): void => clearTimeout(timeout);
+    const finishReject = (error: Error): void => {
+      if (settled) return;
+      settled = true;
+      clearTimer();
+      reject(error);
+    };
+    const finishResolve = (audio: Buffer): void => {
+      if (settled) return;
+      settled = true;
+      clearTimer();
+      resolve(audio);
+    };
+    const timeout = setTimeout(() => {
+      timedOut = true;
+      try {
+        child.kill("SIGKILL");
+      } catch {
+        // Still reject with the timeout even if the child has already exited.
+      }
+      finishReject(
+        new Error(appendStderrTail(`ffmpeg timed out after ${timeoutMs} ms.`, stderrTail)),
+      );
+    }, timeoutMs);
     child.stdout?.on("data", (chunk: Buffer) => output.push(Buffer.from(chunk)));
-    child.stderr?.resume();
-    child.on("error", reject);
+    child.stderr?.on("data", (chunk: Buffer) => {
+      const data = Buffer.from(chunk);
+      const combined = Buffer.concat([stderrTail, data]);
+      stderrTail = combined.subarray(Math.max(0, combined.length - STDERR_TAIL_MAX_BYTES));
+    });
+    child.on("error", (error) => finishReject(error));
     child.on("close", (code) => {
-      if (code === 0) resolve(Buffer.concat(output));
-      else reject(new Error(`ffmpeg exited with code ${code ?? "unknown"}.`));
+      if (timedOut) return;
+      if (code === 0) finishResolve(Buffer.concat(output));
+      else {
+        finishReject(
+          new Error(appendStderrTail(`ffmpeg exited with code ${code ?? "unknown"}.`, stderrTail)),
+        );
+      }
     });
 
     chunks.forEach((chunk, index) => {
@@ -109,4 +157,34 @@ function transcodeWithFfmpeg(chunks: Buffer[], executable: string): Promise<Buff
       }
     });
   });
+}
+
+function appendStderrTail(message: string, stderrTail: Buffer): string {
+  const rawTail = stderrTail.toString("utf8");
+  let sanitizedTail = "";
+  for (let index = 0; index < rawTail.length; index += 1) {
+    const code = rawTail.charCodeAt(index);
+    if (code === 0x1b) {
+      if (rawTail[index + 1] === "[") {
+        index += 2;
+        while (index < rawTail.length) {
+          const sequenceCode = rawTail.charCodeAt(index);
+          if (sequenceCode >= 0x40 && sequenceCode <= 0x7e) break;
+          index += 1;
+        }
+      } else if (index + 1 < rawTail.length) {
+        index += 1;
+      }
+      continue;
+    }
+    if (
+      (code < 0x20 && code !== 0x09 && code !== 0x0a && code !== 0x0d) ||
+      (code >= 0x7f && code <= 0x9f)
+    ) {
+      continue;
+    }
+    sanitizedTail += rawTail[index];
+  }
+  const tail = sanitizedTail.trim();
+  return tail ? `${message} Stderr tail: ${tail}` : message;
 }

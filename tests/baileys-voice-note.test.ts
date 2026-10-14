@@ -1,13 +1,44 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { randomUUID } from "node:crypto";
 import { BaileysAdapter } from "../src/channels/baileys/baileys.adapter.js";
+import { db } from "../src/db/client.js";
+import { instances, messages } from "../src/db/schema.js";
 import { WHATSAPP_VOICE_MIME_TYPE } from "../src/tts/audio.js";
+import { eq } from "drizzle-orm";
 
 describe("Baileys voice-note payload", () => {
+  let instanceId: string;
+
+  beforeEach(() => {
+    instanceId = `voice_note_${randomUUID()}`;
+    const now = Date.now();
+    db.insert(instances)
+      .values({ id: instanceId, name: "voice note test", createdAt: now, updatedAt: now })
+      .run();
+    db.insert(messages)
+      .values({
+        id: "quoted-message",
+        instanceId,
+        chatId: "0000000000000@s.whatsapp.net",
+        senderId: "5511999999999@s.whatsapp.net",
+        type: "text",
+        content: "Quoted message",
+        isFromMe: 0,
+        status: "received",
+        timestamp: now,
+      })
+      .run();
+  });
+
+  afterEach(() => {
+    db.delete(instances).where(eq(instances.id, instanceId)).run();
+  });
+
   it("sends audio as PTT with the required OGG/Opus MIME type and quoted message", async () => {
     const socket = {
       sendMessage: vi.fn(async () => ({ key: { id: "sent-message" } })),
     };
-    const adapter = new BaileysAdapter("test-instance");
+    const adapter = new BaileysAdapter(instanceId);
     Object.assign(adapter, { sock: socket, status: "connected" });
     const audio = Buffer.from("OggS-voice-note");
 

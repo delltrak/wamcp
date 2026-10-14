@@ -32,6 +32,7 @@ const config: TtsConfig = {
   modelId: "eleven_v3",
   outputFormat: "opus_48000_64",
   maxChars: 5000,
+  concurrency: 2,
   baseUrl: "https://api.elevenlabs.io",
   timeoutMs: 5000,
 };

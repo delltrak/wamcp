@@ -47,9 +47,12 @@ ElevenLabs supports Opus output formats from `opus_48000_32` through `opus_48000
 
 Long text is split into chunks with neighboring text sent to the provider for continuity. The full
 input is limited by `WA_TTS_MAX_CHARS` (default 5000). Failed requests are retried with backoff and
-jitter only for HTTP 429 and 5xx responses. `WA_TTS_TIMEOUT_MS` applies to each provider request.
+jitter only for HTTP 429 and 5xx responses. `WA_TTS_TIMEOUT_MS` applies to each provider request
+and ffmpeg conversion. `TTS_CONCURRENCY` (default 2) limits simultaneous synthesis and conversion
+work across `wa_send_voice` and `wa_tts_preview`.
 `WA_TTS_BASE_URL` accepts a host such as `https://api.eu.residency.elevenlabs.io`; `/v1` is added
-automatically, or retained if included in the configured URL.
+automatically, or retained if included in the configured URL. HTTPS is required except for local
+testing with `http://localhost` or `http://127.0.0.1`.
 
 ## Cost notes
 
@@ -73,4 +76,5 @@ return a quota or rate-limit error.
 | `WA_TTS_MAX_CHARS`        | `5000`                      | Maximum input text length                                     |
 | `WA_TTS_BASE_URL`         | `https://api.elevenlabs.io` | Provider host; supports residency hosts                       |
 | `WA_TTS_TIMEOUT_MS`       | `60000`                     | Per-request timeout                                           |
+| `TTS_CONCURRENCY`         | `2`                         | Maximum simultaneous synthesis and ffmpeg conversions        |
 | `WA_TTS_FFMPEG_PATH`      | `ffmpeg` from `PATH`        | Optional ffmpeg executable override                           |

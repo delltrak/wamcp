@@ -2,8 +2,21 @@ import { getTtsConfig, type TtsConfig } from "./config.js";
 import { normalizeToWhatsAppVoiceNote, type FfmpegRunner } from "./audio.js";
 import { createTtsProvider, type TtsProviderDependencies } from "./registry.js";
 import type { TtsAudio, TtsProvider, TtsSynthesizeOptions, TtsVoice } from "./provider.js";
+import { getTtsCodePoints } from "./text.js";
+import { createConcurrencyLimiter } from "../utils/concurrency.js";
 
 export const TTS_CHUNK_MAX_CHARS = 4500;
+
+const synthesisLimiters = new Map<number, <T>(task: () => Promise<T>) => Promise<T>>();
+
+function getSynthesisLimiter(concurrency: number): <T>(task: () => Promise<T>) => Promise<T> {
+  let limiter = synthesisLimiters.get(concurrency);
+  if (!limiter) {
+    limiter = createConcurrencyLimiter(concurrency);
+    synthesisLimiters.set(concurrency, limiter);
+  }
+  return limiter;
+}
 
 export interface TtsServiceDependencies {
   config?: TtsConfig;
@@ -14,7 +27,7 @@ export interface TtsServiceDependencies {
 
 export function chunkText(text: string, maxChars = TTS_CHUNK_MAX_CHARS): string[] {
   if (!text) return [];
-  const characters = Array.from(text);
+  const characters = getTtsCodePoints(text);
   const chunks: string[] = [];
 
   while (characters.length > maxChars) {
@@ -39,6 +52,7 @@ export class TtsService {
   private provider: TtsProvider | undefined;
   private readonly providerDependencies: TtsProviderDependencies;
   private readonly ffmpegRunner: FfmpegRunner | undefined;
+  private readonly limitSynthesis: <T>(task: () => Promise<T>) => Promise<T>;
 
   constructor(dependencies: TtsServiceDependencies = {}) {
     this.config = dependencies.config ?? getTtsConfig();
@@ -46,6 +60,7 @@ export class TtsService {
     this.provider = dependencies.provider;
     this.providerDependencies = dependencies.providerDependencies ?? {};
     this.ffmpegRunner = dependencies.ffmpegRunner;
+    this.limitSynthesis = getSynthesisLimiter(this.config.concurrency);
   }
 
   assertConfigured(): void {
@@ -58,7 +73,7 @@ export class TtsService {
   }
 
   assertTextWithinLimit(text: string): void {
-    if (text.length > this.maxChars) {
+    if (getTtsCodePoints(text).length > this.maxChars) {
       throw new Error(`Text exceeds the configured TTS limit of ${this.maxChars} characters.`);
     }
   }
@@ -76,6 +91,15 @@ export class TtsService {
     options: Omit<TtsSynthesizeOptions, "voiceId" | "previousText" | "nextText"> & {
       voiceId?: string;
     } = {},
+  ): Promise<TtsAudio> {
+    return this.limitSynthesis(() => this.synthesizeWithinLimit(text, options));
+  }
+
+  private async synthesizeWithinLimit(
+    text: string,
+    options: Omit<TtsSynthesizeOptions, "voiceId" | "previousText" | "nextText"> & {
+      voiceId?: string;
+    },
   ): Promise<TtsAudio> {
     this.assertConfigured();
     this.assertTextWithinLimit(text);
@@ -97,7 +121,12 @@ export class TtsService {
       );
     }
 
-    return normalizeToWhatsAppVoiceNote(generated, undefined, this.ffmpegRunner);
+    return normalizeToWhatsAppVoiceNote(
+      generated,
+      undefined,
+      this.ffmpegRunner,
+      this.config.timeoutMs,
+    );
   }
 
   async listVoices(): Promise<TtsVoice[]> {

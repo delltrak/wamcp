@@ -23,6 +23,7 @@ services:
       - WA_TTS_MAX_CHARS=${WA_TTS_MAX_CHARS:-5000}
       - WA_TTS_BASE_URL=${WA_TTS_BASE_URL:-https://api.elevenlabs.io}
       - WA_TTS_TIMEOUT_MS=${WA_TTS_TIMEOUT_MS:-60000}
+      - TTS_CONCURRENCY=${TTS_CONCURRENCY:-2}
       - WA_TTS_FFMPEG_PATH=${WA_TTS_FFMPEG_PATH:-}
     volumes:
       - wa-data:/app/data

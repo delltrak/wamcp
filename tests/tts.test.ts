@@ -1,9 +1,13 @@
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { normalizeToWhatsAppVoiceNote, WHATSAPP_VOICE_MIME_TYPE } from "../src/tts/audio.js";
 import { getTtsConfig, type TtsConfig } from "../src/tts/config.js";
 import { ElevenLabsProvider } from "../src/tts/elevenlabs.js";
 import type { TtsAudio, TtsProvider } from "../src/tts/provider.js";
 import { chunkText, TtsService } from "../src/tts/service.js";
+import { SendVoiceSchema, TtsPreviewSchema } from "../src/schemas/tts.schema.js";
 
 function config(overrides: Partial<TtsConfig> = {}): TtsConfig {
   return {
@@ -15,6 +19,7 @@ function config(overrides: Partial<TtsConfig> = {}): TtsConfig {
     languageCode: undefined,
     outputFormat: "opus_48000_64",
     maxChars: 5000,
+    concurrency: 2,
     baseUrl: "https://api.elevenlabs.io",
     timeoutMs: 5000,
     ...overrides,
@@ -59,6 +64,7 @@ describe("ElevenLabsProvider", () => {
     );
     expect(new Headers(init?.headers).get("xi-api-key")).toBe("unit-test-only-placeholder");
     expect(init?.method).toBe("POST");
+    expect(init?.redirect).toBe("error");
     expect(init?.signal).toBeInstanceOf(AbortSignal);
     expect(JSON.parse(String(init?.body))).toEqual({
       text: "Hello there",
@@ -147,6 +153,104 @@ describe("ElevenLabsProvider", () => {
     expect(badRequestFetch).toHaveBeenCalledTimes(1);
   });
 
+  it("cancels response bodies before retrying and before returning a final error", async () => {
+    const retryCancel = vi.fn();
+    const retryResponse = new Response(new ReadableStream({ cancel: retryCancel }), {
+      status: 503,
+    });
+    const retryFetch = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(retryResponse)
+      .mockResolvedValueOnce(new Response(Buffer.from("OggS-audio")));
+    const retryProvider = new ElevenLabsProvider(config(), {
+      fetch: retryFetch,
+      sleep: async () => {},
+      random: () => 0,
+    });
+    await retryProvider.synthesize("Hello", { voiceId: "test-voice-id" });
+    expect(retryCancel).toHaveBeenCalledOnce();
+
+    const errorCancel = vi.fn();
+    const errorResponse = new Response(new ReadableStream({ cancel: errorCancel }), {
+      status: 400,
+    });
+    const errorProvider = new ElevenLabsProvider(config(), {
+      fetch: vi.fn<typeof fetch>().mockResolvedValue(errorResponse),
+      maxAttempts: 1,
+    });
+    await expect(errorProvider.synthesize("Hello", { voiceId: "test-voice-id" })).rejects.toThrow(
+      "HTTP 400",
+    );
+    expect(errorCancel).toHaveBeenCalledOnce();
+  });
+
+  it("honors Retry-After seconds and HTTP dates, clamped to 30 seconds", async () => {
+    const cases = [
+      ["2", 2000],
+      [new Date(Date.now() + 5_000).toUTCString(), undefined],
+      ["90", 30_000],
+    ] as const;
+
+    for (const [retryAfter, expected] of cases) {
+      const fetchMock = vi
+        .fn<typeof fetch>()
+        .mockResolvedValueOnce(
+          new Response("", { status: 503, headers: { "retry-after": retryAfter } }),
+        )
+        .mockResolvedValueOnce(new Response(Buffer.from("OggS-audio")));
+      const sleep = vi.fn(async () => {});
+      const provider = new ElevenLabsProvider(config(), {
+        fetch: fetchMock,
+        sleep,
+        random: () => 0,
+      });
+      await provider.synthesize("Hello", { voiceId: "test-voice-id" });
+      const delay = sleep.mock.calls[0]?.[0];
+      expect(delay).toBeDefined();
+      if (expected !== undefined) expect(delay).toBe(expected);
+      if (retryAfter !== "2" && retryAfter !== "90") {
+        expect(delay).toBeGreaterThan(0);
+        expect(delay).toBeLessThanOrEqual(5000);
+      }
+    }
+  });
+
+  it("rejects oversized synthesis responses from Content-Length and streamed bodies", async () => {
+    const contentLengthCancel = vi.fn();
+    const contentLengthProvider = new ElevenLabsProvider(config(), {
+      fetch: vi.fn<typeof fetch>().mockResolvedValue(
+        new Response(new ReadableStream({ cancel: contentLengthCancel }), {
+          headers: { "content-length": "4" },
+        }),
+      ),
+      maxResponseBytes: 3,
+    });
+    await expect(
+      contentLengthProvider.synthesize("Hello", { voiceId: "test-voice-id" }),
+    ).rejects.toThrow(/maximum allowed size of 3 bytes/i);
+    expect(contentLengthCancel).toHaveBeenCalledOnce();
+
+    const streamCancel = vi.fn();
+    const streamingProvider = new ElevenLabsProvider(config(), {
+      fetch: vi.fn<typeof fetch>().mockResolvedValue(
+        new Response(
+          new ReadableStream({
+            start(controller) {
+              controller.enqueue(new Uint8Array([1, 2]));
+              controller.enqueue(new Uint8Array([3, 4]));
+            },
+            cancel: streamCancel,
+          }),
+        ),
+      ),
+      maxResponseBytes: 3,
+    });
+    await expect(
+      streamingProvider.synthesize("Hello", { voiceId: "test-voice-id" }),
+    ).rejects.toThrow(/maximum allowed size of 3 bytes/i);
+    expect(streamCancel).toHaveBeenCalledOnce();
+  });
+
   it("lists provider and Voice Design voices by their normal voice IDs", async () => {
     const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(
       new Response(
@@ -195,6 +299,62 @@ describe("TtsService", () => {
     expect(provider.synthesize).not.toHaveBeenCalled();
   });
 
+  it("counts astral symbols as one character in service and tool limits", async () => {
+    const provider: TtsProvider = {
+      synthesize: vi.fn(async () => ({ audio: Buffer.from("OggS-audio"), mimeType: "audio/ogg" })),
+    };
+    const limited = new TtsService({ config: config({ maxChars: 3 }), provider });
+    await expect(limited.synthesize("🙂🙂🙂")).resolves.toMatchObject({
+      mimeType: "audio/ogg; codecs=opus",
+    });
+    await expect(limited.synthesize("🙂🙂🙂🙂")).rejects.toThrow(/3 characters/i);
+
+    const validVoiceInput = {
+      instanceId: "instance",
+      to: "12345",
+      text: "🙂".repeat(65_536),
+    };
+    expect(SendVoiceSchema.safeParse(validVoiceInput).success).toBe(true);
+    expect(
+      SendVoiceSchema.safeParse({ ...validVoiceInput, text: `${validVoiceInput.text}🙂` }).success,
+    ).toBe(false);
+    expect(TtsPreviewSchema.safeParse({ text: "🙂".repeat(65_536) }).success).toBe(true);
+    expect(TtsPreviewSchema.safeParse({ text: "🙂".repeat(65_537) }).success).toBe(false);
+  });
+
+  it("limits concurrent provider synthesis and ffmpeg work across calls", async () => {
+    let activeOperations = 0;
+    let maxActiveOperations = 0;
+    const synthesize = vi.fn(async (): Promise<TtsAudio> => {
+      activeOperations += 1;
+      maxActiveOperations = Math.max(maxActiveOperations, activeOperations);
+      return { audio: Buffer.from("mp3-audio"), mimeType: "audio/mpeg" };
+    });
+    const converter = vi.fn(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      activeOperations -= 1;
+      return Buffer.from("OggS-converted");
+    });
+    const services = Array.from(
+      { length: 2 },
+      () =>
+        new TtsService({
+          config: config({ concurrency: 2 }),
+          provider: { synthesize },
+          ffmpegRunner: converter,
+        }),
+    );
+
+    await Promise.all(
+      Array.from({ length: 5 }, (_, index) =>
+        services[index % services.length]!.synthesize("Hello"),
+      ),
+    );
+    expect(synthesize).toHaveBeenCalledTimes(5);
+    expect(converter).toHaveBeenCalledTimes(5);
+    expect(maxActiveOperations).toBe(2);
+  });
+
   it("chunks without losing text and passes neighboring chunks for continuity", async () => {
     const text = "a ".repeat(2300);
     const parts = chunkText(text);
@@ -223,6 +383,7 @@ describe("TtsService", () => {
     expect(converter).toHaveBeenCalledWith(
       [Buffer.from("OggS-chunk"), Buffer.from("OggS-chunk")],
       "ffmpeg",
+      5000,
     );
   });
 
@@ -254,7 +415,7 @@ describe("WhatsApp audio normalization", () => {
       audio: Buffer.from("OggS-converted"),
       mimeType: WHATSAPP_VOICE_MIME_TYPE,
     });
-    expect(runFfmpeg).toHaveBeenCalledWith([Buffer.from("ID3-mp3")], "mock-ffmpeg");
+    expect(runFfmpeg).toHaveBeenCalledWith([Buffer.from("ID3-mp3")], "mock-ffmpeg", 60_000);
   });
 
   it("re-encodes multiple OGG segments instead of byte-concatenating them", async () => {
@@ -267,7 +428,47 @@ describe("WhatsApp audio normalization", () => {
     expect(runFfmpeg).toHaveBeenCalledWith(
       chunks.map((chunk) => chunk.audio),
       "mock-ffmpeg",
+      60_000,
     );
+  });
+
+  it("kills ffmpeg on timeout and includes a sanitized stderr tail", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "tts-ffmpeg-"));
+    const executable = join(directory, "fake-ffmpeg");
+    const pidPath = join(directory, "pid");
+    const script = `#!/bin/sh\nprintf '%s' "$$" > ${JSON.stringify(pidPath)}\nprintf 'begin-marker' >&2\nprintf '%3000s' '' | tr ' ' x >&2\nprintf '\\033[31mfinal-marker\\033[0m' >&2\nexec sleep 30\n`;
+    await writeFile(executable, script, { mode: 0o755 });
+
+    try {
+      const error = await normalizeToWhatsAppVoiceNote(
+        [{ audio: Buffer.from("ID3-audio"), mimeType: "audio/mpeg" }],
+        executable,
+        undefined,
+        1000,
+      ).then(
+        () => new Error("expected ffmpeg timeout"),
+        (reason: unknown) => (reason instanceof Error ? reason : new Error(String(reason))),
+      );
+      expect(error.message).toMatch(/ffmpeg timed out after 1000 ms/i);
+      expect(error.message).toContain("final-marker");
+      expect(error.message).not.toContain("begin-marker");
+      expect(error.message).not.toContain("\u001b");
+
+      const pid = Number(await readFile(pidPath, "utf8"));
+      let exited = false;
+      for (let attempt = 0; attempt < 50; attempt += 1) {
+        try {
+          process.kill(pid, 0);
+          await new Promise((resolve) => setTimeout(resolve, 10));
+        } catch {
+          exited = true;
+          break;
+        }
+      }
+      expect(exited).toBe(true);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
   });
 
   it("explains how to install ffmpeg when it cannot be found", async () => {
@@ -291,6 +492,25 @@ describe("TTS configuration", () => {
       modelId: "eleven_v3",
       outputFormat: "opus_48000_64",
       maxChars: 5000,
+      concurrency: 2,
     });
+  });
+
+  it("validates the provider URL scheme and defaults concurrency to two", () => {
+    expect(getTtsConfig({}).concurrency).toBe(2);
+    expect(getTtsConfig({ TTS_CONCURRENCY: "4" }).concurrency).toBe(4);
+    expect(getTtsConfig({ TTS_CONCURRENCY: "0" }).concurrency).toBe(2);
+    expect(getTtsConfig({ WA_TTS_BASE_URL: "http://localhost:5000" }).baseUrl).toBe(
+      "http://localhost:5000",
+    );
+    expect(getTtsConfig({ WA_TTS_BASE_URL: "http://127.0.0.1:5000" }).baseUrl).toBe(
+      "http://127.0.0.1:5000",
+    );
+    expect(() => getTtsConfig({ WA_TTS_BASE_URL: "http://example.com" })).toThrow(
+      /Invalid WA_TTS_BASE_URL.*HTTPS/i,
+    );
+    expect(() => new ElevenLabsProvider(config({ baseUrl: "http://example.com" }))).toThrow(
+      /Invalid WA_TTS_BASE_URL.*HTTPS/i,
+    );
   });
 });
