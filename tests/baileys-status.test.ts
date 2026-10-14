@@ -1,7 +1,10 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { WASocket } from "@whiskeysockets/baileys";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { eq } from "drizzle-orm";
 import { BaileysAdapter } from "../src/channels/baileys/baileys.adapter.js";
+import { db } from "../src/db/client.js";
+import { instances } from "../src/db/schema.js";
 import type { ContactStore } from "../src/services/contact-store.js";
 import type { InstanceManager } from "../src/services/instance-manager.js";
 import type { MessageQueue } from "../src/services/message-queue.js";
@@ -32,7 +35,15 @@ function createAdapter(options?: { ownJid?: string; contacts?: string[]; maxReci
 }
 
 describe("Baileys status audiences", () => {
+  beforeEach(() => {
+    const now = Date.now();
+    db.insert(instances)
+      .values({ id: "synthetic-status-instance", name: "test", createdAt: now, updatedAt: now })
+      .run();
+  });
+
   afterEach(() => {
+    db.delete(instances).where(eq(instances.id, "synthetic-status-instance")).run();
     vi.unstubAllEnvs();
   });
 

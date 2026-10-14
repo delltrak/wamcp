@@ -88,7 +88,7 @@ export const messages = sqliteTable(
     isFromMe: integer("is_from_me").notNull().default(0),
     isForwarded: integer("is_forwarded").notNull().default(0),
     status: text("status", {
-      enum: ["received", "sent", "delivered", "read", "played"],
+      enum: ["received", "sent", "delivered", "read", "played", "revoked"],
     })
       .notNull()
       .default("received"),
@@ -100,6 +100,23 @@ export const messages = sqliteTable(
     index("idx_messages_chat").on(table.instanceId, table.chatId, table.timestamp),
     index("idx_messages_timestamp").on(table.instanceId, table.timestamp),
   ],
+);
+
+// ============================================================
+// STATUS AUDIENCES
+// Recipients for sent status stories, used to distribute revocations
+// ============================================================
+export const statusAudiences = sqliteTable(
+  "status_audiences",
+  {
+    instanceId: text("instance_id")
+      .notNull()
+      .references(() => instances.id, { onDelete: "cascade" }),
+    messageId: text("message_id").notNull(),
+    recipientJids: text("recipient_jids").notNull(),
+    createdAt: integer("created_at").notNull(),
+  },
+  (table) => [primaryKey({ columns: [table.instanceId, table.messageId] })],
 );
 
 // ============================================================

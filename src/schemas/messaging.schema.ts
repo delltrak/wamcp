@@ -3,6 +3,7 @@
 // ============================================================
 
 import { z } from "zod";
+import { isValidStatusRecipient } from "../utils/validation.js";
 
 export const SendTextSchema = z
   .object({
@@ -124,6 +125,25 @@ export const DeleteMessageSchema = z
     instanceId: z.string().min(1).describe("The instance ID"),
     chatId: z.string().min(5).describe("Chat JID where the message is"),
     messageId: z.string().min(1).describe("Message ID to delete for everyone"),
+    statusJidList: z
+      .array(
+        z
+          .string()
+          .trim()
+          .min(1)
+          .refine(isValidStatusRecipient, "Expected an individual WhatsApp phone number or JID"),
+      )
+      .optional()
+      .describe("Optional status deletion audience; only valid when chatId is status@broadcast"),
+  })
+  .superRefine((value, context) => {
+    if (value.statusJidList !== undefined && value.chatId !== "status@broadcast") {
+      context.addIssue({
+        code: "custom",
+        path: ["statusJidList"],
+        message: "statusJidList is only valid when chatId is status@broadcast",
+      });
+    }
   })
   .strict();
 

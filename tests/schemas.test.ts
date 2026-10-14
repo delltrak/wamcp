@@ -459,6 +459,38 @@ describe("DeleteMessageSchema", () => {
     });
     expect(result.success).toBe(true);
   });
+
+  it("accepts an optional status audience only for status@broadcast", () => {
+    expect(
+      DeleteMessageSchema.safeParse({
+        instanceId: "inst_abc123",
+        chatId: "status@broadcast",
+        messageId: "msg_123",
+        statusJidList: ["5511999999999", "5511888888888@s.whatsapp.net"],
+      }).success,
+    ).toBe(true);
+    expect(
+      DeleteMessageSchema.safeParse({
+        instanceId: "inst_abc123",
+        chatId: "5511999999999@s.whatsapp.net",
+        messageId: "msg_123",
+        statusJidList: ["5511888888888"],
+      }).success,
+    ).toBe(false);
+  });
+
+  it("rejects invalid status recipients and unknown fields", () => {
+    const base = {
+      instanceId: "inst_abc123",
+      chatId: "status@broadcast",
+      messageId: "msg_123",
+    };
+    expect(
+      DeleteMessageSchema.safeParse({ ...base, statusJidList: ["120363000000000000-5@g.us"] })
+        .success,
+    ).toBe(false);
+    expect(DeleteMessageSchema.safeParse({ ...base, unexpected: true }).success).toBe(false);
+  });
 });
 
 describe("PinMessageSchema", () => {

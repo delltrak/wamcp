@@ -5,7 +5,7 @@
 import { lt } from "drizzle-orm";
 import { Queue, Worker, type Job } from "bullmq";
 import { db } from "../db/client.js";
-import { messages, processedMessages } from "../db/schema.js";
+import { messages, processedMessages, statusAudiences } from "../db/schema.js";
 import { refreshWaVersion } from "../channels/baileys/baileys.version.js";
 import type { InstanceManager } from "./instance-manager.js";
 import { createChildLogger } from "../utils/logger.js";
@@ -141,8 +141,15 @@ export class MaintenanceService {
     const cutoff = Date.now() - retentionDays * 24 * 60 * 60 * 1000;
 
     const result = db.delete(messages).where(lt(messages.timestamp, cutoff)).run();
+    const audiencesResult = db
+      .delete(statusAudiences)
+      .where(lt(statusAudiences.createdAt, cutoff))
+      .run();
 
-    logger.info({ deleted: result.changes, retentionDays }, "Pruned old messages");
+    logger.info(
+      { deleted: result.changes, deletedStatusAudiences: audiencesResult.changes, retentionDays },
+      "Pruned old messages and status audiences",
+    );
   }
 
   private async pruneDedup(): Promise<void> {

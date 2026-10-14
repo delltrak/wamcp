@@ -589,12 +589,20 @@ Edit a previously sent message. Only text messages sent by this instance can be 
 #### `wa_delete_message`
 
 Delete a message for everyone in the chat. Only messages sent by this instance can be deleted.
+For `status@broadcast`, Baileys sends the revocation to the audience saved when the status was
+posted. Older statuses without a saved audience use the account's own JID and known individual
+contacts.
 
-| Parameter    | Type   | Required | Description                       |
-| ------------ | ------ | -------- | --------------------------------- |
-| `instanceId` | string | Yes      | The instance ID                   |
-| `chatId`     | string | Yes      | Chat JID where the message is     |
-| `messageId`  | string | Yes      | Message ID to delete for everyone |
+| Parameter       | Type     | Required | Description                                                                                              |
+| --------------- | -------- | -------- | -------------------------------------------------------------------------------------------------------- |
+| `instanceId`    | string   | Yes      | The instance ID                                                                                          |
+| `chatId`        | string   | Yes      | Chat JID where the message is; use `status@broadcast` for a status                                       |
+| `messageId`     | string   | Yes      | Message ID to delete for everyone                                                                        |
+| `statusJidList` | string[] | No       | Status deletion audience; valid only for `status@broadcast`. The account's own JID is always included. |
+
+When provided, `statusJidList` accepts individual phone numbers or user JIDs and overrides the
+stored/default audience. The local message status is set to `revoked` after Baileys confirms the
+delete. Status deletion is supported by Baileys.
 
 **Channel support:** Both
 

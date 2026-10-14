@@ -553,6 +553,9 @@ default. Each status tool accepts an optional `statusJidList` of phone numbers o
 to restrict the audience; the account's own JID is always included. The default recipient cap is
 256. Larger audiences are truncated to the cap, and the tool response includes `recipientCount`,
 `omittedRecipientCount`, and a warning. Status stories are not supported by the Cloud API.
+Deleting a status reuses the recipients saved when it was posted; `wa_delete_message` also accepts
+an optional `statusJidList` for `status@broadcast`. For older statuses without a saved audience, it
+uses the account's own JID and known individual contacts.
 
 See [Audio transcription](docs/audio-transcription.md) for tool examples and event behavior.
 See [Text-to-speech voice notes](docs/tts.md) for setup, voice selection, model options, and cost notes.
