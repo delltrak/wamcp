@@ -29,6 +29,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Baileys PTT voice notes now include a 64-byte waveform and duration when ffmpeg can decode the
+  audio; non-Opus input is converted to OGG/Opus, with sends falling back gracefully on failure.
 - Baileys quoted text, image, and video sends now resolve the referenced message from the same
   chat and instance and pass a complete WAMessage to the socket. Missing quotes return a clear
   tool error before enqueueing; quotes removed before delivery fail without BullMQ retries.

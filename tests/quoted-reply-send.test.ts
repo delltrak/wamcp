@@ -6,6 +6,29 @@ const queueHarness = vi.hoisted(() => ({
   quotedMessage: null as Record<string, unknown> | null,
 }));
 
+const pttHarness = vi.hoisted(() => ({
+  preparePttAudio: vi.fn(
+    async (
+      audio: Uint8Array,
+      mimeType?: string,
+    ): Promise<{
+      audio: Uint8Array;
+      mimeType: string;
+      seconds?: number;
+      waveform?: Uint8Array;
+    }> => ({
+      audio,
+      mimeType: mimeType ?? "audio/ogg; codecs=opus",
+      seconds: 3,
+      waveform: new Uint8Array(64).fill(73),
+    }),
+  ),
+}));
+
+vi.mock("../src/tts/waveform.js", () => ({
+  preparePttAudio: pttHarness.preparePttAudio,
+}));
+
 vi.mock("bullmq", () => {
   class FakeQueue {
     constructor(_name: string, _options: unknown) {}
@@ -51,7 +74,9 @@ import { generateWAMessageFromContent, type WASocket } from "@whiskeysockets/bai
 import { UnrecoverableError } from "bullmq";
 import { BaileysAdapter } from "../src/channels/baileys/baileys.adapter.js";
 import { MessageQueue } from "../src/services/message-queue.js";
+import { registerTtsTools } from "../src/tools/tts.tools.js";
 import {
+  SendAudioSchema,
   SendImageSchema,
   SendTextSchema,
   SendVideoSchema,
@@ -84,7 +109,21 @@ function createTestRuntime() {
       tools.set(name, handler);
     },
   } as unknown as McpServer;
-  registerMessagingTools(server, { getInstanceChannel: () => adapter } as never, messageQueue);
+  const instanceManager = {
+    getInstanceChannel: () => "baileys",
+    getAdapter: () => adapter,
+  };
+  registerMessagingTools(server, instanceManager as never, messageQueue);
+  registerTtsTools(server, instanceManager as never, messageQueue, {
+    assertConfigured() {},
+    assertTextWithinLimit() {},
+    resolveVoiceId: () => "test-voice",
+    synthesize: async () => ({
+      audio: Buffer.from("OggS TTS fixture"),
+      mimeType: "audio/ogg; codecs=opus",
+    }),
+    listVoices: async () => [],
+  } as never);
 
   return { adapter, messageQueue, sent, tools };
 }
@@ -93,6 +132,7 @@ describe("quoted outbound messages", () => {
   beforeEach(() => {
     queueHarness.job = undefined;
     queueHarness.processor = undefined;
+    pttHarness.preparePttAudio.mockClear();
     queueHarness.quotedMessage = {
       id: "incoming-message-id",
       instanceId: "instance-1",
@@ -139,6 +179,108 @@ describe("quoted outbound messages", () => {
       },
     });
 
+    await messageQueue.close();
+  });
+
+  it("serializes PTT audio through BullMQ and attaches Uint8Array waveform in the worker", async () => {
+    const { messageQueue, sent, tools } = createTestRuntime();
+    const audio = Buffer.from("voice note fixture");
+    await tools.get("wa_send_audio")!(
+      SendAudioSchema.parse({
+        instanceId: "instance-1",
+        to: "test-recipient@s.whatsapp.net",
+        audio: audio.toString("base64"),
+        ptt: true,
+      }),
+    );
+
+    expect(queueHarness.job?.data).toEqual({
+      instanceId: "instance-1",
+      to: "test-recipient@s.whatsapp.net",
+      content: {
+        type: "audio",
+        audio: audio.toString("base64"),
+        ptt: true,
+      },
+    });
+    expect(queueHarness.job?.data).not.toHaveProperty("content.waveform");
+
+    await queueHarness.processor!(queueHarness.job!);
+
+    expect(pttHarness.preparePttAudio).toHaveBeenCalledWith(audio, undefined);
+    const payload = sent[0]?.[1] as {
+      audio: Buffer;
+      ptt: boolean;
+      mimetype: string;
+      seconds?: number;
+      waveform?: Uint8Array;
+    };
+    expect(payload).toMatchObject({
+      audio,
+      ptt: true,
+      mimetype: "audio/ogg; codecs=opus",
+      seconds: 3,
+    });
+    expect(payload.waveform).toBeInstanceOf(Uint8Array);
+    expect(payload.waveform).toHaveLength(64);
+    expect([...payload.waveform!]).toEqual(Array(64).fill(73));
+
+    await messageQueue.close();
+  });
+
+  it("sends wa_send_voice through the same waveform metadata path", async () => {
+    const { messageQueue, sent, tools } = createTestRuntime();
+    await tools.get("wa_send_voice")!({
+      instanceId: "instance-1",
+      to: "test-recipient@s.whatsapp.net",
+      text: "A synthesized voice note.",
+    });
+
+    expect(queueHarness.job?.data).toMatchObject({
+      content: {
+        type: "audio",
+        ptt: true,
+        mimeType: "audio/ogg; codecs=opus",
+      },
+    });
+    await queueHarness.processor!(queueHarness.job!);
+
+    const payload = sent[0]?.[1] as {
+      ptt: boolean;
+      seconds?: number;
+      waveform?: Uint8Array;
+    };
+    expect(payload.ptt).toBe(true);
+    expect(payload.seconds).toBe(3);
+    expect(payload.waveform).toBeInstanceOf(Uint8Array);
+    expect(payload.waveform).toHaveLength(64);
+    expect(pttHarness.preparePttAudio).toHaveBeenCalledTimes(1);
+
+    await messageQueue.close();
+  });
+
+  it("continues the PTT send without metadata when waveform preparation fails", async () => {
+    const { messageQueue, sent, tools } = createTestRuntime();
+    const audio = Buffer.from("voice note fixture");
+    pttHarness.preparePttAudio.mockResolvedValueOnce({
+      audio,
+      mimeType: "audio/ogg; codecs=opus",
+    });
+
+    await tools.get("wa_send_audio")!(
+      SendAudioSchema.parse({
+        instanceId: "instance-1",
+        to: "test-recipient@s.whatsapp.net",
+        audio: audio.toString("base64"),
+        ptt: true,
+      }),
+    );
+    await queueHarness.processor!(queueHarness.job!);
+
+    const payload = sent[0]?.[1] as Record<string, unknown>;
+    expect(payload).toMatchObject({ audio, ptt: true, mimetype: "audio/ogg; codecs=opus" });
+    expect(payload).not.toHaveProperty("seconds");
+    expect(payload).not.toHaveProperty("waveform");
     await messageQueue.close();
   });
 

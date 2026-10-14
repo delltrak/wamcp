@@ -72,10 +72,14 @@ import {
   RECONNECT_INITIAL_DELAY_MS,
   RECONNECT_MAX_DELAY_MS,
   RECONNECT_MAX_ATTEMPTS,
+  MAX_BASE64_MEDIA_BYTES,
 } from "../../constants.js";
 import { createChildLogger } from "../../utils/logger.js";
 import { scheduleBaileysMessagesRead } from "../../services/auto-read.js";
 import { QuotedMessageResolutionError } from "../../utils/quoted-message.js";
+import { MediaService } from "../../services/media.js";
+import { resolveFfmpegTimeoutMs, WHATSAPP_VOICE_MIME_TYPE } from "../../tts/audio.js";
+import { preparePttAudio } from "../../tts/waveform.js";
 import {
   ContactStore,
   type ContactPnResolver,
@@ -83,6 +87,7 @@ import {
 } from "../../services/contact-store.js";
 
 const logger = createChildLogger({ service: "baileys-adapter" });
+const mediaService = new MediaService();
 
 function parseBooleanEnv(value: string | undefined, key: string, fallback: boolean): boolean {
   if (value === undefined || value.trim() === "") return fallback;
@@ -407,11 +412,52 @@ export class BaileysAdapter implements ChannelAdapter {
         }
         break;
       case "audio":
-        msg = {
-          audio: this.resolveMedia(content.audio),
-          ptt: content.ptt ?? false,
-          mimetype: content.mimeType ?? "audio/ogg; codecs=opus",
-        };
+        if (content.ptt) {
+          const fallback = {
+            audio: this.resolveMedia(content.audio),
+            ptt: true,
+            mimetype: content.mimeType ?? WHATSAPP_VOICE_MIME_TYPE,
+          };
+          try {
+            const source = await mediaService.getMediaBuffer(content.audio, {
+              maxBytes: MAX_BASE64_MEDIA_BYTES,
+              timeoutMs: resolveFfmpegTimeoutMs(process.env.WA_TTS_TIMEOUT_MS),
+            });
+            const prepared = await preparePttAudio(source, content.mimeType);
+            if (prepared.seconds === undefined || prepared.waveform === undefined) {
+              logger.warn(
+                { instanceId: this.instanceId },
+                "PTT waveform or duration unavailable; sending audio without metadata",
+              );
+            }
+            const audioMessage: {
+              audio: Buffer;
+              ptt: true;
+              mimetype: string;
+              seconds?: number;
+              waveform?: Uint8Array;
+            } = {
+              audio: prepared.audio,
+              ptt: true,
+              mimetype: prepared.mimeType,
+              ...(prepared.seconds !== undefined ? { seconds: prepared.seconds } : {}),
+              ...(prepared.waveform !== undefined ? { waveform: prepared.waveform } : {}),
+            };
+            msg = audioMessage;
+          } catch {
+            logger.warn(
+              { instanceId: this.instanceId },
+              "PTT audio preparation failed; sending audio without waveform or duration",
+            );
+            msg = fallback;
+          }
+        } else {
+          msg = {
+            audio: this.resolveMedia(content.audio),
+            ptt: false,
+            mimetype: content.mimeType ?? WHATSAPP_VOICE_MIME_TYPE,
+          };
+        }
         if (content.quotedMessageId) {
           opts.quoted = this.getQuotedMessage(jid, content.quotedMessageId);
         }

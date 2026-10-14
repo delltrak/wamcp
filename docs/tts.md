@@ -45,11 +45,18 @@ ffmpeg or set `WA_TTS_FFMPEG_PATH` to its executable. The Docker runtime image i
 ElevenLabs supports Opus output formats from `opus_48000_32` through `opus_48000_192`, and
 `mp3_44100_128`.
 
+Baileys voice notes include a 64-bar waveform and whole-second duration when ffmpeg can decode the
+audio. `wa_send_audio` uses the same behavior with `ptt: true`; non-Opus PTT audio is converted to
+mono 48 kHz OGG/Opus first. Waveform analysis decodes mono 16 kHz PCM, and `WA_TTS_FFMPEG_PATH`
+and `WA_TTS_TIMEOUT_MS` apply to this work too. If conversion or analysis fails, the message is
+still sent with the existing PTT behavior, without waveform or duration. Non-PTT audio sends and
+Cloud API audio behavior are unchanged.
+
 Long text is split into chunks with neighboring text sent to the provider for continuity. The full
 input is limited by `WA_TTS_MAX_CHARS` (default 5000). Failed requests are retried with backoff and
 jitter only for HTTP 429 and 5xx responses. `WA_TTS_TIMEOUT_MS` applies to each provider request
-and ffmpeg conversion. `TTS_CONCURRENCY` (default 2) limits simultaneous synthesis and conversion
-work across `wa_send_voice` and `wa_tts_preview`.
+and ffmpeg conversion or waveform decode. `TTS_CONCURRENCY` (default 2) limits simultaneous
+synthesis and conversion work across `wa_send_voice` and `wa_tts_preview`.
 `WA_TTS_BASE_URL` accepts a host such as `https://api.eu.residency.elevenlabs.io`; `/v1` is added
 automatically, or retained if included in the configured URL. HTTPS is required except for local
 testing with `http://localhost` or `http://127.0.0.1`.
@@ -75,6 +82,6 @@ return a quota or rate-limit error.
 | `WA_TTS_OUTPUT_FORMAT`    | `opus_48000_64`             | ElevenLabs response format; supports its Opus and MP3 formats |
 | `WA_TTS_MAX_CHARS`        | `5000`                      | Maximum input text length                                     |
 | `WA_TTS_BASE_URL`         | `https://api.elevenlabs.io` | Provider host; supports residency hosts                       |
-| `WA_TTS_TIMEOUT_MS`       | `60000`                     | Per-request timeout                                           |
-| `TTS_CONCURRENCY`         | `2`                         | Maximum simultaneous synthesis and ffmpeg conversions        |
-| `WA_TTS_FFMPEG_PATH`      | `ffmpeg` from `PATH`        | Optional ffmpeg executable override                           |
+| `WA_TTS_TIMEOUT_MS`       | `60000`                     | Provider, conversion, and waveform ffmpeg timeout             |
+| `TTS_CONCURRENCY`         | `2`                         | Maximum simultaneous synthesis and ffmpeg conversions         |
+| `WA_TTS_FFMPEG_PATH`      | `ffmpeg` from `PATH`        | ffmpeg executable for conversion and PTT waveform analysis    |
