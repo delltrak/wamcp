@@ -13,8 +13,7 @@ import type {
   BusinessProfile,
   ProfileInfo,
   PrivacySettings,
-  PrivacySetting,
-  PrivacyValue,
+  PrivacyUpdate,
   Contact,
   Chat,
   Message,
@@ -94,8 +93,8 @@ export interface ChannelAdapter {
   removeProfilePicture(): Promise<void>;
   updateProfileName(name: string): Promise<void>;
   updateProfileStatus(status: string): Promise<void>;
-  updatePrivacy(setting: PrivacySetting, value: PrivacyValue): Promise<void>;
-  getPrivacySettings(): Promise<PrivacySettings>;
+  updatePrivacy(update: PrivacyUpdate): Promise<void>;
+  getPrivacySettings(forceRefresh?: boolean): Promise<PrivacySettings>;
   getProfilePicture(jid: string): Promise<string | null>;
 
   // ---- Status / Stories ----

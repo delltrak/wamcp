@@ -14,6 +14,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Added Baileys privacy read/update tools for last seen, online, profile photo, about, read receipts,
+  group adds, calls, and default disappearing duration. Status audience reporting exposes the mode
+  while documenting that Baileys does not provide selected recipient lists.
 - Optional ElevenLabs text-to-speech voice notes through a provider interface, with voice listing,
   base64 previews, text chunk continuity, retry handling, and OGG/Opus output for Baileys.
 - Configurable TTS enablement, provider, voice, model, language, output format, text limit, API host,

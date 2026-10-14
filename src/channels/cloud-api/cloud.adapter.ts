@@ -18,8 +18,7 @@ import type {
   BusinessProfile,
   ProfileInfo,
   PrivacySettings,
-  PrivacySetting,
-  PrivacyValue,
+  PrivacyUpdate,
   Contact,
   Chat,
   Message,
@@ -591,12 +590,12 @@ export class CloudApiAdapter implements ChannelAdapter {
     });
   }
 
-  async updatePrivacy(_setting: PrivacySetting, _value: PrivacyValue): Promise<void> {
-    throw new Error("Privacy settings are not configurable via Cloud API");
+  async updatePrivacy(_update: PrivacyUpdate): Promise<void> {
+    throw new Error("Privacy settings are not supported on the Cloud API");
   }
 
-  async getPrivacySettings(): Promise<PrivacySettings> {
-    throw new Error("Privacy settings are not available via Cloud API");
+  async getPrivacySettings(_forceRefresh = false): Promise<PrivacySettings> {
+    throw new Error("Privacy settings are not supported on the Cloud API");
   }
 
   async getProfilePicture(_jid: string): Promise<string | null> {

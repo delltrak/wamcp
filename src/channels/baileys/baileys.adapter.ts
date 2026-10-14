@@ -27,8 +27,7 @@ import type {
   BusinessProfile,
   ProfileInfo,
   PrivacySettings,
-  PrivacySetting,
-  PrivacyValue,
+  PrivacyUpdate,
   Contact,
   Chat,
   Message,
@@ -44,6 +43,7 @@ import type {
   MessageDeliveryStatus,
 } from "../../types/channel.types.js";
 import { useSqliteAuthState, clearAuthState } from "./baileys.auth.js";
+import { normalizePrivacySettings } from "./privacy.js";
 import { getWaVersion } from "./baileys.version.js";
 import { db } from "../../db/client.js";
 import { messages as messagesTable } from "../../db/schema.js";
@@ -829,46 +829,41 @@ export class BaileysAdapter implements ChannelAdapter {
     await sock.updateProfileStatus(statusText);
   }
 
-  async updatePrivacy(setting: PrivacySetting, value: PrivacyValue): Promise<void> {
+  async updatePrivacy(update: PrivacyUpdate): Promise<void> {
     const sock = this.getSock();
     // Baileys has separate privacy update methods per setting
-    switch (setting) {
+    switch (update.setting) {
       case "lastSeen":
-        await sock.updateLastSeenPrivacy(
-          value as "all" | "contacts" | "contact_blacklist" | "none",
-        );
+        await sock.updateLastSeenPrivacy(update.value);
         break;
       case "online":
-        await sock.updateOnlinePrivacy(value as "all" | "match_last_seen");
+        await sock.updateOnlinePrivacy(update.value);
         break;
       case "profilePic":
-        await sock.updateProfilePicturePrivacy(
-          value as "all" | "contacts" | "contact_blacklist" | "none",
-        );
+        await sock.updateProfilePicturePrivacy(update.value);
         break;
       case "status":
-        await sock.updateStatusPrivacy(value as "all" | "contacts" | "contact_blacklist" | "none");
+        await sock.updateStatusPrivacy(update.value);
         break;
       case "readReceipts":
-        await sock.updateReadReceiptsPrivacy(value as "all" | "none");
+        await sock.updateReadReceiptsPrivacy(update.value);
         break;
       case "groupAdd":
-        await sock.updateGroupsAddPrivacy(value as "all" | "contacts" | "contact_blacklist");
+        await sock.updateGroupsAddPrivacy(update.value);
+        break;
+      case "calls":
+        await sock.updateCallPrivacy(update.value);
+        break;
+      case "defaultDisappearingMode":
+        await sock.updateDefaultDisappearingMode(update.value);
         break;
     }
   }
 
-  async getPrivacySettings(): Promise<PrivacySettings> {
+  async getPrivacySettings(forceRefresh = false): Promise<PrivacySettings> {
     const sock = this.getSock();
-    const settings = await sock.fetchPrivacySettings(true);
-    return {
-      lastSeen: (settings.last as PrivacyValue) ?? "contacts",
-      online: (settings.online as PrivacyValue) ?? "all",
-      profilePic: (settings.profile as PrivacyValue) ?? "contacts",
-      status: (settings.status as PrivacyValue) ?? "contacts",
-      readReceipts: (settings.readreceipts as PrivacyValue) ?? "all",
-      groupAdd: (settings.groupadd as PrivacyValue) ?? "contacts",
-    };
+    const settings = await sock.fetchPrivacySettings(forceRefresh);
+    return normalizePrivacySettings(settings);
   }
 
   async getProfilePicture(jid: string): Promise<string | null> {
