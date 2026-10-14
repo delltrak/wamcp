@@ -115,7 +115,9 @@ function detectMediaInputFormat(buffer: Buffer): MediaInputFormat {
   return "unknown";
 }
 
-function webPInfo(buffer: Buffer): { animated: boolean; width?: number; height?: number } | null {
+export function getWebPInfo(
+  buffer: Buffer,
+): { animated: boolean; width?: number; height?: number } | null {
   if (detectMediaInputFormat(buffer) !== "webp" || buffer.readUInt32LE(4) + 8 > buffer.length) {
     return null;
   }
@@ -139,8 +141,28 @@ function webPInfo(buffer: Buffer): { animated: boolean; width?: number; height?:
       animationFlag = (buffer[content]! & 0x02) !== 0;
       width = 1 + buffer.readUIntLE(content + 4, 3);
       height = 1 + buffer.readUIntLE(content + 7, 3);
-    } else if (kind === "VP8 " || kind === "VP8L") {
+    } else if (kind === "VP8 ") {
       hasImage = true;
+      // A simple lossy WebP stores the dimensions in the first VP8 keyframe header.
+      if (
+        width === undefined &&
+        chunkSize >= 10 &&
+        (buffer[content]! & 0x01) === 0 &&
+        buffer[content + 3] === 0x9d &&
+        buffer[content + 4] === 0x01 &&
+        buffer[content + 5] === 0x2a
+      ) {
+        width = buffer.readUInt16LE(content + 6) & 0x3fff;
+        height = buffer.readUInt16LE(content + 8) & 0x3fff;
+      }
+    } else if (kind === "VP8L") {
+      hasImage = true;
+      // VP8L uses a one-byte signature followed by packed 14-bit width and height values.
+      if (width === undefined && chunkSize >= 5 && buffer[content] === 0x2f) {
+        const dimensions = buffer.readUInt32LE(content + 1);
+        width = (dimensions & 0x3fff) + 1;
+        height = ((dimensions >>> 14) & 0x3fff) + 1;
+      }
     } else if (kind === "ANMF") {
       hasAnimationFrame = true;
       hasImage = true;
@@ -239,6 +261,39 @@ export interface MediaBufferWithContentType {
 
 function sizeLabel(maxBytes: number): string {
   return maxBytes < 1024 * 1024 ? `${maxBytes} bytes` : `${Math.round(maxBytes / 1024 / 1024)} MB`;
+}
+
+function stickerSizeLimit(animated: boolean): number {
+  return animated ? MEDIA_LIMITS.stickerAnimated : MEDIA_LIMITS.stickerStatic;
+}
+
+function stickerSizeError(size: number, animated: boolean): Error {
+  const kind = animated ? "animated" : "static";
+  const limit = stickerSizeLimit(animated);
+  return new Error(
+    `${kind[0]!.toUpperCase()}${kind.slice(1)} sticker is ${size} bytes and exceeds the ${sizeLabel(limit)} WhatsApp sticker limit (${limit} bytes)`,
+  );
+}
+
+function staticStickerFfmpegArgs(quality: number, scaleAndPad: string): string[] {
+  return [
+    "-i",
+    "pipe:0",
+    "-frames:v",
+    "1",
+    "-vf",
+    `${scaleAndPad},format=rgba`,
+    "-an",
+    "-c:v",
+    "libwebp",
+    "-quality",
+    String(quality),
+    "-compression_level",
+    "6",
+    "-f",
+    "webp",
+    "pipe:1",
+  ];
 }
 
 function assertMaxBytes(size: number, maxBytes: number): void {
@@ -369,25 +424,34 @@ export class MediaService {
     return options.includeContentType ? media : media.data;
   }
 
-  /** Convert supported images to WhatsApp sticker WebP. Existing valid WebP is passed through. */
+  /** Convert supported images to WhatsApp sticker WebP. Correctly sized WebP files pass through. */
   async prepareSticker(input: string, animatedHint?: boolean): Promise<PreparedSticker> {
     const source = await this.getMediaBuffer(input, { maxBytes: MEDIA_LIMITS.image });
     const format = detectMediaInputFormat(source);
+    let animated: boolean;
+    let normalizeWebP = false;
 
     if (format === "webp") {
-      const info = webPInfo(source);
+      const info = getWebPInfo(source);
       if (!info) throw new Error("Sticker input is not a valid WebP image");
-      if (source.length > MEDIA_LIMITS.sticker) {
-        throw new Error(`Sticker exceeds the ${MEDIA_LIMITS.sticker} byte WhatsApp sticker limit`);
+      animated = info.animated;
+      const limit = stickerSizeLimit(animated);
+      if (source.length > limit) throw stickerSizeError(source.length, animated);
+
+      if (info.width !== 512 || info.height !== 512) {
+        if (animated) {
+          throw new Error("Animated WebP stickers must be 512x512; send a GIF to convert it");
+        }
+        normalizeWebP = true;
       }
-      return { data: source, animated: info.animated };
+      if (!normalizeWebP) return { data: source, animated };
+    } else {
+      if (format !== "png" && format !== "jpeg" && format !== "gif") {
+        throw new Error("Sticker input must be PNG, JPG, GIF, or WebP media");
+      }
+      animated = format === "gif" && (animatedHint ?? gifFrameCount(source) > 1);
     }
 
-    if (format !== "png" && format !== "jpeg" && format !== "gif") {
-      throw new Error("Sticker input must be PNG, JPG, GIF, or WebP media");
-    }
-
-    const animated = format === "gif" && (animatedHint ?? gifFrameCount(source) > 1);
     const scaleAndPad =
       "scale=512:512:force_original_aspect_ratio=decrease:flags=lanczos,pad=512:512:(ow-iw)/2:(oh-ih)/2:color=0x00000000";
     const args = animated
@@ -409,62 +473,56 @@ export class MediaService {
           "webp",
           "pipe:1",
         ]
-      : [
-          "-i",
-          "pipe:0",
-          "-frames:v",
-          "1",
-          "-vf",
-          `${scaleAndPad},format=rgba`,
-          "-an",
-          "-c:v",
-          "libwebp",
-          "-quality",
-          "75",
-          "-compression_level",
-          "6",
-          "-f",
-          "webp",
-          "pipe:1",
-        ];
+      : staticStickerFfmpegArgs(75, scaleAndPad);
 
-    let converted: Buffer;
-    try {
-      converted = await runFfmpegCommand(
-        [source],
-        args,
-        mediaFfmpegExecutable(),
-        mediaFfmpegTimeoutMs(),
-        MEDIA_LIMITS.sticker,
-      );
-    } catch (error) {
-      if (error instanceof Error && "code" in error && error.code === "ENOENT") {
-        throw new Error(
-          "ffmpeg is required to convert this sticker. Install ffmpeg or set WA_MEDIA_FFMPEG_PATH.",
-          { cause: error },
+    const limit = stickerSizeLimit(animated);
+    const qualities = animated ? [55] : [75, 50];
+    let converted: Buffer | undefined;
+    let lastSizeError: Error | undefined;
+    for (let attempt = 0; attempt < qualities.length; attempt += 1) {
+      try {
+        converted = await runFfmpegCommand(
+          [source],
+          animated ? args : staticStickerFfmpegArgs(qualities[attempt]!, scaleAndPad),
+          mediaFfmpegExecutable(),
+          mediaFfmpegTimeoutMs(),
+          limit,
         );
+      } catch (error) {
+        if (error instanceof Error && "code" in error && error.code === "ENOENT") {
+          throw new Error(
+            "ffmpeg is required to convert this sticker. Install ffmpeg or set WA_MEDIA_FFMPEG_PATH.",
+            { cause: error },
+          );
+        }
+        if (error instanceof Error && error.message.includes("output exceeded")) {
+          lastSizeError = stickerSizeError(limit + 1, animated);
+          if (!animated && attempt === 0) continue;
+          throw new Error(`Converted ${lastSizeError.message}`, { cause: error });
+        }
+        throw error;
       }
-      if (error instanceof Error && error.message.includes("output exceeded")) {
-        throw new Error(
-          `Converted sticker exceeds the ${MEDIA_LIMITS.sticker} byte WhatsApp sticker limit`,
-          {
-            cause: error,
-          },
-        );
+
+      if (converted.length <= limit) break;
+      lastSizeError = stickerSizeError(converted.length, animated);
+      converted = undefined;
+      if (animated || attempt > 0) {
+        throw new Error(`Converted ${lastSizeError.message}`);
       }
-      throw error;
     }
 
-    const info = webPInfo(converted);
+    if (!converted) {
+      throw new Error(
+        `Converted ${lastSizeError?.message ?? stickerSizeError(limit + 1, animated).message}`,
+      );
+    }
+    const info = getWebPInfo(converted);
     if (!info) throw new Error("ffmpeg did not produce a valid WebP sticker");
     if (info.width !== 512 || info.height !== 512) {
       throw new Error("ffmpeg did not produce a 512x512 WebP sticker");
     }
-    if (converted.length > MEDIA_LIMITS.sticker) {
-      throw new Error(
-        `Converted sticker exceeds the ${MEDIA_LIMITS.sticker} byte WhatsApp sticker limit`,
-      );
-    }
+    if (converted.length > limit)
+      throw new Error(`Converted ${stickerSizeError(converted.length, animated).message}`);
     return { data: converted, animated };
   }
 

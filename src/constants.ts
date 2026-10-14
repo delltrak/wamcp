@@ -67,7 +67,8 @@ export const MEDIA_LIMITS = {
   video: 16 * 1024 * 1024, // 16 MB
   audio: 16 * 1024 * 1024, // 16 MB
   document: 100 * 1024 * 1024, // 100 MB
-  sticker: 500 * 1024, // 500 KB
+  stickerStatic: 100 * 1024, // 100 KB
+  stickerAnimated: 500 * 1024, // 500 KB
 } as const;
 
 // MCP endpoint

@@ -561,10 +561,13 @@ Copy `.env.example` to `.env` and configure:
 | `WA_VERSION_CHECK`          | `true`                   | Daily WhatsApp Web version check         |
 
 `wa_send_sticker` accepts PNG, JPG, GIF, and WebP URLs or base64. PNG/JPG and GIF inputs are
-converted to 512x512 WebP with transparent padding; valid WebP files pass through. Animated GIFs
-are converted with ffmpeg, and animated WebP files pass through. `wa_send_gif` converts GIF or MP4
-input to silent H.264 MP4 and sends it with native GIF playback on Baileys. Cloud API does not
-support the GIF playback option.
+converted to 512x512 WebP with transparent padding. Static stickers are limited to 100 KB and
+animated stickers to 500 KB. Static WebP files that are not 512x512 are normalized with ffmpeg;
+animated WebP files pass through only when they are already 512x512, since ffmpeg cannot safely
+resize animated WebP. Send a GIF to convert an animated sticker to 512x512. Correctly sized WebP
+files pass through unchanged within their size limit. `wa_send_gif` converts GIF or MP4 input to
+silent H.264 MP4 and sends it with native GIF playback on Baileys. Cloud API does not support the
+GIF playback option.
 
 `wa_download_media` locates a received media message by `messageId` and optional `chatId`. File
 mode saves it under `WA_MEDIA_DOWNLOAD_DIR` and returns a path; base64 mode returns inline data and

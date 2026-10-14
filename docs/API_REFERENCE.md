@@ -375,8 +375,10 @@ Send a video to a WhatsApp contact or group.
 #### `wa_send_sticker`
 
 Send a native WhatsApp sticker. PNG/JPG images and GIFs are converted to 512x512 WebP with
-transparent padding. Valid WebP files pass through; animated WebP is preserved and animated GIFs
-are converted with ffmpeg.
+transparent padding. Static stickers are limited to 100 KB and animated stickers to 500 KB. Static
+WebP files that are not 512x512 are normalized with ffmpeg; animated WebP passes through only at
+512x512 because ffmpeg cannot safely resize animated WebP. Send a GIF to convert an animated sticker
+to 512x512. Correctly sized WebP files pass through unchanged when they are within their size limit.
 
 | Parameter         | Type    | Required | Description                                      |
 | ----------------- | ------- | -------- | ------------------------------------------------ |

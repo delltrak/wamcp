@@ -8,7 +8,7 @@ import type { ChannelAdapter, ChannelEventHandler } from "../channel.interface.j
 import { and, eq } from "drizzle-orm";
 import { db } from "../../db/client.js";
 import { messages as messagesTable } from "../../db/schema.js";
-import { mediaResponseToBuffer } from "../../services/media.js";
+import { getWebPInfo, mediaResponseToBuffer } from "../../services/media.js";
 import { MEDIA_LIMITS } from "../../constants.js";
 import type {
   ConnectionStatus,
@@ -301,17 +301,23 @@ export class CloudApiAdapter implements ChannelAdapter {
 
       case "sticker": {
         const sticker = Buffer.from(content.sticker, "base64");
-        if (sticker.length > MEDIA_LIMITS.sticker) {
+        if (sticker.length > MEDIA_LIMITS.stickerAnimated) {
           throw new Error(
-            `Sticker exceeds the ${MEDIA_LIMITS.sticker} byte WhatsApp sticker limit`,
+            `Sticker exceeds the ${MEDIA_LIMITS.stickerAnimated} byte WhatsApp sticker limit`,
           );
         }
-        if (
-          sticker.length < 12 ||
-          sticker.subarray(0, 4).toString("ascii") !== "RIFF" ||
-          sticker.subarray(8, 12).toString("ascii") !== "WEBP"
-        ) {
-          throw new Error("Cloud API sticker messages require a WebP sticker");
+        const stickerInfo = getWebPInfo(sticker);
+        if (!stickerInfo) {
+          throw new Error("Cloud API sticker messages require a valid WebP sticker");
+        }
+        const stickerLimit = stickerInfo.animated
+          ? MEDIA_LIMITS.stickerAnimated
+          : MEDIA_LIMITS.stickerStatic;
+        if (sticker.length > stickerLimit) {
+          const type = stickerInfo.animated ? "animated" : "static";
+          throw new Error(
+            `${type[0]!.toUpperCase()}${type.slice(1)} sticker exceeds the ${sizeLimitLabel(stickerLimit)} WhatsApp sticker limit`,
+          );
         }
         const mediaId = await this.uploadMedia(sticker, "image/webp", "sticker.webp");
         const payload: Record<string, unknown> = {
