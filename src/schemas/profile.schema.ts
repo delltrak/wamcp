@@ -31,66 +31,52 @@ export const UpdateProfileStatusSchema = z
   })
   .strict();
 
-const privacyInstanceId = z.string().min(1).describe("The instance ID");
+const PRIVACY_SETTINGS = [
+  "lastSeen",
+  "online",
+  "profilePic",
+  "status",
+  "readReceipts",
+  "groupAdd",
+  "calls",
+  "defaultDisappearingMode",
+] as const;
 
-export const UpdatePrivacySchema = z.discriminatedUnion("setting", [
-  z
-    .object({
-      instanceId: privacyInstanceId,
-      setting: z.literal("lastSeen"),
-      value: z.enum(["all", "contacts", "contact_blacklist", "none"]),
-    })
-    .strict(),
-  z
-    .object({
-      instanceId: privacyInstanceId,
-      setting: z.literal("online"),
-      value: z.enum(["all", "match_last_seen"]),
-    })
-    .strict(),
-  z
-    .object({
-      instanceId: privacyInstanceId,
-      setting: z.literal("profilePic"),
-      value: z.enum(["all", "contacts", "contact_blacklist", "none"]),
-    })
-    .strict(),
-  z
-    .object({
-      instanceId: privacyInstanceId,
-      setting: z.literal("status"),
-      value: z.enum(["all", "contacts", "contact_blacklist", "none"]),
-    })
-    .strict(),
-  z
-    .object({
-      instanceId: privacyInstanceId,
-      setting: z.literal("readReceipts"),
-      value: z.enum(["all", "none"]),
-    })
-    .strict(),
-  z
-    .object({
-      instanceId: privacyInstanceId,
-      setting: z.literal("groupAdd"),
-      value: z.enum(["all", "contacts", "contact_blacklist"]),
-    })
-    .strict(),
-  z
-    .object({
-      instanceId: privacyInstanceId,
-      setting: z.literal("calls"),
-      value: z.enum(["all", "known"]),
-    })
-    .strict(),
-  z
-    .object({
-      instanceId: privacyInstanceId,
-      setting: z.literal("defaultDisappearingMode"),
-      value: z.union([z.literal(0), z.literal(86400), z.literal(604800), z.literal(7776000)]),
-    })
-    .strict(),
-]);
+const privacyValuesBySetting = {
+  lastSeen: ["all", "contacts", "contact_blacklist", "none"],
+  online: ["all", "match_last_seen"],
+  profilePic: ["all", "contacts", "contact_blacklist", "none"],
+  status: ["all", "contacts", "contact_blacklist", "none"],
+  readReceipts: ["all", "none"],
+  groupAdd: ["all", "contacts", "contact_blacklist"],
+  calls: ["all", "known"],
+  defaultDisappearingMode: [0, 86400, 604800, 7776000],
+} as const satisfies Record<(typeof PRIVACY_SETTINGS)[number], readonly (string | number)[]>;
+
+export const UpdatePrivacySchema = z
+  .object({
+    instanceId: z.string().min(1).describe("The instance ID"),
+    setting: z
+      .enum(PRIVACY_SETTINGS)
+      .describe(
+        "Privacy setting: lastSeen, online, profilePic, status (About/profile text visibility), readReceipts, groupAdd, calls, or defaultDisappearingMode",
+      ),
+    value: z
+      .union([z.string(), z.number()])
+      .describe(
+        'Allowed values depend on setting: lastSeen/profilePic/status use "all", "contacts", "contact_blacklist", or "none"; online uses "all" or "match_last_seen"; readReceipts uses "all" or "none"; groupAdd uses "all", "contacts", or "contact_blacklist"; calls uses "all" or "known"; defaultDisappearingMode uses 0, 86400, 604800, or 7776000 seconds.',
+      ),
+  })
+  .strict()
+  .superRefine(({ setting, value }, context) => {
+    if (!privacyValuesBySetting[setting].some((allowedValue) => allowedValue === value)) {
+      context.addIssue({
+        code: "custom",
+        path: ["value"],
+        message: `Invalid value for privacy setting ${setting}`,
+      });
+    }
+  });
 
 export const GetPrivacySettingsSchema = z
   .object({

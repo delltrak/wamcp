@@ -223,22 +223,14 @@ export interface GroupParticipant {
 }
 
 export interface PrivacySettings {
-  lastSeen: PrivacyValue;
-  online: OnlinePrivacyValue;
-  profilePic: PrivacyValue;
-  status: PrivacyValue;
-  statusAudience: StatusAudience;
-  readReceipts: ReadReceiptsPrivacyValue;
-  groupAdd: GroupAddPrivacyValue;
-  calls: CallPrivacyValue;
-}
-
-/** Baileys reports the status visibility mode, but not selected recipient JIDs. */
-export interface StatusAudience {
-  mode: PrivacyValue;
-  includedJids: null;
-  excludedJids: null;
-  recipientListsAvailable: false;
+  lastSeen: PrivacyValue | (string & {});
+  online: OnlinePrivacyValue | (string & {});
+  profilePic: PrivacyValue | (string & {});
+  /** About/profile text visibility, as exposed by Baileys' status privacy category. */
+  status: PrivacyValue | (string & {});
+  readReceipts: ReadReceiptsPrivacyValue | (string & {});
+  groupAdd: GroupAddPrivacyValue | (string & {});
+  calls: CallPrivacyValue | (string & {});
 }
 
 // ---- Chat/Group Modification Types ----

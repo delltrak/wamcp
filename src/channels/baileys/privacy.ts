@@ -5,7 +5,6 @@ import type {
   PrivacySettings,
   PrivacyValue,
   ReadReceiptsPrivacyValue,
-  StatusAudience,
 } from "../../types/channel.types.js";
 
 const PRIVACY_VALUES = ["all", "contacts", "contact_blacklist", "none"] as const;
@@ -18,30 +17,18 @@ function normalizeValue<T extends string>(
   value: string | undefined,
   allowed: readonly T[],
   fallback: T,
-): T {
-  return allowed.includes(value as T) ? (value as T) : fallback;
-}
-
-/** Read the status visibility mode for reuse by status delivery code. */
-export function readStatusAudience(settings: Record<string, string>): StatusAudience {
-  return {
-    mode: normalizeValue<PrivacyValue>(settings.status, PRIVACY_VALUES, "contacts"),
-    includedJids: null,
-    excludedJids: null,
-    recipientListsAvailable: false,
-  };
+): T | (string & {}) {
+  if (value === undefined) return fallback;
+  return allowed.find((allowedValue) => allowedValue === value) ?? value;
 }
 
 /** Convert Baileys' category-keyed privacy dictionary to a stable API shape. */
 export function normalizePrivacySettings(settings: Record<string, string>): PrivacySettings {
-  const statusAudience = readStatusAudience(settings);
-
   return {
     lastSeen: normalizeValue<PrivacyValue>(settings.last, PRIVACY_VALUES, "contacts"),
     online: normalizeValue<OnlinePrivacyValue>(settings.online, ONLINE_VALUES, "all"),
     profilePic: normalizeValue<PrivacyValue>(settings.profile, PRIVACY_VALUES, "contacts"),
-    status: statusAudience.mode,
-    statusAudience,
+    status: normalizeValue<PrivacyValue>(settings.status, PRIVACY_VALUES, "contacts"),
     readReceipts: normalizeValue<ReadReceiptsPrivacyValue>(
       settings.readreceipts,
       READ_RECEIPT_VALUES,
