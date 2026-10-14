@@ -61,8 +61,8 @@ import {
   normalizeConnectionUpdate,
   normalizeCallEvent,
   normalizeLidInMessage,
-  extractMessageType,
-  extractTextContent,
+  extractMessageDetails,
+  unwrapMessageContent,
   extractQuotedMessageId,
   getChatJid,
   getSenderJid,
@@ -91,15 +91,12 @@ function parseBooleanEnv(value: string | undefined, key: string, fallback: boole
   throw new Error(`Invalid ${key}; expected true or false`);
 }
 
-function serializeIncomingAudioMessage(message?: WAMessage): string | null {
-  const audioMessage = message?.message?.audioMessage;
-  if (!message || !audioMessage) return null;
-
-  // Keep only the message key and audio payload needed to download it again.
+function serializeIncomingMessage(message?: WAMessage): string | null {
+  if (!message) return null;
   return JSON.stringify(
     {
       key: message.key,
-      message: { audioMessage },
+      message: message.message,
       messageTimestamp: message.messageTimestamp,
     } as WAMessage,
     BufferJSON.replacer,
@@ -282,6 +279,8 @@ export class BaileysAdapter implements ChannelAdapter {
         return { reactionMessage: content === null ? {} : { text: content } };
       case "sticker":
         return { stickerMessage: {} };
+      case "unknown":
+        return content === null ? {} : { conversation: content };
     }
   }
 
@@ -917,19 +916,34 @@ export class BaileysAdapter implements ChannelAdapter {
       .limit(limit)
       .all();
 
-    return rows.map((r) => ({
-      id: r.id,
-      chatId: r.chatId,
-      senderId: r.senderId,
-      type: r.type as Message["type"],
-      content: r.content,
-      mediaUrl: r.mediaUrl,
-      quotedMessageId: r.quotedId,
-      isFromMe: r.isFromMe === 1,
-      isForwarded: r.isForwarded === 1,
-      status: r.status as Message["status"],
-      timestamp: r.timestamp,
-    }));
+    return rows.map((r) => {
+      let details: ReturnType<typeof extractMessageDetails> | undefined;
+      if (r.rawData) {
+        try {
+          details = extractMessageDetails(JSON.parse(r.rawData, BufferJSON.reviver) as WAMessage);
+        } catch {
+          // The normalized fields remain available if raw data is malformed.
+        }
+      }
+      return {
+        id: r.id,
+        chatId: r.chatId,
+        senderId: r.senderId,
+        type: r.type as Message["type"],
+        content: r.content,
+        mediaUrl: r.mediaUrl,
+        ...(r.mediaMimetype || details?.mediaMimetype
+          ? { mediaMimetype: r.mediaMimetype ?? details?.mediaMimetype }
+          : {}),
+        ...(details?.buttons ? { buttons: details.buttons } : {}),
+        ...(details?.rawType ? { rawType: details.rawType } : {}),
+        quotedMessageId: r.quotedId,
+        isFromMe: r.isFromMe === 1,
+        isForwarded: r.isForwarded === 1,
+        status: r.status as Message["status"],
+        timestamp: r.timestamp,
+      };
+    });
   }
 
   async downloadMessageAudio(
@@ -954,7 +968,8 @@ export class BaileysAdapter implements ChannelAdapter {
     }
 
     const message = JSON.parse(row.rawData, BufferJSON.reviver) as WAMessage;
-    const audioMessage = message.message?.audioMessage;
+    const audioMessage = unwrapMessageContent(message.message)?.audioMessage as
+      NonNullable<WAMessage["message"]>["audioMessage"] | undefined;
     if (!audioMessage) throw new Error(`Audio media for message '${messageId}' is unavailable`);
 
     if (maxBytes !== undefined && audioMessage.fileLength !== undefined) {
@@ -1018,10 +1033,15 @@ export class BaileysAdapter implements ChannelAdapter {
   private persistMessage(event: NormalizedMessageEvent, source?: WAMessage): void {
     try {
       const { message, chatId, instanceId } = event;
-      const rawData =
-        message.type === "audio" && !message.isFromMe
-          ? serializeIncomingAudioMessage(source)
-          : null;
+      const needsRawData =
+        message.type === "image" ||
+        message.type === "video" ||
+        message.type === "audio" ||
+        message.type === "document" ||
+        message.type === "sticker" ||
+        !!message.buttons?.length ||
+        !!message.rawType;
+      const rawData = needsRawData ? serializeIncomingMessage(source) : null;
       db.insert(messagesTable)
         .values({
           id: message.id,
@@ -1031,7 +1051,7 @@ export class BaileysAdapter implements ChannelAdapter {
           type: message.type,
           content: message.content,
           mediaUrl: message.mediaUrl,
-          mediaMimetype: source?.message?.audioMessage?.mimetype ?? null,
+          mediaMimetype: message.mediaMimetype ?? null,
           quotedId: message.quotedMessageId,
           isFromMe: message.isFromMe ? 1 : 0,
           isForwarded: 0,
@@ -1044,7 +1064,7 @@ export class BaileysAdapter implements ChannelAdapter {
           set: {
             content: message.content,
             status: message.isFromMe ? "sent" : "received",
-            mediaMimetype: source?.message?.audioMessage?.mimetype ?? null,
+            mediaMimetype: message.mediaMimetype ?? null,
             rawData,
           },
         })
@@ -1271,6 +1291,7 @@ export class BaileysAdapter implements ChannelAdapter {
 
           // Persist ALL messages (notify + append) to DB
           if (msg.key.id && msg.key.remoteJid && !msg.message?.protocolMessage) {
+            const details = extractMessageDetails(msg);
             const normalized: NormalizedMessageEvent = {
               instanceId: this.instanceId,
               chatId: getChatJid(msg),
@@ -1281,9 +1302,12 @@ export class BaileysAdapter implements ChannelAdapter {
                   typeof msg.messageTimestamp === "number"
                     ? msg.messageTimestamp
                     : Number(msg.messageTimestamp ?? 0),
-                type: extractMessageType(msg),
-                content: extractTextContent(msg),
-                mediaUrl: null,
+                type: details.type,
+                content: details.content,
+                mediaUrl: details.mediaUrl,
+                ...(details.mediaMimetype ? { mediaMimetype: details.mediaMimetype } : {}),
+                ...(details.buttons ? { buttons: details.buttons } : {}),
+                ...(details.rawType ? { rawType: details.rawType } : {}),
                 quotedMessageId: extractQuotedMessageId(msg),
                 isFromMe: msg.key.fromMe ?? false,
               },

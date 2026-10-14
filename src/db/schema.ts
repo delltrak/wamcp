@@ -78,6 +78,7 @@ export const messages = sqliteTable(
         "poll",
         "reaction",
         "sticker",
+        "unknown",
       ],
     }).notNull(),
     content: text("content"),

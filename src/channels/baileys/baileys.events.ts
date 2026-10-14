@@ -3,8 +3,16 @@
 // Maps raw Baileys events to normalized ChannelEvent types.
 // ============================================================
 
-import type { BaileysEventMap, WAMessage, WAMessageUpdate } from "@whiskeysockets/baileys";
+import {
+  getContentType,
+  normalizeMessageContent,
+  type BaileysEventMap,
+  type WAMessage,
+  type WAMessageContent,
+  type WAMessageUpdate,
+} from "@whiskeysockets/baileys";
 import type {
+  MessageButton,
   MessageType,
   MessageDeliveryStatus,
   NormalizedMessageEvent,
@@ -20,69 +28,559 @@ import type {
   NormalizedCallEvent,
   PresenceStatus,
 } from "../../types/channel.types.js";
+import { createChildLogger } from "../../utils/logger.js";
 
-/**
- * Extract the message type from a Baileys WAMessage.
- */
-export function extractMessageType(msg: WAMessage): MessageType {
-  const m = msg.message;
-  if (!m) return "text";
+const logger = createChildLogger({ service: "baileys-events" });
+const MAX_ADDITIONAL_UNWRAPS = 12;
+const unknownTypesLogged = new Set<string>();
 
-  if (m.conversation || m.extendedTextMessage) return "text";
-  if (
-    m.imageMessage ||
-    m.viewOnceMessage?.message?.imageMessage ||
-    m.viewOnceMessageV2?.message?.imageMessage
-  )
-    return "image";
-  if (
-    m.videoMessage ||
-    m.viewOnceMessage?.message?.videoMessage ||
-    m.viewOnceMessageV2?.message?.videoMessage
-  )
-    return "video";
-  if (m.audioMessage) return "audio";
-  if (m.documentMessage || m.documentWithCaptionMessage) return "document";
-  if (m.locationMessage || m.liveLocationMessage) return "location";
-  if (m.contactMessage || m.contactsArrayMessage) return "contact";
-  if (m.pollCreationMessage || m.pollCreationMessageV2 || m.pollCreationMessageV3) return "poll";
-  if (m.reactionMessage) return "reaction";
-  if (m.stickerMessage) return "sticker";
+type MessageRecord = Record<string, unknown>;
 
-  return "text";
+export interface BaileysMessageDetails {
+  type: MessageType;
+  content: string | null;
+  mediaUrl: string | null;
+  mediaMimetype?: string;
+  buttons?: MessageButton[];
+  rawType?: string;
+}
+
+function isRecord(value: unknown): value is MessageRecord {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function stringValue(value: unknown): string | undefined {
+  return typeof value === "string" && value.trim() ? value.trim() : undefined;
+}
+
+function firstString(...values: unknown[]): string | undefined {
+  for (const value of values) {
+    const text = stringValue(value);
+    if (text) return text;
+  }
+  return undefined;
+}
+
+function asRecord(value: unknown): MessageRecord | undefined {
+  return isRecord(value) ? value : undefined;
+}
+
+function recordAt(record: MessageRecord | undefined, key: string): MessageRecord | undefined {
+  return record ? asRecord(record[key]) : undefined;
 }
 
 /**
- * Extract text content from a Baileys WAMessage.
+ * Normalize standard Baileys future-proof wrappers, then handle protocol edits
+ * and any standard wrappers beyond Baileys' five-layer helper limit.
  */
-export function extractTextContent(msg: WAMessage): string | null {
-  const m = msg.message;
-  if (!m) return null;
+export function unwrapMessageContent(
+  content: WAMessageContent | null | undefined,
+): MessageRecord | undefined {
+  if (!content) return undefined;
 
-  if (m.conversation) return m.conversation;
-  if (m.extendedTextMessage?.text) return m.extendedTextMessage.text;
-  if (m.imageMessage?.caption) return m.imageMessage.caption;
-  if (m.videoMessage?.caption) return m.videoMessage.caption;
-  if (m.documentMessage?.caption) return m.documentMessage.caption;
-  if (m.documentWithCaptionMessage?.message?.documentMessage?.caption) {
-    return m.documentWithCaptionMessage.message.documentMessage.caption;
+  const normalized = normalizeMessageContent(content);
+  let current = asRecord(normalized ?? content);
+  if (!current) return undefined;
+
+  for (let depth = 0; depth < MAX_ADDITIONAL_UNWRAPS; depth++) {
+    const protocolEdit = recordAt(recordAt(current, "protocolMessage"), "editedMessage");
+    if (protocolEdit) {
+      current = protocolEdit;
+      continue;
+    }
+
+    const wrapperKeys = [
+      "ephemeralMessage",
+      "viewOnceMessage",
+      "viewOnceMessageV2",
+      "viewOnceMessageV2Extension",
+      "documentWithCaptionMessage",
+      "editedMessage",
+    ];
+    let inner: MessageRecord | undefined;
+    for (const key of wrapperKeys) {
+      const wrapper = recordAt(current, key);
+      const wrapperMessage = recordAt(wrapper, "message");
+      if (wrapperMessage) {
+        inner = wrapperMessage;
+        break;
+      }
+    }
+    if (!inner) break;
+    current = inner;
   }
 
-  return null;
+  return current;
 }
 
-/**
- * Extract quoted message ID from a Baileys WAMessage.
- */
-export function extractQuotedMessageId(msg: WAMessage): string | null {
-  const ctx =
-    msg.message?.extendedTextMessage?.contextInfo ??
-    msg.message?.imageMessage?.contextInfo ??
-    msg.message?.videoMessage?.contextInfo ??
-    msg.message?.audioMessage?.contextInfo ??
-    msg.message?.documentMessage?.contextInfo;
+function messageContent(msg: WAMessage): MessageRecord | undefined {
+  return unwrapMessageContent(msg.message);
+}
 
-  return ctx?.stanzaId ?? null;
+function typeName(content: MessageRecord | undefined): string | undefined {
+  if (!content) return undefined;
+  const baileysType = getContentType(content as WAMessageContent);
+  if (baileysType) return baileysType;
+  return Object.keys(content).find((key) => key !== "senderKeyDistributionMessage");
+}
+
+function pushText(parts: string[], value: unknown): void {
+  const text = stringValue(value);
+  if (text && !parts.includes(text)) parts.push(text);
+}
+
+function hsmText(value: unknown): string | undefined {
+  const hsm = asRecord(value);
+  if (!hsm) return stringValue(value);
+
+  const params = Array.isArray(hsm.params)
+    ? hsm.params.map(stringValue).filter((item): item is string => !!item)
+    : [];
+  if (params.length) return params.join(" ");
+
+  const localizedParams = Array.isArray(hsm.localizableParams) ? hsm.localizableParams : [];
+  const localizedText = localizedParams
+    .map((parameter) => {
+      const entry = asRecord(parameter);
+      return firstString(entry?.default);
+    })
+    .filter((item): item is string => !!item);
+  return localizedText.length ? localizedText.join(" ") : undefined;
+}
+
+function safeJsonRecord(value: unknown): MessageRecord | undefined {
+  if (typeof value !== "string") return undefined;
+  try {
+    return asRecord(JSON.parse(value) as unknown);
+  } catch {
+    return undefined;
+  }
+}
+
+function makeButton(
+  type: string,
+  text: unknown,
+  extras: { url?: unknown; id?: unknown; phone?: unknown } = {},
+): MessageButton {
+  const url = stringValue(extras.url);
+  const id = stringValue(extras.id);
+  const phone = stringValue(extras.phone);
+  const display = firstString(text, url, phone, id) ?? type;
+  return {
+    type,
+    text: display,
+    ...(url ? { url } : {}),
+    ...(id ? { id } : {}),
+    ...(phone ? { phone } : {}),
+  };
+}
+
+function nativeFlowButton(button: unknown): MessageButton | undefined {
+  const entry = asRecord(button);
+  if (!entry) return undefined;
+  const type = firstString(entry.name) ?? "native_flow";
+  const params = safeJsonRecord(entry.buttonParamsJson);
+  if (!params) return makeButton(type, type);
+  return makeButton(type, params.display_text ?? params.text ?? params.title, {
+    url: params.url ?? params.link ?? params.cta_url,
+    id: params.id ?? params.row_id,
+    phone: params.phone_number ?? params.phone,
+  });
+}
+
+function collectNativeFlowButtons(buttons: unknown, result: MessageButton[]): void {
+  if (!Array.isArray(buttons)) return;
+  for (const button of buttons.slice(0, 100)) {
+    const parsed = nativeFlowButton(button);
+    if (parsed) result.push(parsed);
+  }
+}
+
+function collectHydratedTemplateButtons(buttons: unknown, result: MessageButton[]): void {
+  if (!Array.isArray(buttons)) return;
+  for (const value of buttons.slice(0, 100)) {
+    const entry = asRecord(value);
+    if (!entry) continue;
+    for (const [key, kind] of [
+      ["urlButton", "url"],
+      ["callButton", "call"],
+      ["quickReplyButton", "quick_reply"],
+    ] as const) {
+      const body = recordAt(entry, key);
+      if (!body) continue;
+      result.push(
+        makeButton(kind, body.displayText, {
+          url: body.url,
+          id: body.id,
+          phone: body.phoneNumber,
+        }),
+      );
+    }
+  }
+}
+
+function collectFourRowButtons(buttons: unknown, result: MessageButton[]): void {
+  if (!Array.isArray(buttons)) return;
+  for (const value of buttons.slice(0, 100)) {
+    const entry = asRecord(value);
+    if (!entry) continue;
+    for (const [key, kind] of [
+      ["urlButton", "url"],
+      ["callButton", "call"],
+      ["quickReplyButton", "quick_reply"],
+    ] as const) {
+      const body = recordAt(entry, key);
+      if (!body) continue;
+      result.push(
+        makeButton(kind, hsmText(body.displayText), {
+          url: hsmText(body.url),
+          id: body.id,
+          phone: hsmText(body.phoneNumber),
+        }),
+      );
+    }
+  }
+}
+
+function collectButtonsMessageButtons(buttons: unknown, result: MessageButton[]): void {
+  if (!Array.isArray(buttons)) return;
+  for (const value of buttons.slice(0, 100)) {
+    const entry = asRecord(value);
+    if (!entry) continue;
+    const nativeInfo = recordAt(entry, "nativeFlowInfo");
+    const params = safeJsonRecord(nativeInfo?.paramsJson);
+    result.push(
+      makeButton(
+        firstString(nativeInfo?.name) ?? "response",
+        recordAt(entry, "buttonText")?.displayText ?? params?.display_text,
+        {
+          url: params?.url ?? params?.link,
+          id: entry.buttonId ?? params?.id,
+          phone: params?.phone_number,
+        },
+      ),
+    );
+  }
+}
+
+function collectMedia(
+  candidate: MessageRecord | undefined,
+):
+  | { type: MessageType; mediaUrl: string | null; mediaMimetype?: string; caption?: string }
+  | undefined {
+  if (!candidate) return undefined;
+  for (const [key, type] of [
+    ["imageMessage", "image"],
+    ["videoMessage", "video"],
+    ["documentMessage", "document"],
+    ["audioMessage", "audio"],
+  ] as const) {
+    const media = recordAt(candidate, key);
+    if (!media) continue;
+    return {
+      type,
+      mediaUrl: firstString(media.url) ?? null,
+      ...(firstString(media.mimetype) ? { mediaMimetype: firstString(media.mimetype) } : {}),
+      ...(firstString(media.caption) ? { caption: firstString(media.caption) } : {}),
+    };
+  }
+  return undefined;
+}
+
+function addTemplateContent(
+  template: MessageRecord | undefined,
+  parts: string[],
+  buttons: MessageButton[],
+): { media?: ReturnType<typeof collectMedia> } {
+  if (!template) return {};
+  let media: ReturnType<typeof collectMedia>;
+
+  for (const key of ["hydratedTemplate", "hydratedFourRowTemplate"]) {
+    const hydrated = recordAt(template, key);
+    if (!hydrated) continue;
+    pushText(parts, hydrated.hydratedTitleText);
+    pushText(parts, hydrated.hydratedContentText);
+    pushText(parts, hydrated.hydratedFooterText);
+    collectHydratedTemplateButtons(hydrated.hydratedButtons, buttons);
+    media ??= collectMedia(hydrated);
+  }
+
+  const fourRow = recordAt(template, "fourRowTemplate");
+  if (fourRow) {
+    const legacyTitle = asRecord(fourRow.title);
+    pushText(parts, hsmText(legacyTitle ?? fourRow.highlyStructuredMessage));
+    pushText(parts, hsmText(fourRow.content));
+    pushText(parts, hsmText(fourRow.footer));
+    collectFourRowButtons(fourRow.buttons, buttons);
+    media ??= collectMedia(fourRow);
+  }
+
+  const interactiveTemplate = recordAt(template, "interactiveMessageTemplate");
+  if (interactiveTemplate) {
+    const interactive = addInteractiveContent(interactiveTemplate, parts, buttons);
+    media ??= interactive.media;
+  }
+
+  return { ...(media ? { media } : {}) };
+}
+
+function addInteractiveContent(
+  interactive: MessageRecord | undefined,
+  parts: string[],
+  buttons: MessageButton[],
+): { media?: ReturnType<typeof collectMedia> } {
+  if (!interactive) return {};
+  const header = recordAt(interactive, "header");
+  const body = recordAt(interactive, "body");
+  const footer = recordAt(interactive, "footer");
+  pushText(parts, header?.title);
+  pushText(parts, header?.subtitle);
+  pushText(parts, body?.text);
+  pushText(parts, footer?.text);
+  collectNativeFlowButtons(recordAt(interactive, "nativeFlowMessage")?.buttons, buttons);
+
+  let media = collectMedia(header);
+  const carousel = recordAt(interactive, "carouselMessage");
+  const cards = Array.isArray(carousel?.cards) ? carousel.cards.slice(0, 25) : [];
+  for (const cardValue of cards) {
+    const card = asRecord(cardValue);
+    if (!card) continue;
+    const cardHeader = recordAt(card, "header");
+    const cardBody = recordAt(card, "body");
+    const cardFooter = recordAt(card, "footer");
+    pushText(parts, cardHeader?.title);
+    pushText(parts, cardHeader?.subtitle);
+    pushText(parts, cardBody?.text);
+    pushText(parts, cardFooter?.text);
+    collectNativeFlowButtons(recordAt(card, "nativeFlowMessage")?.buttons, buttons);
+    media ??= collectMedia(cardHeader);
+  }
+  return { ...(media ? { media } : {}) };
+}
+
+function renderButtons(buttons: MessageButton[]): string[] {
+  return buttons.map((button) => {
+    const destination = button.url ?? button.phone;
+    const suffix = destination ? ` — ${destination}` : button.id ? ` (${button.id})` : "";
+    return `Button: ${button.text}${suffix}`;
+  });
+}
+
+function messageDetails(content: MessageRecord | undefined): BaileysMessageDetails {
+  if (!content) return { type: "text", content: null, mediaUrl: null };
+
+  const rawType = typeName(content);
+  const parts: string[] = [];
+  const buttons: MessageButton[] = [];
+  let media: ReturnType<typeof collectMedia>;
+
+  pushText(parts, content.conversation);
+  pushText(parts, recordAt(content, "extendedTextMessage")?.text);
+  pushText(parts, recordAt(content, "imageMessage")?.caption);
+  pushText(parts, recordAt(content, "videoMessage")?.caption);
+  pushText(parts, recordAt(content, "documentMessage")?.caption);
+  media = collectMedia(content);
+
+  const template = addTemplateContent(recordAt(content, "templateMessage"), parts, buttons);
+  media ??= template.media;
+
+  const interactive = addInteractiveContent(
+    recordAt(content, "interactiveMessage"),
+    parts,
+    buttons,
+  );
+  media ??= interactive.media;
+
+  const buttonsMessage = recordAt(content, "buttonsMessage");
+  if (buttonsMessage) {
+    pushText(parts, buttonsMessage.contentText ?? buttonsMessage.text);
+    pushText(parts, buttonsMessage.footerText);
+    collectButtonsMessageButtons(buttonsMessage.buttons, buttons);
+    media ??= collectMedia(buttonsMessage);
+  }
+
+  const listMessage = recordAt(content, "listMessage");
+  if (listMessage) {
+    pushText(parts, listMessage.title);
+    pushText(parts, listMessage.description);
+    pushText(parts, listMessage.buttonText);
+    const sections = Array.isArray(listMessage.sections) ? listMessage.sections.slice(0, 100) : [];
+    for (const sectionValue of sections) {
+      const section = asRecord(sectionValue);
+      if (!section) continue;
+      pushText(parts, section.title);
+      const rows = Array.isArray(section.rows) ? section.rows.slice(0, 100) : [];
+      for (const rowValue of rows) {
+        const row = asRecord(rowValue);
+        if (!row) continue;
+        const title = firstString(row.title);
+        const description = firstString(row.description);
+        if (title) pushText(parts, description ? `${title} — ${description}` : title);
+        buttons.push(makeButton("list_row", title ?? row.rowId, { id: row.rowId }));
+      }
+    }
+    pushText(parts, listMessage.footerText);
+  }
+
+  const hsm = recordAt(content, "highlyStructuredMessage");
+  if (hsm) {
+    const hydrated = addTemplateContent(recordAt(hsm, "hydratedHsm"), parts, buttons);
+    media ??= hydrated.media;
+    pushText(parts, hsmText(hsm));
+  }
+
+  const buttonsResponse = recordAt(content, "buttonsResponseMessage");
+  if (buttonsResponse) {
+    const selectedText = firstString(
+      buttonsResponse.selectedDisplayText,
+      buttonsResponse.selectedButtonId,
+    );
+    pushText(parts, selectedText);
+    if (selectedText) {
+      buttons.push(
+        makeButton("buttons_response", selectedText, { id: buttonsResponse.selectedButtonId }),
+      );
+    }
+  }
+
+  const templateReply = recordAt(content, "templateButtonReplyMessage");
+  if (templateReply) {
+    const selectedText = firstString(templateReply.selectedDisplayText, templateReply.selectedId);
+    pushText(parts, selectedText);
+    if (selectedText) {
+      buttons.push(
+        makeButton("template_button_reply", selectedText, { id: templateReply.selectedId }),
+      );
+    }
+  }
+
+  const listResponse = recordAt(content, "listResponseMessage");
+  if (listResponse) {
+    const selectedRowId = asRecord(listResponse.singleSelectReply)?.selectedRowId;
+    pushText(parts, listResponse.title);
+    pushText(parts, listResponse.description);
+    if (selectedRowId) {
+      buttons.push(
+        makeButton("list_response", listResponse.title ?? selectedRowId, { id: selectedRowId }),
+      );
+    }
+  }
+
+  const interactiveResponse = recordAt(content, "interactiveResponseMessage");
+  if (interactiveResponse) {
+    pushText(parts, recordAt(interactiveResponse, "body")?.text);
+    const response = recordAt(interactiveResponse, "nativeFlowResponseMessage");
+    if (response) {
+      const parsed = safeJsonRecord(response.paramsJson);
+      const name = firstString(response.name) ?? "native_flow_response";
+      const button = makeButton(name, parsed?.display_text ?? parsed?.text ?? parsed?.title, {
+        id: parsed?.id ?? parsed?.row_id,
+        url: parsed?.url ?? parsed?.link,
+        phone: parsed?.phone_number,
+      });
+      buttons.push(button);
+      pushText(parts, button.text);
+    }
+  }
+
+  if (!media) {
+    for (const nested of [
+      recordAt(content, "templateMessage"),
+      recordAt(content, "buttonsMessage"),
+      recordAt(content, "interactiveMessage"),
+    ]) {
+      media = collectMedia(nested);
+      if (media) break;
+    }
+  }
+  if (media?.caption) pushText(parts, media.caption);
+
+  const knownTypes: Record<string, MessageType> = {
+    conversation: "text",
+    extendedTextMessage: "text",
+    templateMessage: "text",
+    interactiveMessage: "text",
+    buttonsMessage: "text",
+    listMessage: "text",
+    highlyStructuredMessage: "text",
+    buttonsResponseMessage: "text",
+    templateButtonReplyMessage: "text",
+    listResponseMessage: "text",
+    interactiveResponseMessage: "text",
+    locationMessage: "location",
+    liveLocationMessage: "location",
+    contactMessage: "contact",
+    contactsArrayMessage: "contact",
+    pollCreationMessage: "poll",
+    pollCreationMessageV2: "poll",
+    pollCreationMessageV3: "poll",
+    reactionMessage: "reaction",
+    stickerMessage: "sticker",
+    imageMessage: "image",
+    videoMessage: "video",
+    audioMessage: "audio",
+    documentMessage: "document",
+  };
+  const mediaType = media?.type;
+  const type: MessageType = mediaType ?? (rawType ? (knownTypes[rawType] ?? "unknown") : "unknown");
+  const unknownRawType = type === "unknown" ? (rawType ?? "unknown") : undefined;
+  if (unknownRawType && !unknownTypesLogged.has(unknownRawType)) {
+    unknownTypesLogged.add(unknownRawType);
+    logger.debug({ rawType: unknownRawType }, "Unknown Baileys message content type");
+  }
+
+  const contentText = [...parts, ...renderButtons(buttons)].join("\n") || null;
+  const uniqueButtons = buttons.filter(
+    (button, index) =>
+      buttons.findIndex(
+        (candidate) =>
+          candidate.type === button.type &&
+          candidate.text === button.text &&
+          candidate.url === button.url &&
+          candidate.id === button.id &&
+          candidate.phone === button.phone,
+      ) === index,
+  );
+
+  return {
+    type,
+    content: contentText,
+    mediaUrl: media?.mediaUrl ?? null,
+    ...(media?.mediaMimetype ? { mediaMimetype: media.mediaMimetype } : {}),
+    ...(uniqueButtons.length ? { buttons: uniqueButtons } : {}),
+    ...(unknownRawType ? { rawType: unknownRawType } : {}),
+  };
+}
+
+/** Extract normalized content and display metadata from any supported Baileys message. */
+export function extractMessageDetails(msg: WAMessage): BaileysMessageDetails {
+  return messageDetails(messageContent(msg));
+}
+
+/** Extract the message type from a Baileys WAMessage. */
+export function extractMessageType(msg: WAMessage): MessageType {
+  return extractMessageDetails(msg).type;
+}
+
+/** Extract text content from a Baileys WAMessage. */
+export function extractTextContent(msg: WAMessage): string | null {
+  return extractMessageDetails(msg).content;
+}
+
+/** Extract quoted message ID from a Baileys WAMessage. */
+export function extractQuotedMessageId(msg: WAMessage): string | null {
+  const content = messageContent(msg);
+  if (!content) return null;
+  const context =
+    recordAt(content, "extendedTextMessage")?.contextInfo ??
+    recordAt(content, "imageMessage")?.contextInfo ??
+    recordAt(content, "videoMessage")?.contextInfo ??
+    recordAt(content, "audioMessage")?.contextInfo ??
+    recordAt(content, "documentMessage")?.contextInfo ??
+    recordAt(content, "templateMessage")?.contextInfo ??
+    recordAt(content, "interactiveMessage")?.contextInfo ??
+    recordAt(content, "listMessage")?.contextInfo;
+  return stringValue(asRecord(context)?.stanzaId) ?? null;
 }
 
 /**
@@ -103,66 +601,61 @@ export function normalizeLidInMessage(msg: WAMessage): void {
   }
 }
 
-/**
- * Get the chat JID for a message (group or individual).
- */
+/** Get the chat JID for a message (group or individual). */
 export function getChatJid(msg: WAMessage): string {
   return msg.key.remoteJid ?? "";
 }
 
-/**
- * Get the sender JID for a message.
- */
+/** Get the sender JID for a message. */
 export function getSenderJid(msg: WAMessage): string {
-  // In group chats, participant holds the actual sender
   if (msg.key.participant) return msg.key.participant;
-  // In individual chats, remoteJid is the sender (if not from me)
   if (!msg.key.fromMe) return msg.key.remoteJid ?? "";
   return "me";
 }
 
 // ---- Normalizers ----
 
-/**
- * Normalize a Baileys messages.upsert event to NormalizedMessageEvent[].
- */
+/** Normalize a Baileys messages.upsert event to NormalizedMessageEvent[]. */
 export function normalizeMessagesUpsert(
   instanceId: string,
   data: BaileysEventMap["messages.upsert"],
 ): NormalizedMessageEvent[] {
-  // Only process notify-type messages (not history sync)
   if (data.type !== "notify") return [];
 
-  return data.messages.map((msg) => {
-    normalizeLidInMessage(msg);
-    const chatId = getChatJid(msg);
-    const isGroup = chatId.endsWith("@g.us");
-    return {
-      instanceId,
-      chatId,
-      chatName: isGroup ? null : (msg.pushName ?? null),
-      senderName: msg.pushName ?? null,
-      isGroup,
-      message: {
-        id: msg.key.id ?? "",
-        sender: getSenderJid(msg),
-        timestamp:
-          typeof msg.messageTimestamp === "number"
-            ? msg.messageTimestamp
-            : Number(msg.messageTimestamp ?? 0),
-        type: extractMessageType(msg),
-        content: extractTextContent(msg),
-        mediaUrl: null,
-        quotedMessageId: extractQuotedMessageId(msg),
-        isFromMe: msg.key.fromMe ?? false,
-      },
-    };
-  });
+  return data.messages
+    .filter((msg) => !msg.message?.protocolMessage)
+    .map((msg) => {
+      normalizeLidInMessage(msg);
+      const details = extractMessageDetails(msg);
+      const chatId = getChatJid(msg);
+      const isGroup = chatId.endsWith("@g.us");
+      return {
+        instanceId,
+        chatId,
+        chatName: isGroup ? null : (msg.pushName ?? null),
+        senderName: msg.pushName ?? null,
+        isGroup,
+        message: {
+          id: msg.key.id ?? "",
+          sender: getSenderJid(msg),
+          timestamp:
+            typeof msg.messageTimestamp === "number"
+              ? msg.messageTimestamp
+              : Number(msg.messageTimestamp ?? 0),
+          type: details.type,
+          content: details.content,
+          mediaUrl: details.mediaUrl,
+          ...(details.mediaMimetype ? { mediaMimetype: details.mediaMimetype } : {}),
+          ...(details.buttons ? { buttons: details.buttons } : {}),
+          ...(details.rawType ? { rawType: details.rawType } : {}),
+          quotedMessageId: extractQuotedMessageId(msg),
+          isFromMe: msg.key.fromMe ?? false,
+        },
+      };
+    });
 }
 
-/**
- * Normalize a Baileys messages.update event.
- */
+/** Normalize a Baileys messages.update event. */
 export function normalizeMessagesUpdate(
   instanceId: string,
   updates: WAMessageUpdate[],
@@ -187,9 +680,7 @@ export function normalizeMessagesUpdate(
     });
 }
 
-/**
- * Normalize a Baileys messages.delete event.
- */
+/** Normalize a Baileys messages.delete event. */
 export function normalizeMessagesDelete(
   instanceId: string,
   data: BaileysEventMap["messages.delete"],
@@ -205,9 +696,7 @@ export function normalizeMessagesDelete(
   return [];
 }
 
-/**
- * Normalize a Baileys messages.reaction event.
- */
+/** Normalize a Baileys messages.reaction event. */
 export function normalizeMessagesReaction(
   instanceId: string,
   reactions: BaileysEventMap["messages.reaction"],
@@ -221,18 +710,16 @@ export function normalizeMessagesReaction(
   }));
 }
 
-/**
- * Normalize a Baileys message edit event.
- */
+/** Normalize a Baileys message edit event. */
 export function normalizeMessageEdit(
   instanceId: string,
   msg: WAMessage,
   chatId: string,
 ): NormalizedMessageEditEvent {
-  const editedContent =
-    msg.message?.protocolMessage?.editedMessage?.conversation ??
-    msg.message?.protocolMessage?.editedMessage?.extendedTextMessage?.text ??
-    "";
+  const editedMessage = recordAt(asRecord(msg.message), "protocolMessage")?.editedMessage;
+  const editedContent = editedMessage
+    ? (messageDetails(unwrapMessageContent(editedMessage as WAMessageContent)).content ?? "")
+    : "";
 
   return {
     instanceId,
@@ -246,9 +733,7 @@ export function normalizeMessageEdit(
   };
 }
 
-/**
- * Normalize a Baileys presence.update event.
- */
+/** Normalize a Baileys presence.update event. */
 export function normalizePresenceUpdate(
   instanceId: string,
   data: BaileysEventMap["presence.update"],
@@ -276,9 +761,7 @@ export function normalizePresenceUpdate(
   return results;
 }
 
-/**
- * Normalize a Baileys groups.update event.
- */
+/** Normalize a Baileys groups.update event. */
 export function normalizeGroupsUpdate(
   instanceId: string,
   updates: BaileysEventMap["groups.update"],
@@ -290,9 +773,7 @@ export function normalizeGroupsUpdate(
   }));
 }
 
-/**
- * Normalize a Baileys group-participants.update event.
- */
+/** Normalize a Baileys group-participants.update event. */
 export function normalizeGroupParticipantsUpdate(
   instanceId: string,
   data: BaileysEventMap["group-participants.update"],
@@ -308,49 +789,43 @@ export function normalizeGroupParticipantsUpdate(
     instanceId,
     groupId: data.id,
     action: actionMap[data.action] ?? "add",
-    participants: data.participants.map((p) => (typeof p === "string" ? p : p.id)),
+    participants: data.participants.map((participant) =>
+      typeof participant === "string" ? participant : participant.id,
+    ),
   };
 }
 
-/**
- * Normalize a Baileys contacts.update event.
- */
+/** Normalize a Baileys contacts.update event. */
 export function normalizeContactsUpdate(
   instanceId: string,
-  contacts: BaileysEventMap["contacts.update"],
+  updates: BaileysEventMap["contacts.update"],
 ): NormalizedContactUpdateEvent[] {
-  return contacts.map((contact) => ({
+  return updates.map((contact) => ({
     instanceId,
     contactId: contact.id ?? "",
     changes: { ...contact } as Record<string, unknown>,
   }));
 }
 
-/**
- * Normalize a Baileys connection.update event.
- */
+/** Normalize a Baileys connection.update event. */
 export function normalizeConnectionUpdate(
   instanceId: string,
-  data: BaileysEventMap["connection.update"],
+  update: BaileysEventMap["connection.update"],
 ): NormalizedConnectionEvent | null {
-  if (data.connection === undefined && data.qr === undefined) return null;
-
-  const statusMap: Record<string, "open" | "close" | "connecting"> = {
-    open: "open",
-    close: "close",
-    connecting: "connecting",
-  };
-
+  if (update.connection === undefined && update.qr === undefined) return null;
   return {
     instanceId,
-    status: data.connection ? (statusMap[data.connection] ?? "connecting") : "connecting",
-    qrCode: data.qr,
+    status:
+      update.connection === "open"
+        ? "open"
+        : update.connection === "close"
+          ? "close"
+          : "connecting",
+    ...(update.qr ? { qrCode: update.qr } : {}),
   };
 }
 
-/**
- * Normalize a Baileys call event.
- */
+/** Normalize a Baileys call offer event. */
 export function normalizeCallEvent(
   instanceId: string,
   calls: BaileysEventMap["call"],

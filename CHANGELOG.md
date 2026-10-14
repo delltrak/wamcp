@@ -29,6 +29,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Baileys business templates, interactive messages, button/list messages, and their selection
+  responses now retain readable content, button metadata, and header media details across storage,
+  `wa_get_messages`, MCP notifications, and event webhooks. Unknown Baileys content types retain
+  their raw type name. Structured message metadata is recovered from the existing `raw_data`
+  column, so no database migration is needed.
 - Baileys quoted text, image, and video sends now resolve the referenced message from the same
   chat and instance and pass a complete WAMessage to the socket. Missing quotes return a clear
   tool error before enqueueing; quotes removed before delivery fail without BullMQ retries.

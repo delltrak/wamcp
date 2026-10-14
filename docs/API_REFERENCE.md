@@ -739,6 +739,29 @@ Get recent messages from a chat. Returns messages ordered by most recent first, 
 }
 ```
 
+Business template, interactive, button, and list messages return readable text in `content`,
+joined from their available heading, body, footer, and button labels. Messages with actions may
+also include the optional `buttons` array (`type`, `text`, and any `url`, `id`, or `phone`).
+Header media uses the message's existing `type`, `mediaUrl`, and optional `mediaMimetype` fields.
+Unknown Baileys message types use `type: "unknown"` and include the source content name in the
+optional `rawType` field.
+
+```json
+{
+  "type": "image",
+  "content": "Synthetic account notice\nReview the details below.\nButton: See details — https://example.com/details",
+  "mediaUrl": "https://example.com/synthetic-header.jpg",
+  "mediaMimetype": "image/jpeg",
+  "buttons": [
+    {
+      "type": "url",
+      "text": "See details",
+      "url": "https://example.com/details"
+    }
+  ]
+}
+```
+
 #### `wa_archive_chat`
 
 Archive or unarchive a chat. Archived chats are hidden from the main chat list.
@@ -1888,14 +1911,26 @@ Fired when a new message is received in any chat.
     "id": "msg_001",
     "sender": "5511999999999@s.whatsapp.net",
     "timestamp": 1709222400,
-    "type": "text",
-    "content": "Hello!",
-    "mediaUrl": null,
+    "type": "image",
+    "content": "Synthetic account notice\nReview the details below.\nButton: See details — https://example.com/details",
+    "mediaUrl": "https://example.com/synthetic-header.jpg",
+    "mediaMimetype": "image/jpeg",
+    "buttons": [
+      {
+        "type": "url",
+        "text": "See details",
+        "url": "https://example.com/details"
+      }
+    ],
     "quotedMessageId": null,
     "isFromMe": false
   }
 }
 ```
+
+`mediaMimetype`, `buttons`, and `rawType` are optional additions to the message object. Business
+template, interactive, list, and button messages include their readable text in `content`; unknown
+Baileys content types use `type: "unknown"` with their source name in `rawType`.
 
 ---
 
