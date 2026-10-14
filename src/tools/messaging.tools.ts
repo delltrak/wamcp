@@ -5,6 +5,7 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { InstanceManager } from "../services/instance-manager.js";
 import type { MessageQueue } from "../services/message-queue.js";
+import { MediaService } from "../services/media.js";
 import { toolSuccess } from "../types/mcp.types.js";
 import { handleToolError } from "../utils/tool-handler.js";
 import { createRequestLogger } from "../utils/logger.js";
@@ -12,6 +13,9 @@ import {
   SendTextSchema,
   SendImageSchema,
   SendVideoSchema,
+  SendStickerSchema,
+  SendGifSchema,
+  DownloadMediaSchema,
   SendAudioSchema,
   SendDocumentSchema,
   SendLocationSchema,
@@ -33,6 +37,8 @@ export function registerMessagingTools(
   instanceManager: InstanceManager,
   messageQueue: MessageQueue,
 ): void {
+  const mediaService = new MediaService();
+
   server.registerTool(
     "wa_send_text",
     {
@@ -127,6 +133,79 @@ Returns: { status: "queued", jobId }`,
   );
 
   server.registerTool(
+    "wa_send_sticker",
+    {
+      description:
+        "Send a native WhatsApp sticker. Accepts PNG, JPG, GIF, or WebP URL/base64; non-WebP images are converted to 512x512 WebP with transparent padding. Animated GIFs use ffmpeg.",
+      inputSchema: SendStickerSchema,
+    },
+    async (params) => {
+      const log = createRequestLogger("wa_send_sticker", params.instanceId);
+      const start = Date.now();
+      try {
+        const channel = instanceManager.getInstanceChannel(params.instanceId);
+        const sticker = await mediaService.prepareSticker(params.sticker, params.animated);
+        const result = await messageQueue.enqueueMessage(
+          params.instanceId,
+          params.to,
+          {
+            type: "sticker",
+            sticker: sticker.data.toString("base64"),
+            animated: sticker.animated,
+            quotedMessageId: params.quotedMessageId,
+          },
+          channel,
+        );
+        log.info(
+          { duration: Date.now() - start, to: params.to, animated: sticker.animated },
+          "Sticker message queued",
+        );
+        return toolSuccess(result);
+      } catch (err) {
+        return handleToolError("wa_send_sticker", err, params.instanceId);
+      }
+    },
+  );
+
+  server.registerTool(
+    "wa_send_gif",
+    {
+      description:
+        "Send a GIF as a native WhatsApp looping video. GIF or MP4 URL/base64 is converted to silent H.264 MP4 with even dimensions. Available on Baileys instances.",
+      inputSchema: SendGifSchema,
+    },
+    async (params) => {
+      const log = createRequestLogger("wa_send_gif", params.instanceId);
+      const start = Date.now();
+      try {
+        const channel = instanceManager.getInstanceChannel(params.instanceId);
+        if (channel === "cloud") {
+          throw new Error(
+            "GIF playback sending is not supported on Cloud API; use a Baileys instance",
+          );
+        }
+        const mp4 = await mediaService.convertGifToMp4(params.gif);
+        const result = await messageQueue.enqueueMessage(
+          params.instanceId,
+          params.to,
+          {
+            type: "video",
+            video: mp4.toString("base64"),
+            caption: params.caption,
+            gifPlayback: true,
+            quotedMessageId: params.quotedMessageId,
+          },
+          channel,
+        );
+        log.info({ duration: Date.now() - start, to: params.to }, "GIF message queued");
+        return toolSuccess(result);
+      } catch (err) {
+        return handleToolError("wa_send_gif", err, params.instanceId);
+      }
+    },
+  );
+
+  server.registerTool(
     "wa_send_audio",
     {
       description:
@@ -184,6 +263,66 @@ Returns: { status: "queued", jobId }`,
         return toolSuccess(result);
       } catch (err) {
         return handleToolError("wa_send_document", err, params.instanceId);
+      }
+    },
+  );
+
+  server.registerTool(
+    "wa_download_media",
+    {
+      description:
+        "Download received image, video, audio, document, or sticker media. File mode returns a saved path; base64 mode returns inline data and has a 5 MB cap.",
+      inputSchema: DownloadMediaSchema,
+    },
+    async (params) => {
+      const log = createRequestLogger("wa_download_media", params.instanceId);
+      const start = Date.now();
+      try {
+        const adapter = instanceManager.getAdapter(params.instanceId);
+        const mode = params.mode ?? "file";
+        const maxBytes = mediaService.getMediaDownloadMaxBytes(mode);
+        const downloaded = await adapter.downloadMessageMedia(
+          params.messageId,
+          params.chatId,
+          maxBytes,
+          60_000,
+        );
+        const mimeType = downloaded.mimeType || "application/octet-stream";
+        const fileName = mediaService.getDownloadedMediaFileName(
+          downloaded.fileName,
+          params.messageId,
+          mimeType,
+        );
+        if (downloaded.data.length > maxBytes) {
+          throw new Error(`Media exceeds maximum download size of ${maxBytes} bytes`);
+        }
+
+        const result =
+          mode === "base64"
+            ? {
+                mode,
+                path: null,
+                mimeType,
+                fileName,
+                size: downloaded.data.length,
+                base64: downloaded.data.toString("base64"),
+              }
+            : {
+                mode,
+                ...(await mediaService.saveDownloadedMedia(downloaded.data, fileName)),
+                mimeType,
+              };
+        log.info(
+          {
+            duration: Date.now() - start,
+            messageId: params.messageId,
+            size: downloaded.data.length,
+          },
+          "Received media downloaded",
+        );
+        return toolSuccess(result);
+      } catch (err) {
+        return handleToolError("wa_download_media", err, params.instanceId);
       }
     },
   );

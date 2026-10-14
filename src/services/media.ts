@@ -3,13 +3,229 @@
 // ============================================================
 
 import { existsSync, mkdirSync, readdirSync, statSync, unlinkSync } from "node:fs";
-import { writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { mkdir, realpath, writeFile } from "node:fs/promises";
+import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { randomUUID } from "node:crypto";
-import { DEFAULT_MEDIA_CACHE_MAX_MB } from "../constants.js";
+import { DEFAULT_MEDIA_CACHE_MAX_MB, MEDIA_LIMITS } from "../constants.js";
+import {
+  DEFAULT_FFMPEG_TIMEOUT_MS,
+  resolveFfmpegExecutable,
+  runFfmpegCommand,
+} from "../tts/audio.js";
 import { validateMediaUrl, validateBase64Size } from "../utils/validation.js";
 
 const MEDIA_DIR = "data/media";
+export const DEFAULT_MEDIA_DOWNLOAD_MAX_BYTES = 25 * 1024 * 1024;
+export const DEFAULT_MEDIA_DOWNLOAD_BASE64_MAX_BYTES = 5 * 1024 * 1024;
+export const DEFAULT_MEDIA_DOWNLOAD_DIR = "data/media-downloads";
+const MAX_MEDIA_FILE_NAME_LENGTH = 120;
+
+export interface PreparedSticker {
+  data: Buffer;
+  animated: boolean;
+}
+
+export interface SavedMediaDownload {
+  path: string;
+  fileName: string;
+  size: number;
+}
+
+type MediaInputFormat = "gif" | "webp" | "png" | "jpeg" | "mp4" | "unknown";
+
+function mediaFfmpegExecutable(): string {
+  return process.env.WA_MEDIA_FFMPEG_PATH?.trim() || resolveFfmpegExecutable();
+}
+
+function mediaFfmpegTimeoutMs(): number {
+  const raw = process.env.WA_MEDIA_FFMPEG_TIMEOUT_MS?.trim();
+  if (!raw) return DEFAULT_FFMPEG_TIMEOUT_MS;
+  const parsed = Number(raw);
+  return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : DEFAULT_FFMPEG_TIMEOUT_MS;
+}
+
+function mediaDownloadMaxBytes(): number {
+  return positiveEnvironmentInteger(
+    process.env.WA_MEDIA_DOWNLOAD_MAX_BYTES,
+    DEFAULT_MEDIA_DOWNLOAD_MAX_BYTES,
+  );
+}
+
+function positiveEnvironmentInteger(value: string | undefined, fallback: number): number {
+  if (!value?.trim() || !/^\d+$/.test(value.trim())) return fallback;
+  const parsed = Number(value.trim());
+  return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+export function getMediaDownloadMaxBytes(mode: "file" | "base64" = "file"): number {
+  const maxBytes = mediaDownloadMaxBytes();
+  return mode === "base64" ? Math.min(maxBytes, DEFAULT_MEDIA_DOWNLOAD_BASE64_MAX_BYTES) : maxBytes;
+}
+
+export function sanitizeMediaFileName(fileName: string | undefined): string {
+  let safeName = [...(fileName ?? "")]
+    .filter((character) => {
+      const code = character.charCodeAt(0);
+      return !(code <= 0x1f || (code >= 0x7f && code <= 0x9f));
+    })
+    .join("")
+    .replace(/[\\/]/g, "");
+  safeName = safeName
+    .replace(/\.\./g, "")
+    .trim()
+    .replace(/^\.+/, "")
+    .replace(/[. ]+$/g, "");
+  if (!safeName) safeName = "media";
+  if (safeName.length > MAX_MEDIA_FILE_NAME_LENGTH) {
+    const extension = safeName.match(/\.[^.]+$/)?.[0] ?? "";
+    if (extension.length >= MAX_MEDIA_FILE_NAME_LENGTH) {
+      safeName = safeName.slice(0, MAX_MEDIA_FILE_NAME_LENGTH);
+    } else {
+      const base = extension ? safeName.slice(0, -extension.length) : safeName;
+      safeName = `${base.slice(0, MAX_MEDIA_FILE_NAME_LENGTH - extension.length)}${extension}`;
+    }
+  }
+  return safeName;
+}
+
+function detectMediaInputFormat(buffer: Buffer): MediaInputFormat {
+  if (
+    buffer.length >= 6 &&
+    ["GIF87a", "GIF89a"].includes(buffer.subarray(0, 6).toString("ascii"))
+  ) {
+    return "gif";
+  }
+  if (
+    buffer.length >= 12 &&
+    buffer.subarray(0, 4).toString("ascii") === "RIFF" &&
+    buffer.subarray(8, 12).toString("ascii") === "WEBP"
+  ) {
+    return "webp";
+  }
+  if (
+    buffer.length >= 8 &&
+    buffer.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]))
+  ) {
+    return "png";
+  }
+  if (buffer.length >= 3 && buffer[0] === 0xff && buffer[1] === 0xd8 && buffer[2] === 0xff) {
+    return "jpeg";
+  }
+  if (buffer.length >= 12 && buffer.subarray(4, 8).toString("ascii") === "ftyp") return "mp4";
+  return "unknown";
+}
+
+function webPInfo(buffer: Buffer): { animated: boolean; width?: number; height?: number } | null {
+  if (detectMediaInputFormat(buffer) !== "webp" || buffer.readUInt32LE(4) + 8 > buffer.length) {
+    return null;
+  }
+  const declaredEnd = buffer.readUInt32LE(4) + 8;
+  let offset = 12;
+  let hasImage = false;
+  let animationFlag = false;
+  let hasAnimationFrame = false;
+  let width: number | undefined;
+  let height: number | undefined;
+
+  while (offset + 8 <= declaredEnd) {
+    const kind = buffer.subarray(offset, offset + 4).toString("ascii");
+    const chunkSize = buffer.readUInt32LE(offset + 4);
+    const content = offset + 8;
+    const chunkEnd = content + chunkSize;
+    if (chunkEnd > declaredEnd || chunkEnd > buffer.length) return null;
+
+    if (kind === "VP8X") {
+      if (chunkSize < 10) return null;
+      animationFlag = (buffer[content]! & 0x02) !== 0;
+      width = 1 + buffer.readUIntLE(content + 4, 3);
+      height = 1 + buffer.readUIntLE(content + 7, 3);
+    } else if (kind === "VP8 " || kind === "VP8L") {
+      hasImage = true;
+    } else if (kind === "ANMF") {
+      hasAnimationFrame = true;
+      hasImage = true;
+    }
+
+    offset = chunkEnd + (chunkSize % 2);
+  }
+
+  if (offset !== declaredEnd || !hasImage) return null;
+  return { animated: animationFlag && hasAnimationFrame, width, height };
+}
+
+function gifFrameCount(buffer: Buffer): number {
+  if (detectMediaInputFormat(buffer) !== "gif" || buffer.length < 13) return 0;
+  let offset = 13;
+  const packed = buffer[10]!;
+  if (packed & 0x80) offset += 3 * 2 ** ((packed & 0x07) + 1);
+  let frames = 0;
+
+  const skipSubBlocks = (): boolean => {
+    while (offset < buffer.length) {
+      const length = buffer[offset++]!;
+      if (length === 0) return true;
+      offset += length;
+    }
+    return false;
+  };
+
+  while (offset < buffer.length) {
+    const marker = buffer[offset++]!;
+    if (marker === 0x3b) break;
+    if (marker === 0x21) {
+      if (offset >= buffer.length) return 0;
+      offset += 1;
+      if (!skipSubBlocks()) return 0;
+      continue;
+    }
+    if (marker !== 0x2c || offset + 9 > buffer.length) return 0;
+    const imagePacked = buffer[offset + 8]!;
+    offset += 9;
+    if (imagePacked & 0x80) offset += 3 * 2 ** ((imagePacked & 0x07) + 1);
+    if (offset >= buffer.length) return 0;
+    offset += 1; // LZW minimum code size
+    if (!skipSubBlocks()) return 0;
+    frames += 1;
+  }
+  return frames;
+}
+
+function mediaExtension(mimeType: string): string {
+  const normalized = mimeType.split(";")[0]?.trim().toLowerCase();
+  const extensions: Record<string, string> = {
+    "image/jpeg": ".jpg",
+    "image/png": ".png",
+    "image/gif": ".gif",
+    "image/webp": ".webp",
+    "video/mp4": ".mp4",
+    "audio/ogg": ".ogg",
+    "audio/mpeg": ".mp3",
+    "audio/mp4": ".m4a",
+    "application/pdf": ".pdf",
+    "application/zip": ".zip",
+    "text/plain": ".txt",
+  };
+  return extensions[normalized ?? ""] ?? ".bin";
+}
+
+function defaultMediaFileName(messageId: string, mimeType: string): string {
+  const safeId = sanitizeMediaFileName(messageId)
+    .replace(/[^a-zA-Z0-9_-]/g, "_")
+    .slice(0, 48);
+  return `${safeId || "media"}${mediaExtension(mimeType)}`;
+}
+
+function assertPathInsideDirectory(directory: string, filePath: string): void {
+  const pathFromDirectory = relative(directory, filePath);
+  if (
+    !pathFromDirectory ||
+    pathFromDirectory.startsWith(`..${sep}`) ||
+    pathFromDirectory === ".." ||
+    isAbsolute(pathFromDirectory)
+  ) {
+    throw new Error("Media download path must stay inside WA_MEDIA_DOWNLOAD_DIR");
+  }
+}
 
 export interface MediaBufferOptions {
   maxBytes?: number;
@@ -38,7 +254,14 @@ export async function mediaResponseToBuffer(
   if (maxBytes !== undefined) {
     const contentLength = Number(response.headers.get("content-length"));
     if (Number.isFinite(contentLength) && contentLength > 0) {
-      assertMaxBytes(contentLength, maxBytes);
+      if (contentLength > maxBytes) {
+        try {
+          await response.body?.cancel();
+        } catch {
+          // Size rejection remains the useful failure if the body cannot be cancelled.
+        }
+        assertMaxBytes(contentLength, maxBytes);
+      }
     }
 
     if (response.body) {
@@ -144,6 +367,191 @@ export class MediaService {
     }
 
     return options.includeContentType ? media : media.data;
+  }
+
+  /** Convert supported images to WhatsApp sticker WebP. Existing valid WebP is passed through. */
+  async prepareSticker(input: string, animatedHint?: boolean): Promise<PreparedSticker> {
+    const source = await this.getMediaBuffer(input, { maxBytes: MEDIA_LIMITS.image });
+    const format = detectMediaInputFormat(source);
+
+    if (format === "webp") {
+      const info = webPInfo(source);
+      if (!info) throw new Error("Sticker input is not a valid WebP image");
+      if (source.length > MEDIA_LIMITS.sticker) {
+        throw new Error(`Sticker exceeds the ${MEDIA_LIMITS.sticker} byte WhatsApp sticker limit`);
+      }
+      return { data: source, animated: info.animated };
+    }
+
+    if (format !== "png" && format !== "jpeg" && format !== "gif") {
+      throw new Error("Sticker input must be PNG, JPG, GIF, or WebP media");
+    }
+
+    const animated = format === "gif" && (animatedHint ?? gifFrameCount(source) > 1);
+    const scaleAndPad =
+      "scale=512:512:force_original_aspect_ratio=decrease:flags=lanczos,pad=512:512:(ow-iw)/2:(oh-ih)/2:color=0x00000000";
+    const args = animated
+      ? [
+          "-i",
+          "pipe:0",
+          "-vf",
+          `fps=15,${scaleAndPad},format=yuva420p`,
+          "-an",
+          "-c:v",
+          "libwebp_anim",
+          "-lossless",
+          "0",
+          "-q:v",
+          "55",
+          "-loop",
+          "0",
+          "-f",
+          "webp",
+          "pipe:1",
+        ]
+      : [
+          "-i",
+          "pipe:0",
+          "-frames:v",
+          "1",
+          "-vf",
+          `${scaleAndPad},format=rgba`,
+          "-an",
+          "-c:v",
+          "libwebp",
+          "-quality",
+          "75",
+          "-compression_level",
+          "6",
+          "-f",
+          "webp",
+          "pipe:1",
+        ];
+
+    let converted: Buffer;
+    try {
+      converted = await runFfmpegCommand(
+        [source],
+        args,
+        mediaFfmpegExecutable(),
+        mediaFfmpegTimeoutMs(),
+        MEDIA_LIMITS.sticker,
+      );
+    } catch (error) {
+      if (error instanceof Error && "code" in error && error.code === "ENOENT") {
+        throw new Error(
+          "ffmpeg is required to convert this sticker. Install ffmpeg or set WA_MEDIA_FFMPEG_PATH.",
+          { cause: error },
+        );
+      }
+      if (error instanceof Error && error.message.includes("output exceeded")) {
+        throw new Error(
+          `Converted sticker exceeds the ${MEDIA_LIMITS.sticker} byte WhatsApp sticker limit`,
+          {
+            cause: error,
+          },
+        );
+      }
+      throw error;
+    }
+
+    const info = webPInfo(converted);
+    if (!info) throw new Error("ffmpeg did not produce a valid WebP sticker");
+    if (info.width !== 512 || info.height !== 512) {
+      throw new Error("ffmpeg did not produce a 512x512 WebP sticker");
+    }
+    if (converted.length > MEDIA_LIMITS.sticker) {
+      throw new Error(
+        `Converted sticker exceeds the ${MEDIA_LIMITS.sticker} byte WhatsApp sticker limit`,
+      );
+    }
+    return { data: converted, animated };
+  }
+
+  /** Convert a GIF or video input to a silent H.264 MP4 suitable for GIF playback. */
+  async convertGifToMp4(input: string): Promise<Buffer> {
+    const source = await this.getMediaBuffer(input, { maxBytes: MEDIA_LIMITS.video });
+    const format = detectMediaInputFormat(source);
+    if (format !== "gif" && format !== "mp4") {
+      throw new Error("GIF input must be a GIF image or MP4 video");
+    }
+
+    let converted: Buffer;
+    try {
+      converted = await runFfmpegCommand(
+        [source],
+        [
+          "-i",
+          "pipe:0",
+          "-map",
+          "0:v:0",
+          "-an",
+          "-vf",
+          "pad=ceil(iw/2)*2:ceil(ih/2)*2:0:0,format=yuv420p",
+          "-c:v",
+          "libx264",
+          "-preset",
+          "veryfast",
+          "-crf",
+          "23",
+          "-pix_fmt",
+          "yuv420p",
+          "-movflags",
+          "+frag_keyframe+empty_moov",
+          "-f",
+          "mp4",
+          "pipe:1",
+        ],
+        mediaFfmpegExecutable(),
+        mediaFfmpegTimeoutMs(),
+        MEDIA_LIMITS.video,
+      );
+    } catch (error) {
+      if (error instanceof Error && "code" in error && error.code === "ENOENT") {
+        throw new Error(
+          "ffmpeg is required to convert GIF media to MP4. Install ffmpeg or set WA_MEDIA_FFMPEG_PATH.",
+          { cause: error },
+        );
+      }
+      if (error instanceof Error && error.message.includes("output exceeded")) {
+        throw new Error(`Converted GIF exceeds the ${MEDIA_LIMITS.video} byte video limit`, {
+          cause: error,
+        });
+      }
+      throw error;
+    }
+
+    if (converted.length < 12 || converted.subarray(4, 8).toString("ascii") !== "ftyp") {
+      throw new Error("ffmpeg did not produce an MP4 video");
+    }
+    return converted;
+  }
+
+  /** Store a download under the dedicated media directory with a generated, contained path. */
+  async saveDownloadedMedia(data: Buffer, fileName: string): Promise<SavedMediaDownload> {
+    const configuredDirectory = process.env.WA_MEDIA_DOWNLOAD_DIR?.trim();
+    const requestedDirectory = resolve(configuredDirectory || DEFAULT_MEDIA_DOWNLOAD_DIR);
+    await mkdir(requestedDirectory, { recursive: true });
+    const directory = await realpath(requestedDirectory);
+    const safeFileName = sanitizeMediaFileName(fileName);
+    const filePath = resolve(directory, `${randomUUID()}-${safeFileName}`);
+    assertPathInsideDirectory(directory, filePath);
+    await writeFile(filePath, data, { flag: "wx", mode: 0o600 });
+    return { path: filePath, fileName: safeFileName, size: data.length };
+  }
+
+  /** Return a safe fallback filename when a received media message has no original name. */
+  getDownloadedMediaFileName(
+    fileName: string | undefined,
+    messageId: string,
+    mimeType: string,
+  ): string {
+    return sanitizeMediaFileName(fileName || defaultMediaFileName(messageId, mimeType));
+  }
+
+  /** Current configured limit, exposed for the download tool and its response mode. */
+  getMediaDownloadMaxBytes(mode: "file" | "base64" = "file"): number {
+    return getMediaDownloadMaxBytes(mode);
   }
 
   /** Cache media buffer to disk, return local path */

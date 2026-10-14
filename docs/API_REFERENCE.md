@@ -9,7 +9,7 @@
 1. [Overview](#1-overview)
 2. [Tools Reference](#2-tools-reference)
    - [Instance Management](#21-instance-management-8-tools)
-   - [Messaging](#22-messaging-17-tools)
+   - [Messaging](#22-messaging-20-tools)
    - [Chat Management](#23-chat-management-6-tools)
    - [Group Management](#24-group-management-14-tools)
    - [Contact Management](#25-contact-management-6-tools)
@@ -61,6 +61,10 @@ Tools marked **Baileys only** are not available on Cloud API instances.
 - **`to`** -- Recipient for send operations. Use a phone number (e.g. `"5511999999999"`) or a group JID (e.g. `"120363...@g.us"`).
 - **JID** -- Jabber ID, WhatsApp's internal identifier. Individual: `5511999999999@s.whatsapp.net`. Group: `120363...@g.us`.
 - **Media** -- Image/video/audio/document fields accept a URL (`https://...`) or base64-encoded data.
+  Stickers and GIFs are converted to WhatsApp-compatible formats with ffmpeg. Received media can
+  be saved under `WA_MEDIA_DOWNLOAD_DIR` (default `data/media-downloads`) or returned as base64.
+  `WA_MEDIA_DOWNLOAD_MAX_BYTES` defaults to 25 MB, and base64 mode is capped at 5 MB. Docker
+  includes ffmpeg; `WA_MEDIA_FFMPEG_PATH` and `WA_MEDIA_FFMPEG_TIMEOUT_MS` configure conversions.
 - **Automatic read receipts** -- `WA_AUTO_READ=false` (default), `on_fetch` to mark incoming
   messages read when a tool or resource returns them, or `on_receive` to mark them read when they
   arrive. Invalid values disable the feature and log a warning.
@@ -69,7 +73,7 @@ Tools marked **Baileys only** are not available on Cloud API instances.
 
 ## 2. Tools Reference
 
-WA MCP exposes **68 tools** grouped by domain. All tools return MCP-standard responses.
+WA MCP exposes **71 tools** grouped by domain. All tools return MCP-standard responses.
 
 ### Success Response Format
 
@@ -290,7 +294,7 @@ Configure Meta Cloud API credentials for a Cloud API instance. Required before c
 
 ---
 
-### 2.2 Messaging (17 tools)
+### 2.2 Messaging (20 tools)
 
 Tools for sending messages, media, reactions, and managing message state.
 
@@ -368,6 +372,45 @@ Send a video to a WhatsApp contact or group.
 
 ---
 
+#### `wa_send_sticker`
+
+Send a native WhatsApp sticker. PNG/JPG images and GIFs are converted to 512x512 WebP with
+transparent padding. Valid WebP files pass through; animated WebP is preserved and animated GIFs
+are converted with ffmpeg.
+
+| Parameter         | Type    | Required | Description                                      |
+| ----------------- | ------- | -------- | ------------------------------------------------ |
+| `instanceId`      | string  | Yes      | The instance to send from                        |
+| `to`              | string  | Yes      | Recipient phone number or group JID              |
+| `sticker`         | string  | Yes      | PNG, JPG, GIF, or WebP URL or base64 data        |
+| `animated`        | boolean | No       | Hint to retain or flatten GIF animation          |
+| `quotedMessageId` | string  | No       | Message ID to reply to                           |
+
+**Channel support:** Both. Cloud API uploads the prepared WebP before sending it.
+
+**Response:** The standard queued message response.
+
+---
+
+#### `wa_send_gif`
+
+Send a GIF as a looping WhatsApp video. GIF or MP4 input is converted to silent H.264 MP4 with
+`yuv420p` pixel format and even dimensions, then sent with Baileys `gifPlayback: true`.
+
+| Parameter         | Type   | Required | Description                          |
+| ----------------- | ------ | -------- | ------------------------------------ |
+| `instanceId`      | string | Yes      | The instance to send from            |
+| `to`              | string | Yes      | Recipient phone number or group JID  |
+| `gif`             | string | Yes      | GIF or MP4 URL or base64 data        |
+| `caption`         | string | No       | Optional caption                     |
+| `quotedMessageId` | string | No       | Message ID to reply to               |
+
+**Channel support:** Baileys only. Cloud API does not expose the GIF playback option.
+
+**Response:** The standard queued message response.
+
+---
+
 #### `wa_send_audio`
 
 Send an audio file or voice note to a WhatsApp contact or group.
@@ -414,6 +457,32 @@ Send a document/file to a WhatsApp contact or group.
   "jobId": "job_127"
 }
 ```
+
+---
+
+#### `wa_download_media`
+
+Download received image, video, audio, document, or sticker media. File mode saves it under
+`WA_MEDIA_DOWNLOAD_DIR`; base64 mode returns inline data without writing a file.
+
+| Parameter    | Type            | Required | Description                                      |
+| ------------ | --------------- | -------- | ------------------------------------------------ |
+| `instanceId` | string          | Yes      | The instance that received the message           |
+| `messageId`  | string          | Yes      | Received message ID                              |
+| `chatId`     | string          | No       | Chat JID used to verify the message              |
+| `mode`       | `file` | `base64` | No (default: `file`) | Return a saved path or base64 data |
+
+**Channel support:** Both. Cloud API downloads media through Meta's media endpoint.
+
+The default maximum is 25 MB (`WA_MEDIA_DOWNLOAD_MAX_BYTES`). Base64 mode has a 5 MB maximum, or
+the lower configured download limit. Incoming path separators, `..` sequences, and control
+characters are stripped from filenames and names are limited to 120 characters. Saved paths receive
+a generated unique prefix and are checked to remain inside the configured directory, so a remote
+filename with traversal components cannot choose its save path.
+
+**File response:** `{ "path": "...", "fileName": "report.pdf", "mimeType": "application/pdf", "size": 4096 }`
+
+**Base64 response:** `{ "path": null, "fileName": "report.pdf", "mimeType": "application/pdf", "size": 4096, "base64": "..." }`
 
 ---
 
@@ -2045,6 +2114,10 @@ Fired when a new message is received in any chat.
     "content": "Synthetic account notice\nReview the details below.\nButton: See details — https://example.com/details",
     "mediaUrl": "https://example.com/synthetic-header.jpg",
     "mediaMimetype": "image/jpeg",
+    "mimeType": "image/jpeg",
+    "fileName": "photo.jpg",
+    "caption": "Review the photo",
+    "size": 12345,
     "buttons": [
       {
         "type": "url",
@@ -2058,9 +2131,14 @@ Fired when a new message is received in any chat.
 }
 ```
 
-`mediaMimetype`, `buttons`, and `rawType` are optional additions to the message object. Business
-template, interactive, list, and button messages include their readable text in `content`; unknown
-Baileys content types use `type: "text"` and include their source name in `rawType`.
+`mediaMimetype`, `mimeType`, `fileName`, `caption`, `size`, `buttons`, and `rawType` are optional
+additions to the message object. Media details are included when available from the channel; media
+bytes are not copied into notifications or outgoing event webhooks. Business template, interactive,
+list, and button messages include their readable text in `content`; unknown Baileys content types
+use `type: "text"` and include their source name in `rawType`.
+
+Outgoing generic and Grok Bot event webhooks also include available media metadata as `mimeType`,
+`fileName`, `caption`, and `size`. The top-level `type` field identifies the media type.
 
 ---
 

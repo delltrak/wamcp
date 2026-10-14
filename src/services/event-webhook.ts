@@ -31,6 +31,10 @@ export interface EventWebhookPayload {
   timestamp: number | null;
   mediaUrl?: string | null;
   mediaMimetype?: string;
+  mimeType?: string;
+  fileName?: string;
+  caption?: string;
+  size?: number;
   buttons?: MessageButton[];
   rawType?: string;
 }
@@ -49,6 +53,10 @@ export interface GrokBotWebhookPayload {
   media?: { id: string };
   mediaUrl?: string;
   mediaMimetype?: string;
+  mimeType?: string;
+  fileName?: string;
+  caption?: string;
+  size?: number;
   buttons?: MessageButton[];
   rawType?: string;
 }
@@ -251,6 +259,10 @@ export function normalizeEventWebhookPayload(
   const message = isRecord(data.message) ? data.message : {};
   const changes = isRecord(data.changes) ? data.changes : {};
   const buttons = messageButtons(message.buttons);
+  const mimeType = firstString(message.mimeType, message.mediaMimetype);
+  const fileName = firstString(message.fileName, message.mediaFileName);
+  const caption = firstString(message.caption, message.mediaCaption);
+  const size = firstNumber(message.size, message.mediaSize);
 
   return {
     event,
@@ -269,6 +281,10 @@ export function normalizeEventWebhookPayload(
     timestamp: firstNumber(message.timestamp, data.editedAt),
     ...(typeof message.mediaUrl === "string" ? { mediaUrl: message.mediaUrl } : {}),
     ...(typeof message.mediaMimetype === "string" ? { mediaMimetype: message.mediaMimetype } : {}),
+    ...(mimeType ? { mimeType } : {}),
+    ...(fileName ? { fileName } : {}),
+    ...(caption ? { caption } : {}),
+    ...(size !== null ? { size } : {}),
     ...(buttons ? { buttons } : {}),
     ...(typeof message.rawType === "string" ? { rawType: message.rawType } : {}),
   };
@@ -299,6 +315,18 @@ export function normalizeGrokBotWebhookPayload(
     ...(safeMediaId ? { media: { id: safeMediaId } } : {}),
     ...(directMediaUrl ? { mediaUrl: directMediaUrl } : {}),
     ...(payload.message.mediaMimetype ? { mediaMimetype: payload.message.mediaMimetype } : {}),
+    ...((payload.message.mimeType ?? payload.message.mediaMimetype)
+      ? { mimeType: payload.message.mimeType ?? payload.message.mediaMimetype }
+      : {}),
+    ...((payload.message.fileName ?? payload.message.mediaFileName)
+      ? { fileName: payload.message.fileName ?? payload.message.mediaFileName }
+      : {}),
+    ...((payload.message.caption ?? payload.message.mediaCaption)
+      ? { caption: payload.message.caption ?? payload.message.mediaCaption }
+      : {}),
+    ...((payload.message.size ?? payload.message.mediaSize)
+      ? { size: payload.message.size ?? payload.message.mediaSize }
+      : {}),
     ...(payload.message.buttons ? { buttons: payload.message.buttons } : {}),
     ...(payload.message.rawType ? { rawType: payload.message.rawType } : {}),
   };

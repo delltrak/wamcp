@@ -77,6 +77,14 @@ export interface VideoContent {
   type: "video";
   video: string; // URL or base64
   caption?: string;
+  gifPlayback?: boolean;
+  quotedMessageId?: string;
+}
+
+export interface StickerContent {
+  type: "sticker";
+  sticker: string; // WebP base64
+  animated?: boolean;
   quotedMessageId?: string;
 }
 
@@ -125,6 +133,7 @@ export type MessageContent =
   | TextContent
   | ImageContent
   | VideoContent
+  | StickerContent
   | AudioContent
   | DocumentContent
   | LocationContent
@@ -214,6 +223,11 @@ export interface Message {
   content: string | null;
   mediaUrl: string | null;
   mediaMimetype?: string | null;
+  mediaFileName?: string | null;
+  mediaSize?: number | null;
+  mimeType?: string | null;
+  fileName?: string | null;
+  size?: number | null;
   buttons?: MessageButton[];
   rawType?: string;
   quotedMessageId: string | null;
@@ -311,6 +325,13 @@ export interface NormalizedMessageEvent {
     content: string | null;
     mediaUrl: string | null;
     mediaMimetype?: string;
+    mediaFileName?: string;
+    mediaSize?: number;
+    mediaCaption?: string;
+    mimeType?: string;
+    fileName?: string;
+    size?: number;
+    caption?: string;
     buttons?: MessageButton[];
     rawType?: string;
     transcription?: string;

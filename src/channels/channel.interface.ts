@@ -120,6 +120,12 @@ export interface ChannelAdapter {
     maxBytes?: number,
     timeoutMs?: number,
   ): Promise<{ data: Buffer; mimeType: string }>;
+  downloadMessageMedia(
+    messageId: string,
+    chatId?: string,
+    maxBytes?: number,
+    timeoutMs?: number,
+  ): Promise<{ data: Buffer; mimeType: string; fileName?: string }>;
   getProfileInfo(): Promise<ProfileInfo>;
 
   // ---- Events ----

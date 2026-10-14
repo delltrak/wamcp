@@ -742,6 +742,45 @@ describe("Baileys business and interactive message normalization", () => {
     }
   });
 
+  it("stops a received media stream as soon as it exceeds the download limit", async () => {
+    const instanceId = `synthetic-media-limit-${randomUUID()}`;
+    const messageId = `SYNTHETIC-MEDIA-LIMIT-${randomUUID()}`;
+    insertSyntheticInstance(instanceId);
+    const source = messageWith(
+      {
+        imageMessage: {
+          url: "https://example.com/synthetic-image.jpg",
+          mimetype: "image/jpeg",
+        },
+      },
+      messageId,
+    );
+    insertSyntheticMessage(instanceId, messageId, {
+      type: "image",
+      content: null,
+      mediaUrl: "https://example.com/synthetic-image.jpg",
+      mediaMimetype: "image/jpeg",
+      rawData: JSON.stringify(source),
+    });
+
+    try {
+      const adapter = new BaileysAdapter(instanceId);
+      const stream = Readable.from([Buffer.from("123"), Buffer.from("45")]);
+      downloadMediaMessageMock.mockReset().mockResolvedValue(stream);
+      Object.assign(adapter, {
+        sock: { updateMediaMessage: vi.fn() },
+        status: "connected",
+      });
+
+      await expect(adapter.downloadMessageMedia(messageId, SYNTHETIC_CHAT, 4)).rejects.toThrow(
+        "maximum download size",
+      );
+      expect(stream.destroyed).toBe(true);
+    } finally {
+      sqlite.prepare("DELETE FROM instances WHERE id = ?").run(instanceId);
+    }
+  });
+
   it("refreshes media parsed from a wrapped business header on conflict", () => {
     const instanceId = `synthetic-header-replay-${randomUUID()}`;
     const messageId = `SYNTHETIC-HEADER-REPLAY-${randomUUID()}`;

@@ -26,7 +26,7 @@
 <p align="center">
   <a href="https://github.com/delltrak/wamcp/actions/workflows/ci.yml"><img src="https://github.com/delltrak/wamcp/actions/workflows/ci.yml/badge.svg" alt="CI" /></a>
   <img src="https://img.shields.io/github/license/delltrak/wamcp?style=flat-square" alt="License" />
-  <img src="https://img.shields.io/badge/node-%3E%3D22-brightgreen?style=flat-square" alt="Node" />
+  <img src="https://img.shields.io/badge/node-%3E%3D24-brightgreen?style=flat-square" alt="Node" />
   <img src="https://img.shields.io/badge/MCP-Streamable%20HTTP-blue?style=flat-square" alt="Transport" />
 </p>
 
@@ -36,7 +36,7 @@
 
 **WA MCP** is a WhatsApp MCP server built with TypeScript that gives AI agents full access to WhatsApp through the [Model Context Protocol](https://modelcontextprotocol.io). It supports both **Baileys** (WhatsApp Web) and **Meta Cloud API** as dual-channel backends, deployable with **Docker** in a single command.
 
-Your agent connects once and auto-discovers **68 tools**, **10 resources**, and **12 real-time events** — zero configuration, zero REST wrappers, zero glue code.
+Your agent connects once and auto-discovers **71 tools**, **10 resources**, and **12 real-time events** — zero configuration, zero REST wrappers, zero glue code.
 
 ```
 Your AI Agent ←→ MCP Protocol ←→ WA MCP ←→ WhatsApp
@@ -146,7 +146,7 @@ Add to your `claude_desktop_config.json`:
 
 ## 🛠️ Tools
 
-WA MCP exposes **68 tools** across 11 domains. All tools use the `wa_` prefix.
+WA MCP exposes **71 tools** across 11 domains. All tools use the `wa_` prefix.
 
 <details>
 <summary>📋 <strong>Instance Management</strong> (8 tools)</summary>
@@ -165,15 +165,18 @@ WA MCP exposes **68 tools** across 11 domains. All tools use the `wa_` prefix.
 </details>
 
 <details>
-<summary>💬 <strong>Messaging</strong> (17 tools)</summary>
+<summary>💬 <strong>Messaging</strong> (20 tools)</summary>
 
 | Tool                   | Description             |
 | ---------------------- | ----------------------- |
 | `wa_send_text`         | Send text message       |
 | `wa_send_image`        | Send image with caption |
 | `wa_send_video`        | Send video with caption |
+| `wa_send_sticker`      | Send a static or animated sticker |
+| `wa_send_gif`          | Send a GIF as a looping MP4 (Baileys) |
 | `wa_send_audio`        | Send audio; Baileys `ptt=true` adds waveform and duration when available |
 | `wa_send_document`     | Send file / document    |
+| `wa_download_media`    | Save received media or return base64 |
 | `wa_send_location`     | Send GPS location       |
 | `wa_send_contact`      | Send vCard contact      |
 | `wa_send_poll`         | Create a poll           |
@@ -418,8 +421,9 @@ Example routine instructions:
 
 The Grok Bot body contains `instanceId`, `chatId`, `chatName`, `senderId`,
 `senderName`, `isGroup`, `type`, `text`, `timestamp`, and `messageId`. Unknown
-names are `null`. Media messages include only a media ID when available, along
-with the message type and text or caption; media bytes are not sent.
+names are `null`. Media messages include a media ID when available plus
+`mimeType`, `fileName`, `caption`, and `size` when the channel provides them;
+media bytes are not sent.
 
 You can add `chatAllowlist` and/or `senderAllowlist` to a multi-destination
 entry to limit which chats or people wake that routine. If both are set, a
@@ -514,6 +518,10 @@ Copy `.env.example` to `.env` and configure:
 | `WA_STATUS_MAX_RECIPIENTS`  | `256`                    | Maximum recipients per Baileys status; excess recipients are truncated and reported |
 | `WA_AUTO_READ`              | `false`                  | `on_fetch` marks incoming messages read when fetched; `on_receive` marks them read on arrival |
 | `WA_MEDIA_CACHE_MAX_MB`     | `500`                    | Media cache size limit                   |
+| `WA_MEDIA_DOWNLOAD_DIR`     | `data/media-downloads`   | Dedicated directory for downloaded files; separate from Baileys session data |
+| `WA_MEDIA_DOWNLOAD_MAX_BYTES` | `26214400` (25 MB)     | Maximum size for received media downloads; base64 mode is capped at 5 MB |
+| `WA_MEDIA_FFMPEG_PATH`      | `ffmpeg` from `PATH`     | Optional ffmpeg executable for sticker and GIF conversion |
+| `WA_MEDIA_FFMPEG_TIMEOUT_MS` | `60000`                 | Conversion timeout in milliseconds |
 | `WA_TRANSCRIPTION_ENABLED`  | `false`                  | Enable transcription and audio notifications |
 | `WA_TRANSCRIPTION_API_KEY`  | —                        | API key for the transcription endpoint   |
 | `WA_TRANSCRIPTION_BASE_URL` | `https://api.openai.com/v1` | OpenAI-compatible API base URL           |
@@ -551,6 +559,19 @@ Copy `.env.example` to `.env` and configure:
 | `WA_EVENT_WEBHOOK_RETRY_ATTEMPTS` | `5` | BullMQ delivery attempts, including the first attempt |
 | `WA_EVENT_WEBHOOK_RETRY_DELAY_MS` | `1000` | Initial exponential retry delay in milliseconds |
 | `WA_VERSION_CHECK`          | `true`                   | Daily WhatsApp Web version check         |
+
+`wa_send_sticker` accepts PNG, JPG, GIF, and WebP URLs or base64. PNG/JPG and GIF inputs are
+converted to 512x512 WebP with transparent padding; valid WebP files pass through. Animated GIFs
+are converted with ffmpeg, and animated WebP files pass through. `wa_send_gif` converts GIF or MP4
+input to silent H.264 MP4 and sends it with native GIF playback on Baileys. Cloud API does not
+support the GIF playback option.
+
+`wa_download_media` locates a received media message by `messageId` and optional `chatId`. File
+mode saves it under `WA_MEDIA_DOWNLOAD_DIR` and returns a path; base64 mode returns inline data and
+is capped at 5 MB (or the lower `WA_MEDIA_DOWNLOAD_MAX_BYTES` value). The default download ceiling
+is 25 MB. Incoming path separators, `..` traversal sequences, and control characters are stripped
+from filenames; each saved path gets a generated unique ID and is verified to stay in the download
+directory.
 
 `WA_AUTO_READ` accepts `false`, `on_fetch`, or `on_receive`. Invalid values disable automatic
 read receipts and produce a warning. Automatic receipts never delay message delivery or tool

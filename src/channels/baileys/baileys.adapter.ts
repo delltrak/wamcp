@@ -101,6 +101,10 @@ const mediaService = new MediaService();
 const DEFAULT_STATUS_MAX_RECIPIENTS = 256;
 const STATUS_BROADCAST_JID = "status@broadcast";
 
+function sizeLabel(maxBytes: number): string {
+  return maxBytes < 1024 * 1024 ? `${maxBytes} bytes` : `${Math.round(maxBytes / 1024 / 1024)} MB`;
+}
+
 function parseBooleanEnv(value: string | undefined, key: string, fallback: boolean): boolean {
   if (value === undefined || value.trim() === "") return fallback;
   if (value.trim().toLowerCase() === "true") return true;
@@ -499,7 +503,17 @@ export class BaileysAdapter implements ChannelAdapter {
         }
         break;
       case "video":
-        msg = { video: this.resolveMedia(content.video), caption: content.caption };
+        msg = {
+          video: this.resolveMedia(content.video),
+          caption: content.caption,
+          ...(content.gifPlayback ? { gifPlayback: true } : {}),
+        };
+        if (content.quotedMessageId) {
+          opts.quoted = this.getQuotedMessage(jid, content.quotedMessageId);
+        }
+        break;
+      case "sticker":
+        msg = { sticker: this.resolveMedia(content.sticker) };
         if (content.quotedMessageId) {
           opts.quoted = this.getQuotedMessage(jid, content.quotedMessageId);
         }
@@ -1174,6 +1188,16 @@ export class BaileysAdapter implements ChannelAdapter {
         ...(r.mediaMimetype || details?.mediaMimetype
           ? { mediaMimetype: r.mediaMimetype ?? details?.mediaMimetype }
           : {}),
+        ...(r.mediaMimetype || details?.mediaMimetype
+          ? { mimeType: r.mediaMimetype ?? details?.mediaMimetype }
+          : {}),
+        ...(details?.mediaFileName
+          ? { mediaFileName: details.mediaFileName, fileName: details.mediaFileName }
+          : {}),
+        ...(details?.mediaSize ? { mediaSize: details.mediaSize, size: details.mediaSize } : {}),
+        ...(details?.mediaCaption
+          ? { mediaCaption: details.mediaCaption, caption: details.mediaCaption }
+          : {}),
         ...(details?.buttons ? { buttons: details.buttons } : {}),
         ...(details?.rawType ? { rawType: details.rawType } : {}),
         quotedMessageId: r.quotedId,
@@ -1245,6 +1269,87 @@ export class BaileysAdapter implements ChannelAdapter {
     return {
       data: Buffer.concat(chunks, size),
       mimeType: row.mimetype ?? audioMessage.mimetype ?? "audio/ogg",
+    };
+  }
+
+  async downloadMessageMedia(
+    messageId: string,
+    chatId?: string,
+    maxBytes?: number,
+    timeoutMs?: number,
+  ): Promise<{ data: Buffer; mimeType: string; fileName?: string }> {
+    const where = chatId
+      ? and(
+          eq(messagesTable.instanceId, this.instanceId),
+          eq(messagesTable.id, messageId),
+          eq(messagesTable.chatId, chatId),
+        )
+      : and(eq(messagesTable.instanceId, this.instanceId), eq(messagesTable.id, messageId));
+    const row = db
+      .select({
+        type: messagesTable.type,
+        rawData: messagesTable.rawData,
+        mimetype: messagesTable.mediaMimetype,
+      })
+      .from(messagesTable)
+      .where(where)
+      .get();
+
+    if (!row) throw new Error(`Message '${messageId}' not found`);
+    const mediaFields: Record<string, string> = {
+      image: "imageMessage",
+      video: "videoMessage",
+      audio: "audioMessage",
+      document: "documentMessage",
+      sticker: "stickerMessage",
+    };
+    const mediaField = mediaFields[row.type];
+    if (!mediaField) throw new Error(`Message '${messageId}' does not contain downloadable media`);
+    if (!row.rawData) {
+      throw new Error(`Media for message '${messageId}' is no longer available`);
+    }
+
+    const message = JSON.parse(row.rawData, BufferJSON.reviver) as WAMessage;
+    const unwrapped = unwrapMessageContent(message.message);
+    const media = unwrapped?.[mediaField];
+    if (!media || typeof media !== "object") {
+      throw new Error(`Media for message '${messageId}' is unavailable`);
+    }
+    const mediaMessage = media as Record<string, unknown>;
+    const fileLength = Number(mediaMessage.fileLength);
+    if (maxBytes !== undefined && Number.isFinite(fileLength) && fileLength > maxBytes) {
+      throw new Error(`Media exceeds maximum download size of ${sizeLabel(maxBytes)}`);
+    }
+
+    const sock = this.getSock();
+    const downloadOptions = timeoutMs
+      ? { options: { signal: AbortSignal.timeout(timeoutMs) } }
+      : {};
+    const stream = await downloadMediaMessage(message, "stream", downloadOptions, {
+      logger: logger.child({ instanceId: this.instanceId, messageId }),
+      reuploadRequest: sock.updateMediaMessage,
+    });
+    const chunks: Buffer[] = [];
+    let size = 0;
+    for await (const chunk of stream) {
+      const buffer = Buffer.from(chunk);
+      size += buffer.length;
+      if (maxBytes !== undefined && size > maxBytes) {
+        stream.destroy();
+        throw new Error(`Media exceeds maximum download size of ${sizeLabel(maxBytes)}`);
+      }
+      chunks.push(buffer);
+    }
+
+    const mimeType =
+      row.mimetype ??
+      (typeof mediaMessage.mimetype === "string"
+        ? mediaMessage.mimetype
+        : "application/octet-stream");
+    return {
+      data: Buffer.concat(chunks, size),
+      mimeType,
+      ...(typeof mediaMessage.fileName === "string" ? { fileName: mediaMessage.fileName } : {}),
     };
   }
 
