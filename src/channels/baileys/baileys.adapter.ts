@@ -75,6 +75,7 @@ import {
 } from "../../constants.js";
 import { createChildLogger } from "../../utils/logger.js";
 import { scheduleBaileysMessagesRead } from "../../services/auto-read.js";
+import { QuotedMessageResolutionError } from "../../utils/quoted-message.js";
 import {
   ContactStore,
   type ContactPnResolver,
@@ -180,10 +181,112 @@ export class BaileysAdapter implements ChannelAdapter {
     ].join("\n");
   }
 
-  private makeQuotedStub(remoteJid: string, messageId: string): WAMessage {
+  private getQuotedMessage(remoteJid: string, messageId: string): WAMessage {
+    const row = db
+      .select({
+        id: messagesTable.id,
+        chatId: messagesTable.chatId,
+        senderId: messagesTable.senderId,
+        type: messagesTable.type,
+        content: messagesTable.content,
+        isFromMe: messagesTable.isFromMe,
+        timestamp: messagesTable.timestamp,
+        rawData: messagesTable.rawData,
+      })
+      .from(messagesTable)
+      .where(
+        and(
+          eq(messagesTable.instanceId, this.instanceId),
+          eq(messagesTable.chatId, remoteJid),
+          eq(messagesTable.id, messageId),
+        ),
+      )
+      .get();
+
+    if (!row) {
+      throw new QuotedMessageResolutionError(
+        `Quoted message '${messageId}' could not be resolved in chat '${remoteJid}'. It may be unavailable or belong to a different chat.`,
+      );
+    }
+
+    let storedMessage: WAMessage | undefined;
+    if (row.rawData) {
+      try {
+        storedMessage = JSON.parse(row.rawData, BufferJSON.reviver) as WAMessage;
+      } catch {
+        // The normalized fields below still provide a usable quote when raw data is malformed.
+      }
+    }
+
+    const isGroup = row.chatId.endsWith("@g.us");
+    const fromMe = row.isFromMe === 1;
+    const participant = isGroup
+      ? row.senderId === "me"
+        ? (storedMessage?.key?.participant ?? this.sock?.user?.id)
+        : row.senderId
+      : undefined;
+
+    if (isGroup && !participant) {
+      throw new QuotedMessageResolutionError(
+        `Quoted message '${messageId}' in group '${remoteJid}' is missing its participant information.`,
+      );
+    }
+
+    const storedContent = storedMessage?.message;
+    const hasStoredContent =
+      storedContent &&
+      Object.keys(storedContent).some(
+        (key) =>
+          key === "conversation" ||
+          (key.includes("Message") && key !== "senderKeyDistributionMessage"),
+      );
+
     return {
-      key: { remoteJid, id: messageId, fromMe: false },
-    } as WAMessage;
+      ...storedMessage,
+      key: {
+        ...storedMessage?.key,
+        remoteJid: row.chatId,
+        id: row.id,
+        fromMe,
+        ...(participant ? { participant } : {}),
+      },
+      message: hasStoredContent
+        ? storedContent
+        : this.buildStoredMessageContent(row.type, row.content),
+      messageTimestamp: storedMessage?.messageTimestamp ?? row.timestamp,
+    };
+  }
+
+  private buildStoredMessageContent(
+    type: Message["type"],
+    content: string | null,
+  ): NonNullable<WAMessage["message"]> {
+    switch (type) {
+      case "text":
+        return { conversation: content ?? "" };
+      case "image":
+        return { imageMessage: content === null ? {} : { caption: content } };
+      case "video":
+        return { videoMessage: content === null ? {} : { caption: content } };
+      case "audio":
+        return { audioMessage: {} };
+      case "document":
+        return { documentMessage: content === null ? {} : { caption: content } };
+      case "location":
+        return { locationMessage: {} };
+      case "contact":
+        return { contactMessage: content === null ? {} : { displayName: content } };
+      case "poll":
+        return { pollCreationMessage: content === null ? {} : { name: content } };
+      case "reaction":
+        return { reactionMessage: content === null ? {} : { text: content } };
+      case "sticker":
+        return { stickerMessage: {} };
+    }
+  }
+
+  validateQuotedMessage(to: string, messageId: string): void {
+    this.getQuotedMessage(this.normalizeJid(to), messageId);
   }
 
   private getMeJid(): string {
@@ -288,19 +391,19 @@ export class BaileysAdapter implements ChannelAdapter {
       case "text":
         msg = { text: content.text };
         if (content.quotedMessageId) {
-          opts.quoted = this.makeQuotedStub(jid, content.quotedMessageId);
+          opts.quoted = this.getQuotedMessage(jid, content.quotedMessageId);
         }
         break;
       case "image":
         msg = { image: this.resolveMedia(content.image), caption: content.caption };
         if (content.quotedMessageId) {
-          opts.quoted = this.makeQuotedStub(jid, content.quotedMessageId);
+          opts.quoted = this.getQuotedMessage(jid, content.quotedMessageId);
         }
         break;
       case "video":
         msg = { video: this.resolveMedia(content.video), caption: content.caption };
         if (content.quotedMessageId) {
-          opts.quoted = this.makeQuotedStub(jid, content.quotedMessageId);
+          opts.quoted = this.getQuotedMessage(jid, content.quotedMessageId);
         }
         break;
       case "audio":

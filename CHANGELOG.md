@@ -23,6 +23,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   asynchronous transcription text on successful audio message notifications.
 - Configurable transcription enablement, API URL/model/language, size ceiling, and timeout.
 
+### Fixed
+
+- Baileys quoted text, image, and video sends now resolve the referenced message from the same
+  chat and instance and pass a complete WAMessage to the socket. Missing quotes return a clear
+  tool error before enqueueing; quotes removed before delivery fail without BullMQ retries.
+
 ## [2.0.0] - 2026-09-18
 
 Dependency modernization after ~6.5 months of drift. Closes 4 critical and 17 high
