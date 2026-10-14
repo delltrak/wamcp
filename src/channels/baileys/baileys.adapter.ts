@@ -47,7 +47,7 @@ import { useSqliteAuthState, clearAuthState } from "./baileys.auth.js";
 import { getWaVersion } from "./baileys.version.js";
 import { db } from "../../db/client.js";
 import { messages as messagesTable } from "../../db/schema.js";
-import { eq, and, desc } from "drizzle-orm";
+import { eq, and, desc, sql } from "drizzle-orm";
 import {
   normalizeMessagesUpsert,
   normalizeMessagesUpdate,
@@ -1062,10 +1062,12 @@ export class BaileysAdapter implements ChannelAdapter {
         .onConflictDoUpdate({
           target: [messagesTable.instanceId, messagesTable.id],
           set: {
+            type: message.type === "text" ? sql`${messagesTable.type}` : message.type,
             content: message.content,
             status: message.isFromMe ? "sent" : "received",
-            mediaMimetype: message.mediaMimetype ?? null,
-            rawData,
+            mediaUrl: sql`coalesce(excluded.media_url, ${messagesTable.mediaUrl})`,
+            mediaMimetype: sql`coalesce(excluded.media_mimetype, ${messagesTable.mediaMimetype})`,
+            rawData: sql`coalesce(excluded.raw_data, ${messagesTable.rawData})`,
           },
         })
         .run();
@@ -1278,9 +1280,19 @@ export class BaileysAdapter implements ChannelAdapter {
         );
         for (const msg of data.messages) {
           normalizeLidInMessage(msg);
+          const unwrappedContent = unwrapMessageContent(msg.message, {
+            unwrapProtocolEdits: false,
+          });
+          const protocolMessage = unwrappedContent?.protocolMessage as
+            NonNullable<WAMessage["message"]>["protocolMessage"] | undefined;
 
-          if (msg.message?.protocolMessage?.type === 14) {
-            const editEvent = normalizeMessageEdit(this.instanceId, msg, msg.key.remoteJid ?? "");
+          if (protocolMessage?.type === 14) {
+            const editEvent = normalizeMessageEdit(
+              this.instanceId,
+              msg,
+              msg.key.remoteJid ?? "",
+              unwrappedContent,
+            );
             this.emit("message.edited", editEvent);
             continue;
           }
@@ -1290,7 +1302,7 @@ export class BaileysAdapter implements ChannelAdapter {
           }
 
           // Persist ALL messages (notify + append) to DB
-          if (msg.key.id && msg.key.remoteJid && !msg.message?.protocolMessage) {
+          if (msg.key.id && msg.key.remoteJid && !protocolMessage) {
             const details = extractMessageDetails(msg);
             const normalized: NormalizedMessageEvent = {
               instanceId: this.instanceId,

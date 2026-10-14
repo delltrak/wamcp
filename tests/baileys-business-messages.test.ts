@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
+import { Readable } from "node:stream";
 import { describe, expect, it, vi } from "vitest";
-import type { WAMessage } from "@whiskeysockets/baileys";
+import type { WAMessage, WASocket } from "@whiskeysockets/baileys";
 import { BaileysAdapter } from "../src/channels/baileys/baileys.adapter.js";
 import {
   extractMessageDetails,
@@ -17,6 +18,13 @@ import { registerEventNotifications } from "../src/notifications/events.js";
 import type { InstanceManager } from "../src/services/instance-manager.js";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 
+const downloadMediaMessageMock = vi.hoisted(() => vi.fn());
+
+vi.mock("@whiskeysockets/baileys", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@whiskeysockets/baileys")>();
+  return { ...actual, downloadMediaMessage: downloadMediaMessageMock };
+});
+
 const SYNTHETIC_JID = "5500000000000@s.whatsapp.net";
 const SYNTHETIC_CHAT = "5500000000000@s.whatsapp.net";
 
@@ -30,13 +38,96 @@ function messageWith(message: Record<string, unknown>, id = "SYNTHETIC-MESSAGE")
 }
 
 function notifyEvent(message: WAMessage): NormalizedMessageEvent {
-  const events = normalizeMessagesUpsert("synthetic-instance", {
+  return normalizeMessageForInstance("synthetic-instance", message);
+}
+
+function normalizeMessageForInstance(
+  instanceId: string,
+  message: WAMessage,
+): NormalizedMessageEvent {
+  const events = normalizeMessagesUpsert(instanceId, {
     type: "notify",
     messages: [message],
   } as Parameters<typeof normalizeMessagesUpsert>[1]);
   const event = events[0];
   if (!event) throw new Error("Synthetic message did not normalize");
   return event;
+}
+
+function insertSyntheticInstance(instanceId: string): void {
+  sqlite
+    .prepare(
+      "INSERT INTO instances (id, name, channel, status, created_at, updated_at) VALUES (?, ?, 'baileys', 'disconnected', 1700000000, 1700000000)",
+    )
+    .run(instanceId, "Synthetic Baileys fixture");
+}
+
+function insertSyntheticMessage(
+  instanceId: string,
+  id: string,
+  values: {
+    type: string;
+    content: string | null;
+    mediaUrl: string | null;
+    mediaMimetype: string | null;
+    rawData: string | null;
+  },
+): void {
+  sqlite
+    .prepare(
+      `INSERT INTO messages (
+        id, instance_id, chat_id, sender_id, type, content, media_url, media_mimetype,
+        is_from_me, status, timestamp, raw_data
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, 'received', 1700000000, ?)`,
+    )
+    .run(
+      id,
+      instanceId,
+      SYNTHETIC_CHAT,
+      SYNTHETIC_CHAT,
+      values.type,
+      values.content,
+      values.mediaUrl,
+      values.mediaMimetype,
+      values.rawData,
+    );
+}
+
+function persistNormalizedMessage(
+  adapter: BaileysAdapter,
+  event: NormalizedMessageEvent,
+  source: WAMessage,
+): void {
+  (
+    adapter as unknown as {
+      persistMessage: (normalized: NormalizedMessageEvent, source: WAMessage) => void;
+    }
+  ).persistMessage(event, source);
+}
+
+async function dispatchMessagesUpsert(
+  adapter: BaileysAdapter,
+  messages: WAMessage[],
+): Promise<void> {
+  let processEvents: ((events: Record<string, unknown>) => Promise<void>) | undefined;
+  const socket = {
+    ev: {
+      on: vi.fn(),
+      process: (handler: (events: Record<string, unknown>) => Promise<void>) => {
+        processEvents = handler;
+      },
+    },
+  } as unknown as WASocket;
+
+  (
+    adapter as unknown as {
+      bindEvents: (sock: WASocket) => void;
+    }
+  ).bindEvents(socket);
+
+  if (!processEvents) throw new Error("Synthetic event processor was not registered");
+  const data = { type: "notify", messages } as Parameters<typeof normalizeMessagesUpsert>[1];
+  await processEvents({ "messages.upsert": data });
 }
 
 describe("Baileys business and interactive message normalization", () => {
@@ -445,6 +536,56 @@ describe("Baileys business and interactive message normalization", () => {
     ).toEqual([]);
   });
 
+  it.each(["ephemeralMessage", "viewOnceMessage"])(
+    "emits wrapped %s edits without receiving or persisting them",
+    async (wrapper) => {
+      const instanceId = `synthetic-wrapped-edit-${randomUUID()}`;
+      const messageId = `SYNTHETIC-WRAPPED-EDIT-${randomUUID()}`;
+      const message = messageWith(
+        {
+          [wrapper]: {
+            message: {
+              protocolMessage: {
+                key: { id: "SYNTHETIC-ORIGINAL-MESSAGE" },
+                type: 14,
+                editedMessage: { conversation: "Synthetic wrapped edit" },
+              },
+            },
+          },
+        },
+        messageId,
+      );
+      insertSyntheticInstance(instanceId);
+
+      try {
+        const adapter = new BaileysAdapter(instanceId);
+        const received = vi.fn();
+        const edited = vi.fn();
+        adapter.on("message.received", received);
+        adapter.on("message.edited", edited);
+
+        await dispatchMessagesUpsert(adapter, [message]);
+
+        expect(edited).toHaveBeenCalledWith(
+          expect.objectContaining({
+            instanceId,
+            chatId: SYNTHETIC_CHAT,
+            messageId: "SYNTHETIC-ORIGINAL-MESSAGE",
+            newContent: "Synthetic wrapped edit",
+          }),
+        );
+        expect(received).not.toHaveBeenCalled();
+        expect(
+          sqlite
+            .prepare("SELECT id FROM messages WHERE instance_id = ? AND id = ?")
+            .get(instanceId, messageId),
+        ).toBeUndefined();
+      } finally {
+        sqlite.prepare("DELETE FROM instances WHERE id = ?").run(instanceId);
+      }
+    },
+  );
+
   it("unwraps deeply nested supported containers within the bounded depth", () => {
     let nested: Record<string, unknown> = { conversation: "Synthetic deep wrapped text" };
     for (let depth = 0; depth < 10; depth++) {
@@ -536,6 +677,158 @@ describe("Baileys business and interactive message normalization", () => {
     };
     expect(sent.params.message.content).toContain("Synthetic event title");
     expect(sent.params.message.buttons?.[0]?.text).toBe("Open");
+  });
+
+  it("upgrades a legacy text row from wrapped audio so audio downloads accept it", async () => {
+    const instanceId = `synthetic-audio-replay-${randomUUID()}`;
+    const messageId = `SYNTHETIC-AUDIO-REPLAY-${randomUUID()}`;
+    insertSyntheticInstance(instanceId);
+    insertSyntheticMessage(instanceId, messageId, {
+      type: "text",
+      content: "Legacy parser content",
+      mediaUrl: null,
+      mediaMimetype: null,
+      rawData: null,
+    });
+
+    try {
+      const adapter = new BaileysAdapter(instanceId);
+      const source = messageWith(
+        {
+          ephemeralMessage: {
+            message: {
+              audioMessage: {
+                url: "https://example.com/synthetic-audio.ogg",
+                mimetype: "audio/ogg; codecs=opus",
+              },
+            },
+          },
+        },
+        messageId,
+      );
+      persistNormalizedMessage(adapter, normalizeMessageForInstance(instanceId, source), source);
+
+      const stored = sqlite
+        .prepare(
+          "SELECT type, media_url, media_mimetype, raw_data FROM messages WHERE instance_id = ? AND id = ?",
+        )
+        .get(instanceId, messageId) as
+        | {
+            type: string;
+            media_url: string | null;
+            media_mimetype: string | null;
+            raw_data: string | null;
+          }
+        | undefined;
+      expect(stored).toMatchObject({
+        type: "audio",
+        media_url: "https://example.com/synthetic-audio.ogg",
+        media_mimetype: "audio/ogg; codecs=opus",
+      });
+      expect(stored?.raw_data).toBeTruthy();
+      const audioBytes = Buffer.from("Synthetic audio bytes");
+      downloadMediaMessageMock.mockResolvedValue(Readable.from([audioBytes]));
+      Object.assign(adapter, {
+        sock: { updateMediaMessage: vi.fn() },
+        status: "connected",
+      });
+      await expect(adapter.downloadMessageAudio(messageId)).resolves.toEqual({
+        data: audioBytes,
+        mimeType: "audio/ogg; codecs=opus",
+      });
+      expect(downloadMediaMessageMock).toHaveBeenCalledOnce();
+    } finally {
+      sqlite.prepare("DELETE FROM instances WHERE id = ?").run(instanceId);
+    }
+  });
+
+  it("refreshes media parsed from a wrapped business header on conflict", () => {
+    const instanceId = `synthetic-header-replay-${randomUUID()}`;
+    const messageId = `SYNTHETIC-HEADER-REPLAY-${randomUUID()}`;
+    insertSyntheticInstance(instanceId);
+    insertSyntheticMessage(instanceId, messageId, {
+      type: "text",
+      content: "Legacy parser content",
+      mediaUrl: null,
+      mediaMimetype: null,
+      rawData: null,
+    });
+
+    try {
+      const adapter = new BaileysAdapter(instanceId);
+      const source = messageWith(
+        {
+          documentWithCaptionMessage: {
+            message: {
+              interactiveMessage: {
+                header: {
+                  title: "Synthetic account notice",
+                  imageMessage: {
+                    url: "https://example.com/synthetic-business-header.jpg",
+                    mimetype: "image/jpeg",
+                  },
+                },
+                body: { text: "Synthetic business message" },
+              },
+            },
+          },
+        },
+        messageId,
+      );
+      persistNormalizedMessage(adapter, normalizeMessageForInstance(instanceId, source), source);
+
+      const stored = sqlite
+        .prepare(
+          "SELECT type, media_url, media_mimetype FROM messages WHERE instance_id = ? AND id = ?",
+        )
+        .get(instanceId, messageId);
+      expect(stored).toMatchObject({
+        type: "image",
+        media_url: "https://example.com/synthetic-business-header.jpg",
+        media_mimetype: "image/jpeg",
+      });
+    } finally {
+      sqlite.prepare("DELETE FROM instances WHERE id = ?").run(instanceId);
+    }
+  });
+
+  it("preserves existing media fields when a replay has no media", () => {
+    const instanceId = `synthetic-no-media-replay-${randomUUID()}`;
+    const messageId = `SYNTHETIC-NO-MEDIA-REPLAY-${randomUUID()}`;
+    const existingRawData = JSON.stringify({
+      key: { id: messageId, remoteJid: SYNTHETIC_CHAT, fromMe: false },
+      message: { audioMessage: { url: "https://example.com/existing-audio.ogg" } },
+      messageTimestamp: 1_700_000_000,
+    });
+    insertSyntheticInstance(instanceId);
+    insertSyntheticMessage(instanceId, messageId, {
+      type: "audio",
+      content: null,
+      mediaUrl: "https://example.com/existing-audio.ogg",
+      mediaMimetype: "audio/ogg",
+      rawData: existingRawData,
+    });
+
+    try {
+      const adapter = new BaileysAdapter(instanceId);
+      const source = messageWith({ conversation: "Synthetic text-only replay" }, messageId);
+      persistNormalizedMessage(adapter, normalizeMessageForInstance(instanceId, source), source);
+
+      const stored = sqlite
+        .prepare(
+          "SELECT type, content, media_url, media_mimetype, raw_data FROM messages WHERE instance_id = ? AND id = ?",
+        )
+        .get(instanceId, messageId);
+      expect(stored).toMatchObject({
+        type: "audio",
+        content: "Synthetic text-only replay",
+        media_url: "https://example.com/existing-audio.ogg",
+        media_mimetype: "audio/ogg",
+        raw_data: existingRawData,
+      });
+    } finally {
+      sqlite.prepare("DELETE FROM instances WHERE id = ?").run(instanceId);
+    }
   });
 
   it("persists structured message additions for wa_get_messages using existing raw_data storage", async () => {

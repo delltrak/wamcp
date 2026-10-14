@@ -75,6 +75,7 @@ function recordAt(record: MessageRecord | undefined, key: string): MessageRecord
  */
 export function unwrapMessageContent(
   content: WAMessageContent | null | undefined,
+  options: { unwrapProtocolEdits?: boolean } = {},
 ): MessageRecord | undefined {
   if (!content) return undefined;
 
@@ -83,7 +84,10 @@ export function unwrapMessageContent(
   if (!current) return undefined;
 
   for (let depth = 0; depth < MAX_ADDITIONAL_UNWRAPS; depth++) {
-    const protocolEdit = recordAt(recordAt(current, "protocolMessage"), "editedMessage");
+    const protocolEdit: MessageRecord | undefined =
+      options.unwrapProtocolEdits === false
+        ? undefined
+        : recordAt(recordAt(current, "protocolMessage"), "editedMessage");
     if (protocolEdit) {
       current = protocolEdit;
       continue;
@@ -624,7 +628,9 @@ export function normalizeMessagesUpsert(
   if (data.type !== "notify") return [];
 
   return data.messages
-    .filter((msg) => !msg.message?.protocolMessage)
+    .filter(
+      (msg) => !unwrapMessageContent(msg.message, { unwrapProtocolEdits: false })?.protocolMessage,
+    )
     .map((msg) => {
       normalizeLidInMessage(msg);
       const details = extractMessageDetails(msg);
@@ -716,8 +722,10 @@ export function normalizeMessageEdit(
   instanceId: string,
   msg: WAMessage,
   chatId: string,
+  content = unwrapMessageContent(msg.message, { unwrapProtocolEdits: false }),
 ): NormalizedMessageEditEvent {
-  const editedMessage = recordAt(asRecord(msg.message), "protocolMessage")?.editedMessage;
+  const protocolMessage = recordAt(content, "protocolMessage");
+  const editedMessage = protocolMessage?.editedMessage;
   const editedContent = editedMessage
     ? (messageDetails(unwrapMessageContent(editedMessage as WAMessageContent)).content ?? "")
     : "";
@@ -725,7 +733,7 @@ export function normalizeMessageEdit(
   return {
     instanceId,
     chatId,
-    messageId: msg.message?.protocolMessage?.key?.id ?? msg.key.id ?? "",
+    messageId: stringValue(recordAt(protocolMessage, "key")?.id) ?? msg.key.id ?? "",
     newContent: editedContent,
     editedAt:
       typeof msg.messageTimestamp === "number"
