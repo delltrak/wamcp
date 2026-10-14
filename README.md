@@ -309,20 +309,21 @@ WA MCP exposes **67 tools** across 11 domains. All tools use the `wa_` prefix.
 
 `wa_get_privacy_settings` and `wa_update_privacy` are available for Baileys instances. Cloud API instances return a clear unsupported-operation error.
 
-`wa_get_privacy_settings` returns normalized account settings. `forceRefresh` defaults to `false`; set it to `true` to ask Baileys to refresh its cached values from WhatsApp. The result includes last seen, online visibility, profile photo, about/status text, read receipts, group adds, calls, and the status audience mode.
+`wa_get_privacy_settings` returns normalized account settings. Reads refresh from WhatsApp by default; set `forceRefresh` to `false` to use cached values. The result includes last seen, online visibility, profile photo, About/profile text visibility (`status`), read receipts, group adds, and calls.
 
 `wa_update_privacy` accepts one `setting` and its matching `value`:
 
 | Setting | Accepted values |
 | --- | --- |
-| `lastSeen`, `profilePic`, `status` | `all`, `contacts`, `contact_blacklist`, `none` |
+| `lastSeen`, `profilePic` | `all`, `contacts`, `contact_blacklist`, `none` |
+| `status` (About/profile text visibility) | `all`, `contacts`, `contact_blacklist`, `none` |
 | `online` | `all`, `match_last_seen` |
 | `readReceipts` | `all`, `none` |
 | `groupAdd` | `all`, `contacts`, `contact_blacklist` |
 | `calls` | `all`, `known` |
 | `defaultDisappearingMode` | `0`, `86400`, `604800`, `7776000` seconds (remove, 24 hours, 7 days, 90 days) |
 
-Baileys can report and update the status audience mode (`all`, `contacts`, `contact_blacklist`, or `none`), but its API does not expose the selected include/exclude JID lists or a setter for those lists. The result therefore reports `includedJids` and `excludedJids` as `null` and `recipientListsAvailable` as `false`. `fetchPrivacySettings` also does not return the default disappearing duration, so that duration can be updated but is not included in the read result.
+Baileys' `status` privacy category and `updateStatusPrivacy` control About/profile text visibility, not the audience for story updates. `fetchPrivacySettings` does not return the default disappearing duration, so that duration can be updated but is not included in the read result.
 
 See the [API reference](docs/API_REFERENCE.md#26-profile-management-6-tools) for tool input and response details.
 

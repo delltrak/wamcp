@@ -1410,21 +1410,22 @@ Update one Baileys account privacy setting. `setting` determines the accepted `v
 | Parameter    | Type                                                                                           | Required | Description               |
 | ------------ | ---------------------------------------------------------------------------------------------- | -------- | ------------------------- |
 | `instanceId` | string                                                                                         | Yes      | The instance ID           |
-| `setting`    | `"lastSeen"` \| `"online"` \| `"profilePic"` \| `"status"` \| `"readReceipts"` \| `"groupAdd"` \| `"calls"` \| `"defaultDisappearingMode"` | Yes | Privacy setting to update |
+| `setting`    | `"lastSeen"` \| `"online"` \| `"profilePic"` \| `"status"` \| `"readReceipts"` \| `"groupAdd"` \| `"calls"` \| `"defaultDisappearingMode"` | Yes | Privacy setting to update; `status` is About/profile text visibility |
 | `value`      | Setting-specific enum listed below                                                           | Yes      | New value or duration in seconds |
 
 Accepted `value` options:
 
 | `setting` | `value` |
 | --- | --- |
-| `lastSeen`, `profilePic`, `status` | `"all"`, `"contacts"`, `"contact_blacklist"`, `"none"` |
+| `lastSeen`, `profilePic` | `"all"`, `"contacts"`, `"contact_blacklist"`, `"none"` |
+| `status` (About/profile text visibility) | `"all"`, `"contacts"`, `"contact_blacklist"`, `"none"` |
 | `online` | `"all"`, `"match_last_seen"` |
 | `readReceipts` | `"all"`, `"none"` |
 | `groupAdd` | `"all"`, `"contacts"`, `"contact_blacklist"` |
 | `calls` | `"all"`, `"known"` |
 | `defaultDisappearingMode` | `0`, `86400`, `604800`, `7776000` (remove, 24 hours, 7 days, 90 days) |
 
-Status visibility can be set to a mode, but Baileys does not expose the selected include/exclude JID lists or a method to update those lists.
+Baileys' `status` privacy category and `updateStatusPrivacy` control About/profile text visibility, not the audience for story updates.
 
 **Channel support:** Baileys only
 
@@ -1442,12 +1443,12 @@ Status visibility can be set to a mode, but Baileys does not expose the selected
 
 #### `wa_get_privacy_settings`
 
-Read normalized account privacy settings. `forceRefresh` asks Baileys to refresh its cached settings from WhatsApp. Status recipient-list JIDs are not exposed by Baileys; the response reports this with `null` list values and `recipientListsAvailable: false`. Baileys does not include the default disappearing duration in `fetchPrivacySettings`, so it cannot be read through this tool.
+Read normalized account privacy settings. Reads refresh from WhatsApp by default; `forceRefresh=false` uses cached settings. The `status` field is About/profile text visibility. Baileys does not include the default disappearing duration in `fetchPrivacySettings`, so it cannot be read through this tool.
 
 | Parameter      | Type    | Required | Description |
 | -------------- | ------- | -------- | ----------- |
 | `instanceId`   | string  | Yes      | The instance ID |
-| `forceRefresh` | boolean | No       | Refresh settings from WhatsApp; defaults to `false` |
+| `forceRefresh` | boolean | No       | Refresh settings from WhatsApp; defaults to `true` |
 
 **Channel support:** Baileys only
 
@@ -1459,12 +1460,6 @@ Read normalized account privacy settings. `forceRefresh` asks Baileys to refresh
   "online": "all",
   "profilePic": "contacts",
   "status": "contacts",
-  "statusAudience": {
-    "mode": "contacts",
-    "includedJids": null,
-    "excludedJids": null,
-    "recipientListsAvailable": false
-  },
   "readReceipts": "all",
   "groupAdd": "contacts",
   "calls": "all"
@@ -1895,7 +1890,7 @@ Own profile information.
 
 Privacy settings for an instance.
 
-**Description:** Normalized privacy settings including lastSeen, online, profilePic, status visibility, readReceipts, groupAdd, and calls. Status recipient JID lists and the default disappearing duration are not exposed by Baileys.
+**Description:** Normalized privacy settings including lastSeen, online, profilePic, status (About/profile text visibility), readReceipts, groupAdd, and calls. The default disappearing duration is not exposed by Baileys.
 
 **URI parameters:**
 | Parameter | Description |
@@ -1910,12 +1905,6 @@ Privacy settings for an instance.
   "online": "all",
   "profilePic": "all",
   "status": "contacts",
-  "statusAudience": {
-    "mode": "contacts",
-    "includedJids": null,
-    "excludedJids": null,
-    "recipientListsAvailable": false
-  },
   "readReceipts": "all",
   "groupAdd": "contacts",
   "calls": "all"

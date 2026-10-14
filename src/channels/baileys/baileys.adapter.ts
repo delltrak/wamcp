@@ -860,7 +860,7 @@ export class BaileysAdapter implements ChannelAdapter {
     }
   }
 
-  async getPrivacySettings(forceRefresh = false): Promise<PrivacySettings> {
+  async getPrivacySettings(forceRefresh = true): Promise<PrivacySettings> {
     const sock = this.getSock();
     const settings = await sock.fetchPrivacySettings(forceRefresh);
     return normalizePrivacySettings(settings);

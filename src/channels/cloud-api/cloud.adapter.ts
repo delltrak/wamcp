@@ -594,7 +594,7 @@ export class CloudApiAdapter implements ChannelAdapter {
     throw new Error("Privacy settings are not supported on the Cloud API");
   }
 
-  async getPrivacySettings(_forceRefresh = false): Promise<PrivacySettings> {
+  async getPrivacySettings(_forceRefresh = true): Promise<PrivacySettings> {
     throw new Error("Privacy settings are not supported on the Cloud API");
   }
 
