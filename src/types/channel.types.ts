@@ -39,12 +39,23 @@ export type MessageDeliveryStatus = "received" | "sent" | "delivered" | "read" |
 // Participant action in groups
 export type ParticipantAction = "add" | "remove" | "promote" | "demote";
 
-// Privacy setting keys
-export type PrivacySetting =
-  "lastSeen" | "online" | "profilePic" | "status" | "readReceipts" | "groupAdd";
-
-// Privacy setting values
+// Privacy setting values exposed by Baileys.
 export type PrivacyValue = "all" | "contacts" | "contact_blacklist" | "none";
+export type OnlinePrivacyValue = "all" | "match_last_seen";
+export type ReadReceiptsPrivacyValue = "all" | "none";
+export type GroupAddPrivacyValue = "all" | "contacts" | "contact_blacklist";
+export type CallPrivacyValue = "all" | "known";
+export type DefaultDisappearingModeDuration = 0 | 86400 | 604800 | 7776000;
+
+export type PrivacyUpdate =
+  | { setting: "lastSeen"; value: PrivacyValue }
+  | { setting: "online"; value: OnlinePrivacyValue }
+  | { setting: "profilePic"; value: PrivacyValue }
+  | { setting: "status"; value: PrivacyValue }
+  | { setting: "readReceipts"; value: ReadReceiptsPrivacyValue }
+  | { setting: "groupAdd"; value: GroupAddPrivacyValue }
+  | { setting: "calls"; value: CallPrivacyValue }
+  | { setting: "defaultDisappearingMode"; value: DefaultDisappearingModeDuration };
 
 // ---- Message Content Types ----
 
@@ -213,11 +224,21 @@ export interface GroupParticipant {
 
 export interface PrivacySettings {
   lastSeen: PrivacyValue;
-  online: PrivacyValue;
+  online: OnlinePrivacyValue;
   profilePic: PrivacyValue;
   status: PrivacyValue;
-  readReceipts: PrivacyValue;
-  groupAdd: PrivacyValue;
+  statusAudience: StatusAudience;
+  readReceipts: ReadReceiptsPrivacyValue;
+  groupAdd: GroupAddPrivacyValue;
+  calls: CallPrivacyValue;
+}
+
+/** Baileys reports the status visibility mode, but not selected recipient JIDs. */
+export interface StatusAudience {
+  mode: PrivacyValue;
+  includedJids: null;
+  excludedJids: null;
+  recipientListsAvailable: false;
 }
 
 // ---- Chat/Group Modification Types ----

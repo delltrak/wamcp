@@ -13,7 +13,7 @@
    - [Chat Management](#23-chat-management-6-tools)
    - [Group Management](#24-group-management-14-tools)
    - [Contact Management](#25-contact-management-5-tools)
-   - [Profile Management](#26-profile-management-5-tools)
+   - [Profile Management](#26-profile-management-6-tools)
    - [Status / Stories](#27-status--stories-3-tools)
    - [Newsletter / Channels](#28-newsletter--channels-3-tools)
    - [Call Management](#29-call-management-1-tool)
@@ -1316,7 +1316,7 @@ Fetch the business profile information for a WhatsApp Business contact.
 
 ---
 
-### 2.6 Profile Management (5 tools)
+### 2.6 Profile Management (6 tools)
 
 Tools for managing the instance's own WhatsApp profile.
 
@@ -1405,15 +1405,28 @@ Change the text status/bio for a WhatsApp instance.
 
 #### `wa_update_privacy`
 
-Update privacy settings for the instance.
+Update one Baileys account privacy setting. `setting` determines the accepted `value` enum. The Cloud API channel does not support privacy settings.
 
 | Parameter    | Type                                                                                           | Required | Description               |
 | ------------ | ---------------------------------------------------------------------------------------------- | -------- | ------------------------- |
 | `instanceId` | string                                                                                         | Yes      | The instance ID           |
-| `setting`    | `"lastSeen"` \| `"online"` \| `"profilePic"` \| `"status"` \| `"readReceipts"` \| `"groupAdd"` | Yes      | Privacy setting to update |
-| `value`      | `"all"` \| `"contacts"` \| `"contact_blacklist"` \| `"none"`                                   | Yes      | New value                 |
+| `setting`    | `"lastSeen"` \| `"online"` \| `"profilePic"` \| `"status"` \| `"readReceipts"` \| `"groupAdd"` \| `"calls"` \| `"defaultDisappearingMode"` | Yes | Privacy setting to update |
+| `value`      | Setting-specific enum listed below                                                           | Yes      | New value or duration in seconds |
 
-**Channel support:** Both
+Accepted `value` options:
+
+| `setting` | `value` |
+| --- | --- |
+| `lastSeen`, `profilePic`, `status` | `"all"`, `"contacts"`, `"contact_blacklist"`, `"none"` |
+| `online` | `"all"`, `"match_last_seen"` |
+| `readReceipts` | `"all"`, `"none"` |
+| `groupAdd` | `"all"`, `"contacts"`, `"contact_blacklist"` |
+| `calls` | `"all"`, `"known"` |
+| `defaultDisappearingMode` | `0`, `86400`, `604800`, `7776000` (remove, 24 hours, 7 days, 90 days) |
+
+Status visibility can be set to a mode, but Baileys does not expose the selected include/exclude JID lists or a method to update those lists.
+
+**Channel support:** Baileys only
 
 **Response:**
 
@@ -1422,6 +1435,39 @@ Update privacy settings for the instance.
   "success": true,
   "setting": "lastSeen",
   "value": "contacts"
+}
+```
+
+---
+
+#### `wa_get_privacy_settings`
+
+Read normalized account privacy settings. `forceRefresh` asks Baileys to refresh its cached settings from WhatsApp. Status recipient-list JIDs are not exposed by Baileys; the response reports this with `null` list values and `recipientListsAvailable: false`. Baileys does not include the default disappearing duration in `fetchPrivacySettings`, so it cannot be read through this tool.
+
+| Parameter      | Type    | Required | Description |
+| -------------- | ------- | -------- | ----------- |
+| `instanceId`   | string  | Yes      | The instance ID |
+| `forceRefresh` | boolean | No       | Refresh settings from WhatsApp; defaults to `false` |
+
+**Channel support:** Baileys only
+
+**Response:**
+
+```json
+{
+  "lastSeen": "contacts",
+  "online": "all",
+  "profilePic": "contacts",
+  "status": "contacts",
+  "statusAudience": {
+    "mode": "contacts",
+    "includedJids": null,
+    "excludedJids": null,
+    "recipientListsAvailable": false
+  },
+  "readReceipts": "all",
+  "groupAdd": "contacts",
+  "calls": "all"
 }
 ```
 
@@ -1865,7 +1911,7 @@ Own profile information.
 
 Privacy settings for an instance.
 
-**Description:** Privacy settings: lastSeen, online, profilePic, status, readReceipts, groupAdd.
+**Description:** Normalized privacy settings including lastSeen, online, profilePic, status visibility, readReceipts, groupAdd, and calls. Status recipient JID lists and the default disappearing duration are not exposed by Baileys.
 
 **URI parameters:**
 | Parameter | Description |
@@ -1880,8 +1926,15 @@ Privacy settings for an instance.
   "online": "all",
   "profilePic": "all",
   "status": "contacts",
+  "statusAudience": {
+    "mode": "contacts",
+    "includedJids": null,
+    "excludedJids": null,
+    "recipientListsAvailable": false
+  },
   "readReceipts": "all",
-  "groupAdd": "contacts"
+  "groupAdd": "contacts",
+  "calls": "all"
 }
 ```
 
