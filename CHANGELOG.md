@@ -11,9 +11,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Added `WA_MARK_ONLINE_ON_CONNECT` to control whether Baileys marks the linked account online
   when its socket connects. It defaults to `false`, preserving the current behavior.
+- Baileys status stories now report the recipient count and warn when the configured audience cap
+  truncates a recipient list.
 
 ### Added
 
+- Optional `WA_STATUS_MAX_RECIPIENTS` cap for Baileys status audiences; it defaults to 256.
 - Optional ElevenLabs text-to-speech voice notes through a provider interface, with voice listing,
   base64 previews, text chunk continuity, retry handling, and OGG/Opus output for Baileys.
 - Configurable TTS enablement, provider, voice, model, language, output format, text limit, API host,
@@ -29,6 +32,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Baileys status stories now pass a normalized, deduplicated recipient list (the account's own JID
+  plus stored contacts by default) to `sendMessage`, so status updates are distributed. Status tools
+  also accept an explicit individual-recipient list and validate text-story RGB/ARGB colors.
 - Baileys business templates, interactive messages, button/list messages, and their selection
   responses now retain readable content, button metadata, and header media details across storage,
   `wa_get_messages`, MCP notifications, and event webhooks. Unknown Baileys content types retain

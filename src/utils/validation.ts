@@ -19,6 +19,9 @@ const INDIVIDUAL_JID_RE = /^\d{5,20}@s\.whatsapp\.net$/;
 const GROUP_JID_RE = /^\d{5,20}-\d{5,20}@g\.us$/;
 const NEWSLETTER_JID_RE = /^\d{5,20}@newsletter$/;
 const STATUS_BROADCAST_JID = "status@broadcast";
+const STATUS_INDIVIDUAL_JID_RE =
+  /^\d{5,20}(?::\d+)?@(s\.whatsapp\.net|c\.us|lid|hosted|hosted\.lid)$/;
+const PHONE_INPUT_RE = /^[+\d\s().-]+$/;
 
 export function isValidJid(jid: string): boolean {
   return (
@@ -37,6 +40,23 @@ const PHONE_RE = /^\d{5,20}$/;
 
 export function isValidJidOrPhone(input: string): boolean {
   return isValidJid(input) || PHONE_RE.test(input.replace(/[^0-9]/g, ""));
+}
+
+/**
+ * Validate a status recipient. Status broadcasts accept individual PN, hosted,
+ * and LID JIDs (Baileys resolves LID devices); groups, newsletters, and
+ * broadcasts are not valid audience members.
+ */
+export function isValidStatusRecipient(input: string): boolean {
+  const value = input.trim();
+  if (value.includes("@")) {
+    const match = STATUS_INDIVIDUAL_JID_RE.exec(value);
+    if (!match) return false;
+    if (match[1] === "lid" || match[1] === "hosted" || match[1] === "hosted.lid") return true;
+    return isValidJid(`${value.slice(0, value.indexOf("@")).replace(/:\d+$/, "")}@s.whatsapp.net`);
+  }
+
+  return PHONE_INPUT_RE.test(value) && isValidJidOrPhone(value);
 }
 
 // ---- URL Safety (SSRF Prevention) ----

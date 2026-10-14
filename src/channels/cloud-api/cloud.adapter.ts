@@ -28,6 +28,7 @@ import type {
   GroupModification,
   ParticipantAction,
   StatusContent,
+  StatusSendResult,
   CloudCredentials,
   ChannelEvent,
   ChannelEventPayload,
@@ -613,7 +614,7 @@ export class CloudApiAdapter implements ChannelAdapter {
 
   // ---- Status / Stories ----
 
-  async sendStatus(_content: StatusContent): Promise<void> {
+  async sendStatus(_content: StatusContent): Promise<StatusSendResult> {
     throw new Error("Status/Stories are not supported on Cloud API");
   }
 

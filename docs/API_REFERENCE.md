@@ -1431,6 +1431,13 @@ Update privacy settings for the instance.
 
 Tools for posting WhatsApp status/story updates.
 
+By default, Baileys sends a status to the account's own normalized JID and known individual
+contacts. Each tool accepts `statusJidList` to restrict the audience; the account's own JID is
+always added. Individual LID JIDs are supported by the installed Baileys version. Groups,
+broadcasts, newsletters, and `status@broadcast` are not audience recipients. The configurable
+`WA_STATUS_MAX_RECIPIENTS` limit defaults to `256`; larger audiences are truncated and the
+response reports the omitted count. These tools are unsupported by the Cloud API.
+
 #### `wa_send_text_status`
 
 Post a text status/story update visible to contacts.
@@ -1439,7 +1446,8 @@ Post a text status/story update visible to contacts.
 | ----------------- | ------------ | -------- | -------------------------------------------- |
 | `instanceId`      | string       | Yes      | The instance ID                              |
 | `text`            | string       | Yes      | Status text content                          |
-| `backgroundColor` | string       | No       | Background color hex code (e.g. `"#FF5733"`) |
+| `statusJidList`   | string[]     | No       | Optional individual phone numbers or JIDs; the account's own JID is always included |
+| `backgroundColor` | string       | No       | RGB or ARGB hex color (e.g. `"#FF5733"` or `"#FFFF5733"`) |
 | `font`            | number (int) | No       | Font style (0-5)                             |
 
 **Channel support:** Baileys only
@@ -1448,9 +1456,13 @@ Post a text status/story update visible to contacts.
 
 ```json
 {
-  "success": true
+  "success": true,
+  "recipientCount": 4
 }
 ```
+
+If the audience exceeds the configured cap, the response also includes `omittedRecipientCount`
+and a `warning` describing the truncation.
 
 ---
 
@@ -1462,6 +1474,7 @@ Post an image status/story update visible to contacts.
 | ------------ | ------ | -------- | -------------------------------- |
 | `instanceId` | string | Yes      | The instance ID                  |
 | `image`      | string | Yes      | Image URL or base64-encoded data |
+| `statusJidList` | string[] | No   | Optional individual phone numbers or JIDs; the account's own JID is always included |
 | `caption`    | string | No       | Image caption                    |
 
 **Channel support:** Baileys only
@@ -1470,7 +1483,8 @@ Post an image status/story update visible to contacts.
 
 ```json
 {
-  "success": true
+  "success": true,
+  "recipientCount": 4
 }
 ```
 
@@ -1484,6 +1498,7 @@ Post a video status/story update visible to contacts.
 | ------------ | ------ | -------- | -------------------------------- |
 | `instanceId` | string | Yes      | The instance ID                  |
 | `video`      | string | Yes      | Video URL or base64-encoded data |
+| `statusJidList` | string[] | No   | Optional individual phone numbers or JIDs; the account's own JID is always included |
 | `caption`    | string | No       | Video caption                    |
 
 **Channel support:** Baileys only
@@ -1492,7 +1507,8 @@ Post a video status/story update visible to contacts.
 
 ```json
 {
-  "success": true
+  "success": true,
+  "recipientCount": 4
 }
 ```
 
