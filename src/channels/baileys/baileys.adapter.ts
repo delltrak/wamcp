@@ -12,6 +12,7 @@ import makeWASocket, {
   generateForwardMessageContent,
   generateWAMessageFromContent,
   type WASocket,
+  type GroupParticipant as BaileysGroupParticipant,
   type WAMessage,
   type BaileysEventMap,
   type AnyMessageContent,
@@ -908,15 +909,12 @@ export class BaileysAdapter implements ChannelAdapter {
             : participant.admin === "admin"
               ? "admin"
               : "member";
-        let resolvedJid = participant.id;
-        try {
-          resolvedJid = await this.resolveGroupParticipantJid(participant.id);
-        } catch {
-          // Keep the original JID when a participant's phone number cannot be resolved.
-        }
-        const normalizedResolvedJid = jidNormalizedUser(resolvedJid);
-        const phone = normalizedResolvedJid.endsWith("@s.whatsapp.net")
-          ? (normalizedResolvedJid.split("@")[0]?.split(":")[0] ?? null)
+        const participantJids = await this.getGroupParticipantIdentities(participant);
+        const phoneJid = participant.phoneNumber
+          ? jidNormalizedUser(participant.phoneNumber)
+          : [...participantJids].find((candidate) => candidate.endsWith("@s.whatsapp.net"));
+        const phone = phoneJid?.endsWith("@s.whatsapp.net")
+          ? (phoneJid.split("@")[0]?.split(":")[0] ?? null)
           : null;
 
         return {
@@ -974,43 +972,53 @@ export class BaileysAdapter implements ChannelAdapter {
   }
 
   private async getOwnGroupParticipantJids(sock: WASocket): Promise<Set<string>> {
-    const user = sock.user as (NonNullable<WASocket["user"]> & { lid?: string }) | undefined;
-    const ownJids = new Set<string>();
-    for (const candidate of [user?.id, user?.lid]) {
-      if (!candidate) continue;
-      const normalized = jidNormalizedUser(candidate);
-      ownJids.add(normalized);
-      if (normalized.endsWith("@lid")) {
-        try {
-          const pn = await this.resolvePn(normalized);
-          ownJids.add(jidNormalizedUser(pn));
-        } catch {
-          // The LID itself still supports direct comparisons if no phone mapping exists.
-        }
-      }
-    }
-    return ownJids;
+    return this.getNormalizedGroupIdentities([sock.user?.id, sock.user?.lid]);
   }
 
-  private async resolveGroupParticipantJid(jid: string): Promise<string> {
-    const normalized = jidNormalizedUser(jid);
-    if (!normalized.endsWith("@lid")) return normalized;
-    try {
-      return jidNormalizedUser(await this.resolvePn(normalized));
-    } catch {
-      return normalized;
+  private async getGroupParticipantIdentities(
+    participant: Pick<BaileysGroupParticipant, "id" | "phoneNumber" | "lid">,
+  ): Promise<Set<string>> {
+    return this.getNormalizedGroupIdentities([
+      participant.id,
+      participant.phoneNumber,
+      participant.lid,
+    ]);
+  }
+
+  private async getNormalizedGroupIdentities(
+    candidates: Array<string | undefined>,
+  ): Promise<Set<string>> {
+    const identities = new Set(
+      candidates
+        .filter((candidate): candidate is string => candidate !== undefined && candidate.length > 0)
+        .map((candidate) => jidNormalizedUser(candidate)),
+    );
+
+    if ([...identities].some((identity) => identity.endsWith("@s.whatsapp.net"))) {
+      return identities;
     }
+
+    for (const identity of identities) {
+      if (!identity.endsWith("@lid")) continue;
+      try {
+        const phoneJid = jidNormalizedUser(await this.resolvePn(identity));
+        if (phoneJid !== identity) identities.add(phoneJid);
+      } catch {
+        // The direct LID identities still support comparisons when no phone mapping exists.
+      }
+    }
+    return identities;
   }
 
   private async getOwnGroupRole(
-    participants: Array<{ id: string; admin?: string | null }>,
+    participants: BaileysGroupParticipant[],
     ownJids: Set<string>,
   ): Promise<{ isAdmin: boolean; isSuperAdmin: boolean }> {
     let isAdmin = false;
     let isSuperAdmin = false;
     for (const participant of participants) {
-      const participantJid = await this.resolveGroupParticipantJid(participant.id);
-      if (!ownJids.has(participantJid)) continue;
+      const participantJids = await this.getGroupParticipantIdentities(participant);
+      if (![...participantJids].some((participantJid) => ownJids.has(participantJid))) continue;
       if (participant.admin === "admin" || participant.admin === "superadmin") isAdmin = true;
       if (participant.admin === "superadmin") isSuperAdmin = true;
     }

@@ -1,5 +1,8 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { WASocket } from "@whiskeysockets/baileys";
+import type {
+  GroupParticipant as BaileysGroupParticipant,
+  WASocket,
+} from "@whiskeysockets/baileys";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { z } from "zod";
 import { BaileysAdapter } from "../src/channels/baileys/baileys.adapter.js";
@@ -67,7 +70,7 @@ async function invoke(tool: RegisteredTool, params: unknown): Promise<ToolResult
   return (await tool.handler(tool.inputSchema.parse(params))) as ToolResult;
 }
 
-function groupMetadata(participants: Array<{ id: string; admin?: string | null }>) {
+function groupMetadata(participants: BaileysGroupParticipant[]) {
   return {
     id: GROUP_JID,
     subject: "Support group",
@@ -223,6 +226,57 @@ describe("WhatsApp group tools", () => {
     ]);
     expect(updateProfilePicture).toHaveBeenNthCalledWith(1, GROUP_JID, jpeg);
     expect(updateProfilePicture).toHaveBeenNthCalledWith(2, GROUP_JID, jpeg);
+  });
+
+  it("matches an own LID to PN-addressed participants through alternate identities", async () => {
+    const jpeg = Buffer.from([0xff, 0xd8, 0xff, 0x01]);
+    vi.spyOn(MediaService.prototype, "prepareGroupProfilePicture").mockResolvedValue(jpeg);
+    const getPNForLID = vi.fn(async (_lid: string) => null);
+    const updateProfilePicture = vi.fn(async () => undefined);
+    const participant: BaileysGroupParticipant = {
+      id: OWN_PN,
+      phoneNumber: OWN_PN,
+      lid: OWN_LID,
+      admin: "admin",
+    };
+    const metadata = groupMetadata([participant]);
+    const { adapter } = createAdapter({
+      user: { id: OWN_LID, lid: OWN_LID },
+      signalRepository: { lidMapping: { getPNForLID } },
+      groupFetchAllParticipating: vi.fn(async () => ({ [GROUP_JID]: metadata })),
+      groupMetadata: vi.fn(async () => metadata),
+      updateProfilePicture,
+    });
+
+    await expect(adapter.listGroups()).resolves.toMatchObject([{ isAdmin: true }]);
+    await expect(adapter.updateGroupPicture(GROUP_JID, "aW1hZ2U=")).resolves.toBeUndefined();
+
+    expect(getPNForLID).toHaveBeenCalledWith(OWN_LID);
+    expect(updateProfilePicture).toHaveBeenCalledWith(GROUP_JID, jpeg);
+  });
+
+  it("matches an own PN to LID participants through phoneNumber", async () => {
+    const jpeg = Buffer.from([0xff, 0xd8, 0xff, 0x01]);
+    vi.spyOn(MediaService.prototype, "prepareGroupProfilePicture").mockResolvedValue(jpeg);
+    const getPNForLID = vi.fn(async (_lid: string) => null);
+    const updateProfilePicture = vi.fn(async () => undefined);
+    const metadata = groupMetadata([{ id: OWN_LID, phoneNumber: OWN_PN, admin: "admin" }]);
+    const { adapter } = createAdapter({
+      user: { id: OWN_PN },
+      signalRepository: { lidMapping: { getPNForLID } },
+      groupFetchAllParticipating: vi.fn(async () => ({ [GROUP_JID]: metadata })),
+      groupMetadata: vi.fn(async () => metadata),
+      updateProfilePicture,
+    });
+
+    await expect(adapter.listGroups()).resolves.toMatchObject([{ isAdmin: true }]);
+    await expect(adapter.getGroupMetadata(GROUP_JID)).resolves.toMatchObject({
+      participants: [{ phone: "5511999990000" }],
+    });
+    await expect(adapter.updateGroupPicture(GROUP_JID, "aW1hZ2U=")).resolves.toBeUndefined();
+
+    expect(getPNForLID).not.toHaveBeenCalled();
+    expect(updateProfilePicture).toHaveBeenCalledWith(GROUP_JID, jpeg);
   });
 
   it("removes the group picture and reports a clear non-admin error", async () => {
