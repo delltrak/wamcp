@@ -2,7 +2,7 @@
 // WA MCP — Message Queue (BullMQ)
 // ============================================================
 
-import { Queue, Worker, type Job } from "bullmq";
+import { Queue, UnrecoverableError, Worker, type Job } from "bullmq";
 import type { ChannelAdapter } from "../channels/channel.interface.js";
 import type { MessageContent } from "../types/channel.types.js";
 import {
@@ -14,6 +14,7 @@ import {
   QUEUE_FAILED_AGE_S,
 } from "../constants.js";
 import { createChildLogger } from "../utils/logger.js";
+import { QuotedMessageResolutionError } from "../utils/quoted-message.js";
 import { getRedisConnectionOptions } from "./redis.js";
 
 const logger = createChildLogger({ service: "message-queue" });
@@ -81,7 +82,14 @@ export class MessageQueue {
         }
         const data = job.data as OutboundJob;
         const adapter = this.getAdapter(data.instanceId);
-        await adapter.sendMessage(data.to, data.content);
+        try {
+          await adapter.sendMessage(data.to, data.content);
+        } catch (err) {
+          if (err instanceof QuotedMessageResolutionError) {
+            throw new UnrecoverableError(err.message);
+          }
+          throw err;
+        }
       },
       {
         connection: this.redisOpts,
@@ -112,6 +120,10 @@ export class MessageQueue {
     content: MessageContent,
     channel: "baileys" | "cloud" = "baileys",
   ): Promise<EnqueueResult> {
+    if ("quotedMessageId" in content && content.quotedMessageId && this.getAdapter) {
+      this.getAdapter(instanceId).validateQuotedMessage?.(to, content.quotedMessageId);
+    }
+
     const queue = this.getOrCreateQueue(instanceId, channel);
     const jobData: OutboundJob = { instanceId, to, content };
     const job = await queue.add("send", jobData);
