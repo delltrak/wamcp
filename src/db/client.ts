@@ -72,6 +72,14 @@ function initializeDatabase(): void {
     CREATE INDEX IF NOT EXISTS idx_messages_chat ON messages(instance_id, chat_id, timestamp DESC);
     CREATE INDEX IF NOT EXISTS idx_messages_timestamp ON messages(instance_id, timestamp DESC);
 
+    CREATE TABLE IF NOT EXISTS status_audiences (
+      instance_id     TEXT NOT NULL REFERENCES instances(id) ON DELETE CASCADE,
+      message_id      TEXT NOT NULL,
+      recipient_jids  TEXT NOT NULL,
+      created_at      INTEGER NOT NULL,
+      PRIMARY KEY (instance_id, message_id)
+    );
+
     CREATE TABLE IF NOT EXISTS processed_messages (
       message_id      TEXT NOT NULL,
       instance_id     TEXT NOT NULL REFERENCES instances(id) ON DELETE CASCADE,

@@ -48,7 +48,7 @@ export interface ChannelAdapter {
   sendMessage(to: string, content: MessageContent): Promise<MessageResponse>;
   validateQuotedMessage?(to: string, messageId: string): void;
   editMessage(chatId: string, msgId: string, newText: string): Promise<void>;
-  deleteMessage(chatId: string, msgId: string): Promise<void>;
+  deleteMessage(chatId: string, msgId: string, statusJidList?: string[]): Promise<void>;
   forwardMessage(to: string, msgId: string, fromChat: string): Promise<MessageResponse>;
   sendReaction(chatId: string, msgId: string, emoji: string): Promise<void>;
   pinMessage(chatId: string, msgId: string, pin: boolean): Promise<void>;

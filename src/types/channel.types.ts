@@ -34,7 +34,8 @@ export interface MessageButton {
 }
 
 // Message delivery status
-export type MessageDeliveryStatus = "received" | "sent" | "delivered" | "read" | "played";
+export type MessageDeliveryStatus =
+  "received" | "sent" | "delivered" | "read" | "played" | "revoked";
 
 // Participant action in groups
 export type ParticipantAction = "add" | "remove" | "promote" | "demote";

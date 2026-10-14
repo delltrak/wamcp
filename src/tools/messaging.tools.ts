@@ -361,7 +361,7 @@ Returns: { status: "queued", jobId }`,
     "wa_delete_message",
     {
       description:
-        "Delete a message for everyone in the chat. Only messages sent by this instance can be deleted.",
+        "Delete a message for everyone in the chat. Only messages sent by this instance can be deleted. For status@broadcast, an optional statusJidList can specify the deletion audience.",
       inputSchema: DeleteMessageSchema,
     },
     async (params) => {
@@ -369,7 +369,7 @@ Returns: { status: "queued", jobId }`,
       const start = Date.now();
       try {
         const adapter = instanceManager.getAdapter(params.instanceId);
-        await adapter.deleteMessage(params.chatId, params.messageId);
+        await adapter.deleteMessage(params.chatId, params.messageId, params.statusJidList);
         log.info({ duration: Date.now() - start }, "Message deleted");
         return toolSuccess({ success: true });
       } catch (err) {

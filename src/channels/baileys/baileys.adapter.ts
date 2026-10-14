@@ -48,7 +48,10 @@ import { useSqliteAuthState, clearAuthState } from "./baileys.auth.js";
 import { normalizePrivacySettings } from "./privacy.js";
 import { getWaVersion } from "./baileys.version.js";
 import { db } from "../../db/client.js";
-import { messages as messagesTable } from "../../db/schema.js";
+import {
+  messages as messagesTable,
+  statusAudiences as statusAudiencesTable,
+} from "../../db/schema.js";
 import { eq, and, desc, sql } from "drizzle-orm";
 import {
   normalizeMessagesUpsert,
@@ -92,6 +95,7 @@ import {
 const logger = createChildLogger({ service: "baileys-adapter" });
 const mediaService = new MediaService();
 const DEFAULT_STATUS_MAX_RECIPIENTS = 256;
+const STATUS_BROADCAST_JID = "status@broadcast";
 
 function parseBooleanEnv(value: string | undefined, key: string, fallback: boolean): boolean {
   if (value === undefined || value.trim() === "") return fallback;
@@ -599,12 +603,24 @@ export class BaileysAdapter implements ChannelAdapter {
     } as AnyMessageContent);
   }
 
-  async deleteMessage(chatId: string, msgId: string): Promise<void> {
+  async deleteMessage(chatId: string, msgId: string, requestedJids?: string[]): Promise<void> {
     const sock = this.getSock();
     const jid = this.normalizeJid(chatId);
-    await sock.sendMessage(jid, {
-      delete: { remoteJid: jid, id: msgId, fromMe: true },
-    });
+    if (jid === STATUS_BROADCAST_JID) {
+      const storedJids =
+        requestedJids === undefined ? this.getStoredStatusAudience(msgId) : undefined;
+      const audience = this.resolveStatusAudience(sock, requestedJids ?? storedJids);
+      await sock.sendMessage(
+        jid,
+        { delete: { remoteJid: jid, id: msgId, fromMe: true } },
+        { statusJidList: audience.statusJidList },
+      );
+    } else {
+      await sock.sendMessage(jid, {
+        delete: { remoteJid: jid, id: msgId, fromMe: true },
+      });
+    }
+    this.updateMessageStatus(msgId, "revoked");
   }
 
   async forwardMessage(to: string, msgId: string, fromChat: string): Promise<MessageResponse> {
@@ -967,7 +983,7 @@ export class BaileysAdapter implements ChannelAdapter {
 
   async sendStatus(content: StatusContent): Promise<StatusSendResult> {
     const sock = this.getSock();
-    const statusJid = "status@broadcast";
+    const statusJid = STATUS_BROADCAST_JID;
     const audience = this.resolveStatusAudience(sock, content.statusJidList);
     const messageOptions: MiscMessageGenerationOptions = {
       statusJidList: audience.statusJidList,
@@ -978,37 +994,46 @@ export class BaileysAdapter implements ChannelAdapter {
       ...(content.type === "text" && content.font !== undefined ? { font: content.font } : {}),
     };
 
+    let messageId: string | null | undefined;
     switch (content.type) {
       case "text":
-        await sock.sendMessage(
-          statusJid,
-          {
-            text: content.text ?? "",
-          },
-          messageOptions,
-        );
+        messageId = (
+          await sock.sendMessage(
+            statusJid,
+            {
+              text: content.text ?? "",
+            },
+            messageOptions,
+          )
+        )?.key.id;
         break;
       case "image":
-        await sock.sendMessage(
-          statusJid,
-          {
-            image: this.resolveMedia(content.media ?? ""),
-            caption: content.caption,
-          },
-          messageOptions,
-        );
+        messageId = (
+          await sock.sendMessage(
+            statusJid,
+            {
+              image: this.resolveMedia(content.media ?? ""),
+              caption: content.caption,
+            },
+            messageOptions,
+          )
+        )?.key.id;
         break;
       case "video":
-        await sock.sendMessage(
-          statusJid,
-          {
-            video: this.resolveMedia(content.media ?? ""),
-            caption: content.caption,
-          },
-          messageOptions,
-        );
+        messageId = (
+          await sock.sendMessage(
+            statusJid,
+            {
+              video: this.resolveMedia(content.media ?? ""),
+              caption: content.caption,
+            },
+            messageOptions,
+          )
+        )?.key.id;
         break;
     }
+
+    if (messageId) this.persistStatusAudience(messageId, audience.statusJidList);
 
     return {
       recipientCount: audience.statusJidList.length,
@@ -1241,6 +1266,61 @@ export class BaileysAdapter implements ChannelAdapter {
         .run();
     } catch (err) {
       logger.error({ err, messageId }, "Failed to update message status");
+    }
+  }
+
+  private persistStatusAudience(messageId: string, recipientJids: string[]): void {
+    try {
+      db.insert(statusAudiencesTable)
+        .values({
+          instanceId: this.instanceId,
+          messageId,
+          recipientJids: JSON.stringify(recipientJids),
+          createdAt: Date.now(),
+        })
+        .onConflictDoUpdate({
+          target: [statusAudiencesTable.instanceId, statusAudiencesTable.messageId],
+          set: { recipientJids: JSON.stringify(recipientJids), createdAt: Date.now() },
+        })
+        .run();
+    } catch (err) {
+      logger.error(
+        { err, instanceId: this.instanceId, messageId },
+        "Failed to persist status audience",
+      );
+    }
+  }
+
+  private getStoredStatusAudience(messageId: string): string[] | undefined {
+    try {
+      const row = db
+        .select({ recipientJids: statusAudiencesTable.recipientJids })
+        .from(statusAudiencesTable)
+        .where(
+          and(
+            eq(statusAudiencesTable.instanceId, this.instanceId),
+            eq(statusAudiencesTable.messageId, messageId),
+          ),
+        )
+        .get();
+      if (!row) return undefined;
+
+      const parsed: unknown = JSON.parse(row.recipientJids);
+      if (
+        !Array.isArray(parsed) ||
+        !parsed.every(
+          (jid): jid is string => typeof jid === "string" && isValidStatusRecipient(jid),
+        )
+      ) {
+        return undefined;
+      }
+      return parsed;
+    } catch (err) {
+      logger.warn(
+        { err, instanceId: this.instanceId, messageId },
+        "Failed to read stored status audience",
+      );
+      return undefined;
     }
   }
 
