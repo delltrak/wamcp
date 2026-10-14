@@ -14,6 +14,7 @@ import {
   UnblockContactSchema,
   GetBusinessProfileSchema,
   SearchContactSchema,
+  ResyncContactsSchema,
 } from "../schemas/contact.schema.js";
 
 export function registerContactTools(
@@ -122,6 +123,39 @@ export function registerContactTools(
         return toolSuccess({ query: params.query, count: contacts.length, contacts });
       } catch (err) {
         return handleToolError("wa_search_contact", err, params.instanceId);
+      }
+    },
+  );
+
+  server.registerTool(
+    "wa_resync_contacts",
+    {
+      description:
+        "Refresh contacts for an already connected Baileys session without pairing again. Resyncs app-state collections and recovers individual contacts from locally stored chats and messages.",
+      inputSchema: ResyncContactsSchema,
+    },
+    async (params) => {
+      const log = createRequestLogger("wa_resync_contacts", params.instanceId);
+      const start = Date.now();
+      try {
+        const adapter = instanceManager.getAdapter(params.instanceId);
+        const result = await adapter.resyncContacts();
+        const failedCollections = result.sources.appState.collections.filter(
+          (collection) => !collection.success,
+        ).length;
+        log.info(
+          {
+            duration: Date.now() - start,
+            contactsBefore: result.contactsBefore,
+            contactsAfter: result.contactsAfter,
+            added: result.added,
+            failedCollections,
+          },
+          "Contact resync completed",
+        );
+        return toolSuccess(result);
+      } catch (err) {
+        return handleToolError("wa_resync_contacts", err, params.instanceId);
       }
     },
   );

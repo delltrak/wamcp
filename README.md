@@ -36,7 +36,7 @@
 
 **WA MCP** is a WhatsApp MCP server built with TypeScript that gives AI agents full access to WhatsApp through the [Model Context Protocol](https://modelcontextprotocol.io). It supports both **Baileys** (WhatsApp Web) and **Meta Cloud API** as dual-channel backends, deployable with **Docker** in a single command.
 
-Your agent connects once and auto-discovers **67 tools**, **10 resources**, and **12 real-time events** — zero configuration, zero REST wrappers, zero glue code.
+Your agent connects once and auto-discovers **68 tools**, **10 resources**, and **12 real-time events** — zero configuration, zero REST wrappers, zero glue code.
 
 ```
 Your AI Agent ←→ MCP Protocol ←→ WA MCP ←→ WhatsApp
@@ -146,7 +146,7 @@ Add to your `claude_desktop_config.json`:
 
 ## 🛠️ Tools
 
-WA MCP exposes **67 tools** across 11 domains. All tools use the `wa_` prefix.
+WA MCP exposes **68 tools** across 11 domains. All tools use the `wa_` prefix.
 
 <details>
 <summary>📋 <strong>Instance Management</strong> (8 tools)</summary>
@@ -246,10 +246,11 @@ WA MCP exposes **67 tools** across 11 domains. All tools use the `wa_` prefix.
 </details>
 
 <details>
-<summary>📇 <strong>Contacts</strong> (5 tools)</summary>
+<summary>📇 <strong>Contacts</strong> (6 tools)</summary>
 
 | Tool                      | Description                      |
 | ------------------------- | -------------------------------- |
+| `wa_resync_contacts`      | Refresh contacts on an existing Baileys session |
 | `wa_search_contact`       | Search contacts by name or phone |
 | `wa_check_number_exists`  | Check if number is on WhatsApp   |
 | `wa_block_contact`        | Block contact                    |
@@ -257,6 +258,13 @@ WA MCP exposes **67 tools** across 11 domains. All tools use the `wa_` prefix.
 | `wa_get_business_profile` | Get business profile             |
 
 </details>
+
+For an existing linked Baileys session, connect the stored instance with `wa_connect_instance`
+and call `wa_resync_contacts` with its `instanceId`. If it is already connected, call the resync
+tool directly. It refreshes app-state collections and supplements them with individual contacts
+from locally stored chats and messages. It does not require pairing again. Recovered contacts are
+stored in SQLite and remain available after server restarts. The Cloud API channel does not support
+this operation.
 
 <details>
 <summary>👤 <strong>Profile</strong> (6 tools)</summary>
@@ -455,7 +463,7 @@ See [Outgoing event webhooks](docs/event-webhooks.md) for configuration details.
 │  │  Layer 1 — MCP Transport (HTTP/stdio) │ │
 │  ├────────────────────────────────────────┤ │
 │  │  Layer 2 — MCP Core                   │ │
-│  │  67 Tools │ 10 Resources │ 12 Events  │ │
+│  │  68 Tools │ 10 Resources │ 12 Events  │ │
 │  ├────────────────────────────────────────┤ │
 │  │  Layer 3 — Services                   │ │
 │  │  Instance Manager │ Queue │ Dedup     │ │

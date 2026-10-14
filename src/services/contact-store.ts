@@ -3,9 +3,13 @@
 // Persists contacts received from Baileys and serves local lookups.
 // ============================================================
 
-import { and, eq, isNotNull, isNull, like, or } from "drizzle-orm";
+import { and, count, desc, eq, isNotNull, isNull, like, or } from "drizzle-orm";
 import type { db as applicationDb } from "../db/client.js";
-import { contacts as contactsTable } from "../db/schema.js";
+import {
+  chats as chatsTable,
+  contacts as contactsTable,
+  messages as messagesTable,
+} from "../db/schema.js";
 import type { Contact } from "../types/channel.types.js";
 
 export interface ContactSyncRecord {
@@ -23,6 +27,17 @@ export interface ContactHistorySync {
 }
 
 export type ContactPnResolver = (lid: string) => Promise<string | null>;
+
+export interface ContactRecoverySourceResult {
+  candidates: number;
+  contactsAdded: number;
+  error?: string;
+}
+
+export interface LocalContactRecoveryResult {
+  chats: ContactRecoverySourceResult;
+  messages: ContactRecoverySourceResult;
+}
 
 export class ContactStore {
   private readonly lidMappings = new Map<string, string>();
@@ -52,9 +67,7 @@ export class ContactStore {
     history: ContactHistorySync,
     resolvePn?: ContactPnResolver,
   ): Promise<void> {
-    const contacts = (history.contacts ?? [])
-      .filter((contact) => !!contact.id)
-      .map((contact) => ({ ...contact, name: contact.name ?? contact.notify }));
+    const contacts = (history.contacts ?? []).filter((contact) => !!contact.id);
     await this.upsertContacts(contacts, resolvePn);
 
     const namedChats = (history.chats ?? []).filter(
@@ -62,6 +75,80 @@ export class ContactStore {
         !!chat.id && !!chat.name && !chat.id.endsWith("@g.us") && !chat.id.endsWith("@broadcast"),
     );
     await this.upsertContacts(namedChats.map((chat) => ({ id: chat.id, name: chat.name })));
+  }
+
+  /** Recover individual contacts from chats and messages already stored locally. */
+  async recoverFromLocalData(resolvePn?: ContactPnResolver): Promise<LocalContactRecoveryResult> {
+    const result: LocalContactRecoveryResult = {
+      chats: { candidates: 0, contactsAdded: 0 },
+      messages: { candidates: 0, contactsAdded: 0 },
+    };
+
+    const chatCandidates = new Map<string, ContactSyncRecord>();
+    try {
+      const chats = this.database
+        .select({ jid: chatsTable.jid, name: chatsTable.name })
+        .from(chatsTable)
+        .where(eq(chatsTable.instanceId, this.instanceId))
+        .all();
+      for (const chat of chats) {
+        const jid = individualJid(chat.jid);
+        if (!jid) continue;
+        addCandidate(chatCandidates, jid, { name: chat.name });
+      }
+      result.chats.candidates = chatCandidates.size;
+      result.chats.contactsAdded = await this.persistRecoveredCandidates(chatCandidates, resolvePn);
+    } catch (error) {
+      result.chats.error = errorMessage(error);
+    }
+
+    const messageCandidates = new Map<string, ContactSyncRecord>();
+    try {
+      const messages = this.database
+        .select({
+          chatId: messagesTable.chatId,
+          senderId: messagesTable.senderId,
+          isFromMe: messagesTable.isFromMe,
+          pushName: messagesTable.pushName,
+        })
+        .from(messagesTable)
+        .where(eq(messagesTable.instanceId, this.instanceId))
+        .orderBy(desc(messagesTable.timestamp))
+        .all();
+      for (const message of messages) {
+        const chatJid = individualJid(message.chatId);
+        if (chatJid) {
+          addCandidate(messageCandidates, chatJid, {
+            notify: message.isFromMe === 0 ? message.pushName : undefined,
+          });
+        }
+
+        if (message.isFromMe === 0) {
+          const senderJid = individualJid(message.senderId);
+          if (senderJid) {
+            addCandidate(messageCandidates, senderJid, { notify: message.pushName });
+          }
+        }
+      }
+      result.messages.candidates = messageCandidates.size;
+      result.messages.contactsAdded = await this.persistRecoveredCandidates(
+        messageCandidates,
+        resolvePn,
+      );
+    } catch (error) {
+      result.messages.error = errorMessage(error);
+    }
+
+    return result;
+  }
+
+  getContactCount(): number {
+    const row = this.database
+      .select({ count: count() })
+      .from(contactsTable)
+      .where(eq(contactsTable.instanceId, this.instanceId))
+      .get();
+    return row?.count ?? 0;
   }
 
   /** Apply a LID-to-phone mapping to contacts already persisted for this instance. */
@@ -150,9 +237,14 @@ export class ContactStore {
       .from(contactsTable)
       .where(and(eq(contactsTable.instanceId, this.instanceId), eq(contactsTable.jid, jid)))
       .get();
-    const hasPhonebookName = !!existing?.name && existing.name !== existing.notifyName;
-    const name = hasPhonebookName ? existing.name : (contact.name ?? existing?.name ?? null);
-    const notifyName = contact.notify ?? existing?.notifyName ?? null;
+    const existingHasSavedName =
+      !!existing?.name &&
+      (existing.nameSource === "saved" ||
+        (existing.nameSource !== "notify" && existing.name !== existing.notifyName));
+    const incomingName = contact.name?.trim() || null;
+    const name = existingHasSavedName ? existing.name : incomingName;
+    const nameSource = name ? "saved" : null;
+    const notifyName = contact.notify?.trim() || existing?.notifyName || null;
     const phoneSource = contact.phoneNumber ?? (jid.endsWith("@lid") ? null : jid);
     const phone = phoneSource ? phoneFromJid(phoneSource) : (existing?.phone ?? null);
     const lid = contact.lid ?? (isLid ? id : existing?.lid) ?? null;
@@ -164,6 +256,7 @@ export class ContactStore {
         instanceId: this.instanceId,
         jid,
         name,
+        nameSource,
         notifyName,
         phone,
         lid,
@@ -176,6 +269,7 @@ export class ContactStore {
         target: [contactsTable.instanceId, contactsTable.jid],
         set: {
           name,
+          nameSource,
           notifyName,
           phone,
           lid,
@@ -187,6 +281,44 @@ export class ContactStore {
       })
       .run();
   }
+
+  private async persistRecoveredCandidates(
+    candidates: Map<string, ContactSyncRecord>,
+    resolvePn?: ContactPnResolver,
+  ): Promise<number> {
+    const before = this.getContactCount();
+    await this.upsertContacts([...candidates.values()], resolvePn);
+    return Math.max(0, this.getContactCount() - before);
+  }
+}
+
+function individualJid(value?: string | null): string | null {
+  const jid = value?.trim();
+  if (!jid) return null;
+
+  const separator = jid.indexOf("@");
+  if (separator <= 0 || separator === jid.length - 1) return null;
+  const local = jid.slice(0, separator).replace(/:\d+$/, "");
+  const server = jid.slice(separator + 1).toLowerCase();
+  if (!local || !["s.whatsapp.net", "lid", "c.us"].includes(server)) return null;
+  return `${local}@${server}`;
+}
+
+function addCandidate(
+  candidates: Map<string, ContactSyncRecord>,
+  jid: string,
+  values: Pick<ContactSyncRecord, "name" | "notify">,
+): void {
+  const existing = candidates.get(jid) ?? { id: jid };
+  const name = values.name?.trim();
+  const notify = values.notify?.trim();
+  if (name && !existing.name) existing.name = name;
+  if (notify && !existing.notify) existing.notify = notify;
+  candidates.set(jid, existing);
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
 
 function phoneFromJid(jid: string): string {

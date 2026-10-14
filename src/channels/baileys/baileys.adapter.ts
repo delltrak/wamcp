@@ -13,9 +13,11 @@ import makeWASocket, {
   generateWAMessageFromContent,
   type WASocket,
   type WAMessage,
+  type BaileysEventMap,
   type AnyMessageContent,
   type MiscMessageGenerationOptions,
   jidNormalizedUser,
+  ALL_WA_PATCH_NAMES,
 } from "@whiskeysockets/baileys";
 import { Boom } from "@hapi/boom";
 import type { ChannelAdapter, ChannelEventHandler } from "../channel.interface.js";
@@ -30,6 +32,7 @@ import type {
   PrivacySettings,
   PrivacyUpdate,
   Contact,
+  ContactResyncResult,
   Chat,
   Message,
   GroupMetadata,
@@ -49,6 +52,7 @@ import { normalizePrivacySettings } from "./privacy.js";
 import { getWaVersion } from "./baileys.version.js";
 import { db } from "../../db/client.js";
 import {
+  chats as chatsTable,
   messages as messagesTable,
   statusAudiences as statusAudiencesTable,
 } from "../../db/schema.js";
@@ -144,6 +148,7 @@ export class BaileysAdapter implements ChannelAdapter {
   private readonly markOnlineOnConnect: boolean;
   private readonly maxStatusRecipients: number;
   private readonly listeners = new Map<ChannelEvent, Set<ChannelEventHandler<ChannelEvent>>>();
+  private pendingSocketEventProcessing: Promise<void> = Promise.resolve();
 
   constructor(
     private readonly instanceId: string,
@@ -1079,6 +1084,62 @@ export class BaileysAdapter implements ChannelAdapter {
     return this.contactStore.getContacts(search);
   }
 
+  async resyncContacts(): Promise<ContactResyncResult> {
+    const sock = this.getSock();
+    const contactsBefore = this.contactStore.getContactCount();
+    const collections: ContactResyncResult["sources"]["appState"]["collections"] = [];
+
+    for (const collection of ALL_WA_PATCH_NAMES) {
+      const before = this.contactStore.getContactCount();
+      let errorMessage: string | undefined;
+      try {
+        // false preserves incremental existing-session behavior and avoids initial-sync handling.
+        await sock.resyncAppState([collection], false);
+      } catch (error) {
+        errorMessage = error instanceof Error ? error.message : String(error);
+        logger.warn(
+          { instanceId: this.instanceId, collection, error },
+          "Contact app-state resync failed",
+        );
+      }
+      await this.waitForSocketEventProcessing(sock);
+      collections.push({
+        collection,
+        success: errorMessage === undefined,
+        contactsAdded: Math.max(0, this.contactStore.getContactCount() - before),
+        ...(errorMessage ? { error: errorMessage } : {}),
+      });
+    }
+
+    const resolveLidToPn: ContactPnResolver = async (lid) => {
+      try {
+        return await sock.signalRepository.lidMapping.getPNForLID(lid);
+      } catch (error) {
+        logger.debug({ instanceId: this.instanceId, lid, error }, "Failed to resolve contact LID");
+        return null;
+      }
+    };
+    const localStore = await this.contactStore.recoverFromLocalData(resolveLidToPn);
+    const contactsAfter = this.contactStore.getContactCount();
+
+    return {
+      contactsBefore,
+      contactsAfter,
+      added: Math.max(0, contactsAfter - contactsBefore),
+      sources: {
+        appState: { collections },
+        localStore,
+      },
+    };
+  }
+
+  private async waitForSocketEventProcessing(sock: WASocket): Promise<void> {
+    while (sock.ev.isBuffering()) {
+      await new Promise<void>((resolve) => setTimeout(resolve, 10));
+    }
+    await this.pendingSocketEventProcessing;
+  }
+
   async getChats(): Promise<Chat[]> {
     return [];
   }
@@ -1235,6 +1296,7 @@ export class BaileysAdapter implements ChannelAdapter {
           isForwarded: 0,
           status: message.isFromMe ? "sent" : "received",
           timestamp: message.timestamp,
+          pushName: source?.pushName ?? null,
           rawData,
         })
         .onConflictDoUpdate({
@@ -1243,6 +1305,7 @@ export class BaileysAdapter implements ChannelAdapter {
             type: message.type === "text" ? sql`${messagesTable.type}` : message.type,
             content: message.content,
             status: message.isFromMe ? "sent" : "received",
+            pushName: sql`coalesce(excluded.push_name, ${messagesTable.pushName})`,
             mediaUrl: sql`coalesce(excluded.media_url, ${messagesTable.mediaUrl})`,
             mediaMimetype: sql`coalesce(excluded.media_mimetype, ${messagesTable.mediaMimetype})`,
             rawData: sql`coalesce(excluded.raw_data, ${messagesTable.rawData})`,
@@ -1255,6 +1318,33 @@ export class BaileysAdapter implements ChannelAdapter {
       );
     } catch (err) {
       logger.error({ err, messageId: event.message.id }, "Failed to persist message");
+    }
+  }
+
+  private persistChats(chats: Array<{ id?: string | null; name?: string | null }>): void {
+    for (const chat of chats) {
+      const jid = chat.id?.trim();
+      if (!jid) continue;
+
+      const name = chat.name?.trim() || null;
+      const isGroup = jid.endsWith("@g.us") ? 1 : 0;
+      db.insert(chatsTable)
+        .values({
+          instanceId: this.instanceId,
+          jid,
+          name,
+          isGroup,
+          updatedAt: Date.now(),
+        })
+        .onConflictDoUpdate({
+          target: [chatsTable.instanceId, chatsTable.jid],
+          set: {
+            name: sql`coalesce(excluded.name, ${chatsTable.name})`,
+            isGroup,
+            updatedAt: Date.now(),
+          },
+        })
+        .run();
     }
   }
 
@@ -1431,7 +1521,7 @@ export class BaileysAdapter implements ChannelAdapter {
     };
 
     // Use ev.process() to receive ALL buffered events after sync flush
-    sock.ev.process(async (events) => {
+    const processEvents = async (events: Partial<BaileysEventMap>) => {
       const eventKeys = Object.keys(events);
       if (eventKeys.length > 0) {
         logger.info({ instanceId: this.instanceId, events: eventKeys }, "ev.process fired");
@@ -1449,6 +1539,7 @@ export class BaileysAdapter implements ChannelAdapter {
 
       // --- Chats: extract phonebook names from chat metadata ---
       if (events["chats.upsert"]) {
+        this.persistChats(events["chats.upsert"]);
         const namedChats = events["chats.upsert"].filter(
           (ch): ch is typeof ch & { id: string; name: string } =>
             !!ch.id && !!ch.name && !ch.id.endsWith("@g.us") && !ch.id.endsWith("@broadcast"),
@@ -1458,6 +1549,20 @@ export class BaileysAdapter implements ChannelAdapter {
           logger.info(
             { instanceId: this.instanceId, count: namedChats.length },
             "Contacts persisted from chat names (chats.upsert)",
+          );
+        }
+      }
+
+      if (events["chats.update"]) {
+        this.persistChats(events["chats.update"]);
+        const namedChats = events["chats.update"].filter(
+          (ch): ch is typeof ch & { id: string; name: string } => !!ch.id && !!ch.name,
+        );
+        if (namedChats.length > 0) {
+          await persistContacts(namedChats.map((ch) => ({ id: ch.id, name: ch.name })));
+          logger.info(
+            { instanceId: this.instanceId, count: namedChats.length },
+            "Contacts persisted from chat names (chats.update)",
           );
         }
       }
@@ -1481,6 +1586,7 @@ export class BaileysAdapter implements ChannelAdapter {
       // --- History sync: contacts arrive here during first sync ---
       if (events["messaging-history.set"]) {
         const { contacts = [], chats = [] } = events["messaging-history.set"];
+        this.persistChats(chats);
         const contactCount = contacts.filter((contact) => contact.id).length;
         const chatContactCount = chats.filter(
           (chat) =>
@@ -1531,7 +1637,7 @@ export class BaileysAdapter implements ChannelAdapter {
           }
 
           if (msg.pushName && msg.key.remoteJid && !msg.key.fromMe) {
-            await persistContacts([{ id: msg.key.remoteJid, name: msg.pushName }]);
+            await persistContacts([{ id: msg.key.remoteJid, notify: msg.pushName }]);
           }
 
           // Persist ALL messages (notify + append) to DB
@@ -1617,6 +1723,21 @@ export class BaileysAdapter implements ChannelAdapter {
         const normalized = normalizeCallEvent(this.instanceId, events["call"]);
         for (const event of normalized) this.emit("call.received", event);
       }
+    };
+
+    sock.ev.process((events) => {
+      const processing = processEvents(events);
+      const tracked = processing.catch((error: unknown) => {
+        logger.error(
+          { instanceId: this.instanceId, error },
+          "Buffered Baileys event processing failed",
+        );
+      });
+      this.pendingSocketEventProcessing = Promise.all([
+        this.pendingSocketEventProcessing,
+        tracked,
+      ]).then(() => undefined);
+      return processing;
     });
   }
 

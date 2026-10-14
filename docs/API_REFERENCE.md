@@ -12,7 +12,7 @@
    - [Messaging](#22-messaging-17-tools)
    - [Chat Management](#23-chat-management-6-tools)
    - [Group Management](#24-group-management-14-tools)
-   - [Contact Management](#25-contact-management-5-tools)
+   - [Contact Management](#25-contact-management-6-tools)
    - [Profile Management](#26-profile-management-6-tools)
    - [Status / Stories](#27-status--stories-3-tools)
    - [Newsletter / Channels](#28-newsletter--channels-3-tools)
@@ -69,7 +69,7 @@ Tools marked **Baileys only** are not available on Cloud API instances.
 
 ## 2. Tools Reference
 
-WA MCP exposes **60 tools** grouped by domain. All tools return MCP-standard responses.
+WA MCP exposes **68 tools** grouped by domain. All tools return MCP-standard responses.
 
 ### Success Response Format
 
@@ -1199,9 +1199,73 @@ Approve or reject a pending join request for a WhatsApp group.
 
 ---
 
-### 2.5 Contact Management (5 tools)
+### 2.5 Contact Management (6 tools)
 
-Tools for searching contacts, checking phone numbers, blocking/unblocking contacts, and fetching business profiles.
+Tools for refreshing and searching contacts, checking phone numbers, blocking/unblocking contacts, and fetching business profiles.
+
+#### `wa_resync_contacts`
+
+Refresh contacts for an already linked Baileys session without pairing again. The tool resyncs each
+Baileys app-state collection separately, then supplements the contact cache from locally stored
+individual chats and messages. Collection failures are reported individually while the remaining
+collections and local recovery continue. Recovered contacts persist in SQLite across server restarts.
+
+Use this on a connected Baileys instance. Call `wa_connect_instance` first to reconnect an existing
+stored session, or invoke this tool directly if that session is already connected. The Cloud API
+channel returns an unsupported-operation error.
+
+| Parameter    | Type   | Required | Description              |
+| ------------ | ------ | -------- | ------------------------ |
+| `instanceId` | string | Yes      | The existing instance ID |
+
+**Channel support:** Baileys only
+
+**Response:**
+
+```json
+{
+  "contactsBefore": 25,
+  "contactsAfter": 41,
+  "added": 16,
+  "sources": {
+    "appState": {
+      "collections": [
+        {
+          "collection": "critical_block",
+          "success": true,
+          "contactsAdded": 0
+        },
+        {
+          "collection": "critical_unblock_low",
+          "success": true,
+          "contactsAdded": 0
+        },
+        {
+          "collection": "regular_high",
+          "success": true,
+          "contactsAdded": 2
+        },
+        {
+          "collection": "regular_low",
+          "success": true,
+          "contactsAdded": 0
+        },
+        {
+          "collection": "regular",
+          "success": true,
+          "contactsAdded": 0
+        }
+      ]
+    },
+    "localStore": {
+      "chats": { "candidates": 8, "contactsAdded": 3 },
+      "messages": { "candidates": 12, "contactsAdded": 11 }
+    }
+  }
+}
+```
+
+Each collection result has a `success` flag; failed collections also include an `error` message.
 
 #### `wa_search_contact`
 

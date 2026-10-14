@@ -175,6 +175,26 @@ export interface Contact {
   isBlocked: boolean;
 }
 
+export interface ContactResyncResult {
+  contactsBefore: number;
+  contactsAfter: number;
+  added: number;
+  sources: {
+    appState: {
+      collections: Array<{
+        collection: string;
+        success: boolean;
+        contactsAdded: number;
+        error?: string;
+      }>;
+    };
+    localStore: {
+      chats: { candidates: number; contactsAdded: number; error?: string };
+      messages: { candidates: number; contactsAdded: number; error?: string };
+    };
+  };
+}
+
 export interface Chat {
   jid: string;
   name: string | null;

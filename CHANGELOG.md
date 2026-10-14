@@ -16,6 +16,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Added `wa_resync_contacts` to refresh contacts on an existing Baileys session without pairing
+  again. It resyncs app-state collections individually, recovers contacts from local chats and
+  messages, and keeps recovered contacts in SQLite across restarts.
 - Optional `WA_STATUS_MAX_RECIPIENTS` cap for Baileys status audiences; it defaults to 256.
 - Added Baileys privacy read/update tools for last seen, online, profile photo, About/profile text
   visibility, read receipts, group adds, calls, and default disappearing duration.

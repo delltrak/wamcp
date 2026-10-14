@@ -41,6 +41,7 @@ const CHANNEL_ADAPTER_METHODS: (keyof ChannelAdapter)[] = [
   "unblockContact",
   "getBlocklist",
   "getBusinessProfile",
+  "resyncContacts",
   // Profile
   "updateProfilePicture",
   "removeProfilePicture",
@@ -86,4 +87,12 @@ describe("BaileysAdapter implements ChannelAdapter", () => {
       expect(typeof adapter[method]).toBe("function");
     });
   }
+});
+
+describe("Cloud API contact resync", () => {
+  it("returns a clear unsupported-operation error", async () => {
+    await expect(new CloudApiAdapter("test_instance").resyncContacts()).rejects.toThrow(
+      "Contact resync is not supported on Cloud API",
+    );
+  });
 });

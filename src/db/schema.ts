@@ -93,6 +93,7 @@ export const messages = sqliteTable(
       .notNull()
       .default("received"),
     timestamp: integer("timestamp").notNull(),
+    pushName: text("push_name"),
     rawData: text("raw_data"),
   },
   (table) => [
@@ -147,6 +148,7 @@ export const contacts = sqliteTable(
       .references(() => instances.id, { onDelete: "cascade" }),
     jid: text("jid").notNull(),
     name: text("name"),
+    nameSource: text("name_source"),
     notifyName: text("notify_name"),
     phone: text("phone"),
     lid: text("lid"),

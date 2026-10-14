@@ -552,6 +552,10 @@ export class CloudApiAdapter implements ChannelAdapter {
     }
   }
 
+  async resyncContacts(): Promise<never> {
+    throw new Error("Contact resync is not supported on Cloud API");
+  }
+
   // ---- Profile ----
 
   async updateProfilePicture(_image: Buffer): Promise<void> {
