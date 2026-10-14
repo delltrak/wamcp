@@ -169,7 +169,11 @@ transcription still pending at the maximum wait, message cap, or shutdown flush
 is included using its original message payload so it cannot hold the chat open.
 The legacy `WA_EVENT_WEBHOOK_DEBOUNCE_MS` and destination `debounceMs` settings
 retain their destination-wide event batching behavior when the new per-chat
-setting is disabled.
+setting is disabled. When `WA_WEBHOOK_DEBOUNCE_MS` is greater than 0, the
+destination-wide debounce from `WA_EVENT_WEBHOOK_DEBOUNCE_MS` or destination
+`debounceMs` is ignored for all events, including immediate events and per-chat
+batches. Registration logs one warning for each destination with positive
+`debounceMs`.
 
 Example routine instructions:
 

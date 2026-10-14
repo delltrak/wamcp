@@ -436,7 +436,10 @@ messages separately by instance and chat. Each new message restarts the window;
 `WA_WEBHOOK_DEBOUNCE_MAX_MS` caps the total wait from the first message. The
 payload keeps the last message's fields at the top level and adds all messages
 in arrival order. Non-message events are delivered immediately. Batches flush
-at 25 messages and on shutdown.
+at 25 messages and on shutdown. When `WA_WEBHOOK_DEBOUNCE_MS` is greater than 0,
+destination-wide debounce (`WA_EVENT_WEBHOOK_DEBOUNCE_MS` or a destination's
+`debounceMs`) is ignored for all events; registration logs a warning for each
+destination with a positive `debounceMs`.
 
 Treat the routine key as a secret. Keep it in `.env`, never commit it, and
 rotate it in Grok Bot if it is exposed. Message content leaves this machine and

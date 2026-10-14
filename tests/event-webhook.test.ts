@@ -502,8 +502,91 @@ describe("outgoing event webhook events", () => {
     );
   });
 
+  it("warns when per-chat batching overrides destination debounce", async () => {
+    vi.useFakeTimers();
+    const warning = vi.spyOn(logger, "warn").mockImplementation(() => undefined);
+    let eventHandler: EventHandler | undefined;
+    const instanceManager = {
+      onAnyEvent: (handler: EventHandler) => {
+        eventHandler = handler;
+        return () => {
+          eventHandler = undefined;
+        };
+      },
+    } as unknown as InstanceManager;
+    const events = ["message.received", "message.edited"] as const;
+    const config = loadEventWebhookConfig({
+      WA_WEBHOOK_DEBOUNCE_MS: "100",
+      WA_WEBHOOK_DEBOUNCE_MAX_MS: "1000",
+      WA_EVENT_WEBHOOKS: JSON.stringify([
+        {
+          id: "owner",
+          url: "https://hooks.example.test/owner",
+          events,
+          debounceMs: 1_000,
+        },
+        {
+          id: "audit",
+          url: "https://hooks.example.test/audit",
+          events,
+          debounceMs: 2_000,
+        },
+        {
+          id: "immediate",
+          url: "https://hooks.example.test/immediate",
+          events,
+        },
+      ]),
+    });
+    const enqueue = vi.fn<(_: EventWebhookJob) => Promise<unknown>>(() => Promise.resolve());
+    const unsubscribe = registerEventWebhookHandler(instanceManager, config, enqueue);
+
+    expect(warning).toHaveBeenCalledTimes(2);
+    expect(warning).toHaveBeenCalledWith(
+      { destinationId: "owner", debounceMs: 1_000 },
+      "Destination debounce is ignored while per-chat batching is enabled",
+    );
+    expect(warning).toHaveBeenCalledWith(
+      { destinationId: "audit", debounceMs: 2_000 },
+      "Destination debounce is ignored while per-chat batching is enabled",
+    );
+
+    eventHandler?.("message.edited", "inst_1234abcd", {
+      instanceId: "inst_1234abcd",
+      chatId: "5511888888888@s.whatsapp.net",
+      messageId: "wamid.edited",
+      newContent: "edited",
+      editedAt: 1_700_000_001,
+    });
+    expect(enqueue).toHaveBeenCalledTimes(3);
+    expect(enqueue.mock.calls.map(([job]) => job.destinationId)).toEqual([
+      "owner",
+      "audit",
+      "immediate",
+    ]);
+
+    eventHandler?.("message.received", "inst_1234abcd", incomingMessage());
+    expect(enqueue).toHaveBeenCalledTimes(3);
+    await vi.advanceTimersByTimeAsync(100);
+    expect(enqueue).toHaveBeenCalledTimes(6);
+    expect(enqueue.mock.calls.slice(3).map(([job]) => job.destinationId)).toEqual([
+      "owner",
+      "audit",
+      "immediate",
+    ]);
+    expect(enqueue.mock.calls.slice(3).map(([job]) => job.payload)).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ messages: [expect.objectContaining({ text: "hello" })] }),
+      ]),
+    );
+
+    unsubscribe();
+    await unsubscribe.flush();
+  });
+
   it("batches without dropping messages and flushes on the configured window", async () => {
     vi.useFakeTimers();
+    const warning = vi.spyOn(logger, "warn").mockImplementation(() => undefined);
     let eventHandler: EventHandler | undefined;
     const instanceManager = {
       onAnyEvent: (handler: EventHandler) => {
@@ -514,6 +597,7 @@ describe("outgoing event webhook events", () => {
       },
     } as unknown as InstanceManager;
     const config = loadEventWebhookConfig({
+      WA_WEBHOOK_DEBOUNCE_MS: "0",
       WA_EVENT_WEBHOOKS: JSON.stringify([
         {
           id: "grok",
@@ -535,6 +619,7 @@ describe("outgoing event webhook events", () => {
 
     await vi.advanceTimersByTimeAsync(1_000);
     await vi.waitFor(() => expect(enqueue).toHaveBeenCalledOnce());
+    expect(warning).not.toHaveBeenCalled();
     expect(enqueue.mock.calls[0]?.[0]).toMatchObject({
       destinationId: "grok",
       payload: {

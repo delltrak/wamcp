@@ -397,6 +397,17 @@ export function registerEventWebhookHandler(
   onEnqueueFailure: () => void = () =>
     logger.warn("Unable to enqueue outgoing event webhook; message processing continues"),
 ): EventWebhookUnsubscribe {
+  if (config.messageDebounceMs > 0) {
+    for (const destination of config.destinations) {
+      if (destination.debounceMs > 0) {
+        logger.warn(
+          { destinationId: destination.id, debounceMs: destination.debounceMs },
+          "Destination debounce is ignored while per-chat batching is enabled",
+        );
+      }
+    }
+  }
+
   const buffers = new Map<string, BufferedDestinationEvents>();
   const messageBuffers = new Map<string, BufferedMessageBatch>();
   const pendingEnqueues = new Set<Promise<void>>();
