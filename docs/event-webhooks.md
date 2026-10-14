@@ -31,7 +31,9 @@ HTTP Host header.
 | `WA_EVENT_WEBHOOK_AUTH_HEADER` | unset | Single-destination authentication header. Grok Bot defaults to `X-Grok-Bot-Key` when the preset and auth value are set. |
 | `WA_EVENT_WEBHOOK_AUTH_VALUE` | unset | Single-destination authentication value. |
 | `WA_EVENT_WEBHOOK_SECRET` | unset | HMAC-SHA256 signing key; adds timestamp and signature headers. |
-| `WA_EVENT_WEBHOOK_DEBOUNCE_MS` | `0` | Single-destination batch window, from 0 to 30000 ms. |
+| `WA_WEBHOOK_DEBOUNCE_MS` | `0` | Per-chat window for `message.received`; each new message restarts it. A value of 0 disables this batching. |
+| `WA_WEBHOOK_DEBOUNCE_MAX_MS` | `30000` | Hard maximum wait from the first message in a batch, from 0 to 300000 ms. Values below the debounce window are clamped to that window. Invalid values use defaults and produce a warning. |
+| `WA_EVENT_WEBHOOK_DEBOUNCE_MS` | `0` | Legacy destination-wide event batch window, from 0 to 30000 ms. |
 | `WA_EVENT_WEBHOOK_ALLOW_HTTP` | `false` | Allow the `http` scheme; private/local hosts remain blocked. |
 | `WA_EVENT_WEBHOOK_QUEUE_PREFIX` | Host/deployment hash | BullMQ namespace; use the same value for replicas and a unique value per deployment. |
 | `WA_EVENT_WEBHOOK_TIMEOUT_MS` | `10000` | Per-request timeout, from 1 to 300000 ms. |
@@ -118,13 +120,60 @@ For media, `type` identifies the kind, `text` can contain its caption, and a
 request body.
 
 To limit a routine, add a `chatAllowlist` or `senderAllowlist` array to its
-destination. To batch a burst, set `debounceMs` on that destination or
-`WA_EVENT_WEBHOOK_DEBOUNCE_MS` for the single destination. The window starts
-with the first message and is capped at 30 seconds; at most 25 messages are
-included in one POST. A multi-message Grok Bot batch has the shape
-`{ "messages": [ ... ] }`. Buffered messages are kept individually, and the
-batch flushes when its window expires, reaches the message cap, or the service
-shuts down.
+destination. `WA_WEBHOOK_DEBOUNCE_MS` batches only incoming `message.received`
+events by instance and chat, across destinations. The window restarts for each
+new message, and `WA_WEBHOOK_DEBOUNCE_MAX_MS` caps the total wait from the first
+message. Non-message events continue immediately. Batches contain up to 25
+messages; when full they flush early. Shutdown flushes pending batches on a
+best-effort basis.
+
+With per-chat batching enabled, standard and preset payloads keep the
+last message's fields at the top level and add a `messages` array in arrival
+order. A one-message batch still includes the array. Standard payload example:
+
+```json
+{
+  "event": "message.received",
+  "instanceId": "inst_1234abcd",
+  "chat": "15551234567@s.whatsapp.net",
+  "sender": "15551234567@s.whatsapp.net",
+  "type": "text",
+  "text": "second message",
+  "timestamp": 1700000001,
+  "messages": [
+    {
+      "event": "message.received",
+      "instanceId": "inst_1234abcd",
+      "chat": "15551234567@s.whatsapp.net",
+      "sender": "15551234567@s.whatsapp.net",
+      "type": "text",
+      "text": "first message",
+      "timestamp": 1700000000
+    },
+    {
+      "event": "message.received",
+      "instanceId": "inst_1234abcd",
+      "chat": "15551234567@s.whatsapp.net",
+      "sender": "15551234567@s.whatsapp.net",
+      "type": "text",
+      "text": "second message",
+      "timestamp": 1700000001
+    }
+  ]
+}
+```
+
+When transcription is configured, audio messages enter the batch after their
+transcription completes and include an additive `transcription` field. A
+transcription still pending at the maximum wait, message cap, or shutdown flush
+is included using its original message payload so it cannot hold the chat open.
+The legacy `WA_EVENT_WEBHOOK_DEBOUNCE_MS` and destination `debounceMs` settings
+retain their destination-wide event batching behavior when the new per-chat
+setting is disabled. When `WA_WEBHOOK_DEBOUNCE_MS` is greater than 0, the
+destination-wide debounce from `WA_EVENT_WEBHOOK_DEBOUNCE_MS` or destination
+`debounceMs` is ignored for all events, including immediate events and per-chat
+batches. Registration logs one warning for each destination with positive
+`debounceMs`.
 
 Example routine instructions:
 

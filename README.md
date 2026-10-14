@@ -431,10 +431,15 @@ media bytes are not sent.
 
 You can add `chatAllowlist` and/or `senderAllowlist` to a multi-destination
 entry to limit which chats or people wake that routine. If both are set, a
-message must match both lists. Set `WA_EVENT_WEBHOOK_DEBOUNCE_MS` or a
-destination's `debounceMs` to batch a short burst into one request. A batch is
-sent as `{ "messages": [...] }`; windows are capped at 30 seconds and 25
-messages per request.
+message must match both lists. Set `WA_WEBHOOK_DEBOUNCE_MS` to batch incoming
+messages separately by instance and chat. Each new message restarts the window;
+`WA_WEBHOOK_DEBOUNCE_MAX_MS` caps the total wait from the first message. The
+payload keeps the last message's fields at the top level and adds all messages
+in arrival order. Non-message events are delivered immediately. Batches flush
+at 25 messages and on shutdown. When `WA_WEBHOOK_DEBOUNCE_MS` is greater than 0,
+destination-wide debounce (`WA_EVENT_WEBHOOK_DEBOUNCE_MS` or a destination's
+`debounceMs`) is ignored for all events; registration logs a warning for each
+destination with a positive `debounceMs`.
 
 Treat the routine key as a secret. Keep it in `.env`, never commit it, and
 rotate it in Grok Bot if it is exposed. Message content leaves this machine and
@@ -556,7 +561,9 @@ Copy `.env.example` to `.env` and configure:
 | `WA_EVENT_WEBHOOK_HEADERS` | — | Additional request headers as a JSON object of string values |
 | `WA_EVENT_WEBHOOK_AUTH_HEADER` / `WA_EVENT_WEBHOOK_AUTH_VALUE` | — | Authentication header name and value; Grok Bot defaults the name to `X-Grok-Bot-Key` when its preset is enabled |
 | `WA_EVENT_WEBHOOK_SECRET` | — | HMAC-SHA256 signing secret; adds timestamp and signature headers |
-| `WA_EVENT_WEBHOOK_DEBOUNCE_MS` | `0` | Single-destination batch window, from 0 to 30000 ms |
+| `WA_WEBHOOK_DEBOUNCE_MS` | `0` | Per-chat incoming message batch window; new messages restart it |
+| `WA_WEBHOOK_DEBOUNCE_MAX_MS` | `30000` | Maximum wait from the first message, from 0 to 300000 ms |
+| `WA_EVENT_WEBHOOK_DEBOUNCE_MS` | `0` | Legacy destination-wide event batch window, from 0 to 30000 ms |
 | `WA_EVENT_WEBHOOK_ALLOW_HTTP` | `false` | Permit the HTTP scheme; public-host validation still applies |
 | `WA_EVENT_WEBHOOK_QUEUE_PREFIX` | Host/deployment hash | BullMQ namespace; share across replicas and use a different value per deployment |
 | `WA_EVENT_WEBHOOK_TIMEOUT_MS` | `10000` | Per-request timeout in milliseconds |

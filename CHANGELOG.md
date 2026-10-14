@@ -16,6 +16,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Optional per-chat batching for incoming event webhook messages with a sliding debounce window,
+  maximum batch age, message-count cap, transcription-aware ordering, and shutdown flushing.
 - Added Baileys group listing and detailed participant roles, plus admin-only group picture updates
   and removal. Picture inputs accept HTTPS URLs or base64 images and are converted to square JPEGs.
 - Added `wa_send_sticker`, `wa_send_gif`, and `wa_download_media`. Sticker conversion uses ffmpeg

@@ -2,6 +2,7 @@ import { createHmac } from "node:crypto";
 import { UnrecoverableError } from "bullmq";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { InstanceManager } from "../src/services/instance-manager.js";
+import { TranscriptionService } from "../src/services/transcription.js";
 import {
   calculateEventWebhookBackoff,
   createEventWebhookHeaders,
@@ -21,6 +22,7 @@ import {
 } from "../src/services/event-webhook.js";
 import { loadEventWebhookConfig } from "../src/services/event-webhook-config.js";
 import type { ChannelEventPayload } from "../src/types/channel.types.js";
+import { logger } from "../src/utils/logger.js";
 import { createShutdownHandler, installShutdownHandlers } from "../src/utils/shutdown.js";
 import { isNonPublicIp } from "../src/utils/validation.js";
 
@@ -52,6 +54,7 @@ function configuredWebhook(overrides: Record<string, string | undefined> = {}) {
 
 afterEach(() => {
   vi.useRealTimers();
+  vi.unstubAllEnvs();
   vi.restoreAllMocks();
 });
 
@@ -65,6 +68,27 @@ describe("outgoing event webhook config", () => {
     expect(config.timeoutMs).toBe(10_000);
     expect(config.retryAttempts).toBe(5);
     expect(config.retryDelayMs).toBe(1_000);
+    expect(config.messageDebounceMs).toBe(0);
+    expect(config.messageDebounceMaxMs).toBe(30_000);
+  });
+
+  it("clamps the maximum wait to the debounce window and warns on invalid values", () => {
+    const warning = vi.spyOn(logger, "warn").mockImplementation(() => undefined);
+    const clamped = loadEventWebhookConfig({
+      WA_WEBHOOK_DEBOUNCE_MS: "2000",
+      WA_WEBHOOK_DEBOUNCE_MAX_MS: "500",
+    });
+    expect(clamped.messageDebounceMs).toBe(2_000);
+    expect(clamped.messageDebounceMaxMs).toBe(2_000);
+    expect(warning).toHaveBeenCalledOnce();
+
+    const invalid = loadEventWebhookConfig({
+      WA_WEBHOOK_DEBOUNCE_MS: "not-a-number",
+      WA_WEBHOOK_DEBOUNCE_MAX_MS: "-1",
+    });
+    expect(invalid.messageDebounceMs).toBe(0);
+    expect(invalid.messageDebounceMaxMs).toBe(30_000);
+    expect(warning).toHaveBeenCalledTimes(3);
   });
 
   it.each([
@@ -478,8 +502,91 @@ describe("outgoing event webhook events", () => {
     );
   });
 
+  it("warns when per-chat batching overrides destination debounce", async () => {
+    vi.useFakeTimers();
+    const warning = vi.spyOn(logger, "warn").mockImplementation(() => undefined);
+    let eventHandler: EventHandler | undefined;
+    const instanceManager = {
+      onAnyEvent: (handler: EventHandler) => {
+        eventHandler = handler;
+        return () => {
+          eventHandler = undefined;
+        };
+      },
+    } as unknown as InstanceManager;
+    const events = ["message.received", "message.edited"] as const;
+    const config = loadEventWebhookConfig({
+      WA_WEBHOOK_DEBOUNCE_MS: "100",
+      WA_WEBHOOK_DEBOUNCE_MAX_MS: "1000",
+      WA_EVENT_WEBHOOKS: JSON.stringify([
+        {
+          id: "owner",
+          url: "https://hooks.example.test/owner",
+          events,
+          debounceMs: 1_000,
+        },
+        {
+          id: "audit",
+          url: "https://hooks.example.test/audit",
+          events,
+          debounceMs: 2_000,
+        },
+        {
+          id: "immediate",
+          url: "https://hooks.example.test/immediate",
+          events,
+        },
+      ]),
+    });
+    const enqueue = vi.fn<(_: EventWebhookJob) => Promise<unknown>>(() => Promise.resolve());
+    const unsubscribe = registerEventWebhookHandler(instanceManager, config, enqueue);
+
+    expect(warning).toHaveBeenCalledTimes(2);
+    expect(warning).toHaveBeenCalledWith(
+      { destinationId: "owner", debounceMs: 1_000 },
+      "Destination debounce is ignored while per-chat batching is enabled",
+    );
+    expect(warning).toHaveBeenCalledWith(
+      { destinationId: "audit", debounceMs: 2_000 },
+      "Destination debounce is ignored while per-chat batching is enabled",
+    );
+
+    eventHandler?.("message.edited", "inst_1234abcd", {
+      instanceId: "inst_1234abcd",
+      chatId: "5511888888888@s.whatsapp.net",
+      messageId: "wamid.edited",
+      newContent: "edited",
+      editedAt: 1_700_000_001,
+    });
+    expect(enqueue).toHaveBeenCalledTimes(3);
+    expect(enqueue.mock.calls.map(([job]) => job.destinationId)).toEqual([
+      "owner",
+      "audit",
+      "immediate",
+    ]);
+
+    eventHandler?.("message.received", "inst_1234abcd", incomingMessage());
+    expect(enqueue).toHaveBeenCalledTimes(3);
+    await vi.advanceTimersByTimeAsync(100);
+    expect(enqueue).toHaveBeenCalledTimes(6);
+    expect(enqueue.mock.calls.slice(3).map(([job]) => job.destinationId)).toEqual([
+      "owner",
+      "audit",
+      "immediate",
+    ]);
+    expect(enqueue.mock.calls.slice(3).map(([job]) => job.payload)).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ messages: [expect.objectContaining({ text: "hello" })] }),
+      ]),
+    );
+
+    unsubscribe();
+    await unsubscribe.flush();
+  });
+
   it("batches without dropping messages and flushes on the configured window", async () => {
     vi.useFakeTimers();
+    const warning = vi.spyOn(logger, "warn").mockImplementation(() => undefined);
     let eventHandler: EventHandler | undefined;
     const instanceManager = {
       onAnyEvent: (handler: EventHandler) => {
@@ -490,6 +597,7 @@ describe("outgoing event webhook events", () => {
       },
     } as unknown as InstanceManager;
     const config = loadEventWebhookConfig({
+      WA_WEBHOOK_DEBOUNCE_MS: "0",
       WA_EVENT_WEBHOOKS: JSON.stringify([
         {
           id: "grok",
@@ -511,6 +619,7 @@ describe("outgoing event webhook events", () => {
 
     await vi.advanceTimersByTimeAsync(1_000);
     await vi.waitFor(() => expect(enqueue).toHaveBeenCalledOnce());
+    expect(warning).not.toHaveBeenCalled();
     expect(enqueue.mock.calls[0]?.[0]).toMatchObject({
       destinationId: "grok",
       payload: {
@@ -520,6 +629,379 @@ describe("outgoing event webhook events", () => {
         ],
       },
     });
+    unsubscribe();
+    await unsubscribe.flush();
+  });
+
+  it("batches incoming messages per chat and keeps the last message at the top level", async () => {
+    vi.useFakeTimers();
+    let eventHandler: EventHandler | undefined;
+    const instanceManager = {
+      onAnyEvent: (handler: EventHandler) => {
+        eventHandler = handler;
+        return () => {
+          eventHandler = undefined;
+        };
+      },
+    } as unknown as InstanceManager;
+    const config = configuredWebhook({
+      WA_WEBHOOK_DEBOUNCE_MS: "500",
+      WA_WEBHOOK_DEBOUNCE_MAX_MS: "2000",
+    });
+    const enqueue = vi.fn<(_: EventWebhookJob) => Promise<unknown>>(() => Promise.resolve());
+    const unsubscribe = registerEventWebhookHandler(instanceManager, config, enqueue);
+
+    for (const [index, text] of ["first", "second", "third"].entries()) {
+      eventHandler?.("message.received", "inst_1234abcd", {
+        ...incomingMessage(),
+        message: { ...incomingMessage().message, id: `message-${index}`, content: text },
+      });
+      if (index < 2) await vi.advanceTimersByTimeAsync(100);
+    }
+    await vi.advanceTimersByTimeAsync(500);
+
+    expect(enqueue).toHaveBeenCalledOnce();
+    expect(enqueue.mock.calls[0]?.[0].payload).toMatchObject({
+      event: "message.received",
+      text: "third",
+      messages: [{ text: "first" }, { text: "second" }, { text: "third" }],
+    });
+
+    unsubscribe();
+    await unsubscribe.flush();
+  });
+
+  it("restarts the debounce window when another message arrives", async () => {
+    vi.useFakeTimers();
+    let eventHandler: EventHandler | undefined;
+    const instanceManager = {
+      onAnyEvent: (handler: EventHandler) => {
+        eventHandler = handler;
+        return () => undefined;
+      },
+    } as unknown as InstanceManager;
+    const config = configuredWebhook({ WA_WEBHOOK_DEBOUNCE_MS: "500" });
+    const enqueue = vi.fn<(_: EventWebhookJob) => Promise<unknown>>(() => Promise.resolve());
+    const unsubscribe = registerEventWebhookHandler(instanceManager, config, enqueue);
+
+    eventHandler?.("message.received", "inst_1234abcd", incomingMessage());
+    await vi.advanceTimersByTimeAsync(400);
+    eventHandler?.("message.received", "inst_1234abcd", {
+      ...incomingMessage(),
+      message: { ...incomingMessage().message, id: "message-two", content: "second" },
+    });
+    await vi.advanceTimersByTimeAsync(499);
+    expect(enqueue).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(enqueue).toHaveBeenCalledOnce();
+    expect(enqueue.mock.calls[0]?.[0].payload).toMatchObject({
+      messages: [{ text: "hello" }, { text: "second" }],
+    });
+
+    unsubscribe();
+    await unsubscribe.flush();
+  });
+
+  it("flushes at the maximum wait even when new messages keep restarting the window", async () => {
+    vi.useFakeTimers();
+    let eventHandler: EventHandler | undefined;
+    const instanceManager = {
+      onAnyEvent: (handler: EventHandler) => {
+        eventHandler = handler;
+        return () => undefined;
+      },
+    } as unknown as InstanceManager;
+    const config = configuredWebhook({
+      WA_WEBHOOK_DEBOUNCE_MS: "1000",
+      WA_WEBHOOK_DEBOUNCE_MAX_MS: "2500",
+    });
+    const enqueue = vi.fn<(_: EventWebhookJob) => Promise<unknown>>(() => Promise.resolve());
+    const unsubscribe = registerEventWebhookHandler(instanceManager, config, enqueue);
+
+    for (let index = 0; index < 4; index += 1) {
+      eventHandler?.("message.received", "inst_1234abcd", {
+        ...incomingMessage(),
+        message: { ...incomingMessage().message, id: `message-${index}`, content: `${index}` },
+      });
+      if (index < 3) await vi.advanceTimersByTimeAsync(800);
+    }
+    await vi.advanceTimersByTimeAsync(99);
+    expect(enqueue).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
+
+    expect(enqueue).toHaveBeenCalledOnce();
+    expect(enqueue.mock.calls[0]?.[0].payload).toMatchObject({
+      messages: Array.from({ length: 4 }, (_, index) => ({ text: `${index}` })),
+    });
+
+    unsubscribe();
+    await unsubscribe.flush();
+  });
+
+  it("keeps different chats in separate batches", async () => {
+    vi.useFakeTimers();
+    let eventHandler: EventHandler | undefined;
+    const instanceManager = {
+      onAnyEvent: (handler: EventHandler) => {
+        eventHandler = handler;
+        return () => undefined;
+      },
+    } as unknown as InstanceManager;
+    const config = configuredWebhook({ WA_WEBHOOK_DEBOUNCE_MS: "250" });
+    const enqueue = vi.fn<(_: EventWebhookJob) => Promise<unknown>>(() => Promise.resolve());
+    const unsubscribe = registerEventWebhookHandler(instanceManager, config, enqueue);
+
+    eventHandler?.("message.received", "inst_1234abcd", incomingMessage());
+    eventHandler?.("message.received", "inst_1234abcd", {
+      ...incomingMessage(),
+      chatId: "5511999999999@s.whatsapp.net",
+      message: { ...incomingMessage().message, id: "other-chat-message" },
+    });
+    await vi.advanceTimersByTimeAsync(250);
+
+    expect(enqueue).toHaveBeenCalledTimes(2);
+    const chats = enqueue.mock.calls.map(([job]) => (job.payload as { chat: string }).chat);
+    expect(chats).toEqual(["5511888888888@s.whatsapp.net", "5511999999999@s.whatsapp.net"]);
+
+    unsubscribe();
+    await unsubscribe.flush();
+  });
+
+  it("delivers non-message events immediately while message batches wait", async () => {
+    vi.useFakeTimers();
+    let eventHandler: EventHandler | undefined;
+    const instanceManager = {
+      onAnyEvent: (handler: EventHandler) => {
+        eventHandler = handler;
+        return () => undefined;
+      },
+    } as unknown as InstanceManager;
+    const config = configuredWebhook({
+      WA_EVENT_WEBHOOK_EVENTS: "message.received,connection.changed",
+      WA_WEBHOOK_DEBOUNCE_MS: "500",
+    });
+    const enqueue = vi.fn<(_: EventWebhookJob) => Promise<unknown>>(() => Promise.resolve());
+    const unsubscribe = registerEventWebhookHandler(instanceManager, config, enqueue);
+
+    eventHandler?.("message.received", "inst_1234abcd", incomingMessage());
+    eventHandler?.("connection.changed", "inst_1234abcd", {
+      instanceId: "inst_1234abcd",
+      status: "open",
+    });
+    expect(enqueue).toHaveBeenCalledOnce();
+    expect(enqueue.mock.calls[0]?.[0].payload).toMatchObject({ type: "open" });
+
+    await vi.advanceTimersByTimeAsync(500);
+    expect(enqueue).toHaveBeenCalledTimes(2);
+    expect(enqueue.mock.calls[1]?.[0].payload).toMatchObject({ messages: [expect.any(Object)] });
+
+    unsubscribe();
+    await unsubscribe.flush();
+  });
+
+  it("keeps disabled batching at one unchanged payload per incoming message", () => {
+    let eventHandler: EventHandler | undefined;
+    const instanceManager = {
+      onAnyEvent: (handler: EventHandler) => {
+        eventHandler = handler;
+        return () => undefined;
+      },
+    } as unknown as InstanceManager;
+    const config = configuredWebhook();
+    const enqueue = vi.fn<(_: EventWebhookJob) => Promise<unknown>>(() => Promise.resolve());
+    registerEventWebhookHandler(instanceManager, config, enqueue);
+    const first = incomingMessage();
+    const second = {
+      ...incomingMessage(),
+      message: { ...incomingMessage().message, id: "message-two", content: "second" },
+    };
+
+    eventHandler?.("message.received", "inst_1234abcd", first);
+    eventHandler?.("message.received", "inst_1234abcd", second);
+
+    expect(enqueue).toHaveBeenCalledTimes(2);
+    expect(enqueue.mock.calls.map(([job]) => job.payload)).toEqual([
+      normalizeEventWebhookPayload("message.received", "inst_1234abcd", first),
+      normalizeEventWebhookPayload("message.received", "inst_1234abcd", second),
+    ]);
+  });
+
+  it("caps per-chat batches at 25 messages and includes a single-message batch on shutdown", async () => {
+    vi.useFakeTimers();
+    let eventHandler: EventHandler | undefined;
+    const instanceManager = {
+      onAnyEvent: (handler: EventHandler) => {
+        eventHandler = handler;
+        return () => undefined;
+      },
+    } as unknown as InstanceManager;
+    const config = configuredWebhook({
+      WA_WEBHOOK_DEBOUNCE_MS: "30000",
+      WA_WEBHOOK_DEBOUNCE_MAX_MS: "30000",
+    });
+    const enqueue = vi.fn<(_: EventWebhookJob) => Promise<unknown>>(() => Promise.resolve());
+    const unsubscribe = registerEventWebhookHandler(instanceManager, config, enqueue);
+
+    for (let index = 0; index < 26; index += 1) {
+      eventHandler?.("message.received", "inst_1234abcd", {
+        ...incomingMessage(),
+        message: { ...incomingMessage().message, content: `${index}` },
+      });
+    }
+
+    expect(enqueue).toHaveBeenCalledOnce();
+    const firstBatch = enqueue.mock.calls[0]?.[0].payload as {
+      text: string | null;
+      messages: { text: string | null }[];
+    };
+    expect(firstBatch.text).toBe("24");
+    expect(firstBatch.messages.map((message) => message.text)).toEqual(
+      Array.from({ length: 25 }, (_, index) => `${index}`),
+    );
+    expect(vi.getTimerCount()).toBeGreaterThan(0);
+
+    await unsubscribe.flush();
+    expect(enqueue).toHaveBeenCalledTimes(2);
+    expect(enqueue.mock.calls[1]?.[0].payload).toMatchObject({
+      text: "25",
+      messages: [{ text: "25" }],
+    });
+    expect(vi.getTimerCount()).toBe(0);
+    unsubscribe();
+  });
+
+  it("waits for voice transcription and keeps message arrival order", async () => {
+    vi.useFakeTimers();
+    vi.stubEnv("WA_TRANSCRIPTION_ENABLED", "true");
+    vi.stubEnv("WA_TRANSCRIPTION_API_KEY", "unit-test-key");
+    let resolveTranscription!: (result: { text: string }) => void;
+    vi.spyOn(TranscriptionService.prototype, "transcribe").mockImplementation(
+      () => new Promise((resolve) => (resolveTranscription = resolve)),
+    );
+    const adapter = {
+      downloadMessageAudio: vi.fn().mockResolvedValue({
+        data: Buffer.from("audio"),
+        mimeType: "audio/ogg",
+      }),
+    };
+    let eventHandler: EventHandler | undefined;
+    const instanceManager = {
+      onAnyEvent: (handler: EventHandler) => {
+        eventHandler = handler;
+        return () => undefined;
+      },
+      getAdapter: () => adapter,
+    } as unknown as InstanceManager;
+    const config = configuredWebhook({ WA_WEBHOOK_DEBOUNCE_MS: "500" });
+    const enqueue = vi.fn<(_: EventWebhookJob) => Promise<unknown>>(() => Promise.resolve());
+    const unsubscribe = registerEventWebhookHandler(instanceManager, config, enqueue);
+
+    const voice = {
+      ...incomingMessage(),
+      message: { ...incomingMessage().message, id: "voice", type: "audio" as const, content: null },
+    };
+    const laterText = {
+      ...incomingMessage(),
+      message: { ...incomingMessage().message, id: "text-after-voice", content: "after" },
+    };
+    eventHandler?.("message.received", "inst_1234abcd", voice);
+    eventHandler?.("message.received", "inst_1234abcd", laterText);
+    await vi.advanceTimersByTimeAsync(500);
+    expect(enqueue).not.toHaveBeenCalled();
+
+    resolveTranscription({ text: "recognized voice" });
+    await Promise.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(enqueue).toHaveBeenCalledOnce();
+    expect(enqueue.mock.calls[0]?.[0].payload).toMatchObject({
+      text: "after",
+      messages: [{ text: null, transcription: "recognized voice" }, { text: "after" }],
+    });
+    expect(adapter.downloadMessageAudio).toHaveBeenCalledOnce();
+
+    unsubscribe();
+    await unsubscribe.flush();
+  });
+
+  it("bounds a pending transcription by the maximum batch wait", async () => {
+    vi.useFakeTimers();
+    vi.stubEnv("WA_TRANSCRIPTION_ENABLED", "true");
+    vi.stubEnv("WA_TRANSCRIPTION_API_KEY", "unit-test-key");
+    let resolveTranscription!: (result: { text: string }) => void;
+    vi.spyOn(TranscriptionService.prototype, "transcribe").mockImplementation(
+      () => new Promise((resolve) => (resolveTranscription = resolve)),
+    );
+    const adapter = {
+      downloadMessageAudio: vi.fn().mockResolvedValue({
+        data: Buffer.from("audio"),
+        mimeType: "audio/ogg",
+      }),
+    };
+    let eventHandler: EventHandler | undefined;
+    const instanceManager = {
+      onAnyEvent: (handler: EventHandler) => {
+        eventHandler = handler;
+        return () => undefined;
+      },
+      getAdapter: () => adapter,
+    } as unknown as InstanceManager;
+    const config = configuredWebhook({
+      WA_WEBHOOK_DEBOUNCE_MS: "500",
+      WA_WEBHOOK_DEBOUNCE_MAX_MS: "700",
+    });
+    const enqueue = vi.fn<(_: EventWebhookJob) => Promise<unknown>>(() => Promise.resolve());
+    const unsubscribe = registerEventWebhookHandler(instanceManager, config, enqueue);
+    const voice = {
+      ...incomingMessage(),
+      message: { ...incomingMessage().message, type: "audio" as const, content: null },
+    };
+
+    eventHandler?.("message.received", "inst_1234abcd", voice);
+    await vi.advanceTimersByTimeAsync(700);
+    expect(enqueue).toHaveBeenCalledOnce();
+    expect(enqueue.mock.calls[0]?.[0].payload).toMatchObject({
+      messages: [{ text: null }],
+    });
+    expect(enqueue.mock.calls[0]?.[0].payload).not.toHaveProperty("transcription");
+
+    resolveTranscription({ text: "arrived after the cap" });
+    for (let index = 0; index < 6; index += 1) await Promise.resolve();
+    expect(enqueue).toHaveBeenCalledOnce();
+
+    unsubscribe();
+    await unsubscribe.flush();
+  });
+
+  it("signs the serialized batched payload with the existing HMAC scheme", async () => {
+    vi.useFakeTimers();
+    let eventHandler: EventHandler | undefined;
+    const instanceManager = {
+      onAnyEvent: (handler: EventHandler) => {
+        eventHandler = handler;
+        return () => undefined;
+      },
+    } as unknown as InstanceManager;
+    const config = configuredWebhook({
+      WA_EVENT_WEBHOOK_SECRET: "batch-signing-secret",
+      WA_WEBHOOK_DEBOUNCE_MS: "100",
+    });
+    const enqueue = vi.fn<(_: EventWebhookJob) => Promise<unknown>>(() => Promise.resolve());
+    const unsubscribe = registerEventWebhookHandler(instanceManager, config, enqueue);
+    eventHandler?.("message.received", "inst_1234abcd", incomingMessage());
+    await vi.advanceTimersByTimeAsync(100);
+
+    const payload = enqueue.mock.calls[0]?.[0].payload;
+    expect(payload).toBeDefined();
+    const body = JSON.stringify(payload);
+    const timestamp = "1234567890";
+    const headers = createEventWebhookHeaders(body, config.destinations[0]!, timestamp);
+    const expected = createHmac("sha256", "batch-signing-secret")
+      .update(`${timestamp}.${body}`)
+      .digest("hex");
+    expect(headers.get("x-wa-event-signature")).toBe(`sha256=${expected}`);
+
     unsubscribe();
     await unsubscribe.flush();
   });
@@ -655,13 +1137,7 @@ describe("outgoing event webhook delivery", () => {
     });
 
     await expect(
-      postEventWebhook(
-        configuredWebhook().destinations[0]!,
-        {},
-        1_000,
-        fetchRequest,
-        resolveDns,
-      ),
+      postEventWebhook(configuredWebhook().destinations[0]!, {}, 1_000, fetchRequest, resolveDns),
     ).rejects.toBeInstanceOf(EventWebhookRetryableError);
     expect(fetchRequest).not.toHaveBeenCalled();
   });
@@ -673,13 +1149,7 @@ describe("outgoing event webhook delivery", () => {
     });
 
     await expect(
-      postEventWebhook(
-        configuredWebhook().destinations[0]!,
-        {},
-        1_000,
-        fetchRequest,
-        resolveDns,
-      ),
+      postEventWebhook(configuredWebhook().destinations[0]!, {}, 1_000, fetchRequest, resolveDns),
     ).rejects.toBeInstanceOf(UnrecoverableError);
     expect(fetchRequest).not.toHaveBeenCalled();
   });

@@ -9,6 +9,7 @@ import { QUEUE_COMPLETED_AGE_S, QUEUE_FAILED_AGE_S } from "../constants.js";
 import type { ChannelEvent, ChannelEventPayload, MessageButton } from "../types/channel.types.js";
 import { createChildLogger } from "../utils/logger.js";
 import { getRedisConnectionOptions } from "./redis.js";
+import { transcribeIncomingAudioIfConfigured } from "./incoming-audio-transcription.js";
 import {
   loadEventWebhookConfig,
   type EventWebhookConfig,
@@ -28,6 +29,7 @@ export interface EventWebhookPayload {
   sender: string | null;
   type: string;
   text: string | null;
+  transcription?: string;
   timestamp: number | null;
   mediaUrl?: string | null;
   mediaMimetype?: string;
@@ -48,6 +50,7 @@ export interface GrokBotWebhookPayload {
   isGroup: boolean;
   type: string;
   text: string | null;
+  transcription?: string;
   timestamp: number | null;
   messageId: string;
   media?: { id: string };
@@ -64,6 +67,8 @@ export interface GrokBotWebhookPayload {
 export type EventWebhookBody =
   | EventWebhookPayload
   | GrokBotWebhookPayload
+  | (EventWebhookPayload & { messages: EventWebhookPayload[] })
+  | (GrokBotWebhookPayload & { messages: GrokBotWebhookPayload[] })
   | { events: EventWebhookPayload[] }
   | { messages: GrokBotWebhookPayload[] };
 
@@ -96,6 +101,24 @@ const MAX_BATCH_SIZE = 25;
 interface BufferedDestinationEvents {
   payloads: (EventWebhookPayload | GrokBotWebhookPayload)[];
   timer: ReturnType<typeof setTimeout>;
+}
+
+type BufferedMessagePayload = EventWebhookPayload | GrokBotWebhookPayload;
+
+interface BufferedMessageEntry {
+  fallbackPayload: BufferedMessagePayload;
+  payload?: BufferedMessagePayload;
+  pendingTranscription: boolean;
+}
+
+interface BufferedMessageBatch {
+  key: string;
+  destination: EventWebhookDestination;
+  entries: BufferedMessageEntry[];
+  maxDeadlineAt: number;
+  maxTimer: ReturnType<typeof setTimeout>;
+  debounceTimer?: ReturnType<typeof setTimeout>;
+  debounceExpired: boolean;
 }
 
 export type EventWebhookUnsubscribe = (() => void) & { flush: () => Promise<void> };
@@ -374,7 +397,19 @@ export function registerEventWebhookHandler(
   onEnqueueFailure: () => void = () =>
     logger.warn("Unable to enqueue outgoing event webhook; message processing continues"),
 ): EventWebhookUnsubscribe {
+  if (config.messageDebounceMs > 0) {
+    for (const destination of config.destinations) {
+      if (destination.debounceMs > 0) {
+        logger.warn(
+          { destinationId: destination.id, debounceMs: destination.debounceMs },
+          "Destination debounce is ignored while per-chat batching is enabled",
+        );
+      }
+    }
+  }
+
   const buffers = new Map<string, BufferedDestinationEvents>();
+  const messageBuffers = new Map<string, BufferedMessageBatch>();
   const pendingEnqueues = new Set<Promise<void>>();
 
   const safeFailureNotice = (): void => {
@@ -423,6 +458,125 @@ export function registerEventWebhookHandler(
     return enqueuePayload(destination, payload);
   };
 
+  const clearMessageBatchTimers = (batch: BufferedMessageBatch): void => {
+    clearTimeout(batch.maxTimer);
+    if (batch.debounceTimer) clearTimeout(batch.debounceTimer);
+  };
+
+  const flushMessageBatch = (batch: BufferedMessageBatch, force: boolean): Promise<void> => {
+    if (messageBuffers.get(batch.key) !== batch) return Promise.resolve();
+    if (!force && batch.entries.some((entry) => entry.pendingTranscription)) {
+      return Promise.resolve();
+    }
+
+    clearMessageBatchTimers(batch);
+    messageBuffers.delete(batch.key);
+
+    const payloads = batch.entries.map((entry) => {
+      if (entry.pendingTranscription) {
+        // The max-wait and shutdown paths use the same original-message fallback
+        // as a failed transcription, so a slow provider cannot hold a chat open.
+        entry.pendingTranscription = false;
+        entry.payload = entry.fallbackPayload;
+      }
+      return entry.payload ?? entry.fallbackPayload;
+    });
+    const lastPayload = payloads[payloads.length - 1];
+    if (!lastPayload) return Promise.resolve();
+
+    const payload = { ...lastPayload, messages: payloads } as EventWebhookBody;
+    return enqueuePayload(batch.destination, payload);
+  };
+
+  const scheduleMessageDebounce = (batch: BufferedMessageBatch): void => {
+    if (batch.debounceTimer) clearTimeout(batch.debounceTimer);
+    const remainingMaxWait = Math.max(0, batch.maxDeadlineAt - Date.now());
+    const delay = Math.min(config.messageDebounceMs, remainingMaxWait);
+    batch.debounceExpired = false;
+    batch.debounceTimer = setTimeout(() => {
+      batch.debounceTimer = undefined;
+      if (messageBuffers.get(batch.key) !== batch) return;
+      batch.debounceExpired = true;
+      if (!batch.entries.some((entry) => entry.pendingTranscription)) {
+        void flushMessageBatch(batch, false);
+      }
+    }, delay);
+  };
+
+  const queueMessagePayload = (
+    destination: EventWebhookDestination,
+    instanceId: string,
+    chatId: string,
+    payload: BufferedMessagePayload,
+    transcription: Promise<string> | undefined,
+    withTranscription: (text: string) => BufferedMessagePayload,
+  ): void => {
+    const key = JSON.stringify([destination.id, instanceId, chatId]);
+    let batch = messageBuffers.get(key);
+    if (!batch) {
+      const maxDeadlineAt = Date.now() + config.messageDebounceMaxMs;
+      const created = {
+        key,
+        destination,
+        entries: [],
+        maxDeadlineAt,
+        maxTimer: setTimeout(() => {
+          void flushMessageBatch(created, true);
+        }, config.messageDebounceMaxMs),
+        debounceExpired: false,
+      } satisfies BufferedMessageBatch;
+      batch = created;
+      messageBuffers.set(key, batch);
+    }
+
+    const entry: BufferedMessageEntry = {
+      fallbackPayload: payload,
+      pendingTranscription: Boolean(transcription),
+      ...(!transcription ? { payload } : {}),
+    };
+    batch.entries.push(entry);
+    scheduleMessageDebounce(batch);
+
+    if (batch.entries.length >= MAX_BATCH_SIZE) {
+      void flushMessageBatch(batch, true);
+      return;
+    }
+
+    if (transcription) {
+      void transcription.then(
+        (text) => {
+          if (!entry.pendingTranscription) return;
+          entry.pendingTranscription = false;
+          entry.payload = withTranscription(text);
+          if (
+            messageBuffers.get(key) === batch &&
+            batch.debounceExpired &&
+            !batch.entries.some((item) => item.pendingTranscription)
+          ) {
+            void flushMessageBatch(batch, false);
+          }
+        },
+        (error: unknown) => {
+          if (!entry.pendingTranscription) return;
+          entry.pendingTranscription = false;
+          entry.payload = entry.fallbackPayload;
+          logger.warn(
+            { instanceId },
+            "Incoming audio transcription failed; outgoing webhook will use the original message",
+          );
+          if (
+            messageBuffers.get(key) === batch &&
+            batch.debounceExpired &&
+            !batch.entries.some((item) => item.pendingTranscription)
+          ) {
+            void flushMessageBatch(batch, false);
+          }
+          void error;
+        },
+      );
+    }
+  };
+
   const queuePayload = (
     destination: EventWebhookDestination,
     payload: EventWebhookPayload | GrokBotWebhookPayload,
@@ -450,24 +604,73 @@ export function registerEventWebhookHandler(
         for (const destination of config.destinations) {
           if (!shouldSendEventWebhook(event, payload, destination)) continue;
 
+          let webhookPayload: EventWebhookPayload | GrokBotWebhookPayload;
           if (destination.preset === "grok-bot" && event === "message.received") {
-            queuePayload(
-              destination,
-              normalizeGrokBotWebhookPayload(
-                instanceId,
-                payload as ChannelEventPayload["message.received"],
-              ),
+            webhookPayload = normalizeGrokBotWebhookPayload(
+              instanceId,
+              payload as ChannelEventPayload["message.received"],
             );
           } else {
-            queuePayload(
-              destination,
-              normalizeEventWebhookPayload(
-                event,
-                instanceId,
-                payload as ChannelEventPayload[ChannelEvent],
-              ),
+            webhookPayload = normalizeEventWebhookPayload(
+              event,
+              instanceId,
+              payload as ChannelEventPayload[ChannelEvent],
             );
           }
+
+          if (config.messageDebounceMs > 0) {
+            if (event !== "message.received") {
+              void enqueuePayload(destination, webhookPayload);
+              continue;
+            }
+
+            const messageEvent = payload as ChannelEventPayload["message.received"];
+            const chatId = messageEvent.chatId;
+            if (!chatId) {
+              void enqueuePayload(destination, webhookPayload);
+              continue;
+            }
+
+            let transcription: Promise<string> | undefined;
+            if (messageEvent.message.type === "audio") {
+              try {
+                transcription = transcribeIncomingAudioIfConfigured(
+                  instanceManager,
+                  instanceId,
+                  messageEvent,
+                );
+              } catch {
+                logger.warn(
+                  { instanceId },
+                  "Unable to start incoming audio transcription; outgoing webhook will use the original message",
+                );
+              }
+            }
+
+            const withTranscription = (text: string): BufferedMessagePayload => {
+              const transcribedEvent = {
+                ...messageEvent,
+                message: { ...messageEvent.message, transcription: text },
+              } as unknown as ChannelEventPayload["message.received"];
+              const normalized =
+                destination.preset === "grok-bot"
+                  ? normalizeGrokBotWebhookPayload(instanceId, transcribedEvent)
+                  : normalizeEventWebhookPayload("message.received", instanceId, transcribedEvent);
+              return { ...normalized, transcription: text };
+            };
+
+            queueMessagePayload(
+              destination,
+              instanceId,
+              chatId,
+              webhookPayload,
+              transcription,
+              withTranscription,
+            );
+            continue;
+          }
+
+          queuePayload(destination, webhookPayload);
         }
       } catch {
         safeFailureNotice();
@@ -480,6 +683,7 @@ export function registerEventWebhookHandler(
     void unsubscribe.flush();
   }) as EventWebhookUnsubscribe;
   unsubscribe.flush = async () => {
+    for (const batch of messageBuffers.values()) void flushMessageBatch(batch, true);
     for (const destination of config.destinations) void flushDestination(destination);
     while (pendingEnqueues.size > 0) await Promise.all([...pendingEnqueues]);
   };

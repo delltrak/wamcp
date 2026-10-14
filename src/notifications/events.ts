@@ -7,8 +7,7 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { InstanceManager } from "../services/instance-manager.js";
 import type { ChannelEvent, ChannelEventPayload } from "../types/channel.types.js";
 import { logger } from "../utils/logger.js";
-import { TranscriptionService } from "../services/transcription.js";
-import { createConcurrencyLimiter } from "../utils/concurrency.js";
+import { transcribeIncomingAudioIfConfigured } from "../services/incoming-audio-transcription.js";
 
 /** Mapping from channel event names to MCP notification method names */
 const EVENT_TO_METHOD: Record<ChannelEvent, string> = {
@@ -26,64 +25,6 @@ const EVENT_TO_METHOD: Record<ChannelEvent, string> = {
   "call.received": "whatsapp/call.received",
 };
 
-function positiveInteger(value: string | undefined, fallback: number): number {
-  if (!value) return fallback;
-  const parsed = Number.parseInt(value, 10);
-  return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : fallback;
-}
-
-interface SharedTranscriptionState {
-  transcriptionService: TranscriptionService;
-  limitTranscriptions: <T>(task: () => Promise<T>) => Promise<T>;
-  inFlight: Map<string, Promise<string>>;
-}
-
-const transcriptionByInstanceManager = new WeakMap<InstanceManager, SharedTranscriptionState>();
-
-function getSharedTranscriptionState(instanceManager: InstanceManager): SharedTranscriptionState {
-  let state = transcriptionByInstanceManager.get(instanceManager);
-  if (!state) {
-    state = {
-      transcriptionService: new TranscriptionService(),
-      limitTranscriptions: createConcurrencyLimiter(
-        positiveInteger(process.env.TRANSCRIPTION_CONCURRENCY, 2),
-      ),
-      inFlight: new Map(),
-    };
-    transcriptionByInstanceManager.set(instanceManager, state);
-  }
-  return state;
-}
-
-function transcribeIncomingAudio(
-  instanceManager: InstanceManager,
-  state: SharedTranscriptionState,
-  instanceId: string,
-  messageEvent: ChannelEventPayload["message.received"],
-): Promise<string> {
-  const key = JSON.stringify([instanceId, messageEvent.message.id]);
-  const inFlight = state.inFlight.get(key);
-  if (inFlight) return inFlight;
-
-  const transcription = state.limitTranscriptions(async () => {
-    const media = await instanceManager
-      .getAdapter(instanceId)
-      .downloadMessageAudio(
-        messageEvent.message.id,
-        state.transcriptionService.maxBytes,
-        state.transcriptionService.timeoutMs,
-      );
-    const result = await state.transcriptionService.transcribe(media.data, media.mimeType);
-    return result.text;
-  });
-  state.inFlight.set(key, transcription);
-  const removeInFlight = () => {
-    if (state.inFlight.get(key) === transcription) state.inFlight.delete(key);
-  };
-  void transcription.then(removeInFlight, removeInFlight);
-  return transcription;
-}
-
 /**
  * Wire instance manager events to MCP server notifications.
  * Every channel event from any instance gets forwarded as an MCP notification.
@@ -92,8 +33,6 @@ export function registerEventNotifications(
   server: McpServer,
   instanceManager: InstanceManager,
 ): () => void {
-  const transcriptionState = getSharedTranscriptionState(instanceManager);
-
   return instanceManager.onAnyEvent(
     <E extends ChannelEvent>(event: E, instanceId: string, payload: ChannelEventPayload[E]) => {
       const method = EVENT_TO_METHOD[event];
@@ -104,21 +43,21 @@ export function registerEventNotifications(
 
         if (
           event === "message.received" &&
-          transcriptionState.transcriptionService.isConfigured() &&
           (payload as ChannelEventPayload["message.received"]).message.type === "audio"
         ) {
           const messageEvent = payload as ChannelEventPayload["message.received"];
           try {
-            const transcription = await transcribeIncomingAudio(
+            const transcription = transcribeIncomingAudioIfConfigured(
               instanceManager,
-              transcriptionState,
               instanceId,
               messageEvent,
             );
-            notificationPayload = {
-              ...messageEvent,
-              message: { ...messageEvent.message, transcription },
-            };
+            if (transcription) {
+              notificationPayload = {
+                ...messageEvent,
+                message: { ...messageEvent.message, transcription: await transcription },
+              };
+            }
           } catch (err) {
             logger.warn(
               { err: String(err), instanceId, messageId: messageEvent.message.id },
