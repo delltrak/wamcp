@@ -164,7 +164,8 @@ generic shape:
 
 `buttons`, `rawType`, `mediaUrl`, and `mediaMimetype` are optional additive fields. Business
 template and interactive message text is flattened into `text`; action labels and links are also
-available in `buttons`. `rawType` is present when the Baileys content type is not recognized.
+available in `buttons`. Unrecognized Baileys content types use `type: "text"`; their source content
+name is available in `rawType`.
 For the `grok-bot` preset, `mediaUrl`, `mediaMimetype`, `buttons`, and `rawType` are forwarded
 when present; media identifiers remain subject to the preset's existing safe-ID filtering.
 

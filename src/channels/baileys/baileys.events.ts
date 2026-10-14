@@ -522,8 +522,9 @@ function messageDetails(content: MessageRecord | undefined): BaileysMessageDetai
     documentMessage: "document",
   };
   const mediaType = media?.type;
-  const type: MessageType = mediaType ?? (rawType ? (knownTypes[rawType] ?? "unknown") : "unknown");
-  const unknownRawType = type === "unknown" ? (rawType ?? "unknown") : undefined;
+  const mappedType = rawType ? knownTypes[rawType] : undefined;
+  const type: MessageType = mediaType ?? mappedType ?? "text";
+  const unknownRawType = mediaType || mappedType ? undefined : rawType;
   if (unknownRawType && !unknownTypesLogged.has(unknownRawType)) {
     unknownTypesLogged.add(unknownRawType);
     logger.debug({ rawType: unknownRawType }, "Unknown Baileys message content type");

@@ -743,7 +743,7 @@ Business template, interactive, button, and list messages return readable text i
 joined from their available heading, body, footer, and button labels. Messages with actions may
 also include the optional `buttons` array (`type`, `text`, and any `url`, `id`, or `phone`).
 Header media uses the message's existing `type`, `mediaUrl`, and optional `mediaMimetype` fields.
-Unknown Baileys message types use `type: "unknown"` and include the source content name in the
+Unknown Baileys message types use `type: "text"` and include their source content name in the
 optional `rawType` field.
 
 ```json
@@ -1930,7 +1930,7 @@ Fired when a new message is received in any chat.
 
 `mediaMimetype`, `buttons`, and `rawType` are optional additions to the message object. Business
 template, interactive, list, and button messages include their readable text in `content`; unknown
-Baileys content types use `type: "unknown"` with their source name in `rawType`.
+Baileys content types use `type: "text"` and include their source name in `rawType`.
 
 ---
 

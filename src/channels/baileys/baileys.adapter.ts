@@ -279,8 +279,6 @@ export class BaileysAdapter implements ChannelAdapter {
         return { reactionMessage: content === null ? {} : { text: content } };
       case "sticker":
         return { stickerMessage: {} };
-      case "unknown":
-        return content === null ? {} : { conversation: content };
     }
   }
 
@@ -929,7 +927,9 @@ export class BaileysAdapter implements ChannelAdapter {
         id: r.id,
         chatId: r.chatId,
         senderId: r.senderId,
-        type: r.type as Message["type"],
+        // Re-normalizing stored raw messages also repairs rows written while an
+        // earlier build persisted unsupported content with type "unknown".
+        type: details?.type ?? (r.type as Message["type"]),
         content: r.content,
         mediaUrl: r.mediaUrl,
         ...(r.mediaMimetype || details?.mediaMimetype

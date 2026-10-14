@@ -22,8 +22,7 @@ export type MessageType =
   | "contact"
   | "poll"
   | "reaction"
-  | "sticker"
-  | "unknown";
+  | "sticker";
 
 /** A display-safe action exposed by a business template or interactive message. */
 export interface MessageButton {

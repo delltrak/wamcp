@@ -454,12 +454,12 @@ describe("Baileys business and interactive message normalization", () => {
     expect(extractMessageDetails(messageWith(nested)).content).toBe("Synthetic deep wrapped text");
   });
 
-  it("keeps an unknown Baileys type name instead of silently returning text", () => {
+  it("keeps an unknown Baileys type name without changing the existing type field", () => {
     const details = extractMessageDetails(
       messageWith({ futureBusinessMessage: { opaque: "synthetic" } }),
     );
 
-    expect(details.type).toBe("unknown");
+    expect(details.type).toBe("text");
     expect(details.content).toBeNull();
     expect(details.rawType).toBe("futureBusinessMessage");
   });
@@ -603,6 +603,12 @@ describe("Baileys business and interactive message normalization", () => {
         }
       ).persistMessage(unknownEvent, unknownMessage);
 
+      // Simulate a row persisted by the already-pushed build, which stored
+      // unsupported content using the temporary "unknown" type value.
+      sqlite
+        .prepare("UPDATE messages SET type = ? WHERE instance_id = ? AND id = ?")
+        .run("unknown", instanceId, unknownMessage.key.id);
+
       const stored = await adapter.getMessages(SYNTHETIC_JID, 10);
       const found = stored.find((item) => item.id === id);
       expect(found).toMatchObject({
@@ -620,7 +626,7 @@ describe("Baileys business and interactive message normalization", () => {
         ],
       });
       expect(stored.find((item) => item.id === unknownMessage.key.id)).toMatchObject({
-        type: "unknown",
+        type: "text",
         rawType: "futureBusinessMessage",
       });
     } finally {
