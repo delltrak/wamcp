@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { hostname } from "node:os";
 import type { ChannelEvent } from "../types/channel.types.js";
+import { logger } from "../utils/logger.js";
 import { validateWebhookUrl } from "../utils/validation.js";
 
 const CHANNEL_EVENTS: readonly ChannelEvent[] = [
@@ -49,6 +50,10 @@ export interface EventWebhookDestination {
 export interface EventWebhookConfig {
   destinations: EventWebhookDestination[];
   queuePrefix: string;
+  /** Per-chat batching for incoming messages. Zero keeps the legacy event path. */
+  messageDebounceMs: number;
+  /** Maximum batch age measured from its first incoming message. */
+  messageDebounceMaxMs: number;
   /** Retained for callers and for the backward-compatible single destination. */
   events: ChannelEvent[];
   ignoreFromMe: boolean;
@@ -98,6 +103,39 @@ function parseOptionalBoundedInteger(
     throw new Error(`Invalid ${key}; expected an integer from 0 to ${maximum}`);
   }
   return value;
+}
+
+function parseMessageDebounceConfig(env: Environment): {
+  messageDebounceMs: number;
+  messageDebounceMaxMs: number;
+} {
+  const maxAllowedMs = 300_000;
+  const parse = (key: string, fallback: number): number => {
+    const raw = env[key];
+    if (raw === undefined || raw.trim() === "") return fallback;
+    const value = raw.trim();
+    const parsed = /^\d+$/.test(value) ? Number(value) : Number.NaN;
+    if (!Number.isSafeInteger(parsed) || parsed < 0 || parsed > maxAllowedMs) {
+      logger.warn(
+        { variable: key, maximumMs: maxAllowedMs },
+        `Invalid ${key}; using the default value`,
+      );
+      return fallback;
+    }
+    return parsed;
+  };
+
+  const messageDebounceMs = parse("WA_WEBHOOK_DEBOUNCE_MS", 0);
+  const configuredMax = parse("WA_WEBHOOK_DEBOUNCE_MAX_MS", 30_000);
+  const messageDebounceMaxMs = Math.max(configuredMax, messageDebounceMs);
+  if (messageDebounceMaxMs !== configuredMax) {
+    logger.warn(
+      { variable: "WA_WEBHOOK_DEBOUNCE_MAX_MS", minimumMs: messageDebounceMs },
+      "WA_WEBHOOK_DEBOUNCE_MAX_MS is below WA_WEBHOOK_DEBOUNCE_MS; clamping to the debounce window",
+    );
+  }
+
+  return { messageDebounceMs, messageDebounceMaxMs };
 }
 
 function parseEvents(value: string | undefined): ChannelEvent[] {
@@ -321,6 +359,7 @@ function parseDestination(
 
 /** Parse and validate webhook settings without exposing secrets in errors. */
 export function loadEventWebhookConfig(env: Environment = process.env): EventWebhookConfig {
+  const messageDebounce = parseMessageDebounceConfig(env);
   const configuredQueuePrefix = env.WA_EVENT_WEBHOOK_QUEUE_PREFIX?.trim();
   if (configuredQueuePrefix && !/^[A-Za-z0-9_-]{1,64}$/.test(configuredQueuePrefix)) {
     throw new Error("Invalid WA_EVENT_WEBHOOK_QUEUE_PREFIX; use 1-64 letters, digits, _ or -");
@@ -375,6 +414,7 @@ export function loadEventWebhookConfig(env: Environment = process.env): EventWeb
     return {
       destinations,
       queuePrefix,
+      ...messageDebounce,
       events,
       ignoreFromMe,
       timeoutMs,
@@ -404,6 +444,7 @@ export function loadEventWebhookConfig(env: Environment = process.env): EventWeb
     return {
       destinations: [],
       queuePrefix,
+      ...messageDebounce,
       events,
       ignoreFromMe,
       timeoutMs,
@@ -426,6 +467,7 @@ export function loadEventWebhookConfig(env: Environment = process.env): EventWeb
       },
     ],
     queuePrefix,
+    ...messageDebounce,
     events,
     ignoreFromMe,
     timeoutMs,

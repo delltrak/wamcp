@@ -16,6 +16,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Optional per-chat batching for incoming event webhook messages with a sliding debounce window,
+  maximum batch age, message-count cap, transcription-aware ordering, and shutdown flushing.
 - Added `wa_resync_contacts` to refresh contacts on an existing Baileys session without pairing
   again. It resyncs app-state collections individually, recovers contacts from local chats and
   messages, and keeps recovered contacts in SQLite across restarts.
