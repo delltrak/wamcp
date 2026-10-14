@@ -172,7 +172,7 @@ WA MCP exposes **66 tools** across 11 domains. All tools use the `wa_` prefix.
 | `wa_send_text`         | Send text message       |
 | `wa_send_image`        | Send image with caption |
 | `wa_send_video`        | Send video with caption |
-| `wa_send_audio`        | Send audio / voice note |
+| `wa_send_audio`        | Send audio; Baileys `ptt=true` adds waveform and duration when available |
 | `wa_send_document`     | Send file / document    |
 | `wa_send_location`     | Send GPS location       |
 | `wa_send_contact`      | Send vCard contact      |
@@ -499,9 +499,9 @@ Copy `.env.example` to `.env` and configure:
 | `WA_TTS_OUTPUT_FORMAT`      | `opus_48000_64`          | Provider audio output format |
 | `WA_TTS_MAX_CHARS`          | `5000`                   | Maximum input text length |
 | `WA_TTS_BASE_URL`           | `https://api.elevenlabs.io` | Provider API host, including residency hosts |
-| `WA_TTS_TIMEOUT_MS`         | `60000`                  | Timeout for each provider request |
+| `WA_TTS_TIMEOUT_MS`         | `60000`                  | Timeout for provider requests, ffmpeg conversion, and PTT waveform decoding |
 | `TTS_CONCURRENCY`           | `2`                      | Maximum concurrent TTS synthesis and ffmpeg conversions |
-| `WA_TTS_FFMPEG_PATH`        | `ffmpeg` from `PATH`     | Optional ffmpeg executable path for conversion and chunk joining |
+| `WA_TTS_FFMPEG_PATH`        | `ffmpeg` from `PATH`     | ffmpeg executable for conversion, chunk joining, and PTT waveform decoding |
 | `WA_CLOUD_WEBHOOK_SECRET`   | —                        | Signing secret for the `x-hub-signature-256` header on `POST /cloud-webhook` |
 | `WA_CLOUD_VERIFY_TOKEN`     | —                        | Token for Meta's webhook GET verification handshake |
 | `WA_EVENT_WEBHOOK_URL` | — | Single outgoing destination; unset disables it |
