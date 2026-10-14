@@ -243,8 +243,15 @@ export interface StatusContent {
   text?: string;
   media?: string; // URL or base64
   caption?: string;
+  statusJidList?: string[];
   backgroundColor?: string;
   font?: number;
+}
+
+export interface StatusSendResult {
+  recipientCount: number;
+  omittedRecipientCount: number;
+  warning?: string;
 }
 
 export interface CloudCredentials {

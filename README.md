@@ -480,6 +480,7 @@ Copy `.env.example` to `.env` and configure:
 | `WA_MESSAGE_RETENTION_DAYS` | `30`                     | Auto-delete old messages                 |
 | `WA_AUTO_RECONNECT`         | `true`                   | Auto-reconnect on disconnect             |
 | `WA_MARK_ONLINE_ON_CONNECT` | `false`                  | Mark the Baileys account online when its socket connects |
+| `WA_STATUS_MAX_RECIPIENTS`  | `256`                    | Maximum recipients per Baileys status; excess recipients are truncated and reported |
 | `WA_AUTO_READ`              | `false`                  | `on_fetch` marks incoming messages read when fetched; `on_receive` marks them read on arrival |
 | `WA_MEDIA_CACHE_MAX_MB`     | `500`                    | Media cache size limit                   |
 | `WA_TRANSCRIPTION_ENABLED`  | `false`                  | Enable transcription and audio notifications |
@@ -523,6 +524,12 @@ Copy `.env.example` to `.env` and configure:
 `WA_AUTO_READ` accepts `false`, `on_fetch`, or `on_receive`. Invalid values disable automatic
 read receipts and produce a warning. Automatic receipts never delay message delivery or tool
 responses; receipt failures are logged.
+
+Baileys status stories go to the account's own normalized JID and known individual contacts by
+default. Each status tool accepts an optional `statusJidList` of phone numbers or individual JIDs
+to restrict the audience; the account's own JID is always included. The default recipient cap is
+256. Larger audiences are truncated to the cap, and the tool response includes `recipientCount`,
+`omittedRecipientCount`, and a warning. Status stories are not supported by the Cloud API.
 
 See [Audio transcription](docs/audio-transcription.md) for tool examples and event behavior.
 See [Text-to-speech voice notes](docs/tts.md) for setup, voice selection, model options, and cost notes.
