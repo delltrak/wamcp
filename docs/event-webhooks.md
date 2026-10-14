@@ -2,8 +2,10 @@
 
 Outgoing event webhooks let an external endpoint receive normalized channel
 events without keeping an MCP connection open. Delivery uses a dedicated
-BullMQ queue. Requests have a timeout and retry with exponential backoff;
-queue and delivery errors do not interrupt incoming WhatsApp message handling.
+BullMQ queue. Requests have a timeout and retry with capped exponential backoff
+and jitter for network errors, timeouts, HTTP 429, and 5xx responses. Other HTTP
+4xx responses are treated as permanent failures and are not retried. Queue and
+delivery errors do not interrupt incoming WhatsApp message handling.
 Each runtime gets a deployment-specific queue prefix by default. The worker
 checks the destination identity on every job before using its configured URL or
 credentials.
@@ -34,7 +36,13 @@ HTTP Host header.
 | `WA_EVENT_WEBHOOK_QUEUE_PREFIX` | Host/deployment hash | BullMQ namespace; use the same value for replicas and a unique value per deployment. |
 | `WA_EVENT_WEBHOOK_TIMEOUT_MS` | `10000` | Per-request timeout, from 1 to 300000 ms. |
 | `WA_EVENT_WEBHOOK_RETRY_ATTEMPTS` | `5` | Total BullMQ attempts per delivery, including the first. |
-| `WA_EVENT_WEBHOOK_RETRY_DELAY_MS` | `1000` | Initial exponential retry delay, from 1 to 300000 ms. |
+| `WA_EVENT_WEBHOOK_RETRY_DELAY_MS` | `1000` | Initial exponential retry delay, from 1 to 300000 ms. Retries add 20% jitter and are capped at five minutes. |
+
+For HTTP 429 and 5xx responses, a valid `Retry-After` header (seconds or an
+HTTP date) sets a minimum retry delay. Its value is capped at five minutes.
+The retry schedule uses the larger of that minimum and the jittered exponential
+delay, also capped at five minutes. Other 4xx responses, including 400, 401,
+404, and 408, fail permanently without another attempt.
 
 The single-destination authentication pair takes precedence over a matching
 header in `WA_EVENT_WEBHOOK_HEADERS`. For multi-destination entries, use
@@ -154,5 +162,6 @@ HMAC_SHA256(secret, timestamp + "." + body)
 ```
 
 Authentication values, HMAC secrets, URLs, and response bodies are not written
-to webhook logs. Delivery failures are reported generically and retried by
-BullMQ with exponential backoff.
+to webhook logs. Delivery failures are reported generically. Transient delivery
+failures are retried by BullMQ with capped exponential backoff and jitter;
+permanent failures are not retried.
