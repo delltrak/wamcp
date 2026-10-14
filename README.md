@@ -467,6 +467,7 @@ Copy `.env.example` to `.env` and configure:
 | `WA_CLOUD_RATE_LIMIT`       | `80`                     | Messages/min per Cloud API instance      |
 | `WA_MESSAGE_RETENTION_DAYS` | `30`                     | Auto-delete old messages                 |
 | `WA_AUTO_RECONNECT`         | `true`                   | Auto-reconnect on disconnect             |
+| `WA_MARK_ONLINE_ON_CONNECT` | `false`                  | Mark the Baileys account online when its socket connects |
 | `WA_AUTO_READ`              | `false`                  | `on_fetch` marks incoming messages read when fetched; `on_receive` marks them read on arrival |
 | `WA_MEDIA_CACHE_MAX_MB`     | `500`                    | Media cache size limit                   |
 | `WA_TRANSCRIPTION_ENABLED`  | `false`                  | Enable transcription and audio notifications |
@@ -484,10 +485,6 @@ Copy `.env.example` to `.env` and configure:
 | `WA_EVENT_WEBHOOK_PRESET` | — | `grok-bot` uses the compact payload and incoming-message filters |
 | `WA_EVENT_WEBHOOK_EVENTS` | `message.received` | Comma-separated events to forward |
 | `WA_EVENT_WEBHOOK_IGNORE_FROM_ME` | `true` | Ignore messages sent by this instance |
-
-`WA_AUTO_READ` accepts `false`, `on_fetch`, or `on_receive`. Invalid values disable automatic
-read receipts and produce a warning. Automatic receipts never delay message delivery or tool
-responses; receipt failures are logged.
 | `WA_EVENT_WEBHOOK_HEADERS` | — | Additional request headers as a JSON object of string values |
 | `WA_EVENT_WEBHOOK_AUTH_HEADER` / `WA_EVENT_WEBHOOK_AUTH_VALUE` | — | Authentication header name and value; Grok Bot defaults the name to `X-Grok-Bot-Key` when its preset is enabled |
 | `WA_EVENT_WEBHOOK_SECRET` | — | HMAC-SHA256 signing secret; adds timestamp and signature headers |
@@ -499,7 +496,12 @@ responses; receipt failures are logged.
 | `WA_EVENT_WEBHOOK_RETRY_DELAY_MS` | `1000` | Initial exponential retry delay in milliseconds |
 | `WA_VERSION_CHECK`          | `true`                   | Daily WhatsApp Web version check         |
 
+`WA_AUTO_READ` accepts `false`, `on_fetch`, or `on_receive`. Invalid values disable automatic
+read receipts and produce a warning. Automatic receipts never delay message delivery or tool
+responses; receipt failures are logged.
+
 See [Audio transcription](docs/audio-transcription.md) for tool examples and event behavior.
+See [Baileys presence](docs/baileys-presence.md) for online status configuration.
 
 ---
 

@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Added `WA_MARK_ONLINE_ON_CONNECT` to control whether Baileys marks the linked account online
+  when its socket connects. It defaults to `false`, preserving the current behavior.
+
 ### Added
 
 - Optional `WA_AUTO_READ=false|on_fetch|on_receive` behavior for incoming messages, with receipts

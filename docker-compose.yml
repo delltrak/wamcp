@@ -12,6 +12,7 @@ services:
       - WA_LOG_LEVEL=info
       - WA_MESSAGE_RETENTION_DAYS=30
       - WA_BAILEYS_RATE_LIMIT=20
+      - WA_MARK_ONLINE_ON_CONNECT=${WA_MARK_ONLINE_ON_CONNECT:-false}
     volumes:
       - wa-data:/app/data
     depends_on:

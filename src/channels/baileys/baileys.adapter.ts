@@ -83,6 +83,13 @@ import {
 
 const logger = createChildLogger({ service: "baileys-adapter" });
 
+function parseBooleanEnv(value: string | undefined, key: string, fallback: boolean): boolean {
+  if (value === undefined || value.trim() === "") return fallback;
+  if (value.trim().toLowerCase() === "true") return true;
+  if (value.trim().toLowerCase() === "false") return false;
+  throw new Error(`Invalid ${key}; expected true or false`);
+}
+
 function serializeIncomingAudioMessage(message?: WAMessage): string | null {
   const audioMessage = message?.message?.audioMessage;
   if (!message || !audioMessage) return null;
@@ -111,6 +118,7 @@ export class BaileysAdapter implements ChannelAdapter {
   private saveCreds: (() => Promise<void>) | null = null;
 
   private readonly autoReconnect: boolean;
+  private readonly markOnlineOnConnect: boolean;
   private readonly listeners = new Map<ChannelEvent, Set<ChannelEventHandler<ChannelEvent>>>();
 
   constructor(
@@ -119,6 +127,11 @@ export class BaileysAdapter implements ChannelAdapter {
   ) {
     this.contactStore = contactStore ?? new ContactStore(instanceId, db);
     this.autoReconnect = process.env.WA_AUTO_RECONNECT !== "false" && DEFAULT_AUTO_RECONNECT;
+    this.markOnlineOnConnect = parseBooleanEnv(
+      process.env.WA_MARK_ONLINE_ON_CONNECT,
+      "WA_MARK_ONLINE_ON_CONNECT",
+      false,
+    );
   }
 
   // ---- Private helpers ----
@@ -204,7 +217,7 @@ export class BaileysAdapter implements ChannelAdapter {
       logger: logger.child({ instanceId: this.instanceId }),
       generateHighQualityLinkPreview: true,
       syncFullHistory: true,
-      markOnlineOnConnect: false,
+      markOnlineOnConnect: this.markOnlineOnConnect,
     });
 
     this.sock = sock;
