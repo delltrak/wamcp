@@ -20,6 +20,7 @@ import { registerStatusTools } from "../tools/status.tools.js";
 import { registerCallTools } from "../tools/call.tools.js";
 import { registerNewsletterTools } from "../tools/newsletter.tools.js";
 import { registerTranscriptionTools } from "../tools/transcription.tools.js";
+import { registerTtsTools } from "../tools/tts.tools.js";
 
 // Resources
 import { registerInstancesResource } from "../resources/instances.resource.js";
@@ -61,6 +62,7 @@ export function createMcpServer(
   registerCallTools(server, instanceManager, messageQueue);
   registerNewsletterTools(server, instanceManager, messageQueue);
   registerTranscriptionTools(server, instanceManager);
+  registerTtsTools(server, instanceManager, messageQueue);
 
   // Register resources
   registerInstancesResource(server, instanceManager, messageQueue);

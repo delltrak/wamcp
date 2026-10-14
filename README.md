@@ -133,6 +133,7 @@ Add to your `claude_desktop_config.json`:
 | 🔄  | **Multi-instance**     | Run 1–50 WhatsApp numbers from a single server.                                                           |
 | 📨  | **Full messaging**     | Text, images, video, audio, documents, polls, reactions, replies, forwards, edits, deletes, view-once.    |
 | 🎙️  | **Audio transcription** | Optional incoming audio transcription for Baileys and Cloud API messages.                                 |
+| 🔊  | **Voice notes**         | Optional ElevenLabs text-to-speech voice notes through a provider interface.                                |
 | 👥  | **Groups**             | Create, manage members, promote/demote admins, settings, invite links, join requests, ephemeral messages. |
 | 👤  | **Contacts & Profile** | Number check, block/unblock, business profiles, privacy, status updates.                                  |
 | 📡  | **Real-time events**   | 12 notification types via SSE: messages, typing, groups, calls, connection status.                        |
@@ -145,7 +146,7 @@ Add to your `claude_desktop_config.json`:
 
 ## 🛠️ Tools
 
-WA MCP exposes **63 tools** across 10 domains. All tools use the `wa_` prefix.
+WA MCP exposes **66 tools** across 11 domains. All tools use the `wa_` prefix.
 
 <details>
 <summary>📋 <strong>Instance Management</strong> (8 tools)</summary>
@@ -194,6 +195,17 @@ WA MCP exposes **63 tools** across 10 domains. All tools use the `wa_` prefix.
 | Tool                  | Description                                                |
 | --------------------- | ---------------------------------------------------------- |
 | `wa_transcribe_audio` | Transcribe an incoming audio message or direct audio input |
+
+</details>
+
+<details>
+<summary>🔊 <strong>Text-to-speech</strong> (3 tools)</summary>
+
+| Tool                  | Description                                                  |
+| --------------------- | ------------------------------------------------------------ |
+| `wa_send_voice`       | Synthesize and queue a WhatsApp voice note                   |
+| `wa_tts_list_voices`  | List voices from the configured provider                     |
+| `wa_tts_preview`      | Return generated OGG/Opus audio as base64 without sending it |
 
 </details>
 
@@ -478,6 +490,18 @@ Copy `.env.example` to `.env` and configure:
 | `WA_TRANSCRIPTION_MAX_MB`   | `16`                      | Maximum audio input size in MB           |
 | `WA_TRANSCRIPTION_TIMEOUT_MS` | `60000`                 | Transcription and media download timeout |
 | `TRANSCRIPTION_CONCURRENCY` | `2`                       | Concurrent incoming audio downloads and transcriptions |
+| `WA_TTS_ENABLED`            | `false`                  | Enable outgoing voice-note synthesis |
+| `WA_TTS_PROVIDER`           | `elevenlabs`             | Synthesis provider registry selection |
+| `WA_TTS_API_KEY`            | —                        | ElevenLabs API key |
+| `WA_TTS_DEFAULT_VOICE_ID`   | —                        | Default provider voice ID; can be overridden per call |
+| `WA_TTS_MODEL`              | `eleven_v3`              | Default ElevenLabs model ID |
+| `WA_TTS_LANGUAGE`           | —                        | Optional language code |
+| `WA_TTS_OUTPUT_FORMAT`      | `opus_48000_64`          | Provider audio output format |
+| `WA_TTS_MAX_CHARS`          | `5000`                   | Maximum input text length |
+| `WA_TTS_BASE_URL`           | `https://api.elevenlabs.io` | Provider API host, including residency hosts |
+| `WA_TTS_TIMEOUT_MS`         | `60000`                  | Timeout for each provider request |
+| `TTS_CONCURRENCY`           | `2`                      | Maximum concurrent TTS synthesis and ffmpeg conversions |
+| `WA_TTS_FFMPEG_PATH`        | `ffmpeg` from `PATH`     | Optional ffmpeg executable path for conversion and chunk joining |
 | `WA_CLOUD_WEBHOOK_SECRET`   | —                        | Signing secret for the `x-hub-signature-256` header on `POST /cloud-webhook` |
 | `WA_CLOUD_VERIFY_TOKEN`     | —                        | Token for Meta's webhook GET verification handshake |
 | `WA_EVENT_WEBHOOK_URL` | — | Single outgoing destination; unset disables it |
@@ -501,6 +525,7 @@ read receipts and produce a warning. Automatic receipts never delay message deli
 responses; receipt failures are logged.
 
 See [Audio transcription](docs/audio-transcription.md) for tool examples and event behavior.
+See [Text-to-speech voice notes](docs/tts.md) for setup, voice selection, model options, and cost notes.
 See [Baileys presence](docs/baileys-presence.md) for online status configuration.
 
 ---
@@ -563,6 +588,7 @@ src/
 │   ├── dedup.ts                 # Message deduplication
 │   ├── media.ts                 # Media handling
 │   └── transcription.ts         # Speech-to-text provider
+├── tts/                         # Text-to-speech provider interface and registry
 ├── db/
 │   ├── schema.ts                # Drizzle table definitions
 │   └── client.ts                # SQLite connection

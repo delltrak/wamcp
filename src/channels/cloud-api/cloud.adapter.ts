@@ -291,11 +291,15 @@ export class CloudApiAdapter implements ChannelAdapter {
 
       case "audio": {
         const media = this.resolveMediaPayload(content.audio, "audio");
-        const res = await this.sendRaw({
+        const payload: Record<string, unknown> = {
           recipient_type: "individual",
           to: phone,
           ...media,
-        });
+        };
+        if (content.quotedMessageId) {
+          payload.context = { message_id: content.quotedMessageId };
+        }
+        const res = await this.sendRaw(payload);
         return this.toMessageResponse(res);
       }
 
