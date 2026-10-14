@@ -36,7 +36,7 @@
 
 **WA MCP** is a WhatsApp MCP server built with TypeScript that gives AI agents full access to WhatsApp through the [Model Context Protocol](https://modelcontextprotocol.io). It supports both **Baileys** (WhatsApp Web) and **Meta Cloud API** as dual-channel backends, deployable with **Docker** in a single command.
 
-Your agent connects once and auto-discovers **63 tools**, **10 resources**, and **12 real-time events** — zero configuration, zero REST wrappers, zero glue code.
+Your agent connects once and auto-discovers **67 tools**, **10 resources**, and **12 real-time events** — zero configuration, zero REST wrappers, zero glue code.
 
 ```
 Your AI Agent ←→ MCP Protocol ←→ WA MCP ←→ WhatsApp
@@ -82,7 +82,7 @@ from google.adk.tools.mcp_tool import McpToolset
 
 tools = McpToolset(url="http://localhost:3000/mcp")
 
-# Agent auto-discovers 63 WhatsApp tools
+# Agent auto-discovers 67 WhatsApp tools
 # wa_create_instance, wa_send_text, wa_send_image, ...
 ```
 
@@ -146,7 +146,7 @@ Add to your `claude_desktop_config.json`:
 
 ## 🛠️ Tools
 
-WA MCP exposes **66 tools** across 11 domains. All tools use the `wa_` prefix.
+WA MCP exposes **67 tools** across 11 domains. All tools use the `wa_` prefix.
 
 <details>
 <summary>📋 <strong>Instance Management</strong> (8 tools)</summary>
@@ -259,7 +259,7 @@ WA MCP exposes **66 tools** across 11 domains. All tools use the `wa_` prefix.
 </details>
 
 <details>
-<summary>👤 <strong>Profile</strong> (5 tools)</summary>
+<summary>👤 <strong>Profile</strong> (6 tools)</summary>
 
 | Tool                        | Description             |
 | --------------------------- | ----------------------- |
@@ -267,6 +267,7 @@ WA MCP exposes **66 tools** across 11 domains. All tools use the `wa_` prefix.
 | `wa_remove_profile_picture` | Remove profile picture  |
 | `wa_update_profile_name`    | Change display name     |
 | `wa_update_profile_status`  | Change status text      |
+| `wa_get_privacy_settings`   | Read account privacy    |
 | `wa_update_privacy`         | Update privacy settings |
 
 </details>
@@ -303,6 +304,27 @@ WA MCP exposes **66 tools** across 11 domains. All tools use the `wa_` prefix.
 </details>
 
 ---
+
+## 🔐 Privacy settings
+
+`wa_get_privacy_settings` and `wa_update_privacy` are available for Baileys instances. Cloud API instances return a clear unsupported-operation error.
+
+`wa_get_privacy_settings` returns normalized account settings. `forceRefresh` defaults to `false`; set it to `true` to ask Baileys to refresh its cached values from WhatsApp. The result includes last seen, online visibility, profile photo, about/status text, read receipts, group adds, calls, and the status audience mode.
+
+`wa_update_privacy` accepts one `setting` and its matching `value`:
+
+| Setting | Accepted values |
+| --- | --- |
+| `lastSeen`, `profilePic`, `status` | `all`, `contacts`, `contact_blacklist`, `none` |
+| `online` | `all`, `match_last_seen` |
+| `readReceipts` | `all`, `none` |
+| `groupAdd` | `all`, `contacts`, `contact_blacklist` |
+| `calls` | `all`, `known` |
+| `defaultDisappearingMode` | `0`, `86400`, `604800`, `7776000` seconds (remove, 24 hours, 7 days, 90 days) |
+
+Baileys can report and update the status audience mode (`all`, `contacts`, `contact_blacklist`, or `none`), but its API does not expose the selected include/exclude JID lists or a setter for those lists. The result therefore reports `includedJids` and `excludedJids` as `null` and `recipientListsAvailable` as `false`. `fetchPrivacySettings` also does not return the default disappearing duration, so that duration can be updated but is not included in the read result.
+
+See the [API reference](docs/API_REFERENCE.md#26-profile-management-6-tools) for tool input and response details.
 
 ## 📖 Resources
 
@@ -432,7 +454,7 @@ See [Outgoing event webhooks](docs/event-webhooks.md) for configuration details.
 │  │  Layer 1 — MCP Transport (HTTP/stdio) │ │
 │  ├────────────────────────────────────────┤ │
 │  │  Layer 2 — MCP Core                   │ │
-│  │  63 Tools │ 10 Resources │ 12 Events  │ │
+│  │  67 Tools │ 10 Resources │ 12 Events  │ │
 │  ├────────────────────────────────────────┤ │
 │  │  Layer 3 — Services                   │ │
 │  │  Instance Manager │ Queue │ Dedup     │ │
@@ -582,7 +604,7 @@ src/
 ├── index.ts                     # Entry point (HTTP/stdio)
 ├── constants.ts                 # Defaults and limits
 ├── server/mcp.ts                # MCP server setup
-├── tools/                       # 🔧 63 MCP tools (10 files)
+├── tools/                       # 🔧 67 MCP tools (10 files)
 ├── resources/                   # 📖 10 MCP resources (8 files)
 ├── notifications/events.ts      # 📡 12 event types
 ├── channels/

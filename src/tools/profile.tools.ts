@@ -15,6 +15,7 @@ import {
   UpdateProfileNameSchema,
   UpdateProfileStatusSchema,
   UpdatePrivacySchema,
+  GetPrivacySettingsSchema,
 } from "../schemas/profile.schema.js";
 
 const mediaService = new MediaService();
@@ -107,10 +108,31 @@ export function registerProfileTools(
   );
 
   server.registerTool(
+    "wa_get_privacy_settings",
+    {
+      description:
+        "Read normalized account privacy settings for a Baileys instance. Set forceRefresh=true to refresh from WhatsApp. Status recipient lists are not exposed by Baileys.",
+      inputSchema: GetPrivacySettingsSchema,
+    },
+    async (params) => {
+      const log = createRequestLogger("wa_get_privacy_settings", params.instanceId);
+      const start = Date.now();
+      try {
+        const adapter = instanceManager.getAdapter(params.instanceId);
+        const settings = await adapter.getPrivacySettings(params.forceRefresh);
+        log.info({ duration: Date.now() - start }, "Privacy settings read");
+        return toolSuccess(settings);
+      } catch (err) {
+        return handleToolError("wa_get_privacy_settings", err, params.instanceId);
+      }
+    },
+  );
+
+  server.registerTool(
     "wa_update_privacy",
     {
       description:
-        "Update privacy settings (lastSeen, online, profilePic, status, readReceipts, groupAdd).",
+        "Update Baileys account privacy settings: lastSeen, online, profilePic, status visibility, readReceipts, groupAdd, calls, or defaultDisappearingMode. Status recipient lists cannot be changed through Baileys.",
       inputSchema: UpdatePrivacySchema,
     },
     async (params) => {
@@ -118,7 +140,8 @@ export function registerProfileTools(
       const start = Date.now();
       try {
         const adapter = instanceManager.getAdapter(params.instanceId);
-        await adapter.updatePrivacy(params.setting, params.value);
+        const { instanceId: _instanceId, ...update } = params;
+        await adapter.updatePrivacy(update);
         log.info({ duration: Date.now() - start }, "Privacy setting updated");
         return toolSuccess({ success: true, setting: params.setting, value: params.value });
       } catch (err) {
