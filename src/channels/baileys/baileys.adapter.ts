@@ -108,6 +108,17 @@ function sizeLabel(maxBytes: number): string {
   return maxBytes < 1024 * 1024 ? `${maxBytes} bytes` : `${Math.round(maxBytes / 1024 / 1024)} MB`;
 }
 
+function isContactEligibleChatNameJid(jid: string): boolean {
+  const normalizedJid = jid.toLowerCase();
+  const server = normalizedJid.slice(normalizedJid.lastIndexOf("@") + 1);
+  return (
+    normalizedJid !== STATUS_BROADCAST_JID &&
+    server !== "g.us" &&
+    server !== "broadcast" &&
+    server !== "newsletter"
+  );
+}
+
 function groupPictureFailure(error: unknown, operation: "update" | "remove"): Error {
   const errorObject =
     typeof error === "object" && error !== null ? (error as Record<string, unknown>) : undefined;
@@ -1877,7 +1888,7 @@ export class BaileysAdapter implements ChannelAdapter {
         this.persistChats(events["chats.upsert"]);
         const namedChats = events["chats.upsert"].filter(
           (ch): ch is typeof ch & { id: string; name: string } =>
-            !!ch.id && !!ch.name && !ch.id.endsWith("@g.us") && !ch.id.endsWith("@broadcast"),
+            !!ch.id && !!ch.name && isContactEligibleChatNameJid(ch.id),
         );
         if (namedChats.length > 0) {
           await persistContacts(namedChats.map((ch) => ({ id: ch.id, name: ch.name })));
@@ -1891,7 +1902,8 @@ export class BaileysAdapter implements ChannelAdapter {
       if (events["chats.update"]) {
         this.persistChats(events["chats.update"]);
         const namedChats = events["chats.update"].filter(
-          (ch): ch is typeof ch & { id: string; name: string } => !!ch.id && !!ch.name,
+          (ch): ch is typeof ch & { id: string; name: string } =>
+            !!ch.id && !!ch.name && isContactEligibleChatNameJid(ch.id),
         );
         if (namedChats.length > 0) {
           await persistContacts(namedChats.map((ch) => ({ id: ch.id, name: ch.name })));

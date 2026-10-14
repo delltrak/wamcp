@@ -3,14 +3,12 @@
 // Persists contacts received from Baileys and serves local lookups.
 // ============================================================
 
-import { and, count, desc, eq, isNotNull, isNull, like, or } from "drizzle-orm";
+import { and, count, eq, isNotNull, isNull, like, or, sql } from "drizzle-orm";
 import type { db as applicationDb } from "../db/client.js";
-import {
-  chats as chatsTable,
-  contacts as contactsTable,
-  messages as messagesTable,
-} from "../db/schema.js";
+import { chats as chatsTable, contacts as contactsTable } from "../db/schema.js";
 import type { Contact } from "../types/channel.types.js";
+
+const MAX_LOCAL_MESSAGE_CONTACT_CANDIDATES = 50_000;
 
 export interface ContactSyncRecord {
   id?: string | null;
@@ -72,7 +70,12 @@ export class ContactStore {
 
     const namedChats = (history.chats ?? []).filter(
       (chat): chat is typeof chat & { id: string; name: string } =>
-        !!chat.id && !!chat.name && !chat.id.endsWith("@g.us") && !chat.id.endsWith("@broadcast"),
+        !!chat.id &&
+        !!chat.name &&
+        !chat.id.endsWith("@g.us") &&
+        !chat.id.endsWith("@broadcast") &&
+        !chat.id.toLowerCase().endsWith("@newsletter") &&
+        chat.id.toLowerCase() !== "status@broadcast",
     );
     await this.upsertContacts(namedChats.map((chat) => ({ id: chat.id, name: chat.name })));
   }
@@ -104,31 +107,65 @@ export class ContactStore {
 
     const messageCandidates = new Map<string, ContactSyncRecord>();
     try {
-      const messages = this.database
-        .select({
-          chatId: messagesTable.chatId,
-          senderId: messagesTable.senderId,
-          isFromMe: messagesTable.isFromMe,
-          pushName: messagesTable.pushName,
-        })
-        .from(messagesTable)
-        .where(eq(messagesTable.instanceId, this.instanceId))
-        .orderBy(desc(messagesTable.timestamp))
-        .all();
+      const messages = this.database.all<{
+        jid: string;
+        push_name: string | null;
+      }>(sql`
+        WITH message_candidates AS (
+          SELECT
+            chat_id AS jid,
+            timestamp AS candidate_at,
+            CASE WHEN is_from_me = 0 THEN NULLIF(TRIM(push_name), '') ELSE NULL END AS push_name,
+            CASE
+              WHEN is_from_me = 0 AND NULLIF(TRIM(push_name), '') IS NOT NULL THEN timestamp
+              ELSE NULL
+            END AS push_name_at
+          FROM messages
+          WHERE instance_id = ${this.instanceId}
+            AND (
+              chat_id LIKE '%@s.whatsapp.net'
+              OR chat_id LIKE '%@lid'
+              OR chat_id LIKE '%@c.us'
+            )
+          UNION ALL
+          SELECT
+            sender_id AS jid,
+            timestamp AS candidate_at,
+            NULLIF(TRIM(push_name), '') AS push_name,
+            CASE WHEN NULLIF(TRIM(push_name), '') IS NOT NULL THEN timestamp ELSE NULL END
+              AS push_name_at
+          FROM messages
+          WHERE instance_id = ${this.instanceId}
+            AND is_from_me = 0
+            AND (
+              sender_id LIKE '%@s.whatsapp.net'
+              OR sender_id LIKE '%@lid'
+              OR sender_id LIKE '%@c.us'
+            )
+        ),
+        candidate_jids AS (
+          SELECT jid, MAX(candidate_at) AS latest_at, MAX(push_name_at) AS latest_push_name_at
+          FROM message_candidates
+          GROUP BY jid
+          ORDER BY latest_at DESC
+          LIMIT ${MAX_LOCAL_MESSAGE_CONTACT_CANDIDATES}
+        ),
+        latest_names AS (
+          SELECT candidate_jids.jid, message_candidates.push_name
+          FROM candidate_jids
+          JOIN message_candidates
+            ON message_candidates.jid = candidate_jids.jid
+            AND message_candidates.push_name_at = candidate_jids.latest_push_name_at
+          GROUP BY candidate_jids.jid
+        )
+        SELECT candidate_jids.jid, latest_names.push_name
+        FROM candidate_jids
+        LEFT JOIN latest_names ON latest_names.jid = candidate_jids.jid
+        ORDER BY candidate_jids.latest_push_name_at DESC, candidate_jids.latest_at DESC
+      `);
       for (const message of messages) {
-        const chatJid = individualJid(message.chatId);
-        if (chatJid) {
-          addCandidate(messageCandidates, chatJid, {
-            notify: message.isFromMe === 0 ? message.pushName : undefined,
-          });
-        }
-
-        if (message.isFromMe === 0) {
-          const senderJid = individualJid(message.senderId);
-          if (senderJid) {
-            addCandidate(messageCandidates, senderJid, { notify: message.pushName });
-          }
-        }
+        const jid = individualJid(message.jid);
+        if (jid) addCandidate(messageCandidates, jid, { notify: message.push_name ?? undefined });
       }
       result.messages.candidates = messageCandidates.size;
       result.messages.contactsAdded = await this.persistRecoveredCandidates(
