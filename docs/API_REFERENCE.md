@@ -61,6 +61,9 @@ Tools marked **Baileys only** are not available on Cloud API instances.
 - **`to`** -- Recipient for send operations. Use a phone number (e.g. `"5511999999999"`) or a group JID (e.g. `"120363...@g.us"`).
 - **JID** -- Jabber ID, WhatsApp's internal identifier. Individual: `5511999999999@s.whatsapp.net`. Group: `120363...@g.us`.
 - **Media** -- Image/video/audio/document fields accept a URL (`https://...`) or base64-encoded data.
+- **Automatic read receipts** -- `WA_AUTO_READ=false` (default), `on_fetch` to mark incoming
+  messages read when a tool or resource returns them, or `on_receive` to mark them read when they
+  arrive. Invalid values disable the feature and log a warning.
 
 ---
 
@@ -679,11 +682,12 @@ Send a presence status (typing, recording, etc.) to a chat.
 
 Mark specific messages as read in a chat.
 
-| Parameter    | Type     | Required | Description                         |
-| ------------ | -------- | -------- | ----------------------------------- |
-| `instanceId` | string   | Yes      | The instance ID                     |
-| `chatId`     | string   | Yes      | Chat JID containing the messages    |
-| `messageIds` | string[] | Yes      | Message IDs to mark as read (min 1) |
+| Parameter     | Type     | Required | Description                                                      |
+| ------------- | -------- | -------- | ---------------------------------------------------------------- |
+| `instanceId`  | string   | Yes      | The instance ID                                                  |
+| `chatId`      | string   | Yes      | Chat JID containing the messages                                 |
+| `messageIds`  | string[] | Yes      | Message IDs to mark as read (min 1)                              |
+| `participant` | string   | No       | Sender JID for group messages; defaults to the stored message sender |
 
 **Channel support:** Both
 

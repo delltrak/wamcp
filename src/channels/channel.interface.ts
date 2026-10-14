@@ -59,7 +59,7 @@ export interface ChannelAdapter {
     chatId: string,
     status: "composing" | "recording" | "paused" | "available" | "unavailable",
   ): Promise<void>;
-  markRead(chatId: string, messageIds: string[]): Promise<void>;
+  markRead(chatId: string, messageIds: string[], participant?: string): Promise<void>;
 
   // ---- Chats ----
   modifyChat(chatId: string, modification: ChatModification): Promise<void>;

@@ -34,6 +34,7 @@ import type {
   NormalizedMessageEvent,
 } from "../../types/channel.types.js";
 import { createChildLogger } from "../../utils/logger.js";
+import { getAutoReadMode, scheduleIncomingMessageRead } from "../../services/auto-read.js";
 
 const logger = createChildLogger({ service: "cloud-api-adapter" });
 
@@ -435,7 +436,7 @@ export class CloudApiAdapter implements ChannelAdapter {
     throw new Error("Sending presence is not supported on Cloud API");
   }
 
-  async markRead(chatId: string, messageIds: string[]): Promise<void> {
+  async markRead(chatId: string, messageIds: string[], _participant?: string): Promise<void> {
     // Cloud API marks one message at a time
     const _phone = this.normalizePhone(chatId);
     const { phoneNumberId } = this.getCredentials();
@@ -785,7 +786,17 @@ export class CloudApiAdapter implements ChannelAdapter {
   /** Emit an event to registered listeners. Public so the webhook handler can use it. */
   emit<E extends ChannelEvent>(event: E, payload: ChannelEventPayload[E]): void {
     if (event === "message.received") {
-      this.persistAudioMessage(payload as ChannelEventPayload["message.received"]);
+      const messageEvent = payload as ChannelEventPayload["message.received"];
+      this.persistAudioMessage(messageEvent);
+      if (getAutoReadMode() === "on_receive") {
+        scheduleIncomingMessageRead(
+          this,
+          messageEvent.chatId,
+          messageEvent.message.id,
+          messageEvent.message.isFromMe,
+          this.instanceId,
+        );
+      }
     }
 
     const handlers = this.listeners.get(event);

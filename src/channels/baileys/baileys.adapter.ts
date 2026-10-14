@@ -74,6 +74,7 @@ import {
   RECONNECT_MAX_ATTEMPTS,
 } from "../../constants.js";
 import { createChildLogger } from "../../utils/logger.js";
+import { scheduleBaileysMessagesRead } from "../../services/auto-read.js";
 import {
   ContactStore,
   type ContactPnResolver,
@@ -440,10 +441,45 @@ export class BaileysAdapter implements ChannelAdapter {
     await sock.sendPresenceUpdate(presenceStatus, this.normalizeJid(chatId));
   }
 
-  async markRead(chatId: string, messageIds: string[]): Promise<void> {
+  async markRead(chatId: string, messageIds: string[], participant?: string): Promise<void> {
     const sock = this.getSock();
     const jid = this.normalizeJid(chatId);
-    const keys = messageIds.map((id) => ({ remoteJid: jid, id }));
+    const isGroup = jid.endsWith("@g.us");
+    const keys = messageIds.flatMap((id) => {
+      if (!isGroup) return [{ remoteJid: jid, id }];
+
+      const storedMessage = db
+        .select({ senderId: messagesTable.senderId, isFromMe: messagesTable.isFromMe })
+        .from(messagesTable)
+        .where(
+          and(
+            eq(messagesTable.instanceId, this.instanceId),
+            eq(messagesTable.chatId, jid),
+            eq(messagesTable.id, id),
+          ),
+        )
+        .get();
+      const messageParticipant = storedMessage?.senderId || participant;
+
+      if (!messageParticipant || messageParticipant === "me") {
+        logger.warn(
+          { instanceId: this.instanceId, messageId: id },
+          "Skipping group read receipt because the message participant is unavailable",
+        );
+        return [];
+      }
+
+      return [
+        {
+          remoteJid: jid,
+          id,
+          participant: messageParticipant,
+          fromMe: storedMessage?.isFromMe === 1,
+        },
+      ];
+    });
+
+    if (keys.length === 0) return;
     await sock.readMessages(keys);
   }
 
@@ -1149,6 +1185,8 @@ export class BaileysAdapter implements ChannelAdapter {
             this.persistMessage(normalized, msg);
           }
         }
+
+        scheduleBaileysMessagesRead(this, data.type, data.messages, this.instanceId);
 
         // Emit events only for incoming notify-type messages (not our own sends)
         const notifyEvents = normalizeMessagesUpsert(this.instanceId, data);

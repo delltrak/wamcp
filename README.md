@@ -468,6 +468,7 @@ Copy `.env.example` to `.env` and configure:
 | `WA_MESSAGE_RETENTION_DAYS` | `30`                     | Auto-delete old messages                 |
 | `WA_AUTO_RECONNECT`         | `true`                   | Auto-reconnect on disconnect             |
 | `WA_MARK_ONLINE_ON_CONNECT` | `false`                  | Mark the Baileys account online when its socket connects |
+| `WA_AUTO_READ`              | `false`                  | `on_fetch` marks incoming messages read when fetched; `on_receive` marks them read on arrival |
 | `WA_MEDIA_CACHE_MAX_MB`     | `500`                    | Media cache size limit                   |
 | `WA_TRANSCRIPTION_ENABLED`  | `false`                  | Enable transcription and audio notifications |
 | `WA_TRANSCRIPTION_API_KEY`  | —                        | API key for the transcription endpoint   |
@@ -494,6 +495,10 @@ Copy `.env.example` to `.env` and configure:
 | `WA_EVENT_WEBHOOK_RETRY_ATTEMPTS` | `5` | BullMQ delivery attempts, including the first attempt |
 | `WA_EVENT_WEBHOOK_RETRY_DELAY_MS` | `1000` | Initial exponential retry delay in milliseconds |
 | `WA_VERSION_CHECK`          | `true`                   | Daily WhatsApp Web version check         |
+
+`WA_AUTO_READ` accepts `false`, `on_fetch`, or `on_receive`. Invalid values disable automatic
+read receipts and produce a warning. Automatic receipts never delay message delivery or tool
+responses; receipt failures are logged.
 
 See [Audio transcription](docs/audio-transcription.md) for tool examples and event behavior.
 See [Baileys presence](docs/baileys-presence.md) for online status configuration.

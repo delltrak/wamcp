@@ -22,6 +22,7 @@ import { normalizeWebhookPayload } from "./channels/cloud-api/cloud.events.js";
 import type { MetaWebhookPayload } from "./channels/cloud-api/cloud.events.js";
 import { installShutdownHandlers, SHUTDOWN_TIMEOUT_MS } from "./utils/shutdown.js";
 import { logger } from "./utils/logger.js";
+import { getAutoReadMode } from "./services/auto-read.js";
 
 const CLOUD_WEBHOOK_PATH = "/cloud-webhook";
 
@@ -65,6 +66,8 @@ function checkApiKey(req: IncomingMessage, res: ServerResponse): boolean {
 }
 
 async function initServices() {
+  getAutoReadMode();
+
   // Initialize services
   const instanceManager = new InstanceManager();
   const messageQueue = new MessageQueue();

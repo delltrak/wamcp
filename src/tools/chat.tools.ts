@@ -8,6 +8,7 @@ import type { MessageQueue } from "../services/message-queue.js";
 import { toolSuccess } from "../types/mcp.types.js";
 import { handleToolError } from "../utils/tool-handler.js";
 import { createRequestLogger } from "../utils/logger.js";
+import { scheduleFetchedMessagesRead } from "../services/auto-read.js";
 import {
   ArchiveChatSchema,
   PinChatSchema,
@@ -144,6 +145,7 @@ export function registerChatTools(
       try {
         const adapter = instanceManager.getAdapter(params.instanceId);
         const messages = await adapter.getMessages(params.chatId, params.limit);
+        scheduleFetchedMessagesRead(adapter, params.chatId, messages, params.instanceId);
         log.info(
           { duration: Date.now() - start, chatId: params.chatId, count: messages.length },
           "Messages retrieved",

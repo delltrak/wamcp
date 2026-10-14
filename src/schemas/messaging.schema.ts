@@ -159,5 +159,12 @@ export const MarkReadSchema = z
     instanceId: z.string().min(1).describe("The instance ID"),
     chatId: z.string().min(5).describe("Chat JID containing the messages"),
     messageIds: z.array(z.string().min(1)).min(1).describe("Message IDs to mark as read"),
+    participant: z
+      .string()
+      .min(1)
+      .optional()
+      .describe(
+        "Optional sender JID for group messages; otherwise resolved from stored message data",
+      ),
   })
   .strict();

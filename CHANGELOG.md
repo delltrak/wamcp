@@ -14,6 +14,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Optional `WA_AUTO_READ=false|on_fetch|on_receive` behavior for incoming messages, with receipts
+  scheduled in the background so message handling and tool/resource responses continue promptly.
+- Optional `participant` input for `wa_mark_read`; Baileys group receipt keys now include the
+  participant and stored `fromMe` value while direct chat keys keep their existing shape.
 - Optional incoming audio transcription for Baileys and Cloud API messages through an
   OpenAI-compatible transcription endpoint, with a `wa_transcribe_audio` MCP tool and
   asynchronous transcription text on successful audio message notifications.
