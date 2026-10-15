@@ -789,6 +789,7 @@ export class BaileysAdapter implements ChannelAdapter {
   private readonly healthWatchdogMs: number;
   private connectedAtMs: number | null = null;
   private disconnectedAtMs: number | null = null;
+  private appendNotifyWatermarkMs: number | null = null;
   private lastDisconnectReason: string | null = null;
   private lastDisconnectStatusCode: number | null = null;
   private consecutiveHealthProbeFailures = 0;
@@ -4941,6 +4942,7 @@ export class BaileysAdapter implements ChannelAdapter {
       }
 
       if (connection === "open") {
+        this.appendNotifyWatermarkMs = this.getAppendNotifyWatermark(Date.now());
         this.status = "connected";
         const persistedDisconnect = db
           .select({ lastDisconnected: instancesTable.lastDisconnected })
@@ -4964,6 +4966,7 @@ export class BaileysAdapter implements ChannelAdapter {
 
       if (connection === "close") {
         this.clearHealthWatchdog();
+        this.appendNotifyWatermarkMs = null;
         this.status = "disconnected";
         const boom = (lastDisconnect?.error as Boom)?.output;
         const statusCode = boom?.statusCode;
@@ -5181,7 +5184,9 @@ export class BaileysAdapter implements ChannelAdapter {
         const data = events["messages.upsert"];
         const appendNow = Date.now();
         const appendWatermark =
-          data.type === "append" ? this.getAppendNotifyWatermark(appendNow) : null;
+          data.type === "append"
+            ? (this.appendNotifyWatermarkMs ?? this.getAppendNotifyWatermark(appendNow))
+            : null;
         logger.info(
           { instanceId: this.instanceId, type: data.type, count: data.messages.length },
           "messages.upsert event received",
@@ -5741,16 +5746,17 @@ export class BaileysAdapter implements ChannelAdapter {
     const lastMessage = db
       .select({ timestamp: messagesTable.timestamp })
       .from(messagesTable)
-      .where(eq(messagesTable.instanceId, this.instanceId))
+      .where(and(eq(messagesTable.instanceId, this.instanceId), eq(messagesTable.isFromMe, 0)))
       .orderBy(desc(messagesTable.timestamp))
       .limit(1)
       .get();
     const lastSeenMessageAt = lastMessage?.timestamp ? lastMessage.timestamp * 1000 : null;
-    const connectionAt = instance?.lastDisconnected || instance?.lastConnected || null;
-    const watermark =
-      connectionAt !== null
-        ? Math.max(connectionAt, lastSeenMessageAt ?? connectionAt)
-        : lastSeenMessageAt;
+    const timestamps = [
+      instance?.lastDisconnected ?? null,
+      instance?.lastConnected ?? null,
+      lastSeenMessageAt,
+    ].filter((timestamp): timestamp is number => timestamp !== null && Number.isFinite(timestamp));
+    const watermark = timestamps.length > 0 ? Math.max(...timestamps) : null;
 
     return watermark !== null
       ? watermark - APPEND_NOTIFY_CLOCK_SKEW_MS

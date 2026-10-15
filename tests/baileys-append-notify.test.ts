@@ -38,6 +38,7 @@ function createFixture(options: { lastConnected?: number; lastDisconnected?: num
   adapter: BaileysAdapter;
   dispatchBatch: (events: Partial<BaileysEventMap>) => Promise<void>;
   dispatch: (type: "append" | "notify", messages: WAMessage[]) => Promise<void>;
+  dispatchConnectionUpdate: (update: BaileysEventMap["connection.update"]) => void;
 } {
   const instanceId = `append_notify_${randomUUID()}`;
   const now = Date.now();
@@ -53,9 +54,14 @@ function createFixture(options: { lastConnected?: number; lastDisconnected?: num
     .run();
 
   let processEvents: ((events: Partial<BaileysEventMap>) => Promise<void> | void) | undefined;
+  let connectionUpdate: ((update: BaileysEventMap["connection.update"]) => void) | undefined;
   const socket = {
     ev: {
-      on: vi.fn(),
+      on: vi.fn(
+        (event: string, handler: (update: BaileysEventMap["connection.update"]) => void) => {
+          if (event === "connection.update") connectionUpdate = handler;
+        },
+      ),
       process: vi.fn((handler: (events: Partial<BaileysEventMap>) => Promise<void> | void) => {
         processEvents = handler;
       }),
@@ -75,6 +81,11 @@ function createFixture(options: { lastConnected?: number; lastDisconnected?: num
     dispatchBatch,
     dispatch: async (type, messages) => {
       await dispatchBatch({ "messages.upsert": { type, messages } } as Partial<BaileysEventMap>);
+    },
+    dispatchConnectionUpdate: (update) => {
+      if (!connectionUpdate)
+        throw new Error("Baileys connection update handler was not registered");
+      connectionUpdate(update);
     },
   };
 }
@@ -163,6 +174,66 @@ describe("Baileys offline append notifications", () => {
       expect(fallbackReceived).not.toHaveBeenCalled();
     } finally {
       deleteInstance(fallback.instanceId);
+    }
+  });
+
+  it("uses the newest persisted connection timestamp when the disconnect timestamp is stale", async () => {
+    const now = Date.now();
+    const { instanceId, adapter, dispatch } = createFixture({
+      lastDisconnected: now - 2 * 60 * 60_000,
+      lastConnected: now - 30 * 60_000,
+    });
+    const received = vi.fn();
+    adapter.on("message.received", received);
+
+    try {
+      await dispatch("append", [
+        fixtureMessage("before-latest-connect", { timestampMs: now - 60 * 60_000 }),
+      ]);
+      expect(received).not.toHaveBeenCalled();
+    } finally {
+      deleteInstance(instanceId);
+    }
+  });
+
+  it("keeps the pre-connect watermark for offline messages delivered after open", async () => {
+    const now = Date.now();
+    const { instanceId, adapter, dispatch, dispatchConnectionUpdate } = createFixture({
+      lastDisconnected: now - 30 * 60_000,
+      lastConnected: now - 40 * 60_000,
+    });
+    const received = vi.fn();
+    adapter.on("message.received", received);
+    adapter.on("connection.changed", (event) => {
+      if (event.status === "open") {
+        db.update(instances)
+          .set({ lastConnected: Date.now() })
+          .where(eq(instances.id, instanceId))
+          .run();
+      }
+    });
+    const offlineMessageTimestampMs = now - 10 * 60_000;
+    const offlineMessage = fixtureMessage("offline-after-open", {
+      timestampMs: offlineMessageTimestampMs,
+    });
+
+    try {
+      dispatchConnectionUpdate({ connection: "open" });
+      expect(
+        db
+          .select({ lastConnected: instances.lastConnected })
+          .from(instances)
+          .where(eq(instances.id, instanceId))
+          .get()?.lastConnected,
+      ).toBeGreaterThan(offlineMessageTimestampMs);
+
+      await dispatch("append", [offlineMessage]);
+      expect(received).toHaveBeenCalledTimes(1);
+      expect(received).toHaveBeenCalledWith(
+        expect.objectContaining({ message: expect.objectContaining({ id: "offline-after-open" }) }),
+      );
+    } finally {
+      deleteInstance(instanceId);
     }
   });
 
