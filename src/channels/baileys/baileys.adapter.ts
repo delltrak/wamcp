@@ -117,6 +117,8 @@ const logger = createChildLogger({ service: "baileys-adapter" });
 const mediaService = new MediaService();
 const DEFAULT_STATUS_MAX_RECIPIENTS = 256;
 const STATUS_BROADCAST_JID = "status@broadcast";
+const APP_STATE_WRITES_DISABLED_ERROR =
+  "WhatsApp app-state changes are disabled because they can get this linked device removed (see issue #71). Set WA_APP_STATE_WRITES_ENABLED=true to enable at your own risk.";
 
 function sizeLabel(maxBytes: number): string {
   return maxBytes < 1024 * 1024 ? `${maxBytes} bytes` : `${Math.round(maxBytes / 1024 / 1024)} MB`;
@@ -356,6 +358,7 @@ export class BaileysAdapter implements ChannelAdapter {
   private saveCreds: (() => Promise<void>) | null = null;
 
   private readonly autoReconnect: boolean;
+  private readonly appStateWritesEnabled: boolean;
   private readonly markOnlineOnConnect: boolean;
   private readonly maxStatusRecipients: number;
   private readonly listeners = new Map<ChannelEvent, Set<ChannelEventHandler<ChannelEvent>>>();
@@ -368,6 +371,11 @@ export class BaileysAdapter implements ChannelAdapter {
   ) {
     this.contactStore = contactStore ?? new ContactStore(instanceId, db);
     this.autoReconnect = process.env.WA_AUTO_RECONNECT !== "false" && DEFAULT_AUTO_RECONNECT;
+    this.appStateWritesEnabled = parseBooleanEnv(
+      process.env.WA_APP_STATE_WRITES_ENABLED,
+      "WA_APP_STATE_WRITES_ENABLED",
+      false,
+    );
     this.markOnlineOnConnect = parseBooleanEnv(
       process.env.WA_MARK_ONLINE_ON_CONNECT,
       "WA_MARK_ONLINE_ON_CONNECT",
@@ -381,6 +389,10 @@ export class BaileysAdapter implements ChannelAdapter {
   }
 
   // ---- Private helpers ----
+
+  private requireAppStateWritesEnabled(): void {
+    if (!this.appStateWritesEnabled) throw new Error(APP_STATE_WRITES_DISABLED_ERROR);
+  }
 
   private getSock(): WASocket {
     if (!this.sock || this.status !== "connected") {
@@ -923,6 +935,7 @@ export class BaileysAdapter implements ChannelAdapter {
   }
 
   async starMessage(chatId: string, messageId: string, star: boolean): Promise<void> {
+    this.requireAppStateWritesEnabled();
     const sock = this.getSock();
     const jid = this.normalizeJid(chatId);
     const stored = db
@@ -1212,6 +1225,7 @@ export class BaileysAdapter implements ChannelAdapter {
   // ---- Chats ----
 
   async modifyChat(chatId: string, modification: ChatModification): Promise<void> {
+    this.requireAppStateWritesEnabled();
     const sock = this.getSock();
     const jid = this.normalizeJid(chatId);
 
@@ -1247,6 +1261,7 @@ export class BaileysAdapter implements ChannelAdapter {
   }
 
   async markChatUnread(chatId: string): Promise<void> {
+    this.requireAppStateWritesEnabled();
     const sock = this.getSock();
     const jid = this.normalizeJid(chatId);
     const rows = db
@@ -1424,6 +1439,7 @@ export class BaileysAdapter implements ChannelAdapter {
   }
 
   async createLabel(name: string, color: number): Promise<BusinessLabel> {
+    this.requireAppStateWritesEnabled();
     const sock = this.getSock();
     const jid = await this.requireBusinessLabelSupport(sock, ["addLabel"]);
     const label: BusinessLabel = { id: randomUUID(), name, color, deleted: false };
@@ -1442,6 +1458,7 @@ export class BaileysAdapter implements ChannelAdapter {
   }
 
   async editLabel(id: string, update: { name?: string; color?: number }): Promise<void> {
+    this.requireAppStateWritesEnabled();
     const sock = this.getSock();
     const jid = await this.requireBusinessLabelSupport(sock, ["addLabel"]);
     try {
@@ -1466,6 +1483,7 @@ export class BaileysAdapter implements ChannelAdapter {
   }
 
   async deleteLabel(id: string): Promise<void> {
+    this.requireAppStateWritesEnabled();
     const sock = this.getSock();
     const jid = await this.requireBusinessLabelSupport(sock, ["addLabel"]);
     try {
@@ -1488,6 +1506,7 @@ export class BaileysAdapter implements ChannelAdapter {
   }
 
   async setChatLabel(chatId: string, labelId: string, add: boolean): Promise<void> {
+    this.requireAppStateWritesEnabled();
     const sock = this.getSock();
     const jid = this.normalizeJid(chatId);
     await this.requireBusinessLabelSupport(sock, [add ? "addChatLabel" : "removeChatLabel"]);
@@ -1506,6 +1525,7 @@ export class BaileysAdapter implements ChannelAdapter {
     labelId: string,
     add: boolean,
   ): Promise<void> {
+    this.requireAppStateWritesEnabled();
     const sock = this.getSock();
     const jid = this.normalizeJid(chatId);
     await this.requireBusinessLabelSupport(sock, [add ? "addMessageLabel" : "removeMessageLabel"]);
@@ -1818,6 +1838,8 @@ export class BaileysAdapter implements ChannelAdapter {
   }
 
   async updateProfileName(name: string): Promise<void> {
+    // Baileys implements updateProfileName through chatModify/appPatch.
+    this.requireAppStateWritesEnabled();
     const sock = this.getSock();
     await sock.updateProfileName(name);
   }

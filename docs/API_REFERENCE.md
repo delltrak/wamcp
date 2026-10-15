@@ -71,6 +71,12 @@ Tools marked **Baileys only** are not available on Cloud API instances.
 - **Automatic read receipts** -- `WA_AUTO_READ=false` (default), `on_fetch` to mark incoming
   messages read when a tool or resource returns them, or `on_receive` to mark them read when they
   arrive. Invalid values disable the feature and log a warning.
+- **Baileys app-state writes** -- `WA_APP_STATE_WRITES_ENABLED=false` by default. Set it to `true`
+  to enable `wa_archive_chat`, `wa_pin_chat`, `wa_mute_chat`, `wa_delete_chat`, `wa_clear_chat`,
+  `wa_mark_chat_unread`, `wa_star_message`, `wa_create_label`, `wa_edit_label`, `wa_delete_label`,
+  `wa_add_chat_label`, `wa_remove_chat_label`, `wa_add_message_label`, `wa_remove_message_label`,
+  and `wa_update_profile_name`. These changes can get the linked device removed, so enable them at
+  your own risk. Read receipts and app-state reads/resyncs are not gated.
 
 ---
 

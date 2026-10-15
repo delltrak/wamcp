@@ -137,11 +137,16 @@ describe("Baileys business and message features", () => {
   let activeInstanceId: string | undefined;
 
   afterEach(() => {
+    vi.unstubAllEnvs();
     if (activeInstanceId) {
       sqlite.prepare("DELETE FROM instances WHERE id = ?").run(activeInstanceId);
       activeInstanceId = undefined;
     }
   });
+
+  function enableAppStateWrites(): void {
+    vi.stubEnv("WA_APP_STATE_WRITES_ENABLED", "true");
+  }
 
   function createFixture(): { instanceId: string; adapter: BaileysAdapter } {
     const id = `${instanceId}-${randomUUID()}`;
@@ -207,6 +212,7 @@ describe("Baileys business and message features", () => {
       addMessageLabel: vi.fn().mockResolvedValue(undefined),
       removeMessageLabel: vi.fn().mockResolvedValue(undefined),
       chatModify: vi.fn().mockResolvedValue(undefined),
+      updateProfileName: vi.fn().mockResolvedValue(undefined),
       sendMessage: vi.fn(),
       fetchMessageHistory: vi.fn().mockResolvedValue("history-request"),
       ev: {
@@ -236,6 +242,7 @@ describe("Baileys business and message features", () => {
   }
 
   it("creates, edits, deletes, and associates Business labels; label events reach chat listings", async () => {
+    enableAppStateWrites();
     const { instanceId: id, adapter } = createFixture();
     const { socket, processEvents } = installSocket(adapter);
 
@@ -281,12 +288,14 @@ describe("Baileys business and message features", () => {
   });
 
   it("returns a clear error when a non-Business account attempts label operations", async () => {
+    enableAppStateWrites();
     const { adapter } = createFixture();
     installSocket(adapter, { getBusinessProfile: vi.fn().mockResolvedValue(undefined) });
     await expect(adapter.createLabel("Follow up", 4)).rejects.toThrow(/Business account/);
   });
 
   it("marks chats unread with the reverse-chronological lastMessages range and stars stored messages", async () => {
+    enableAppStateWrites();
     const { instanceId: id, adapter } = createFixture();
     const groupId = "120363000000000001@g.us";
     sqlite
@@ -320,6 +329,75 @@ describe("Baileys business and message features", () => {
         .prepare("SELECT starred FROM messages WHERE instance_id = ? AND id = ?")
         .get(id, "outgoing"),
     ).toEqual({ starred: 1 });
+  });
+
+  it("blocks app-state writes by default before socket calls or local updates", async () => {
+    const originalValue = process.env.WA_APP_STATE_WRITES_ENABLED;
+    delete process.env.WA_APP_STATE_WRITES_ENABLED;
+    try {
+      const { instanceId: id, adapter } = createFixture();
+      addStoredMessage(id, "starred-message");
+      const { socket } = installSocket(adapter);
+      const disabledError =
+        "WhatsApp app-state changes are disabled because they can get this linked device removed (see issue #71). Set WA_APP_STATE_WRITES_ENABLED=true to enable at your own risk.";
+
+      await expect(adapter.starMessage(CHAT_ID, "starred-message", true)).rejects.toThrow(
+        disabledError,
+      );
+      await expect(adapter.markChatUnread(CHAT_ID)).rejects.toThrow(disabledError);
+      await expect(adapter.modifyChat(CHAT_ID, { action: "archive" })).rejects.toThrow(
+        disabledError,
+      );
+      await expect(adapter.createLabel("Blocked", 4)).rejects.toThrow(disabledError);
+      await expect(adapter.editLabel("label-1", { name: "Blocked" })).rejects.toThrow(
+        disabledError,
+      );
+      await expect(adapter.deleteLabel("label-1")).rejects.toThrow(disabledError);
+      await expect(adapter.setChatLabel(CHAT_ID, "label-1", true)).rejects.toThrow(disabledError);
+      await expect(adapter.setChatLabel(CHAT_ID, "label-1", false)).rejects.toThrow(disabledError);
+      await expect(
+        adapter.setMessageLabel(CHAT_ID, "starred-message", "label-1", true),
+      ).rejects.toThrow(disabledError);
+      await expect(
+        adapter.setMessageLabel(CHAT_ID, "starred-message", "label-1", false),
+      ).rejects.toThrow(disabledError);
+      await expect(adapter.updateProfileName("Blocked")).rejects.toThrow(disabledError);
+
+      expect(socket.chatModify).not.toHaveBeenCalled();
+      expect(socket.addLabel).not.toHaveBeenCalled();
+      expect(socket.addChatLabel).not.toHaveBeenCalled();
+      expect(socket.removeChatLabel).not.toHaveBeenCalled();
+      expect(socket.addMessageLabel).not.toHaveBeenCalled();
+      expect(socket.removeMessageLabel).not.toHaveBeenCalled();
+      expect(socket.updateProfileName).not.toHaveBeenCalled();
+      expect(socket.getBusinessProfile).not.toHaveBeenCalled();
+      expect(
+        sqlite
+          .prepare("SELECT starred FROM messages WHERE instance_id = ? AND id = ?")
+          .get(id, "starred-message"),
+      ).toEqual({ starred: 0 });
+      expect(sqlite.prepare("SELECT label_id FROM labels WHERE instance_id = ?").all(id)).toEqual(
+        [],
+      );
+      expect(
+        sqlite.prepare("SELECT label_id FROM label_associations WHERE instance_id = ?").all(id),
+      ).toEqual([]);
+    } finally {
+      if (originalValue === undefined) delete process.env.WA_APP_STATE_WRITES_ENABLED;
+      else process.env.WA_APP_STATE_WRITES_ENABLED = originalValue;
+    }
+  });
+
+  it("passes app-state writes through when explicitly enabled", async () => {
+    enableAppStateWrites();
+    const { adapter } = createFixture();
+    const { socket } = installSocket(adapter);
+
+    await adapter.modifyChat(CHAT_ID, { action: "archive" });
+    await adapter.updateProfileName("Enabled name");
+
+    expect(socket.chatModify).toHaveBeenCalledWith({ archive: true, lastMessages: [] }, CHAT_ID);
+    expect(socket.updateProfileName).toHaveBeenCalledWith("Enabled name");
   });
 
   it("sends quoted event messages and returns decrypted responses persisted from Baileys updates", async () => {
