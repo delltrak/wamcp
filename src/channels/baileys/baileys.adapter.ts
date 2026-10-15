@@ -88,6 +88,7 @@ import {
   extractMessageDetails,
   unwrapMessageContent,
   extractQuotedMessageId,
+  isMessageForwarded,
   getChatJid,
   getSenderJid,
 } from "./baileys.events.js";
@@ -862,40 +863,7 @@ export class BaileysAdapter implements ChannelAdapter {
     }
 
     const result = await sock.sendMessage(jid, msg, opts);
-    const outgoingId = result?.key.id;
-    if (result?.message && outgoingId) {
-      const outgoing: WAMessage = {
-        ...result,
-        key: {
-          ...result.key,
-          remoteJid: result.key.remoteJid ?? jid,
-          fromMe: true,
-        },
-      };
-      const details = extractMessageDetails(outgoing);
-      this.persistMessage(
-        {
-          instanceId: this.instanceId,
-          chatId: outgoing.key.remoteJid ?? jid,
-          message: {
-            id: outgoingId,
-            sender: "me",
-            timestamp: messageTimestampToSeconds(
-              outgoing.messageTimestamp,
-              Math.floor(Date.now() / 1000),
-            ),
-            type: details.type,
-            content: details.content,
-            mediaUrl: details.mediaUrl,
-            ...(details.mediaMimetype ? { mediaMimetype: details.mediaMimetype } : {}),
-            quotedMessageId: extractQuotedMessageId(outgoing),
-            isFromMe: true,
-          },
-        },
-        outgoing,
-        true,
-      );
-    }
+    this.persistOutgoingMessage(result, jid);
     return { messageId: result?.key.id ?? "", timestamp: Date.now(), status: "sent" };
   }
 
@@ -984,6 +952,44 @@ export class BaileysAdapter implements ChannelAdapter {
         ),
       )
       .run();
+  }
+
+  private persistOutgoingMessage(result: WAMessage | undefined, jid: string): void {
+    const outgoingId = result?.key.id;
+    if (!result?.message || !outgoingId) return;
+
+    const outgoing: WAMessage = {
+      ...result,
+      key: {
+        ...result.key,
+        remoteJid: result.key.remoteJid ?? jid,
+        fromMe: true,
+      },
+    };
+    const details = extractMessageDetails(outgoing);
+    this.persistMessage(
+      {
+        instanceId: this.instanceId,
+        chatId: outgoing.key.remoteJid ?? jid,
+        message: {
+          id: outgoingId,
+          sender: "me",
+          timestamp: messageTimestampToSeconds(
+            outgoing.messageTimestamp,
+            Math.floor(Date.now() / 1000),
+          ),
+          type: details.type,
+          content: details.content,
+          mediaUrl: details.mediaUrl,
+          ...(details.mediaMimetype ? { mediaMimetype: details.mediaMimetype } : {}),
+          quotedMessageId: extractQuotedMessageId(outgoing),
+          isFromMe: true,
+          isForwarded: isMessageForwarded(outgoing),
+        },
+      },
+      outgoing,
+      true,
+    );
   }
 
   async editMessage(chatId: string, msgId: string, newText: string): Promise<void> {
@@ -1109,6 +1115,7 @@ export class BaileysAdapter implements ChannelAdapter {
     }
 
     const result = await sock.sendMessage(toJid, { forward: fullMessage });
+    this.persistOutgoingMessage(result, toJid);
     return { messageId: result?.key.id ?? "", timestamp: Date.now(), status: "sent" };
   }
 
@@ -2461,6 +2468,7 @@ export class BaileysAdapter implements ChannelAdapter {
         )
         .get();
       const { message, chatId, instanceId } = event;
+      const isForwarded = message.isForwarded === true || isMessageForwarded(source);
       const needsRawData =
         message.type === "image" ||
         message.type === "video" ||
@@ -2487,7 +2495,7 @@ export class BaileysAdapter implements ChannelAdapter {
           mediaMimetype: message.mediaMimetype ?? null,
           quotedId: message.quotedMessageId,
           isFromMe: message.isFromMe ? 1 : 0,
-          isForwarded: 0,
+          isForwarded: isForwarded ? 1 : 0,
           status: message.isFromMe ? "sent" : "received",
           timestamp: message.timestamp,
           pushName: source?.pushName ?? null,
@@ -2503,6 +2511,7 @@ export class BaileysAdapter implements ChannelAdapter {
             mediaUrl: sql`coalesce(excluded.media_url, ${messagesTable.mediaUrl})`,
             mediaMimetype: sql`coalesce(excluded.media_mimetype, ${messagesTable.mediaMimetype})`,
             rawData: sql`coalesce(excluded.raw_data, ${messagesTable.rawData})`,
+            isForwarded: sql`CASE WHEN excluded.is_forwarded = 1 THEN 1 ELSE ${messagesTable.isForwarded} END`,
           },
         })
         .run();

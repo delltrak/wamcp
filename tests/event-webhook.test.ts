@@ -294,7 +294,20 @@ describe("outgoing event webhook events", () => {
       type: "text",
       text: "hello",
       timestamp: 1_700_000_000,
+      isForwarded: false,
     });
+  });
+
+  it("includes the forwarded flag in generic and Grok Bot webhook payloads", () => {
+    const forwarded = {
+      ...incomingMessage(),
+      message: { ...incomingMessage().message, isForwarded: true },
+    };
+
+    expect(
+      normalizeEventWebhookPayload("message.received", "inst_1234abcd", forwarded).isForwarded,
+    ).toBe(true);
+    expect(normalizeGrokBotWebhookPayload("inst_1234abcd", forwarded).isForwarded).toBe(true);
   });
 
   it("adds media MIME type, filename, caption, and known size to webhook payloads", () => {
@@ -428,6 +441,7 @@ describe("outgoing event webhook events", () => {
       text: "caption",
       timestamp: 1_700_000_000,
       messageId: "wamid.abc123",
+      isForwarded: false,
       media: { id: "cloud-media-123" },
     });
 

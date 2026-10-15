@@ -395,6 +395,7 @@ export interface NormalizedMessageEvent {
     labels?: BusinessLabel[];
     quotedMessageId: string | null;
     isFromMe: boolean;
+    isForwarded?: boolean;
   };
 }
 
