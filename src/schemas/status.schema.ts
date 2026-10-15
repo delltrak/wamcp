@@ -50,3 +50,10 @@ export const SendVideoStatusSchema = z
     caption: z.string().optional().describe("Video caption"),
   })
   .strict();
+
+export const GetStatusViewersSchema = z
+  .object({
+    instanceId: z.string().min(1),
+    messageId: z.string().min(1).describe("Message ID returned when the status story was sent"),
+  })
+  .strict();

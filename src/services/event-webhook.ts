@@ -50,6 +50,10 @@ export interface EventWebhookPayload {
   eventMessageId?: string;
   responseMessageId?: string;
   participant?: string;
+  callId?: string;
+  callStatus?: string;
+  isVideo?: boolean;
+  isGroup?: boolean;
   status?: EventResponseStatus;
   extraGuestCount?: number;
   label?: BusinessLabel;
@@ -394,6 +398,18 @@ export function normalizeEventWebhookPayload(
     ...(eventMessageId ? { eventMessageId } : {}),
     ...(responseMessageId ? { responseMessageId } : {}),
     ...(participant ? { participant } : {}),
+    ...(event === "call.received" && typeof data.callId === "string"
+      ? { callId: data.callId }
+      : {}),
+    ...(event === "call.received" && typeof data.status === "string"
+      ? { callStatus: data.status }
+      : {}),
+    ...(event === "call.received" && typeof data.isVideo === "boolean"
+      ? { isVideo: data.isVideo }
+      : {}),
+    ...(event === "call.received" && typeof data.isGroup === "boolean"
+      ? { isGroup: data.isGroup }
+      : {}),
     ...(status ? { status } : {}),
     ...(extraGuestCount !== null ? { extraGuestCount } : {}),
     ...(label ? { label } : {}),
@@ -471,7 +487,9 @@ export function shouldSendEventWebhook(
       ? message.sender
       : typeof data.participant === "string"
         ? data.participant
-        : "";
+        : typeof data.callerId === "string"
+          ? data.callerId
+          : "";
 
   if (event === "message.received") {
     if (config.ignoreFromMe && message.isFromMe === true) return false;

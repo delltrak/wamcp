@@ -9,12 +9,12 @@
 1. [Overview](#1-overview)
 2. [Tools Reference](#2-tools-reference)
    - [Instance Management](#21-instance-management-8-tools)
-   - [Messaging](#22-messaging-23-tools)
+   - [Messaging](#22-messaging-31-tools)
    - [Chat Management](#23-chat-management-11-tools)
    - [Group Management](#24-group-management-23-tools)
    - [Contact Management](#25-contact-management-8-tools)
    - [Profile Management](#26-profile-management-7-tools)
-   - [Status / Stories](#27-status--stories-3-tools)
+   - [Status / Stories](#27-status--stories-4-tools)
    - [Newsletter / Channels](#28-newsletter--channels-10-tools)
    - [Call Management](#29-call-management-1-tool)
    - [Message Search](#210-message-search-1-tool)
@@ -103,7 +103,7 @@ Tools marked **Baileys only** are not available on Cloud API instances.
 
 ## 2. Tools Reference
 
-WA MCP exposes **124 tools** grouped by domain. All tools return MCP-standard responses.
+WA MCP exposes **133 tools** grouped by domain. All tools return MCP-standard responses.
 
 ### Success Response Format
 
@@ -324,7 +324,7 @@ Configure Meta Cloud API credentials for a Cloud API instance. Required before c
 
 ---
 
-### 2.2 Messaging (23 tools)
+### 2.2 Messaging (31 tools)
 
 Tools for sending messages, media, reactions, and managing message state.
 
@@ -338,6 +338,7 @@ Send a text message to a WhatsApp contact or group.
 | `to`              | string | Yes      | Recipient phone number (e.g. `"5511999999999"`) or group JID |
 | `text`            | string | Yes      | Message content (max 65536 chars)                            |
 | `quotedMessageId` | string | No       | Message ID to reply to                                       |
+| `mentions`        | string[] | No     | Participant phone numbers or JIDs to mention                 |
 
 **Channel support:** Both
 
@@ -352,6 +353,21 @@ Send a text message to a WhatsApp contact or group.
 
 ---
 
+#### `wa_send_group_mention_all`
+
+Send a group text message with an `@all` mention. The server reads current group participants and
+adds them to the message's participant mention list.
+
+| Parameter    | Type   | Required | Description |
+| ------------ | ------ | -------- | ----------- |
+| `instanceId` | string | Yes      | The instance to send from |
+| `groupId`    | string | Yes      | Group JID |
+| `text`       | string | Yes      | Message text (max 4096 chars) |
+
+**Channel support:** Baileys only. Cloud API does not support participant mentions.
+
+---
+
 #### `wa_send_image`
 
 Send an image to a WhatsApp contact or group.
@@ -363,6 +379,7 @@ Send an image to a WhatsApp contact or group.
 | `image`           | string | Yes      | Image URL or base64-encoded data    |
 | `caption`         | string | No       | Image caption                       |
 | `quotedMessageId` | string | No       | Message ID to reply to              |
+| `mentions`        | string[] | No     | Participant phone numbers or JIDs to mention |
 
 **Channel support:** Both
 
@@ -388,6 +405,7 @@ Send a video to a WhatsApp contact or group.
 | `video`           | string | Yes      | Video URL or base64-encoded data    |
 | `caption`         | string | No       | Video caption                       |
 | `quotedMessageId` | string | No       | Message ID to reply to              |
+| `mentions`        | string[] | No     | Participant phone numbers or JIDs to mention |
 
 **Channel support:** Both
 
@@ -406,12 +424,13 @@ Send a video to a WhatsApp contact or group.
 
 Send a round video note through the normal queued video path. Baileys sends it with `ptv: true`.
 
-| Parameter    | Type   | Required | Description                         |
-| ------------ | ------ | -------- | ----------------------------------- |
-| `instanceId` | string | Yes      | The instance to send from           |
-| `to`         | string | Yes      | Recipient phone number or group JID |
-| `video`      | string | Yes      | Video URL or base64-encoded data    |
-| `caption`    | string | No       | Optional video caption              |
+| Parameter    | Type     | Required | Description                          |
+| ------------ | -------- | -------- | ------------------------------------ |
+| `instanceId` | string   | Yes      | The instance to send from            |
+| `to`         | string   | Yes      | Recipient phone number or group JID  |
+| `video`      | string   | Yes      | Video URL or base64-encoded data     |
+| `caption`    | string   | No       | Optional video caption               |
+| `mentions`   | string[] | No       | Participant phone numbers or JIDs to mention |
 
 **Channel support:** Baileys only. Cloud API returns an unsupported-operation error.
 
@@ -444,13 +463,14 @@ to 512x512. Correctly sized WebP files pass through unchanged when they are with
 Send a GIF as a looping WhatsApp video. GIF or MP4 input is converted to silent H.264 MP4 with
 `yuv420p` pixel format and even dimensions, then sent with Baileys `gifPlayback: true`.
 
-| Parameter         | Type   | Required | Description                          |
-| ----------------- | ------ | -------- | ------------------------------------ |
-| `instanceId`      | string | Yes      | The instance to send from            |
-| `to`              | string | Yes      | Recipient phone number or group JID  |
-| `gif`             | string | Yes      | GIF or MP4 URL or base64 data        |
-| `caption`         | string | No       | Optional caption                     |
-| `quotedMessageId` | string | No       | Message ID to reply to               |
+| Parameter         | Type     | Required | Description                          |
+| ----------------- | -------- | -------- | ------------------------------------ |
+| `instanceId`      | string   | Yes      | The instance to send from            |
+| `to`              | string   | Yes      | Recipient phone number or group JID  |
+| `gif`             | string   | Yes      | GIF or MP4 URL or base64 data        |
+| `caption`         | string   | No       | Optional caption                     |
+| `quotedMessageId` | string   | No       | Message ID to reply to               |
+| `mentions`        | string[] | No       | Participant phone numbers or JIDs to mention |
 
 **Channel support:** Baileys only. Cloud API does not expose the GIF playback option.
 
@@ -468,6 +488,7 @@ Send an audio file or voice note to a WhatsApp contact or group.
 | `to`         | string  | Yes                   | Recipient phone number or group JID |
 | `audio`      | string  | Yes                   | Audio URL or base64-encoded data    |
 | `ptt`        | boolean | No (default: `false`) | Send as voice note (push-to-talk)   |
+| `mentions`   | string[] | No                  | Participant phone numbers or JIDs to mention |
 
 **Channel support:** Both
 
@@ -493,6 +514,7 @@ Send a document/file to a WhatsApp contact or group.
 | `document`   | string | Yes      | Document URL or base64-encoded data            |
 | `fileName`   | string | Yes      | File name with extension (e.g. `"report.pdf"`) |
 | `mimeType`   | string | Yes      | MIME type (e.g. `"application/pdf"`)           |
+| `mentions`   | string[] | No     | Participant phone numbers or JIDs to mention    |
 
 **Channel support:** Both
 
@@ -673,14 +695,19 @@ React to a message with an emoji. Send an empty string emoji to remove a reactio
 
 Send a text message with a rich link preview.
 
-| Parameter    | Type   | Required | Description                                  |
-| ------------ | ------ | -------- | -------------------------------------------- |
-| `instanceId` | string | Yes      | The instance to send from                    |
-| `to`         | string | Yes      | Recipient phone number or group JID          |
-| `text`       | string | Yes      | Message text content                         |
-| `url`        | string | Yes      | URL for the link preview (must be valid URL) |
+| Parameter     | Type   | Required | Description |
+| ------------- | ------ | -------- | ----------- |
+| `instanceId`  | string | Yes      | The instance to send from |
+| `to`          | string | Yes      | Recipient phone number or group JID |
+| `text`        | string | Yes      | Message text content; the URL is appended if missing |
+| `url`         | string | Yes      | HTTP or HTTPS URL for the preview |
+| `title`       | string | No       | Custom preview title |
+| `description` | string | No       | Custom preview description |
+| `thumbnail`   | string | No       | JPEG thumbnail image as base64 or a JPEG data URI |
 
-**Channel support:** Both
+**Channel support:** Both. Baileys generates preview metadata and thumbnails from the URL when
+custom fields are omitted. Cloud API generates its own preview; custom metadata and thumbnails are
+not supported.
 
 **Response:**
 
@@ -690,6 +717,104 @@ Send a text message with a rich link preview.
   "timestamp": 1709136000
 }
 ```
+
+---
+
+#### `wa_send_buttons`
+
+Send up to three reply buttons. Cloud API sends a native interactive button message; Baileys sends a
+numbered text message that lists each reply ID.
+
+| Parameter    | Type   | Required | Description |
+| ------------ | ------ | -------- | ----------- |
+| `instanceId` | string | Yes      | The instance to send from |
+| `to`         | string | Yes      | Recipient phone number or group JID |
+| `text`       | string | Yes      | Message body (max 1024 chars) |
+| `footer`     | string | No       | Optional footer (max 60 chars) |
+| `buttons`    | object[] | Yes    | One to three `{ "id", "text" }` reply buttons |
+
+**Channel support:** Both. Baileys uses the text fallback because rc14 does not send native reply
+buttons.
+
+---
+
+#### `wa_send_list`
+
+Send a selectable list. Cloud API sends a native interactive list; Baileys sends a readable text
+fallback with each row ID.
+
+| Parameter    | Type   | Required | Description |
+| ------------ | ------ | -------- | ----------- |
+| `instanceId` | string | Yes      | The instance to send from |
+| `to`         | string | Yes      | Recipient phone number or group JID |
+| `text`       | string | Yes      | Message body |
+| `footer`     | string | No       | Optional footer |
+| `buttonText` | string | Yes      | Text for the list-open button |
+| `sections`   | object[] | Yes    | Sections with titles and rows; at most 10 rows total |
+
+**Channel support:** Both. Baileys uses the text fallback because rc14 does not send native lists.
+
+---
+
+#### `wa_send_media_album`
+
+Send two to ten images as one Baileys album.
+
+| Parameter    | Type   | Required | Description |
+| ------------ | ------ | -------- | ----------- |
+| `instanceId` | string | Yes      | The instance to send from |
+| `to`         | string | Yes      | Recipient phone number or group JID |
+| `images`     | object[] | Yes    | Two to ten `{ "image", "caption?" }` entries |
+
+**Channel support:** Baileys only. Cloud API does not group media into albums.
+
+---
+
+#### `wa_reply_privately_to_group_message`
+
+Send a direct message to the author of a group message stored in local history.
+
+| Parameter    | Type   | Required | Description |
+| ------------ | ------ | -------- | ----------- |
+| `instanceId` | string | Yes      | The instance to send from |
+| `groupId`    | string | Yes      | Group JID containing the original message |
+| `messageId`  | string | Yes      | Stored group message ID |
+| `text`       | string | Yes      | Private reply text |
+
+**Channel support:** Baileys only. The group message must be present in local history.
+
+---
+
+#### `wa_get_message_receipts`
+
+List per-participant delivery receipts observed and stored locally for a message. Group receipts
+include each participant; status story reads are returned by `wa_get_status_viewers`.
+
+| Parameter    | Type   | Required | Description |
+| ------------ | ------ | -------- | ----------- |
+| `instanceId` | string | Yes      | The instance ID |
+| `chatId`     | string | Yes      | Chat or group JID |
+| `messageId`  | string | Yes      | Message ID |
+
+Receipt `status` is `delivered`, `read`, or `played`; `timestamp` is Unix milliseconds. Receipts
+are available only after this server observes the receipt event.
+
+**Channel support:** Baileys only. Cloud API does not provide participant-level receipts.
+
+---
+
+#### `wa_get_message_reactions`
+
+List the latest locally observed reaction from each participant for a message. Removed reactions
+are omitted.
+
+| Parameter    | Type   | Required | Description |
+| ------------ | ------ | -------- | ----------- |
+| `instanceId` | string | Yes      | The instance ID |
+| `chatId`     | string | Yes      | Chat or group JID |
+| `messageId`  | string | Yes      | Message ID |
+
+**Channel support:** Baileys only. Cloud API does not expose reaction history here.
 
 ---
 
@@ -829,7 +954,7 @@ Send a presence status (typing, recording, etc.) to a chat.
 | ------------ | -------------------------------------------------------------------------------- | -------- | ---------------------------- |
 | `instanceId` | string                                                                           | Yes      | The instance ID              |
 | `chatId`     | string                                                                           | Yes      | Chat JID to send presence to |
-| `status`     | `"composing"` \| `"recording"` \| `"paused"` \| `"available"` \| `"unavailable"` | Yes      | Presence status              |
+| `status`     | `"typing"` \| `"composing"` \| `"recording"` \| `"paused"` \| `"available"` \| `"unavailable"` | Yes | Presence status; `typing` maps to Baileys `composing` |
 
 **Channel support:** Both
 
@@ -840,6 +965,20 @@ Send a presence status (typing, recording, etc.) to a chat.
   "success": true
 }
 ```
+
+---
+
+#### `wa_subscribe_presence`
+
+Subscribe to contact or group presence updates. Subsequent updates arrive as
+`whatsapp/presence.updated` notifications and can be forwarded to configured event webhooks.
+
+| Parameter    | Type   | Required | Description |
+| ------------ | ------ | -------- | ----------- |
+| `instanceId` | string | Yes      | The instance ID |
+| `chatId`     | string | Yes      | Contact or group JID to subscribe to |
+
+**Channel support:** Baileys only. Cloud API does not expose presence subscriptions.
 
 ---
 
@@ -2009,7 +2148,7 @@ Read normalized account privacy settings. Reads refresh from WhatsApp by default
 
 ---
 
-### 2.7 Status / Stories (3 tools)
+### 2.7 Status / Stories (4 tools)
 
 Tools for posting WhatsApp status/story updates.
 
@@ -2093,6 +2232,20 @@ Post a video status/story update visible to contacts.
   "recipientCount": 4
 }
 ```
+
+---
+
+#### `wa_get_status_viewers`
+
+List contacts whose read or played receipt this server observed for a status/story.
+
+| Parameter    | Type   | Required | Description |
+| ------------ | ------ | -------- | ----------- |
+| `instanceId` | string | Yes      | The instance ID |
+| `messageId`  | string | Yes      | Message ID returned when the status was sent |
+
+**Channel support:** Baileys only. Viewers are available only after this server observes their
+receipt; Cloud API does not expose status viewers.
 
 ---
 
@@ -2193,12 +2346,15 @@ timestamp lower bound.
 
 #### `wa_reject_call`
 
-Reject an incoming voice or video call. The call ID is received via the `whatsapp/call.received` notification.
+Reject an incoming direct voice or video call. The call ID and caller JID are included in the
+`whatsapp/call.received` notification. `WA_AUTO_REJECT_CALLS=true` automatically rejects direct
+call offers; the default is `false`.
 
-| Parameter    | Type   | Required | Description                                              |
-| ------------ | ------ | -------- | -------------------------------------------------------- |
-| `instanceId` | string | Yes      | The instance ID                                          |
-| `callId`     | string | Yes      | The call ID (from `whatsapp/call.received` notification) |
+| Parameter    | Type   | Required | Description |
+| ------------ | ------ | -------- | ----------- |
+| `instanceId` | string | Yes      | The instance ID |
+| `callId`     | string | Yes      | The call ID from the notification |
+| `callFrom`   | string | No       | Caller JID from the notification; cached offer data is used when omitted |
 
 **Channel support:** Baileys only
 
@@ -2928,7 +3084,10 @@ When `status` is `"connecting"`, `qrCode` may contain a base64-encoded QR code i
 
 ### 4.12 `whatsapp/call.received`
 
-Fired when an incoming voice or video call is received. Use the `callId` with `wa_reject_call` to reject the call.
+Fired for call offers and later call-state updates. `status` can be `offer`, `ringing`, `preaccept`,
+`transport`, `relaylatency`, `timeout`, `reject`, `accept`, or `terminate`. Use `callId` and
+`callerId` with `wa_reject_call` to reject an incoming direct call. Set `WA_AUTO_REJECT_CALLS=true`
+to automatically reject direct call offers.
 
 **Payload:**
 
@@ -2936,11 +3095,18 @@ Fired when an incoming voice or video call is received. Use the `callId` with `w
 {
   "_meta": { "notificationType": "whatsapp/call.received" },
   "instanceId": "inst_abc123",
+  "chatId": "5511999999999@s.whatsapp.net",
   "callerId": "5511999999999@s.whatsapp.net",
   "isVideo": false,
-  "callId": "call_abc123"
+  "isGroup": false,
+  "callId": "call_abc123",
+  "timestamp": 1709136000000,
+  "status": "offer"
 }
 ```
+
+Outgoing event webhooks use the same `call.received` filter and include `callId`, `callStatus`,
+`isVideo`, `isGroup`, and the observed timestamp.
 
 ---
 
@@ -3071,7 +3237,7 @@ Add to your Claude Desktop MCP configuration:
 }
 ```
 
-Once configured, Claude will auto-discover all 124 WA MCP tools and can interact with WhatsApp directly.
+Once configured, Claude will auto-discover all 133 WA MCP tools and can interact with WhatsApp directly.
 
 ### 6.3 LangChain (Python)
 
@@ -3084,7 +3250,7 @@ toolkit = MCPToolkit(
 )
 
 tools = toolkit.get_tools()
-# tools now contains all 124 WA MCP tools, ready for any LangChain agent
+# tools now contains all 133 WA MCP tools, ready for any LangChain agent
 ```
 
 ---
@@ -3094,7 +3260,7 @@ tools = toolkit.get_tools()
 | Domain                            | Tools | Channel                              |
 | --------------------------------- | ----- | ------------------------------------ |
 | Instance Management              | 8     | Both (2 Baileys only, 1 Cloud only)  |
-| Messaging                         | 23    | Both                                 |
+| Messaging                         | 31    | Both                                 |
 | Audio Transcription               | 1     | Both                                 |
 | Text-to-speech                    | 3     | Provider-dependent                   |
 | Chat Management                   | 11    | Both                                 |
@@ -3104,11 +3270,11 @@ tools = toolkit.get_tools()
 | Group Management                  | 23    | Baileys                              |
 | Contact Management                | 8     | Both                                 |
 | Profile Management                | 7     | Both                                 |
-| Status / Stories                  | 3     | Baileys only                         |
+| Status / Stories                  | 4     | Baileys only                         |
 | Newsletter / Channels             | 10    | Baileys only                         |
 | Business, Communities, and Catalog| 15    | Baileys only                         |
 | Call Management                   | 1     | Baileys only                         |
-| **Total**                         | **124** |                                    |
+| **Total**                         | **133** |                                    |
 
 | Resources     | 10  |
 | ------------- | --- |

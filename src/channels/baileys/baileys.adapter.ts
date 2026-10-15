@@ -15,6 +15,7 @@ import makeWASocket, {
   getKeyAuthor,
   updateMessageWithPollUpdate,
   makeCacheableSignalKeyStore,
+  getUrlInfo,
   type WASocket,
   type GroupParticipant as BaileysGroupParticipant,
   type GroupMetadata as BaileysGroupMetadata,
@@ -25,6 +26,7 @@ import makeWASocket, {
   type EventMessageOptions,
   type MinimalMessage,
   type WAMessageKey,
+  type WAUrlInfo,
   type CatalogCollection,
   type GetCatalogOptions,
   type NewsletterMetadata,
@@ -65,6 +67,9 @@ import type {
   ChannelEventPayload,
   NormalizedMessageEvent,
   MessageDeliveryStatus,
+  MessageReceipt,
+  MessageReaction,
+  LinkPreviewOptions,
   BusinessLabel,
   EventResponse,
   PollResults,
@@ -89,6 +94,8 @@ import {
   chats as chatsTable,
   messages as messagesTable,
   statusAudiences as statusAudiencesTable,
+  messageReceipts as messageReceiptsTable,
+  messageReactions as messageReactionsTable,
   labels as labelsTable,
   labelAssociations as labelAssociationsTable,
   eventResponses as eventResponsesTable,
@@ -148,6 +155,7 @@ const mediaService = new MediaService();
 const DEFAULT_STATUS_MAX_RECIPIENTS = 256;
 const STATUS_BROADCAST_JID = "status@broadcast";
 const MAX_EVENT_RESPONSE_DECRYPT_ATTEMPTS = 16;
+const MAX_LINK_PREVIEW_THUMBNAIL_BYTES = 512 * 1024;
 const APP_STATE_WRITES_DISABLED_ERROR =
   "WhatsApp account, server, and app-state writes are disabled because changes can get this linked device removed (see issue #71). Set WA_APP_STATE_WRITES_ENABLED=true to enable at your own risk.";
 
@@ -709,6 +717,8 @@ export class BaileysAdapter implements ChannelAdapter {
   private readonly appStateWritesEnabled: boolean;
   private readonly markOnlineOnConnect: boolean;
   private readonly maxStatusRecipients: number;
+  private readonly autoRejectCalls: boolean;
+  private readonly pendingCalls = new Map<string, { from: string; isVideo: boolean }>();
   private readonly listeners = new Map<ChannelEvent, Set<ChannelEventHandler<ChannelEvent>>>();
   private pendingSocketEventProcessing: Promise<void> = Promise.resolve();
   private activeHistoryFetch: HistoryFetchWaiter | null = null;
@@ -733,6 +743,11 @@ export class BaileysAdapter implements ChannelAdapter {
       process.env.WA_STATUS_MAX_RECIPIENTS,
       "WA_STATUS_MAX_RECIPIENTS",
       DEFAULT_STATUS_MAX_RECIPIENTS,
+    );
+    this.autoRejectCalls = parseBooleanEnv(
+      process.env.WA_AUTO_REJECT_CALLS,
+      "WA_AUTO_REJECT_CALLS",
+      false,
     );
   }
 
@@ -1059,6 +1074,7 @@ export class BaileysAdapter implements ChannelAdapter {
 
   async disconnect(): Promise<void> {
     this.clearReconnectTimer();
+    this.pendingCalls.clear();
     if (this.sock) {
       this.sock.end(undefined);
       this.sock = null;
@@ -1244,14 +1260,110 @@ export class BaileysAdapter implements ChannelAdapter {
           },
         };
         break;
+      case "buttons":
+        msg = {
+          text: `${content.text}\n\n${content.buttons
+            .map((button, index) => `${index + 1}. ${button.text} (reply with ${button.id})`)
+            .join("\n")}${content.footer ? `\n\n${content.footer}` : ""}`,
+        };
+        break;
+      case "list":
+        msg = {
+          text: `${content.text}\n\n${content.sections
+            .map(
+              (section) =>
+                `${section.title}\n${section.rows
+                  .map(
+                    (row, index) =>
+                      `  ${index + 1}. ${row.title} (reply with ${row.id})${row.description ? ` — ${row.description}` : ""}`,
+                  )
+                  .join("\n")}`,
+            )
+            .join("\n\n")}\n\n${content.buttonText}${content.footer ? `\n${content.footer}` : ""}`,
+        };
+        break;
       case "reaction":
         throw new Error("Use sendReaction() for reactions");
       default:
         throw new Error(`Unsupported message type: ${(content as MessageContent).type}`);
     }
 
+    const mentions =
+      "mentions" in content ? content.mentions?.map((jid) => this.normalizeJid(jid)) : undefined;
+    const mentionAll = content.type === "text" && content.mentionAll === true;
+    if ((mentions?.length ?? 0) > 0 || mentionAll) {
+      msg = {
+        ...msg,
+        ...(mentions?.length ? { mentions } : {}),
+        ...(mentionAll ? { mentionAll: true } : {}),
+      } as AnyMessageContent;
+    }
+
     const result = await sock.sendMessage(jid, msg, opts);
     this.persistOutgoingMessage(result, jid);
+    return { messageId: result?.key.id ?? "", timestamp: Date.now(), status: "sent" };
+  }
+
+  async sendMediaAlbum(
+    to: string,
+    images: Array<{ image: string; caption?: string }>,
+  ): Promise<MessageResponse> {
+    if (images.length < 2 || images.length > 10) {
+      throw new Error("A WhatsApp media album must contain between 2 and 10 images");
+    }
+    const sock = this.getSock();
+    const jid = this.normalizeJid(to);
+    const parent = await sock.sendMessage(jid, { album: { expectedImageCount: images.length } });
+    if (!parent?.key.id) throw new Error("Baileys did not return an album parent message ID");
+
+    let sent = 0;
+    try {
+      for (const item of images) {
+        const result = await sock.sendMessage(jid, {
+          image: this.resolveMedia(item.image),
+          ...(item.caption ? { caption: item.caption } : {}),
+          albumParentKey: parent.key,
+        });
+        this.persistOutgoingMessage(result, jid);
+        sent += 1;
+      }
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      throw new Error(`Album sent ${sent} of ${images.length} images before failing: ${detail}`, {
+        cause: error,
+      });
+    }
+
+    return { messageId: parent.key.id, timestamp: Date.now(), status: "sent" };
+  }
+
+  async replyPrivatelyToGroupMessage(
+    groupId: string,
+    messageId: string,
+    text: string,
+  ): Promise<MessageResponse> {
+    const groupJid = normalizeGroupJid(groupId);
+    const row = db
+      .select({ senderId: messagesTable.senderId, isFromMe: messagesTable.isFromMe })
+      .from(messagesTable)
+      .where(
+        and(
+          eq(messagesTable.instanceId, this.instanceId),
+          eq(messagesTable.chatId, groupJid),
+          eq(messagesTable.id, messageId),
+        ),
+      )
+      .get();
+    if (!row) throw new Error(`Group message '${messageId}' was not found in local history`);
+    if (!groupJid.endsWith("@g.us")) throw new Error("Private replies require a group JID");
+    if (row.isFromMe === 1 || !row.senderId || row.senderId === "me") {
+      throw new Error("The stored group message has no other participant to reply to");
+    }
+
+    const sock = this.getSock();
+    const target = this.normalizeJid(row.senderId);
+    const result = await sock.sendMessage(target, { text });
+    this.persistOutgoingMessage(result, target);
     return { messageId: result?.key.id ?? "", timestamp: Date.now(), status: "sent" };
   }
 
@@ -1513,6 +1625,42 @@ export class BaileysAdapter implements ChannelAdapter {
     );
   }
 
+  private persistReceipt(
+    chatId: string,
+    messageId: string,
+    participant: string,
+    status: MessageReceipt["status"],
+    timestamp: number,
+  ): void {
+    if (!chatId || !messageId || !participant) return;
+    db.insert(messageReceiptsTable)
+      .values({
+        instanceId: this.instanceId,
+        chatId,
+        messageId,
+        participant,
+        status,
+        timestamp,
+      })
+      .onConflictDoUpdate({
+        target: [
+          messageReceiptsTable.instanceId,
+          messageReceiptsTable.chatId,
+          messageReceiptsTable.messageId,
+          messageReceiptsTable.participant,
+        ],
+        set: {
+          status: sql`CASE
+            WHEN ${messageReceiptsTable.status} = 'played' OR excluded.status = 'played' THEN 'played'
+            WHEN ${messageReceiptsTable.status} = 'read' OR excluded.status = 'read' THEN 'read'
+            ELSE 'delivered'
+          END`,
+          timestamp: sql`MAX(${messageReceiptsTable.timestamp}, excluded.timestamp)`,
+        },
+      })
+      .run();
+  }
+
   async editMessage(chatId: string, msgId: string, newText: string): Promise<void> {
     const sock = this.getSock();
     const jid = this.normalizeJid(chatId);
@@ -1686,10 +1834,76 @@ export class BaileysAdapter implements ChannelAdapter {
     return { messageId: result?.key.id ?? "", timestamp: Date.now(), status: "sent" };
   }
 
-  async sendLinkPreview(to: string, text: string, _url: string): Promise<MessageResponse> {
+  async sendLinkPreview(
+    to: string,
+    text: string,
+    url: string,
+    options?: LinkPreviewOptions,
+  ): Promise<MessageResponse> {
     const sock = this.getSock();
     const jid = this.normalizeJid(to);
-    const result = await sock.sendMessage(jid, { text });
+    const parsedUrl = new URL(url);
+    if (parsedUrl.protocol !== "http:" && parsedUrl.protocol !== "https:") {
+      throw new Error("Link preview URL must use HTTP or HTTPS");
+    }
+    const messageText = text.includes(url) ? text : `${text}\n${url}`;
+    let linkPreview: WAUrlInfo | undefined;
+    if (
+      options?.title !== undefined ||
+      options?.description !== undefined ||
+      options?.thumbnail !== undefined
+    ) {
+      let generated: WAUrlInfo | undefined;
+      try {
+        generated = await getUrlInfo(url, {
+          thumbnailWidth: 192,
+          fetchOpts: { timeout: 3000 },
+          uploadImage: sock.waUploadToServer,
+        });
+      } catch (error) {
+        logger.debug({ err: String(error), url }, "Could not generate link preview metadata");
+      }
+      let jpegThumbnail: Buffer | undefined;
+      if (options.thumbnail !== undefined) {
+        const encoded = options.thumbnail.replace(/^data:image\/jpeg;base64,/i, "");
+        jpegThumbnail = Buffer.from(encoded, "base64");
+        if (jpegThumbnail.length === 0 || jpegThumbnail.length > MAX_LINK_PREVIEW_THUMBNAIL_BYTES) {
+          throw new Error(
+            `Link preview thumbnail must be between 1 and ${MAX_LINK_PREVIEW_THUMBNAIL_BYTES} bytes`,
+          );
+        }
+        if (
+          jpegThumbnail.length < 3 ||
+          jpegThumbnail[0] !== 0xff ||
+          jpegThumbnail[1] !== 0xd8 ||
+          jpegThumbnail[2] !== 0xff
+        ) {
+          throw new Error("Link preview thumbnail must be a JPEG image encoded as base64");
+        }
+      }
+      linkPreview = {
+        "canonical-url": generated?.["canonical-url"] ?? url,
+        "matched-text": url,
+        title: options.title ?? generated?.title ?? parsedUrl.hostname,
+        ...(options.description !== undefined || generated?.description
+          ? { description: options.description ?? generated?.description }
+          : {}),
+        ...((jpegThumbnail ?? generated?.jpegThumbnail)
+          ? { jpegThumbnail: jpegThumbnail ?? generated?.jpegThumbnail }
+          : {}),
+        ...(generated?.highQualityThumbnail
+          ? { highQualityThumbnail: generated.highQualityThumbnail }
+          : {}),
+        ...(generated?.originalThumbnailUrl
+          ? { originalThumbnailUrl: generated.originalThumbnailUrl }
+          : {}),
+      };
+    }
+    const result = await sock.sendMessage(jid, {
+      text: messageText,
+      ...(linkPreview ? { linkPreview } : {}),
+    });
+    this.persistOutgoingMessage(result, jid);
     return { messageId: result?.key.id ?? "", timestamp: Date.now(), status: "sent" };
   }
 
@@ -1697,10 +1911,75 @@ export class BaileysAdapter implements ChannelAdapter {
 
   async sendPresence(
     chatId: string,
-    presenceStatus: "composing" | "recording" | "paused" | "available" | "unavailable",
+    presenceStatus: "typing" | "composing" | "recording" | "paused" | "available" | "unavailable",
   ): Promise<void> {
     const sock = this.getSock();
-    await sock.sendPresenceUpdate(presenceStatus, this.normalizeJid(chatId));
+    await sock.sendPresenceUpdate(
+      presenceStatus === "typing" ? "composing" : presenceStatus,
+      this.normalizeJid(chatId),
+    );
+  }
+
+  async subscribePresence(chatId: string): Promise<void> {
+    const sock = this.getSock();
+    await sock.presenceSubscribe(this.normalizeJid(chatId));
+  }
+
+  async getMessageReceipts(chatId: string, messageId: string): Promise<MessageReceipt[]> {
+    const jid = this.normalizeJid(chatId);
+    return db
+      .select({
+        participant: messageReceiptsTable.participant,
+        status: messageReceiptsTable.status,
+        timestamp: messageReceiptsTable.timestamp,
+      })
+      .from(messageReceiptsTable)
+      .where(
+        and(
+          eq(messageReceiptsTable.instanceId, this.instanceId),
+          eq(messageReceiptsTable.chatId, jid),
+          eq(messageReceiptsTable.messageId, messageId),
+        ),
+      )
+      .orderBy(asc(messageReceiptsTable.participant))
+      .all() as MessageReceipt[];
+  }
+
+  async getStatusViewers(messageId: string): Promise<string[]> {
+    return db
+      .selectDistinct({ participant: messageReceiptsTable.participant })
+      .from(messageReceiptsTable)
+      .where(
+        and(
+          eq(messageReceiptsTable.instanceId, this.instanceId),
+          eq(messageReceiptsTable.chatId, STATUS_BROADCAST_JID),
+          eq(messageReceiptsTable.messageId, messageId),
+          inArray(messageReceiptsTable.status, ["read", "played"]),
+        ),
+      )
+      .orderBy(asc(messageReceiptsTable.participant))
+      .all()
+      .map((row) => row.participant);
+  }
+
+  async getMessageReactions(chatId: string, messageId: string): Promise<MessageReaction[]> {
+    const jid = this.normalizeJid(chatId);
+    return db
+      .select({
+        participant: messageReactionsTable.participant,
+        emoji: messageReactionsTable.emoji,
+        timestamp: messageReactionsTable.timestamp,
+      })
+      .from(messageReactionsTable)
+      .where(
+        and(
+          eq(messageReactionsTable.instanceId, this.instanceId),
+          eq(messageReactionsTable.chatId, jid),
+          eq(messageReactionsTable.messageId, messageId),
+        ),
+      )
+      .orderBy(asc(messageReactionsTable.participant))
+      .all();
   }
 
   async markRead(chatId: string, messageIds: string[], participant?: string): Promise<void> {
@@ -2790,11 +3069,17 @@ export class BaileysAdapter implements ChannelAdapter {
 
   // ---- Calls ----
 
-  async rejectCall(callId: string): Promise<void> {
+  async rejectCall(callId: string, callFrom?: string): Promise<void> {
     const sock = this.getSock();
-    // rejectCall requires (callId, callFrom) — we pass empty string for callFrom
-    // as we don't have the caller info in this context
-    await sock.rejectCall(callId, "");
+    if (!callId) throw new Error("Call ID is required to reject a call");
+    const caller = callFrom ?? this.pendingCalls.get(callId)?.from;
+    if (!caller) {
+      throw new Error(
+        "Caller JID is required to reject a call; use callerId from whatsapp/call.received",
+      );
+    }
+    await sock.rejectCall(callId, this.normalizeJid(caller));
+    this.pendingCalls.delete(callId);
   }
 
   // ---- Data access ----
@@ -4625,6 +4910,24 @@ export class BaileysAdapter implements ChannelAdapter {
 
       if (events["messages.update"]) {
         for (const update of events["messages.update"]) {
+          const receiptStatus: Record<number, MessageReceipt["status"]> = {
+            2: "delivered",
+            3: "read",
+            4: "played",
+          };
+          const status = update.update.status;
+          const messageId = update.key.id;
+          const chatId = update.key.remoteJid;
+          const receipt = typeof status === "number" ? receiptStatus[status] : undefined;
+          if (receipt && messageId && chatId) {
+            this.persistReceipt(
+              chatId,
+              messageId,
+              update.key.participant ?? chatId,
+              receipt,
+              messageTimestampToMilliseconds(update.update.messageTimestamp, Date.now()),
+            );
+          }
           if (update.key.id && update.key.remoteJid && typeof update.update.starred === "boolean") {
             db.update(messagesTable)
               .set({ starred: update.update.starred ? 1 : 0 })
@@ -4651,12 +4954,83 @@ export class BaileysAdapter implements ChannelAdapter {
         }
       }
 
+      if (events["message-receipt.update"]) {
+        for (const update of events["message-receipt.update"]) {
+          const receipt = update.receipt;
+          const readTimestamp =
+            receipt.playedTimestamp ?? receipt.readTimestamp ?? receipt.receiptTimestamp;
+          const status: MessageReceipt["status"] =
+            receipt.playedTimestamp != null
+              ? "played"
+              : receipt.readTimestamp != null
+                ? "read"
+                : "delivered";
+          if (update.key.remoteJid && update.key.id && receipt.userJid && readTimestamp != null) {
+            this.persistReceipt(
+              update.key.remoteJid,
+              update.key.id,
+              receipt.userJid,
+              status,
+              messageTimestampToMilliseconds(readTimestamp, Date.now()),
+            );
+          }
+        }
+      }
+
       if (events["messages.delete"]) {
         const normalized = normalizeMessagesDelete(this.instanceId, events["messages.delete"]);
         for (const event of normalized) this.emit("message.deleted", event);
       }
 
       if (events["messages.reaction"]) {
+        for (const reaction of events["messages.reaction"]) {
+          const chatId = reaction.key.remoteJid;
+          const messageId = reaction.key.id;
+          const participant =
+            reaction.reaction?.key?.participant ?? reaction.reaction?.key?.remoteJid;
+          if (!chatId || !messageId || !participant) continue;
+          if (!reaction.reaction?.text) {
+            db.delete(messageReactionsTable)
+              .where(
+                and(
+                  eq(messageReactionsTable.instanceId, this.instanceId),
+                  eq(messageReactionsTable.chatId, chatId),
+                  eq(messageReactionsTable.messageId, messageId),
+                  eq(messageReactionsTable.participant, participant),
+                ),
+              )
+              .run();
+          } else {
+            db.insert(messageReactionsTable)
+              .values({
+                instanceId: this.instanceId,
+                chatId,
+                messageId,
+                participant,
+                emoji: reaction.reaction.text,
+                timestamp: messageTimestampToMilliseconds(
+                  reaction.reaction.senderTimestampMs,
+                  Date.now(),
+                ),
+              })
+              .onConflictDoUpdate({
+                target: [
+                  messageReactionsTable.instanceId,
+                  messageReactionsTable.chatId,
+                  messageReactionsTable.messageId,
+                  messageReactionsTable.participant,
+                ],
+                set: {
+                  emoji: reaction.reaction.text,
+                  timestamp: messageTimestampToMilliseconds(
+                    reaction.reaction.senderTimestampMs,
+                    Date.now(),
+                  ),
+                },
+              })
+              .run();
+          }
+        }
         const normalized = normalizeMessagesReaction(this.instanceId, events["messages.reaction"]);
         for (const event of normalized) this.emit("message.reaction", event);
       }
@@ -4684,7 +5058,33 @@ export class BaileysAdapter implements ChannelAdapter {
       // --- Calls ---
       if (events["call"]) {
         const normalized = normalizeCallEvent(this.instanceId, events["call"]);
-        for (const event of normalized) this.emit("call.received", event);
+        for (const event of normalized) {
+          if (event.status === "offer" && event.callId && event.callerId) {
+            this.pendingCalls.set(event.callId, { from: event.callerId, isVideo: event.isVideo });
+          }
+          this.emit("call.received", event);
+
+          if (
+            event.status === "offer" &&
+            event.callId &&
+            !event.isGroup &&
+            this.autoRejectCalls &&
+            event.callerId
+          ) {
+            try {
+              await this.rejectCall(event.callId, event.callerId);
+            } catch (error) {
+              logger.warn(
+                { err: String(error), instanceId: this.instanceId, callId: event.callId },
+                "Automatic call rejection failed",
+              );
+            }
+          }
+
+          if (["timeout", "reject", "accept", "terminate"].includes(event.status)) {
+            this.pendingCalls.delete(event.callId);
+          }
+        }
       }
 
       if (events["labels.edit"]) {

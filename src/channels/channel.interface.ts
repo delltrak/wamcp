@@ -32,6 +32,9 @@ import type {
   EventResponse,
   PollResults,
   GroupJoinRequest,
+  MessageReceipt,
+  MessageReaction,
+  LinkPreviewOptions,
   MessageSearchOptions,
   SendEventOptions,
   CatalogProductCreateInput,
@@ -85,14 +88,32 @@ export interface ChannelAdapter {
     media: string,
     type: "image" | "video" | "audio",
   ): Promise<MessageResponse>;
-  sendLinkPreview(to: string, text: string, url: string): Promise<MessageResponse>;
+  sendLinkPreview(
+    to: string,
+    text: string,
+    url: string,
+    options?: LinkPreviewOptions,
+  ): Promise<MessageResponse>;
 
   // ---- Presence ----
   sendPresence(
     chatId: string,
-    status: "composing" | "recording" | "paused" | "available" | "unavailable",
+    status: "typing" | "composing" | "recording" | "paused" | "available" | "unavailable",
   ): Promise<void>;
+  subscribePresence(chatId: string): Promise<void>;
   markRead(chatId: string, messageIds: string[], participant?: string): Promise<void>;
+  getMessageReceipts(chatId: string, messageId: string): Promise<MessageReceipt[]>;
+  getStatusViewers(messageId: string): Promise<string[]>;
+  getMessageReactions(chatId: string, messageId: string): Promise<MessageReaction[]>;
+  replyPrivatelyToGroupMessage(
+    groupId: string,
+    messageId: string,
+    text: string,
+  ): Promise<MessageResponse>;
+  sendMediaAlbum(
+    to: string,
+    images: Array<{ image: string; caption?: string }>,
+  ): Promise<MessageResponse>;
 
   // ---- Chats ----
   modifyChat(chatId: string, modification: ChatModification): Promise<void>;
@@ -190,7 +211,7 @@ export interface ChannelAdapter {
   getOrderDetails(orderId: string, tokenBase64: string): Promise<OrderDetails>;
 
   // ---- Calls ----
-  rejectCall(callId: string): Promise<void>;
+  rejectCall(callId: string, callFrom?: string): Promise<void>;
 
   // ---- Data access ----
   getContacts(search?: string): Promise<Contact[]>;

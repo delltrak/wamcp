@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Added per-chat presence subscriptions, send-time participant mentions and group `@all`, native
+  Cloud API buttons/lists with Baileys text fallbacks, custom link-preview metadata and generated
+  thumbnails, and status-story viewer lookup from observed read receipts.
+- Added local per-participant receipt and reaction history, multi-image albums, and private replies
+  to stored group-message authors. These replacements use normal messages or local read storage.
+- Added `WA_AUTO_REJECT_CALLS=false` for optional automatic rejection of one-to-one call offers.
+  Call offers and subsequent reject, timeout, accept, and terminate events now retain their status
+  and call details in MCP notifications and configured outgoing webhooks.
+
 - Added Baileys poll vote decryption and persisted poll results, live location sends, audio view-once
   messages, and multi-contact vCards. Poll results use the stored poll message secret and decrypted
   vote updates, so they remain available after reconnecting.

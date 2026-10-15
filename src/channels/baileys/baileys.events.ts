@@ -894,8 +894,12 @@ export function normalizeCallEvent(
 ): NormalizedCallEvent[] {
   return calls.map((call) => ({
     instanceId,
-    callerId: call.from ?? "",
+    chatId: call.chatId ?? "",
+    callerId: call.from ?? call.callerPn ?? "",
     isVideo: call.isVideo ?? false,
+    ...(call.isGroup !== undefined ? { isGroup: call.isGroup } : {}),
     callId: call.id ?? "",
+    timestamp: call.date?.getTime() ?? Date.now(),
+    status: call.status,
   }));
 }
