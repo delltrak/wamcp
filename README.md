@@ -82,7 +82,7 @@ from google.adk.tools.mcp_tool import McpToolset
 
 tools = McpToolset(url="http://localhost:3000/mcp")
 
-# Agent auto-discovers 90 WhatsApp tools
+# Agent auto-discovers 118 WhatsApp tools
 # wa_create_instance, wa_send_text, wa_send_image, ...
 ```
 
@@ -288,8 +288,8 @@ WA MCP exposes **118 tools** across 15 domains. All tools use the `wa_` prefix.
 | `wa_group_handle_request`      | Approve / reject join request |
 | `wa_group_update_picture`      | Set group picture (Baileys)   |
 | `wa_group_remove_picture`      | Remove group picture (Baileys) |
-| `wa_group_join_approval_mode`  | Set join-request approval mode (gated write) |
-| `wa_group_member_add_mode`     | Set who can add members (gated write) |
+| `wa_group_join_approval_mode`  | Set join-request approval mode (Baileys, gated write) |
+| `wa_group_member_add_mode`     | Set who can add members (Baileys, gated write) |
 
 </details>
 
@@ -349,12 +349,12 @@ this operation.
 | `wa_newsletter_follow`   | Follow a newsletter   |
 | `wa_newsletter_unfollow` | Unfollow a newsletter |
 | `wa_newsletter_send`     | Send to newsletter    |
-| `wa_create_newsletter` | Create a Channel (gated write) |
+| `wa_create_newsletter` | Create a Channel (Baileys, gated write) |
 | `wa_get_newsletter_metadata` | Read Channel metadata (Baileys) |
-| `wa_newsletter_update_name` | Update Channel name (gated write) |
-| `wa_newsletter_update_description` | Update Channel description (gated write) |
-| `wa_newsletter_update_picture` | Update Channel picture (gated write) |
-| `wa_newsletter_react` | React to a Channel post (gated write) |
+| `wa_newsletter_update_name` | Update Channel name (Baileys, gated write) |
+| `wa_newsletter_update_description` | Update Channel description (Baileys, gated write) |
+| `wa_newsletter_update_picture` | Update Channel picture (Baileys, gated write) |
+| `wa_newsletter_react` | React to a Channel post (Baileys, gated write) |
 | `wa_newsletter_list_posts` | List Channel posts (Baileys) |
 
 </details>
@@ -367,16 +367,16 @@ this operation.
 | `wa_create_quick_reply` | Create a Business quick reply (gated app-state write) |
 | `wa_edit_quick_reply` | Edit a Business quick reply (gated app-state write) |
 | `wa_delete_quick_reply` | Delete a Business quick reply (gated app-state write) |
-| `wa_create_community` | Create a community (gated write) |
+| `wa_create_community` | Create a community (Baileys, gated write) |
 | `wa_list_communities` | List communities (Baileys) |
 | `wa_get_community_details` | Get community metadata (Baileys) |
-| `wa_community_link_group` / `wa_community_unlink_group` | Link or unlink a group (gated write) |
-| `wa_leave_community` | Leave a community (gated write) |
+| `wa_community_link_group` / `wa_community_unlink_group` | Link or unlink a group (Baileys, gated write) |
+| `wa_leave_community` | Leave a community (Baileys, gated write) |
 | `wa_get_catalog` | List catalog products (Baileys) |
 | `wa_get_catalog_collections` | List catalog collections (Baileys) |
-| `wa_create_catalog_product` | Create a catalog product (gated write) |
-| `wa_update_catalog_product` | Update a catalog product (gated write) |
-| `wa_delete_catalog_products` | Delete catalog products (gated write) |
+| `wa_create_catalog_product` | Create a catalog product (Baileys, gated write) |
+| `wa_update_catalog_product` | Update a catalog product (Baileys, gated write) |
+| `wa_delete_catalog_products` | Delete catalog products (Baileys, gated write) |
 | `wa_get_order_details` | Read order details (Baileys) |
 
 </details>
@@ -560,7 +560,7 @@ See [Outgoing event webhooks](docs/event-webhooks.md) for configuration details.
 │  │  Layer 1 — MCP Transport (HTTP/stdio) │ │
 │  ├────────────────────────────────────────┤ │
 │  │  Layer 2 — MCP Core                   │ │
-│  │  90 Tools │ 10 Resources │ 13 Events  │ │
+│  │ 118 Tools │ 10 Resources │ 13 Events  │ │
 │  ├────────────────────────────────────────┤ │
 │  │  Layer 3 — Services                   │ │
 │  │  Instance Manager │ Queue │ Dedup     │ │
@@ -694,6 +694,11 @@ accept that risk. Read-only metadata, catalog, collection, order, blocklist, and
 available. Normal message sends, including PTV, and private disappearing timers sent through
 `sendMessage` are not gated. Read receipts and app-state reads/resyncs are also unaffected.
 
+At the protocol level, issue #74 operations use non-app-state paths: private disappearing timers use
+`sendMessage` control messages; blocklist/About are read queries; community actions use `w:g2` IQs;
+Channel metadata, posts, and reactions use newsletter/MEX queries or message nodes; group approval
+modes and catalog operations use IQ/MEX queries; PTV uses a regular video message with `ptv: true`.
+
 Baileys status stories go to the account's own normalized JID and known individual contacts by
 default. Each status tool accepts an optional `statusJidList` of phone numbers or individual JIDs
 to restrict the audience; the account's own JID is always included. The default recipient cap is
@@ -754,7 +759,7 @@ src/
 ├── index.ts                     # Entry point (HTTP/stdio)
 ├── constants.ts                 # Defaults and limits
 ├── server/mcp.ts                # MCP server setup
-├── tools/                       # 🔧 90 MCP tools (13 files)
+├── tools/                       # 🔧 118 MCP tools (15 files)
 ├── resources/                   # 📖 10 MCP resources (8 files)
 ├── notifications/events.ts      # 📡 12 event types
 ├── channels/
