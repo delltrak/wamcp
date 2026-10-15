@@ -1,10 +1,10 @@
 import { randomUUID } from "node:crypto";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { BaileysEventMap, WAMessage, WASocket } from "@whiskeysockets/baileys";
-import { eq } from "drizzle-orm";
+import { and, eq, lt } from "drizzle-orm";
 import { BaileysAdapter } from "../src/channels/baileys/baileys.adapter.js";
 import { db } from "../src/db/client.js";
-import { instances, processedMessages } from "../src/db/schema.js";
+import { instances, messages, processedMessages } from "../src/db/schema.js";
 import { normalizeEventWebhookPayload } from "../src/services/event-webhook.js";
 import type { NormalizedMessageEvent } from "../src/types/channel.types.js";
 
@@ -31,6 +31,7 @@ interface AdapterInternals {
   reconnectAttempt: number;
   saveCreds: (() => Promise<void>) | null;
   bindEvents: (sock: WASocket) => void;
+  getAppendNotifyWatermark: (now: number) => number;
 }
 
 function createFixture(options: { lastConnected?: number; lastDisconnected?: number } = {}): {
@@ -94,12 +95,101 @@ function deleteInstance(instanceId: string): void {
   db.delete(instances).where(eq(instances.id, instanceId)).run();
 }
 
+function seedStoredMessage(instanceId: string, messageId: string, timestamp: number): void {
+  db.insert(messages)
+    .values({
+      id: messageId,
+      instanceId,
+      chatId: CHAT_JID,
+      senderId: CHAT_JID,
+      type: "text",
+      content: `fixture ${messageId}`,
+      status: "received",
+      timestamp,
+    })
+    .run();
+}
+
 afterEach(() => {
   vi.useRealTimers();
   vi.restoreAllMocks();
 });
 
 describe("Baileys offline append notifications", () => {
+  it("normalizes millisecond-stored message timestamps and still emits newer appends", async () => {
+    const now = Date.now();
+    const storedTimestampMs = now - 2 * 60_000;
+    const { instanceId, adapter, dispatch } = createFixture({
+      lastConnected: now - 10 * 60_000,
+      lastDisconnected: now - 15 * 60_000,
+    });
+    seedStoredMessage(instanceId, "stored-millisecond-message", storedTimestampMs);
+    const received = vi.fn();
+    adapter.on("message.received", received);
+
+    try {
+      expect((adapter as unknown as AdapterInternals).getAppendNotifyWatermark(now)).toBe(
+        storedTimestampMs + 1,
+      );
+
+      await dispatch("append", [
+        fixtureMessage("newer-offline-append", { timestampMs: now - 60_000 }),
+      ]);
+      expect(received).toHaveBeenCalledTimes(1);
+    } finally {
+      deleteInstance(instanceId);
+    }
+  });
+
+  it("skips a redelivered append after its processed-message record was pruned", async () => {
+    const now = Date.now();
+    const { instanceId, adapter, dispatch } = createFixture();
+    const messageId = "pruned-processed-append";
+    seedStoredMessage(instanceId, messageId, Math.floor((now - 6 * 60_000) / 1000));
+    db.insert(processedMessages)
+      .values({ messageId, instanceId, processedAt: now - 25 * 60 * 60_000 })
+      .run();
+    db.delete(processedMessages)
+      .where(
+        and(
+          eq(processedMessages.instanceId, instanceId),
+          lt(processedMessages.processedAt, now - 24 * 60 * 60_000),
+        ),
+      )
+      .run();
+    const received = vi.fn();
+    adapter.on("message.received", received);
+
+    try {
+      await dispatch("append", [fixtureMessage(messageId, { timestampMs: now - 2 * 60_000 })]);
+      expect(received).not.toHaveBeenCalled();
+      expect(
+        db.select().from(processedMessages).where(eq(processedMessages.messageId, messageId)).get(),
+      ).toBeUndefined();
+    } finally {
+      deleteInstance(instanceId);
+    }
+  });
+
+  it("notifies a brand-new offline append once", async () => {
+    const now = Date.now();
+    const { instanceId, adapter, dispatch } = createFixture({
+      lastConnected: now - 15 * 60_000,
+      lastDisconnected: now - 10 * 60_000,
+    });
+    const received = vi.fn();
+    adapter.on("message.received", received);
+    const message = fixtureMessage("new-offline-append-once", { timestampMs: now - 8 * 60_000 });
+
+    try {
+      await dispatch("append", [message]);
+      await dispatch("append", [message]);
+      expect(received).toHaveBeenCalledTimes(1);
+    } finally {
+      deleteInstance(instanceId);
+    }
+  });
+
   it("emits one received event and webhook payload across append and notify redelivery", async () => {
     const now = Date.now();
     const { instanceId, adapter, dispatch } = createFixture({

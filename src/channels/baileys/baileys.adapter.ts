@@ -5187,6 +5187,23 @@ export class BaileysAdapter implements ChannelAdapter {
           data.type === "append"
             ? (this.appendNotifyWatermarkMs ?? this.getAppendNotifyWatermark(appendNow))
             : null;
+        const preexistingAppendMessageIds = new Set<string>();
+        if (data.type === "append") {
+          const checkedMessageIds = new Set<string>();
+          for (const message of data.messages) {
+            const messageId = message.key.id;
+            if (!messageId || checkedMessageIds.has(messageId)) continue;
+            checkedMessageIds.add(messageId);
+            const existing = db
+              .select({ id: messagesTable.id })
+              .from(messagesTable)
+              .where(
+                and(eq(messagesTable.instanceId, this.instanceId), eq(messagesTable.id, messageId)),
+              )
+              .get();
+            if (existing) preexistingAppendMessageIds.add(messageId);
+          }
+        }
         logger.info(
           { instanceId: this.instanceId, type: data.type, count: data.messages.length },
           "messages.upsert event received",
@@ -5258,9 +5275,9 @@ export class BaileysAdapter implements ChannelAdapter {
           let appendEmitted = 0;
           for (const event of normalizedEvents) {
             const messageId = event.message.id;
+            if (!messageId || preexistingAppendMessageIds.has(messageId)) continue;
             const timestampMs = event.message.timestamp * 1000;
             const eligible =
-              !!messageId &&
               !event.message.isFromMe &&
               !event.chatId.endsWith("@broadcast") &&
               !event.chatId.endsWith("@newsletter") &&
@@ -5750,7 +5767,9 @@ export class BaileysAdapter implements ChannelAdapter {
       .orderBy(desc(messagesTable.timestamp))
       .limit(1)
       .get();
-    const lastSeenMessageAt = lastMessage?.timestamp ? lastMessage.timestamp * 1000 : null;
+    const lastSeenMessageAt = lastMessage?.timestamp
+      ? messageTimestampToMilliseconds(lastMessage.timestamp, 0)
+      : null;
     const timestamps = [
       instance?.lastDisconnected ?? null,
       instance?.lastConnected ?? null,
@@ -5758,8 +5777,11 @@ export class BaileysAdapter implements ChannelAdapter {
     ].filter((timestamp): timestamp is number => timestamp !== null && Number.isFinite(timestamp));
     const watermark = timestamps.length > 0 ? Math.max(...timestamps) : null;
 
-    return watermark !== null
-      ? watermark - APPEND_NOTIFY_CLOCK_SKEW_MS
-      : now - this.appendNotifyWindowMs;
+    if (watermark === null) return now - this.appendNotifyWindowMs;
+
+    const connectionWatermark = watermark - APPEND_NOTIFY_CLOCK_SKEW_MS;
+    return lastSeenMessageAt !== null
+      ? Math.max(connectionWatermark, lastSeenMessageAt + 1)
+      : connectionWatermark;
   }
 }
