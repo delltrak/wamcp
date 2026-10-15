@@ -95,6 +95,7 @@ export interface EventResponse {
   extraGuestCount?: number;
   unknownReason?: EventResponseUnknownReason;
   recoverable?: boolean;
+  attemptedCombinations?: number;
 }
 
 export type EventResponseStatus = "GOING" | "NOT_GOING" | "MAYBE" | "UNKNOWN";

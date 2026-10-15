@@ -19,9 +19,11 @@ import type { InstanceManager } from "../src/services/instance-manager.js";
 import { normalizeEventWebhookPayload } from "../src/services/event-webhook.js";
 import { registerEventNotifications } from "../src/notifications/events.js";
 import { registerEventTools } from "../src/tools/event.tools.js";
+import { logger } from "../src/utils/logger.js";
 import type { ChannelEventPayload } from "../src/types/channel.types.js";
 
 const ACCOUNT_ID = "5500000000002@s.whatsapp.net";
+const ACCOUNT_LID = "9000000000002@lid";
 const RESPONDER_ID = "5500000000009@s.whatsapp.net";
 const RESPONDER_LID = "9000000000009@lid";
 const UNRESOLVED_RESPONDER_ID = "5500000000011@s.whatsapp.net";
@@ -119,12 +121,19 @@ describe("Baileys event responses", () => {
     const adapter = new BaileysAdapter(instanceId);
     let processEvents: ((events: Partial<BaileysEventMap>) => Promise<void> | void) | undefined;
     const socket = {
-      user: { id: ACCOUNT_ID },
+      user: { id: ACCOUNT_ID, lid: ACCOUNT_LID },
       signalRepository: {
         lidMapping: {
           getPNForLID: vi.fn(async (lid: string) => {
             if (lid === RESPONDER_LID) return RESPONDER_ID;
             if (lid === EVENT_CREATOR_LID) return EVENT_CREATOR_ID;
+            if (lid === ACCOUNT_LID) return ACCOUNT_ID;
+            return null;
+          }),
+          getLIDForPN: vi.fn(async (pn: string) => {
+            if (pn === RESPONDER_ID) return RESPONDER_LID;
+            if (pn === EVENT_CREATOR_ID) return EVENT_CREATOR_LID;
+            if (pn === ACCOUNT_ID) return ACCOUNT_LID;
             return null;
           }),
         },
@@ -688,6 +697,195 @@ describe("Baileys event responses", () => {
         messageId: "group-response-lid",
       },
     ]);
+  });
+
+  it("decrypts a LID-authored event response with its PN responder in the live and lazy paths", async () => {
+    const { instanceId, adapter, processEvents } = createFixture();
+    const eventId = "group-event-lid-creator-pn-responder";
+    const messageSecret = Buffer.alloc(32, 0x71);
+    const eventKey: WAMessageKey = {
+      id: eventId,
+      remoteJid: GROUP_ID,
+      participant: EVENT_CREATOR_LID,
+      participantAlt: EVENT_CREATOR_ID,
+      fromMe: false,
+    };
+    const encrypted = encryptEventResponse(
+      messageSecret,
+      eventId,
+      EVENT_CREATOR_LID,
+      RESPONDER_ID,
+      proto.Message.EventResponseMessage.create({
+        response: proto.Message.EventResponseMessage.EventResponseType.GOING,
+      }),
+      eventKey,
+    );
+    const response = encryptedResponseMessage(
+      "group-response-lid-creator-pn-responder",
+      GROUP_ID,
+      { remoteJid: GROUP_ID, participant: RESPONDER_ID },
+      encrypted,
+    );
+
+    await upsert(processEvents, eventMessage(eventId, GROUP_ID, eventKey, messageSecret));
+    await upsert(processEvents, response);
+    await expect(adapter.getEventResponses(GROUP_ID, eventId)).resolves.toMatchObject([
+      { participant: RESPONDER_ID, status: "GOING", response: "GOING" },
+    ]);
+
+    sqlite
+      .prepare(
+        "UPDATE event_responses SET response = 'UNKNOWN' WHERE instance_id = ? AND event_message_id = ?",
+      )
+      .run(instanceId, eventId);
+    await expect(adapter.getEventResponses(GROUP_ID, eventId)).resolves.toMatchObject([
+      { participant: RESPONDER_ID, status: "GOING", response: "GOING" },
+    ]);
+  });
+
+  it("decrypts a PN-authored event response with its LID responder", async () => {
+    const { adapter, processEvents } = createFixture();
+    const eventId = "group-event-pn-creator-lid-responder";
+    const messageSecret = Buffer.alloc(32, 0x72);
+    const eventKey: WAMessageKey = {
+      id: eventId,
+      remoteJid: GROUP_ID,
+      fromMe: true,
+    };
+    const encrypted = encryptEventResponse(
+      messageSecret,
+      eventId,
+      ACCOUNT_ID,
+      RESPONDER_LID,
+      proto.Message.EventResponseMessage.create({
+        response: proto.Message.EventResponseMessage.EventResponseType.NOT_GOING,
+      }),
+      eventKey,
+    );
+
+    await upsert(processEvents, eventMessage(eventId, GROUP_ID, eventKey, messageSecret));
+    await upsert(
+      processEvents,
+      encryptedResponseMessage(
+        "group-response-pn-creator-lid-responder",
+        GROUP_ID,
+        { remoteJid: GROUP_ID, participant: RESPONDER_LID, participantAlt: RESPONDER_ID },
+        encrypted,
+      ),
+    );
+
+    await expect(adapter.getEventResponses(GROUP_ID, eventId)).resolves.toMatchObject([
+      { participant: RESPONDER_ID, status: "NOT_GOING", response: "NOT_GOING" },
+    ]);
+  });
+
+  it("tries the linked account LID when a fromMe event creator was encrypted as a LID", async () => {
+    const { adapter, processEvents } = createFixture();
+    const eventId = "group-event-own-lid-creator";
+    const messageSecret = Buffer.alloc(32, 0x73);
+    const eventKey: WAMessageKey = {
+      id: eventId,
+      remoteJid: GROUP_ID,
+      fromMe: true,
+    };
+    const encrypted = encryptEventResponse(
+      messageSecret,
+      eventId,
+      ACCOUNT_LID,
+      RESPONDER_ID,
+      proto.Message.EventResponseMessage.create({
+        response: proto.Message.EventResponseMessage.EventResponseType.MAYBE,
+      }),
+      eventKey,
+    );
+
+    await upsert(processEvents, eventMessage(eventId, GROUP_ID, eventKey, messageSecret));
+    await upsert(
+      processEvents,
+      encryptedResponseMessage(
+        "group-response-own-lid-creator",
+        GROUP_ID,
+        { remoteJid: GROUP_ID, participant: RESPONDER_ID },
+        encrypted,
+      ),
+    );
+
+    await expect(adapter.getEventResponses(GROUP_ID, eventId)).resolves.toMatchObject([
+      { participant: RESPONDER_ID, status: "MAYBE", response: "MAYBE" },
+    ]);
+  });
+
+  it("reports failed JID attempts without logging event secrets or encrypted payloads", async () => {
+    const { adapter, processEvents } = createFixture();
+    const eventId = "group-event-decrypt-failed-candidates";
+    const messageSecret = Buffer.alloc(32, 0x74);
+    const eventKey: WAMessageKey = {
+      id: eventId,
+      remoteJid: GROUP_ID,
+      fromMe: true,
+    };
+    const encrypted = encryptEventResponse(
+      messageSecret,
+      eventId,
+      ACCOUNT_ID,
+      RESPONDER_ID,
+      proto.Message.EventResponseMessage.create({
+        response: proto.Message.EventResponseMessage.EventResponseType.GOING,
+      }),
+      eventKey,
+    );
+    const originalLevel = logger.level;
+    logger.level = "debug";
+    const debug = vi.spyOn(logger, "debug").mockImplementation(() => logger);
+    try {
+      await upsert(processEvents, eventMessage(eventId, GROUP_ID, eventKey, messageSecret));
+      await upsert(
+        processEvents,
+        encryptedResponseMessage(
+          "group-response-decrypt-failed-candidates",
+          GROUP_ID,
+          { remoteJid: GROUP_ID, participant: UNRESOLVED_RESPONDER_LID },
+          encrypted,
+        ),
+      );
+
+      const responses = await adapter.getEventResponses(GROUP_ID, eventId);
+      expect(responses).toMatchObject([
+        {
+          status: "UNKNOWN",
+          unknownReason: "decrypt_failed",
+          recoverable: true,
+          attemptedCombinations: 2,
+        },
+      ]);
+
+      const failureLogs = debug.mock.calls.filter(
+        ([details]) =>
+          typeof details === "object" &&
+          details !== null &&
+          "eventMessageId" in details &&
+          details.eventMessageId === eventId &&
+          "candidateJidsTried" in details,
+      );
+      expect(failureLogs.length).toBeGreaterThan(0);
+      expect(failureLogs[0]?.[0]).toMatchObject({
+        attempts: 2,
+        candidateJidsTried: {
+          creator: expect.arrayContaining([expect.objectContaining({ kind: "own_pn" })]),
+          responder: expect.arrayContaining([
+            expect.objectContaining({ jid: UNRESOLVED_RESPONDER_LID }),
+          ]),
+        },
+      });
+      const serializedLogs = JSON.stringify(failureLogs);
+      expect(serializedLogs).not.toContain(messageSecret.toString("base64"));
+      expect(serializedLogs).not.toContain(Buffer.from(encrypted.encPayload).toString("base64"));
+      expect(serializedLogs).not.toContain("messageSecret");
+      expect(serializedLogs).not.toContain("encPayload");
+    } finally {
+      debug.mockRestore();
+      logger.level = originalLevel;
+    }
   });
 
   it("uses participantAlt PN when an event response author LID has no mapping", async () => {
