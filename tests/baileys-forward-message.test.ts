@@ -208,6 +208,40 @@ describe("Baileys message forwarding", () => {
     expect(Buffer.isBuffer(audio?.waveform)).toBe(true);
   });
 
+  it("forwards a stored empty protobuf message body", async () => {
+    const id = "stored-empty-request-phone-number";
+    const original = sourceMessage(id, { requestPhoneNumberMessage: {} });
+    insertStoredMessage(id, "text", JSON.stringify(original, BufferJSON.replacer));
+    const { adapter, socket } = createAdapter(
+      async () => ({ key: { id: "forwarded-empty-body" } }) as WAMessage,
+    );
+
+    await adapter.forwardMessage(DESTINATION, id, SOURCE_CHAT);
+
+    expect(socket.sendMessage).toHaveBeenCalledWith(
+      DESTINATION,
+      expect.objectContaining({
+        forward: expect.objectContaining({
+          message: { requestPhoneNumberMessage: {} },
+        }),
+      }),
+    );
+  });
+
+  it("rejects a stored sender key distribution message without user content", async () => {
+    const id = "stored-sender-key-distribution-only";
+    const original = sourceMessage(id, { senderKeyDistributionMessage: {} });
+    insertStoredMessage(id, "text", JSON.stringify(original, BufferJSON.replacer));
+    const { adapter, socket } = createAdapter(
+      async () => ({ key: { id: "unexpected" } }) as WAMessage,
+    );
+
+    await expect(adapter.forwardMessage(DESTINATION, id, SOURCE_CHAT)).rejects.toThrow(
+      "full content is unavailable",
+    );
+    expect(socket.sendMessage).not.toHaveBeenCalled();
+  });
+
   it("persists the full WAMessage returned by an outgoing PTT send", async () => {
     const outgoingId = "outgoing-ptt-stored";
     const outgoing = sourceMessage(outgoingId, audioMessage(true), true);
@@ -233,6 +267,49 @@ describe("Baileys message forwarding", () => {
     expect(revived.message?.audioMessage?.ptt).toBe(true);
     expect(Buffer.isBuffer(revived.message?.audioMessage?.mediaKey)).toBe(true);
     expect(Buffer.isBuffer(revived.message?.audioMessage?.waveform)).toBe(true);
+  });
+
+  it("stores the current outgoing timestamp in seconds when it is missing", async () => {
+    const outgoingId = "outgoing-without-message-timestamp";
+    const outgoing = sourceMessage(outgoingId, { conversation: "hello" }, true);
+    outgoing.key.remoteJid = "5511777777777@s.whatsapp.net";
+    outgoing.messageTimestamp = undefined as unknown as WAMessage["messageTimestamp"];
+    const { adapter } = createAdapter(async () => outgoing);
+    const beforeSend = Math.floor(Date.now() / 1000);
+
+    await adapter.sendMessage("5511777777", { type: "text", text: "hello" });
+
+    const stored = db
+      .select({ timestamp: messages.timestamp })
+      .from(messages)
+      .where(eq(messages.id, outgoingId))
+      .get();
+    expect(stored?.timestamp).toBeGreaterThanOrEqual(beforeSend);
+    expect(stored?.timestamp).toBeLessThanOrEqual(Math.floor(Date.now() / 1000));
+  });
+
+  it("converts a protobuf Long outgoing timestamp to seconds", async () => {
+    const outgoingId = "outgoing-with-long-message-timestamp";
+    const outgoing = sourceMessage(outgoingId, { conversation: "hello" }, true);
+    outgoing.key.remoteJid = "5511777777777@s.whatsapp.net";
+    Object.assign(outgoing, {
+      messageTimestamp: {
+        low: 1_700_000_123,
+        high: 0,
+        unsigned: false,
+        toNumber: () => 1_700_000_123,
+      },
+    });
+    const { adapter } = createAdapter(async () => outgoing);
+
+    await adapter.sendMessage("5511777777", { type: "text", text: "hello" });
+
+    const stored = db
+      .select({ timestamp: messages.timestamp })
+      .from(messages)
+      .where(eq(messages.id, outgoingId))
+      .get();
+    expect(stored?.timestamp).toBe(1_700_000_123);
   });
 
   it("uses normalized stored text when an older row has no raw message", async () => {
@@ -281,7 +358,7 @@ describe("Baileys message forwarding", () => {
     expect(socket.sendMessage).not.toHaveBeenCalled();
   });
 
-  it("does not send an empty text proto as a forward", async () => {
+  it("forwards an empty text value from a stored full message", async () => {
     const id = "empty-text-content";
     insertStoredMessage(
       id,
@@ -289,12 +366,18 @@ describe("Baileys message forwarding", () => {
       JSON.stringify(sourceMessage(id, { conversation: "" }), BufferJSON.replacer),
     );
     const { adapter, socket } = createAdapter(
-      async () => ({ key: { id: "unexpected" } }) as WAMessage,
+      async () => ({ key: { id: "forwarded-empty-text" } }) as WAMessage,
     );
 
-    await expect(adapter.forwardMessage(DESTINATION, id, SOURCE_CHAT)).rejects.toThrow(
-      "full content is unavailable",
+    await expect(adapter.forwardMessage(DESTINATION, id, SOURCE_CHAT)).resolves.toMatchObject({
+      messageId: "forwarded-empty-text",
+      status: "sent",
+    });
+    expect(socket.sendMessage).toHaveBeenCalledWith(
+      DESTINATION,
+      expect.objectContaining({
+        forward: expect.objectContaining({ message: { conversation: "" } }),
+      }),
     );
-    expect(socket.sendMessage).not.toHaveBeenCalled();
   });
 });

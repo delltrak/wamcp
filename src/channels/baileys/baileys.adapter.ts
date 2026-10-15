@@ -50,6 +50,7 @@ import type {
 import { useSqliteAuthState, clearAuthState } from "./baileys.auth.js";
 import { normalizePrivacySettings } from "./privacy.js";
 import { getWaVersion } from "./baileys.version.js";
+import { messageTimestampToSeconds } from "./message-timestamp.js";
 import { db } from "../../db/client.js";
 import {
   chats as chatsTable,
@@ -190,8 +191,24 @@ function hasMeaningfulValue(value: unknown): boolean {
 
   return Object.entries(value).some(
     ([key, nested]) =>
-      key !== "contextInfo" && key !== "senderKeyDistributionMessage" && hasMeaningfulValue(nested),
+      key !== "contextInfo" &&
+      key !== "messageContextInfo" &&
+      key !== "senderKeyDistributionMessage" &&
+      hasMeaningfulValue(nested),
   );
+}
+
+function hasStoredContentField(content: Record<string, unknown>): boolean {
+  return Object.entries(content).some(([key, value]) => {
+    if (
+      key === "senderKeyDistributionMessage" ||
+      key === "messageContextInfo" ||
+      key === "contextInfo"
+    ) {
+      return false;
+    }
+    return value !== null && value !== undefined;
+  });
 }
 
 function findNestedField(value: unknown, field: string): Record<string, unknown> | undefined {
@@ -211,14 +228,20 @@ function findNestedField(value: unknown, field: string): Record<string, unknown>
   }
 
   for (const [key, nested] of Object.entries(record)) {
-    if (key === "contextInfo" || key === "senderKeyDistributionMessage") continue;
+    if (
+      key === "contextInfo" ||
+      key === "messageContextInfo" ||
+      key === "senderKeyDistributionMessage"
+    ) {
+      continue;
+    }
     const match = findNestedField(nested, field);
     if (match) return match;
   }
   return undefined;
 }
 
-function hasForwardableContent(message: WAMessage): boolean {
+function hasForwardableContent(message: WAMessage, allowEmptyStoredProto = false): boolean {
   const content = unwrapMessageContent(message.message);
   if (!content) return false;
 
@@ -253,8 +276,15 @@ function hasForwardableContent(message: WAMessage): boolean {
     );
   }
 
-  return Object.entries(content).some(
-    ([key, value]) => key !== "senderKeyDistributionMessage" && hasMeaningfulValue(value),
+  return (
+    Object.entries(content).some(
+      ([key, value]) =>
+        key !== "senderKeyDistributionMessage" &&
+        key !== "messageContextInfo" &&
+        key !== "contextInfo" &&
+        hasMeaningfulValue(value),
+    ) ||
+    (allowEmptyStoredProto && hasStoredContentField(content))
   );
 }
 
@@ -772,10 +802,10 @@ export class BaileysAdapter implements ChannelAdapter {
           message: {
             id: outgoingId,
             sender: "me",
-            timestamp:
-              typeof outgoing.messageTimestamp === "number"
-                ? outgoing.messageTimestamp
-                : Number(outgoing.messageTimestamp ?? Date.now()),
+            timestamp: messageTimestampToSeconds(
+              outgoing.messageTimestamp,
+              Math.floor(Date.now() / 1000),
+            ),
             type: details.type,
             content: details.content,
             mediaUrl: details.mediaUrl,
@@ -867,13 +897,17 @@ export class BaileysAdapter implements ChannelAdapter {
     let sourceMessage: WAMessage | undefined;
     if (row.rawData) {
       try {
-        sourceMessage = JSON.parse(row.rawData, BufferJSON.reviver) as WAMessage;
+        const parsed: unknown = JSON.parse(row.rawData, BufferJSON.reviver);
+        if (typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)) {
+          sourceMessage = parsed as WAMessage;
+        }
       } catch {
         // Older or malformed rows can still use the normalized text fallback below.
       }
     }
 
-    if (!hasForwardableContent(sourceMessage ?? ({} as WAMessage))) {
+    const hasStoredFullOriginal = sourceMessage !== undefined;
+    if (!hasForwardableContent(sourceMessage ?? ({} as WAMessage), hasStoredFullOriginal)) {
       if (row.type === "text" && typeof row.content === "string" && row.content.trim()) {
         sourceMessage = {
           ...sourceMessage,
@@ -903,7 +937,7 @@ export class BaileysAdapter implements ChannelAdapter {
       },
     } as WAMessage;
 
-    if (!hasForwardableContent(fullMessage)) {
+    if (!hasForwardableContent(fullMessage, hasStoredFullOriginal)) {
       throw new Error(
         `Message '${msgId}' cannot be forwarded because its full content is unavailable`,
       );
@@ -2174,10 +2208,7 @@ export class BaileysAdapter implements ChannelAdapter {
               message: {
                 id: msg.key.id,
                 sender: getSenderJid(msg),
-                timestamp:
-                  typeof msg.messageTimestamp === "number"
-                    ? msg.messageTimestamp
-                    : Number(msg.messageTimestamp ?? 0),
+                timestamp: messageTimestampToSeconds(msg.messageTimestamp, 0),
                 type: details.type,
                 content: details.content,
                 mediaUrl: details.mediaUrl,
