@@ -92,6 +92,7 @@ import { db, sqlite } from "../../db/client.js";
 import {
   chats as chatsTable,
   messages as messagesTable,
+  instances as instancesTable,
   statusAudiences as statusAudiencesTable,
   messageReceipts as messageReceiptsTable,
   messageReactions as messageReactionsTable,
@@ -103,6 +104,7 @@ import {
 } from "../../db/schema.js";
 import { eq, and, desc, asc, ne, inArray, or, sql } from "drizzle-orm";
 import { searchStoredMessages } from "../../services/message-search.js";
+import { DedupService } from "../../services/dedup.js";
 import {
   normalizeMessagesUpsert,
   normalizeMessagesUpdate,
@@ -152,6 +154,11 @@ import {
 const logger = createChildLogger({ service: "baileys-adapter" });
 const mediaService = new MediaService();
 const DEFAULT_STATUS_MAX_RECIPIENTS = 256;
+const DEFAULT_APPEND_NOTIFY_WINDOW_HOURS = 24;
+const DEFAULT_APPEND_NOTIFY_MAX_PER_BATCH = 100;
+const DEFAULT_BAILEYS_HEALTH_WATCHDOG_MS = 180_000;
+const APPEND_NOTIFY_CLOCK_SKEW_MS = 5 * 60_000;
+const BAILEYS_KEEP_ALIVE_INTERVAL_MS = 25_000;
 const STATUS_BROADCAST_JID = "status@broadcast";
 const MAX_MARK_READ_MESSAGE_IDS = 100;
 const MAX_PRESENCE_SUBSCRIPTIONS = 100;
@@ -758,6 +765,7 @@ export class BaileysAdapter implements ChannelAdapter {
   private pairingCodeResolver: ((code: string | null) => void) | null = null;
   private reconnectAttempt = 0;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  private watchdogTimer: ReturnType<typeof setTimeout> | null = null;
   private saveCreds: (() => Promise<void>) | null = null;
   private authMeId: string | undefined;
   private authMeLid: string | undefined;
@@ -773,6 +781,15 @@ export class BaileysAdapter implements ChannelAdapter {
   private readonly listeners = new Map<ChannelEvent, Set<ChannelEventHandler<ChannelEvent>>>();
   private pendingSocketEventProcessing: Promise<void> = Promise.resolve();
   private activeHistoryFetch: HistoryFetchWaiter | null = null;
+  private readonly messageDedup = new DedupService();
+  private readonly appendNotifyWindowMs: number;
+  private readonly appendNotifyMaxPerBatch: number;
+  private readonly healthWatchdogMs: number;
+  private connectedAtMs: number | null = null;
+  private disconnectedAtMs: number | null = null;
+  private lastDisconnectReason: string | null = null;
+  private lastDisconnectStatusCode: number | null = null;
+  private lastInboundActivityAtMs = 0;
 
   constructor(
     private readonly instanceId: string,
@@ -794,6 +811,25 @@ export class BaileysAdapter implements ChannelAdapter {
       process.env.WA_STATUS_MAX_RECIPIENTS,
       "WA_STATUS_MAX_RECIPIENTS",
       DEFAULT_STATUS_MAX_RECIPIENTS,
+    );
+    this.appendNotifyWindowMs =
+      parsePositiveIntegerEnv(
+        process.env.WA_BAILEYS_APPEND_NOTIFY_WINDOW_HOURS,
+        "WA_BAILEYS_APPEND_NOTIFY_WINDOW_HOURS",
+        DEFAULT_APPEND_NOTIFY_WINDOW_HOURS,
+      ) *
+      60 *
+      60 *
+      1000;
+    this.appendNotifyMaxPerBatch = parsePositiveIntegerEnv(
+      process.env.WA_BAILEYS_APPEND_NOTIFY_MAX_PER_BATCH,
+      "WA_BAILEYS_APPEND_NOTIFY_MAX_PER_BATCH",
+      DEFAULT_APPEND_NOTIFY_MAX_PER_BATCH,
+    );
+    this.healthWatchdogMs = parsePositiveIntegerEnv(
+      process.env.WA_BAILEYS_HEALTH_WATCHDOG_MS,
+      "WA_BAILEYS_HEALTH_WATCHDOG_MS",
+      DEFAULT_BAILEYS_HEALTH_WATCHDOG_MS,
     );
     this.autoRejectCalls = parseBooleanEnv(
       process.env.WA_AUTO_REJECT_CALLS,
@@ -1089,6 +1125,7 @@ export class BaileysAdapter implements ChannelAdapter {
       printQRInTerminal: false,
       logger: logger.child({ instanceId: this.instanceId }),
       generateHighQualityLinkPreview: true,
+      keepAliveIntervalMs: BAILEYS_KEEP_ALIVE_INTERVAL_MS,
       syncFullHistory: true,
       markOnlineOnConnect: this.markOnlineOnConnect,
       getMessage: async (key: WAMessageKey): Promise<proto.IMessage | undefined> => {
@@ -1131,6 +1168,7 @@ export class BaileysAdapter implements ChannelAdapter {
 
   async disconnect(): Promise<void> {
     this.clearReconnectTimer();
+    this.clearHealthWatchdog();
     this.pendingCalls.clear();
     if (this.sock) {
       this.sock.end(undefined);
@@ -4902,18 +4940,49 @@ export class BaileysAdapter implements ChannelAdapter {
 
       if (connection === "open") {
         this.status = "connected";
+        const persistedDisconnect = db
+          .select({ lastDisconnected: instancesTable.lastDisconnected })
+          .from(instancesTable)
+          .where(eq(instancesTable.id, this.instanceId))
+          .get()?.lastDisconnected;
+        const offlineSince = this.disconnectedAtMs ?? persistedDisconnect ?? null;
+        const offlineDurationMs =
+          offlineSince !== null ? Math.max(0, Date.now() - offlineSince) : undefined;
+        this.connectedAtMs = Date.now();
+        this.disconnectedAtMs = null;
         this.qrCode = null;
         this.pairingPhone = null;
         this.pairingCodeValue = null;
         this.pairingCodeResolver = null;
         this.reconnectAttempt = 0;
-        logger.info({ instanceId: this.instanceId }, "Connected to WhatsApp");
+        this.lastInboundActivityAtMs = Date.now();
+        this.resetHealthWatchdog(sock);
+        logger.info({ instanceId: this.instanceId, offlineDurationMs }, "Connected to WhatsApp");
       }
 
       if (connection === "close") {
+        this.clearHealthWatchdog();
         this.status = "disconnected";
         const boom = (lastDisconnect?.error as Boom)?.output;
         const statusCode = boom?.statusCode;
+        const error = lastDisconnect?.error;
+        const reason = error instanceof Error ? error.message : error ? String(error) : "unknown";
+        const closedAt = Date.now();
+        const connectedDurationMs =
+          this.connectedAtMs !== null ? Math.max(0, closedAt - this.connectedAtMs) : undefined;
+        this.connectedAtMs = null;
+        this.disconnectedAtMs = closedAt;
+        this.lastDisconnectReason = reason;
+        this.lastDisconnectStatusCode = typeof statusCode === "number" ? statusCode : null;
+        logger.warn(
+          {
+            instanceId: this.instanceId,
+            reason,
+            statusCode,
+            connectedDurationMs,
+          },
+          "Baileys connection closed",
+        );
 
         if (statusCode === DisconnectReason.loggedOut) {
           logger.info({ instanceId: this.instanceId }, "Logged out, clearing auth");
@@ -4934,6 +5003,10 @@ export class BaileysAdapter implements ChannelAdapter {
     sock.ev.on("creds.update", async () => {
       await this.saveCreds?.();
     });
+
+    sock.ws?.on("message", () => this.noteInboundActivity(sock));
+    sock.ws?.on("ping", () => this.noteInboundActivity(sock));
+    sock.ws?.on("pong", () => this.noteInboundActivity(sock));
 
     const resolveLidToPn: ContactPnResolver = async (lid) => {
       try {
@@ -5022,6 +5095,9 @@ export class BaileysAdapter implements ChannelAdapter {
           syncType,
           peerDataRequestSessionId,
         } = events["messaging-history.set"];
+        for (const message of messages) {
+          if (message.key.id) this.messageDedup.markProcessed(this.instanceId, message.key.id);
+        }
         this.persistChats(chats);
         const contactCount = contacts.filter((contact) => contact.id).length;
         const chatContactCount = chats.filter(
@@ -5105,6 +5181,9 @@ export class BaileysAdapter implements ChannelAdapter {
       // --- Messages ---
       if (events["messages.upsert"]) {
         const data = events["messages.upsert"];
+        const appendNow = Date.now();
+        const appendWatermark =
+          data.type === "append" ? this.getAppendNotifyWatermark(appendNow) : null;
         logger.info(
           { instanceId: this.instanceId, type: data.type, count: data.messages.length },
           "messages.upsert event received",
@@ -5171,14 +5250,61 @@ export class BaileysAdapter implements ChannelAdapter {
 
         scheduleBaileysMessagesRead(this, data.type, data.messages, this.instanceId);
 
-        // Emit events only for incoming notify-type messages (not our own sends)
-        const notifyEvents = normalizeMessagesUpsert(this.instanceId, data);
-        logger.info(
-          { instanceId: this.instanceId, notifyCount: notifyEvents.length },
-          "Notify messages for emission",
-        );
-        for (const event of notifyEvents) {
-          this.emit("message.received", this.attachMessageLabels(event));
+        const normalizedEvents = normalizeMessagesUpsert(this.instanceId, data);
+        if (data.type === "append") {
+          let appendEmitted = 0;
+          for (const event of normalizedEvents) {
+            const messageId = event.message.id;
+            const timestampMs = event.message.timestamp * 1000;
+            const eligible =
+              !!messageId &&
+              !event.message.isFromMe &&
+              !event.chatId.endsWith("@broadcast") &&
+              !event.chatId.endsWith("@newsletter") &&
+              timestampMs > 0 &&
+              timestampMs >= (appendWatermark ?? appendNow - this.appendNotifyWindowMs) &&
+              timestampMs <= appendNow + APPEND_NOTIFY_CLOCK_SKEW_MS;
+            if (!eligible) continue;
+
+            if (appendEmitted >= this.appendNotifyMaxPerBatch) {
+              // A capped message is deliberately skipped, including on redelivery.
+              this.messageDedup.markProcessed(this.instanceId, messageId);
+              continue;
+            }
+
+            if (!this.messageDedup.markProcessed(this.instanceId, messageId)) continue;
+            this.emit("message.received", this.attachMessageLabels(event));
+            appendEmitted++;
+          }
+
+          logger.info(
+            {
+              instanceId: this.instanceId,
+              appendCount: data.messages.length,
+              appendEmitted,
+              appendSkipped: data.messages.length - appendEmitted,
+              maxPerBatch: this.appendNotifyMaxPerBatch,
+            },
+            "Append messages for emission",
+          );
+        } else {
+          let notifyEmitted = 0;
+          for (const event of normalizedEvents) {
+            const messageId = event.message.id;
+            if (!messageId || !this.messageDedup.markProcessed(this.instanceId, messageId))
+              continue;
+
+            this.emit("message.received", this.attachMessageLabels(event));
+            notifyEmitted++;
+          }
+          logger.info(
+            {
+              instanceId: this.instanceId,
+              notifyCount: notifyEmitted,
+              notifySkipped: normalizedEvents.length - notifyEmitted,
+            },
+            "Notify messages for emission",
+          );
         }
       }
 
@@ -5431,6 +5557,7 @@ export class BaileysAdapter implements ChannelAdapter {
     };
 
     sock.ev.process((events) => {
+      this.noteInboundActivity(sock);
       const processing = processEvents(events);
       const tracked = processing.catch((error: unknown) => {
         logger.error(
@@ -5449,7 +5576,16 @@ export class BaileysAdapter implements ChannelAdapter {
   private scheduleReconnect(): void {
     if (this.reconnectAttempt >= RECONNECT_MAX_ATTEMPTS) {
       logger.error(
-        { instanceId: this.instanceId, attempts: this.reconnectAttempt },
+        {
+          instanceId: this.instanceId,
+          attempts: this.reconnectAttempt,
+          reason: this.lastDisconnectReason,
+          statusCode: this.lastDisconnectStatusCode,
+          offlineDurationMs:
+            this.disconnectedAtMs !== null
+              ? Math.max(0, Date.now() - this.disconnectedAtMs)
+              : undefined,
+        },
         "Max reconnect attempts reached",
       );
       return;
@@ -5462,7 +5598,17 @@ export class BaileysAdapter implements ChannelAdapter {
 
     this.reconnectAttempt++;
     logger.info(
-      { instanceId: this.instanceId, attempt: this.reconnectAttempt, delayMs: delay },
+      {
+        instanceId: this.instanceId,
+        attempt: this.reconnectAttempt,
+        delayMs: delay,
+        offlineDurationMs:
+          this.disconnectedAtMs !== null
+            ? Math.max(0, Date.now() - this.disconnectedAtMs)
+            : undefined,
+        reason: this.lastDisconnectReason,
+        statusCode: this.lastDisconnectStatusCode,
+      },
       "Scheduling reconnect",
     );
 
@@ -5483,5 +5629,72 @@ export class BaileysAdapter implements ChannelAdapter {
       this.reconnectTimer = null;
     }
     this.reconnectAttempt = 0;
+  }
+
+  private clearHealthWatchdog(): void {
+    if (this.watchdogTimer) {
+      clearTimeout(this.watchdogTimer);
+      this.watchdogTimer = null;
+    }
+  }
+
+  private resetHealthWatchdog(sock: WASocket): void {
+    this.clearHealthWatchdog();
+    if (this.status !== "connected" || this.sock !== sock) return;
+
+    this.watchdogTimer = setTimeout(() => {
+      this.watchdogTimer = null;
+      if (this.status !== "connected" || this.sock !== sock) return;
+
+      const idleMs = Date.now() - this.lastInboundActivityAtMs;
+      if (idleMs < this.healthWatchdogMs) {
+        this.resetHealthWatchdog(sock);
+        return;
+      }
+
+      logger.warn(
+        { instanceId: this.instanceId, idleMs, watchdogMs: this.healthWatchdogMs },
+        "Baileys websocket has no inbound activity; ending socket to reconnect",
+      );
+      try {
+        sock.end(new Error(`Baileys websocket idle for ${idleMs}ms`));
+      } catch (err) {
+        logger.warn({ err, instanceId: this.instanceId }, "Failed to end idle Baileys socket");
+      }
+    }, this.healthWatchdogMs);
+  }
+
+  private noteInboundActivity(sock: WASocket): void {
+    if (this.status !== "connected" || this.sock !== sock) return;
+    this.lastInboundActivityAtMs = Date.now();
+    this.resetHealthWatchdog(sock);
+  }
+
+  private getAppendNotifyWatermark(now: number): number {
+    const instance = db
+      .select({
+        lastConnected: instancesTable.lastConnected,
+        lastDisconnected: instancesTable.lastDisconnected,
+      })
+      .from(instancesTable)
+      .where(eq(instancesTable.id, this.instanceId))
+      .get();
+    const lastMessage = db
+      .select({ timestamp: messagesTable.timestamp })
+      .from(messagesTable)
+      .where(eq(messagesTable.instanceId, this.instanceId))
+      .orderBy(desc(messagesTable.timestamp))
+      .limit(1)
+      .get();
+    const lastSeenMessageAt = lastMessage?.timestamp ? lastMessage.timestamp * 1000 : null;
+    const connectionAt = instance?.lastDisconnected || instance?.lastConnected || null;
+    const watermark =
+      connectionAt !== null
+        ? Math.max(connectionAt, lastSeenMessageAt ?? connectionAt)
+        : lastSeenMessageAt;
+
+    return watermark !== null
+      ? watermark - APPEND_NOTIFY_CLOCK_SKEW_MS
+      : now - this.appendNotifyWindowMs;
   }
 }

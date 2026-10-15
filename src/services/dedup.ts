@@ -24,8 +24,9 @@ export class DedupService {
   }
 
   /** Mark a message as processed */
-  markProcessed(instanceId: string, messageId: string): void {
-    db.insert(processedMessages)
+  markProcessed(instanceId: string, messageId: string): boolean {
+    const result = db
+      .insert(processedMessages)
       .values({
         instanceId,
         messageId,
@@ -33,6 +34,7 @@ export class DedupService {
       })
       .onConflictDoNothing()
       .run();
+    return result.changes > 0;
   }
 
   /** Remove entries older than the configured TTL */

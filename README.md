@@ -629,6 +629,9 @@ Copy `.env.example` to `.env` and configure:
 | `WA_CLOUD_RATE_LIMIT`       | `80`                     | Messages/min per Cloud API instance      |
 | `WA_MESSAGE_RETENTION_DAYS` | `30`                     | Auto-delete old messages                 |
 | `WA_AUTO_RECONNECT`         | `true`                   | Auto-reconnect on disconnect             |
+| `WA_BAILEYS_APPEND_NOTIFY_WINDOW_HOURS` | `24` | Fallback eligibility window for offline append messages when no watermark exists |
+| `WA_BAILEYS_APPEND_NOTIFY_MAX_PER_BATCH` | `100` | Maximum offline append `message.received` events emitted per Baileys batch |
+| `WA_BAILEYS_HEALTH_WATCHDOG_MS` | `180000` | Idle inbound-event interval before the Baileys socket is ended for normal reconnect |
 | `WA_APP_STATE_WRITES_ENABLED` | `false`                 | Enable gated Baileys account, server, and app-state changes; these changes can remove the linked device |
 | `WA_MARK_ONLINE_ON_CONNECT` | `false`                  | Mark the Baileys account online when its socket connects |
 | `WA_AUTO_REJECT_CALLS`      | `false`                  | Automatically reject incoming one-to-one Baileys call offers |
@@ -678,6 +681,14 @@ Copy `.env.example` to `.env` and configure:
 | `WA_EVENT_WEBHOOK_RETRY_ATTEMPTS` | `5` | BullMQ delivery attempts, including the first attempt |
 | `WA_EVENT_WEBHOOK_RETRY_DELAY_MS` | `1000` | Initial exponential retry delay in milliseconds |
 | `WA_VERSION_CHECK`          | `true`                   | Daily WhatsApp Web version check         |
+
+Baileys may emit an incoming offline message delivered as an `append` once when its timestamp is
+after the instance's last disconnect (or last connect) or latest stored message. When those timestamps
+are unavailable, `WA_BAILEYS_APPEND_NOTIFY_WINDOW_HOURS` provides the fallback window. History-sync
+messages, messages sent by this account, status broadcasts, protocol updates, and duplicate message IDs
+are not emitted. The health watchdog counts inbound Baileys events while connected; when its interval
+expires it ends the socket and lets automatic reconnect handle the connection. Connection close and
+reconnect logs include the disconnect reason, status code, and offline duration.
 
 `wa_send_sticker` accepts PNG, JPG, GIF, and WebP URLs or base64. PNG/JPG and GIF inputs are
 converted to 512x512 WebP with transparent padding. Static stickers are limited to 100 KB and
