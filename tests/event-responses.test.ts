@@ -853,8 +853,8 @@ describe("Baileys event responses", () => {
       expect(responses).toMatchObject([
         {
           status: "UNKNOWN",
-          unknownReason: "decrypt_failed",
-          recoverable: true,
+          unknownReason: "decrypt_failed_all_candidates",
+          recoverable: false,
           attemptedCombinations: 2,
         },
       ]);
@@ -886,6 +886,86 @@ describe("Baileys event responses", () => {
       debug.mockRestore();
       logger.level = originalLevel;
     }
+  });
+
+  it("marks responses unrecoverable when the stored event secret fails every candidate", async () => {
+    const { adapter, processEvents } = createFixture();
+    const eventId = "group-event-stale-secret";
+    const storedMessageSecret = Buffer.alloc(32, 0x75);
+    const responseMessageSecret = Buffer.alloc(32, 0x76);
+    const eventKey: WAMessageKey = {
+      id: eventId,
+      remoteJid: GROUP_ID,
+      fromMe: true,
+    };
+    const encrypted = encryptEventResponse(
+      responseMessageSecret,
+      eventId,
+      ACCOUNT_ID,
+      RESPONDER_ID,
+      proto.Message.EventResponseMessage.create({
+        response: proto.Message.EventResponseMessage.EventResponseType.GOING,
+      }),
+      eventKey,
+    );
+
+    await upsert(processEvents, eventMessage(eventId, GROUP_ID, eventKey, storedMessageSecret));
+    await upsert(
+      processEvents,
+      encryptedResponseMessage(
+        "group-response-stale-secret",
+        GROUP_ID,
+        { remoteJid: GROUP_ID, participant: RESPONDER_ID },
+        encrypted,
+      ),
+    );
+
+    const responses = await adapter.getEventResponses(GROUP_ID, eventId);
+    expect(responses).toMatchObject([
+      {
+        status: "UNKNOWN",
+        unknownReason: "decrypt_failed_all_candidates",
+        recoverable: false,
+      },
+    ]);
+    expect(responses[0]?.attemptedCombinations).toBeGreaterThan(0);
+  });
+
+  it("keeps decryption failures recoverable when no responder candidates are available", async () => {
+    const { adapter, processEvents } = createFixture();
+    const eventId = "group-event-no-responder-candidate";
+    const messageSecret = Buffer.alloc(32, 0x77);
+    const eventKey: WAMessageKey = {
+      id: eventId,
+      remoteJid: GROUP_ID,
+      fromMe: true,
+    };
+    const encrypted = encryptEventResponse(
+      messageSecret,
+      eventId,
+      ACCOUNT_ID,
+      RESPONDER_ID,
+      proto.Message.EventResponseMessage.create({
+        response: proto.Message.EventResponseMessage.EventResponseType.GOING,
+      }),
+      eventKey,
+    );
+
+    await upsert(processEvents, eventMessage(eventId, GROUP_ID, eventKey, messageSecret));
+    await upsert(
+      processEvents,
+      encryptedResponseMessage("group-response-no-responder-candidate", GROUP_ID, {}, encrypted),
+    );
+
+    const responses = await adapter.getEventResponses(GROUP_ID, eventId);
+    expect(responses).toMatchObject([
+      {
+        status: "UNKNOWN",
+        unknownReason: "decrypt_failed",
+        recoverable: true,
+        attemptedCombinations: 0,
+      },
+    ]);
   });
 
   it("uses participantAlt PN when an event response author LID has no mapping", async () => {
