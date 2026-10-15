@@ -22,7 +22,44 @@ export type MessageType =
   | "contact"
   | "poll"
   | "reaction"
-  | "sticker";
+  | "sticker"
+  | "event";
+
+export interface BusinessLabel {
+  id: string;
+  name: string;
+  color: number;
+  deleted: boolean;
+  predefinedId?: string;
+}
+
+export interface MessageSearchOptions {
+  query: string;
+  from?: number;
+  to?: number;
+  sender?: string;
+  chatId?: string;
+  limit: number;
+  offset: number;
+}
+
+export interface EventResponse {
+  responder: string;
+  response: string;
+  timestamp: number | null;
+  messageId: string | null;
+}
+
+export interface SendEventOptions {
+  to: string;
+  name: string;
+  description?: string;
+  start: string;
+  end?: string;
+  locationText?: string;
+  callType?: "voice" | "video";
+  quotedMessageId?: string;
+}
 
 /** A display-safe action exposed by a business template or interactive message. */
 export interface MessageButton {
@@ -222,6 +259,7 @@ export interface Chat {
   isMuted: boolean;
   isArchived: boolean;
   lastMessageAt: number | null;
+  labels?: BusinessLabel[];
 }
 
 export interface Message {
@@ -244,6 +282,8 @@ export interface Message {
   isForwarded: boolean;
   status: MessageDeliveryStatus;
   timestamp: number;
+  starred?: boolean;
+  labels?: BusinessLabel[];
 }
 
 export interface GroupMetadata {
@@ -333,6 +373,7 @@ export interface NormalizedMessageEvent {
   chatName?: string | null;
   senderName?: string | null;
   isGroup?: boolean;
+  chatLabels?: BusinessLabel[];
   message: {
     id: string;
     sender: string;
@@ -351,6 +392,7 @@ export interface NormalizedMessageEvent {
     buttons?: MessageButton[];
     rawType?: string;
     transcription?: string;
+    labels?: BusinessLabel[];
     quotedMessageId: string | null;
     isFromMe: boolean;
   };
@@ -432,6 +474,18 @@ export interface NormalizedCallEvent {
   callId: string;
 }
 
+export interface NormalizedLabelUpdateEvent {
+  instanceId: string;
+  action: "edited" | "associated" | "disassociated";
+  label: BusinessLabel;
+  chatId?: string;
+  association?: {
+    type: "chat" | "message";
+    chatId: string;
+    messageId?: string;
+  };
+}
+
 // Channel event names
 export type ChannelEvent =
   | "message.received"
@@ -445,7 +499,8 @@ export type ChannelEvent =
   | "group.participants_changed"
   | "contact.updated"
   | "connection.changed"
-  | "call.received";
+  | "call.received"
+  | "label.updated";
 
 // Event payload map
 export type ChannelEventPayload = {
@@ -461,4 +516,5 @@ export type ChannelEventPayload = {
   "contact.updated": NormalizedContactUpdateEvent;
   "connection.changed": NormalizedConnectionEvent;
   "call.received": NormalizedCallEvent;
+  "label.updated": NormalizedLabelUpdateEvent;
 };

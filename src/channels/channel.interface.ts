@@ -28,6 +28,10 @@ import type {
   CloudCredentials,
   ChannelEvent,
   ChannelEventPayload,
+  BusinessLabel,
+  EventResponse,
+  MessageSearchOptions,
+  SendEventOptions,
 } from "../types/channel.types.js";
 
 // Typed event handler
@@ -48,6 +52,9 @@ export interface ChannelAdapter {
 
   // ---- Messaging ----
   sendMessage(to: string, content: MessageContent): Promise<MessageResponse>;
+  sendEvent(options: SendEventOptions): Promise<MessageResponse>;
+  getEventResponses(chatId: string, eventMessageId: string): Promise<EventResponse[]>;
+  starMessage(chatId: string, messageId: string, star: boolean): Promise<void>;
   validateQuotedMessage?(to: string, messageId: string): void;
   editMessage(chatId: string, msgId: string, newText: string): Promise<void>;
   deleteMessage(chatId: string, msgId: string, statusJidList?: string[]): Promise<void>;
@@ -66,6 +73,13 @@ export interface ChannelAdapter {
 
   // ---- Chats ----
   modifyChat(chatId: string, modification: ChatModification): Promise<void>;
+  markChatUnread(chatId: string): Promise<void>;
+  listLabels(includeDeleted?: boolean): Promise<BusinessLabel[]>;
+  createLabel(name: string, color: number): Promise<BusinessLabel>;
+  editLabel(id: string, update: { name?: string; color?: number }): Promise<void>;
+  deleteLabel(id: string): Promise<void>;
+  setChatLabel(chatId: string, labelId: string, add: boolean): Promise<void>;
+  setMessageLabel(chatId: string, messageId: string, labelId: string, add: boolean): Promise<void>;
 
   // ---- Groups ----
   listGroups(): Promise<GroupSummary[]>;
@@ -119,6 +133,16 @@ export interface ChannelAdapter {
   getContacts(search?: string): Promise<Contact[]>;
   getChats(): Promise<Chat[]>;
   getMessages(chatId: string, limit?: number): Promise<Message[]>;
+  searchMessages(options: MessageSearchOptions): Promise<{
+    messages: Message[];
+    hasMore: boolean;
+    nextOffset: number | null;
+  }>;
+  fetchMessageHistory(
+    chatId: string,
+    count: number,
+    timeoutMs?: number,
+  ): Promise<{ requested: number; stored: number; timedOut: boolean }>;
   downloadMessageAudio(
     messageId: string,
     maxBytes?: number,

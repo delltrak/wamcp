@@ -15,6 +15,9 @@ const CHANNEL_ADAPTER_METHODS: (keyof ChannelAdapter)[] = [
   "setCredentials",
   // Messaging
   "sendMessage",
+  "sendEvent",
+  "getEventResponses",
+  "starMessage",
   "editMessage",
   "deleteMessage",
   "forwardMessage",
@@ -27,6 +30,13 @@ const CHANNEL_ADAPTER_METHODS: (keyof ChannelAdapter)[] = [
   "markRead",
   // Chats
   "modifyChat",
+  "markChatUnread",
+  "listLabels",
+  "createLabel",
+  "editLabel",
+  "deleteLabel",
+  "setChatLabel",
+  "setMessageLabel",
   // Groups
   "listGroups",
   "createGroup",
@@ -65,6 +75,8 @@ const CHANNEL_ADAPTER_METHODS: (keyof ChannelAdapter)[] = [
   "getContacts",
   "getChats",
   "getMessages",
+  "searchMessages",
+  "fetchMessageHistory",
   "downloadMessageAudio",
   "downloadMessageMedia",
   "getProfileInfo",

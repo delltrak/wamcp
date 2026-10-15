@@ -215,6 +215,38 @@ generic shape:
 template and interactive message text is flattened into `text`; action labels and links are also
 available in `buttons`. Unrecognized Baileys content types use `type: "text"`; their source content
 name is available in `rawType`.
+
+When labels are assigned, message events can also contain `chatLabels` and
+`messageLabels` arrays. Each label has `id`, `name`, `color`, `deleted`, and an
+optional `predefinedId`. Label edits and associations emit the optional
+`label.updated` event; select it in `WA_EVENT_WEBHOOK_EVENTS` or a destination's
+`events` list to receive it. Label change bodies include `action`, `label`, and,
+for association changes, `association` with `type`, `chatId`, and optional
+`messageId`. The `chat` field is also populated for association changes, so
+`chatAllowlist` continues to apply.
+
+```json
+{
+  "event": "label.updated",
+  "instanceId": "inst_1234abcd",
+  "chat": "5511888888888@s.whatsapp.net",
+  "type": "associated",
+  "action": "associated",
+  "label": {
+    "id": "label_1",
+    "name": "Follow up",
+    "color": 4,
+    "deleted": false
+  },
+  "association": {
+    "type": "chat",
+    "chatId": "5511888888888@s.whatsapp.net"
+  }
+}
+```
+
+The `grok-bot` preset remains limited to `message.received`; it can include
+`chatLabels` and `messageLabels` on those message payloads when present.
 For the `grok-bot` preset, `mediaUrl`, `mediaMimetype`, `buttons`, and `rawType` are forwarded
 when present; media identifiers remain subject to the preset's existing safe-ID filtering.
 

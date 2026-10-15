@@ -16,6 +16,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Added local `wa_search_messages` with case-insensitive substring matching, escaped SQL `LIKE`
+  wildcards, date/sender/chat filters, and stable offset pagination.
+- Added Baileys WhatsApp Business label tools for listing, creation, edits, soft deletion, and
+  chat/message associations. Label edits and associations persist locally; chat listings, message
+  reads, MCP notifications, and optional outgoing webhooks include label details.
+- Added `wa_list_chats`, `wa_mark_chat_unread`, and `wa_star_message`. Mark-unread uses the stored
+  reverse-chronological message range required by Baileys, and starred state is retained locally.
+- Added `wa_send_event` and `wa_get_event_responses` using Baileys event messages and persisted,
+  decrypted event-response updates when Baileys can associate a response with its event.
+- Added `wa_fetch_message_history` for Baileys on-demand history sync, anchored at the oldest local
+  message, deduplicated through existing message persistence, and bounded by a response timeout.
+- Added additive SQLite tables for Business labels, their associations, and event responses, plus a
+  `starred` message column. Startup creates new tables and adds the column to existing databases.
 - Optional per-chat batching for incoming event webhook messages with a sliding debounce window,
   maximum batch age, message-count cap, transcription-aware ordering, and shutdown flushing.
 - Added Baileys group listing and detailed participant roles, plus admin-only group picture updates

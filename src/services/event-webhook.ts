@@ -6,7 +6,12 @@ import { Queue, UnrecoverableError, Worker, type Job, type JobsOptions } from "b
 import { Agent } from "undici";
 import type { InstanceManager } from "./instance-manager.js";
 import { QUEUE_COMPLETED_AGE_S, QUEUE_FAILED_AGE_S } from "../constants.js";
-import type { ChannelEvent, ChannelEventPayload, MessageButton } from "../types/channel.types.js";
+import type {
+  BusinessLabel,
+  ChannelEvent,
+  ChannelEventPayload,
+  MessageButton,
+} from "../types/channel.types.js";
 import { createChildLogger } from "../utils/logger.js";
 import { getRedisConnectionOptions } from "./redis.js";
 import { transcribeIncomingAudioIfConfigured } from "./incoming-audio-transcription.js";
@@ -39,6 +44,11 @@ export interface EventWebhookPayload {
   size?: number;
   buttons?: MessageButton[];
   rawType?: string;
+  action?: string;
+  label?: BusinessLabel;
+  association?: { type: "chat" | "message"; chatId: string; messageId?: string };
+  chatLabels?: BusinessLabel[];
+  messageLabels?: BusinessLabel[];
 }
 
 export interface GrokBotWebhookPayload {
@@ -62,6 +72,8 @@ export interface GrokBotWebhookPayload {
   size?: number;
   buttons?: MessageButton[];
   rawType?: string;
+  chatLabels?: BusinessLabel[];
+  messageLabels?: BusinessLabel[];
 }
 
 export type EventWebhookBody =
@@ -272,6 +284,31 @@ function messageButtons(value: unknown): MessageButton[] | undefined {
   return buttons.length ? buttons : undefined;
 }
 
+function businessLabel(value: unknown): BusinessLabel | undefined {
+  if (
+    !isRecord(value) ||
+    typeof value.id !== "string" ||
+    typeof value.name !== "string" ||
+    typeof value.color !== "number" ||
+    typeof value.deleted !== "boolean"
+  ) {
+    return undefined;
+  }
+  return {
+    id: value.id,
+    name: value.name,
+    color: value.color,
+    deleted: value.deleted,
+    ...(typeof value.predefinedId === "string" ? { predefinedId: value.predefinedId } : {}),
+  };
+}
+
+function businessLabels(value: unknown): BusinessLabel[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const labels = value.map(businessLabel).filter((label): label is BusinessLabel => !!label);
+  return labels.length ? labels : undefined;
+}
+
 /** Flatten a normalized channel event into the stable outgoing webhook shape. */
 export function normalizeEventWebhookPayload(
   event: ChannelEvent,
@@ -286,11 +323,27 @@ export function normalizeEventWebhookPayload(
   const fileName = firstString(message.fileName, message.mediaFileName);
   const caption = firstString(message.caption, message.mediaCaption);
   const size = firstNumber(message.size, message.mediaSize);
+  const label = businessLabel(data.label);
+  const chatLabels = businessLabels(data.chatLabels);
+  const messageLabels = businessLabels(message.labels);
+  const associationData = isRecord(data.association) ? data.association : undefined;
+  const associationType = associationData?.type;
+  const associationChatId = firstString(associationData?.chatId);
+  const associationMessageId = firstString(associationData?.messageId);
+  const association =
+    (associationType === "chat" || associationType === "message") && associationChatId
+      ? {
+          type: associationType as "chat" | "message",
+          chatId: associationChatId,
+          ...(associationMessageId ? { messageId: associationMessageId } : {}),
+        }
+      : undefined;
+  const action = firstString(data.action);
 
   return {
     event,
     instanceId,
-    chat: firstString(data.chatId, data.groupId),
+    chat: firstString(data.chatId, data.groupId, association?.chatId),
     sender: firstString(
       message.sender,
       data.participant,
@@ -310,6 +363,11 @@ export function normalizeEventWebhookPayload(
     ...(size !== null ? { size } : {}),
     ...(buttons ? { buttons } : {}),
     ...(typeof message.rawType === "string" ? { rawType: message.rawType } : {}),
+    ...(action ? { action } : {}),
+    ...(label ? { label } : {}),
+    ...(association ? { association } : {}),
+    ...(chatLabels ? { chatLabels } : {}),
+    ...(messageLabels ? { messageLabels } : {}),
   };
 }
 
@@ -352,6 +410,8 @@ export function normalizeGrokBotWebhookPayload(
       : {}),
     ...(payload.message.buttons ? { buttons: payload.message.buttons } : {}),
     ...(payload.message.rawType ? { rawType: payload.message.rawType } : {}),
+    ...(payload.chatLabels?.length ? { chatLabels: payload.chatLabels } : {}),
+    ...(payload.message.labels?.length ? { messageLabels: payload.message.labels } : {}),
   };
 }
 
@@ -366,7 +426,13 @@ export function shouldSendEventWebhook(
 
   const data = payload as unknown as Record<string, unknown>;
   const message = isRecord(data.message) ? data.message : {};
-  const chatId = typeof data.chatId === "string" ? data.chatId : "";
+  const association = isRecord(data.association) ? data.association : {};
+  const chatId =
+    typeof data.chatId === "string"
+      ? data.chatId
+      : typeof association.chatId === "string"
+        ? association.chatId
+        : "";
   const senderId = typeof message.sender === "string" ? message.sender : "";
 
   if (event === "message.received") {

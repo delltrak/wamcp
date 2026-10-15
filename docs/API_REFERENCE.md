@@ -10,13 +10,16 @@
 2. [Tools Reference](#2-tools-reference)
    - [Instance Management](#21-instance-management-8-tools)
    - [Messaging](#22-messaging-20-tools)
-   - [Chat Management](#23-chat-management-6-tools)
+   - [Chat Management](#23-chat-management-10-tools)
    - [Group Management](#24-group-management-18-tools)
    - [Contact Management](#25-contact-management-6-tools)
    - [Profile Management](#26-profile-management-6-tools)
    - [Status / Stories](#27-status--stories-3-tools)
    - [Newsletter / Channels](#28-newsletter--channels-3-tools)
    - [Call Management](#29-call-management-1-tool)
+   - [Message Search](#210-message-search-1-tool)
+   - [WhatsApp Business Labels](#211-whatsapp-business-labels-8-tools)
+   - [WhatsApp Events](#212-whatsapp-events-2-tools)
 3. [Resources Reference](#3-resources-reference)
 4. [Notifications Reference](#4-notifications-reference)
 5. [Error Handling](#5-error-handling)
@@ -73,7 +76,7 @@ Tools marked **Baileys only** are not available on Cloud API instances.
 
 ## 2. Tools Reference
 
-WA MCP exposes **75 tools** grouped by domain. All tools return MCP-standard responses.
+WA MCP exposes **90 tools** grouped by domain. All tools return MCP-standard responses.
 
 ### Success Response Format
 
@@ -781,7 +784,7 @@ Mark specific messages as read in a chat.
 
 ---
 
-### 2.3 Chat Management (6 tools)
+### 2.3 Chat Management (10 tools)
 
 Tools for organizing the chat list and retrieving message history.
 
@@ -953,6 +956,61 @@ Clear all messages in a chat. The chat remains but all messages are removed.
   "cleared": true
 }
 ```
+
+---
+
+#### `wa_list_chats`
+
+List locally cached chats. Each entry includes the active Business labels associated with that chat.
+
+| Parameter | Type | Required | Description |
+| --------- | ---- | -------- | ----------- |
+| `instanceId` | string | Yes | The instance ID |
+
+**Channel support:** Baileys only. Chat listing is not available on the Cloud API adapter.
+
+---
+
+#### `wa_mark_chat_unread`
+
+Mark a chat unread. The adapter passes recent stored messages in Baileys' required reverse-chronological `lastMessages` range.
+
+| Parameter | Type | Required | Description |
+| --------- | ---- | -------- | ----------- |
+| `instanceId` | string | Yes | The instance ID |
+| `chatId` | string | Yes | Chat JID to mark unread |
+
+**Channel support:** Baileys only. A chat without a locally stored message cannot provide Baileys' required message range.
+
+---
+
+#### `wa_star_message`
+
+Star or unstar a message in a chat.
+
+| Parameter | Type | Required | Description |
+| --------- | ---- | -------- | ----------- |
+| `instanceId` | string | Yes | The instance ID |
+| `chatId` | string | Yes | Chat JID containing the message |
+| `messageId` | string | Yes | Stored message ID |
+| `star` | boolean | Yes | `true` to star; `false` to unstar |
+
+**Channel support:** Baileys only. The local message record retains the starred state after Baileys confirms the operation.
+
+---
+
+#### `wa_fetch_message_history`
+
+Request older messages from Baileys' on-demand history sync. The oldest stored message in the chat is used as the anchor. The tool waits for `ON_DEMAND` results up to the configured timeout.
+
+| Parameter | Type | Required | Description |
+| --------- | ---- | -------- | ----------- |
+| `instanceId` | string | Yes | The instance ID |
+| `chatId` | string | Yes | Chat JID whose older messages should be fetched |
+| `count` | number | No | Requested message count (default 50, max 100) |
+| `timeoutMs` | number | No | Wait limit from 1000 to 30000 ms (default 10000) |
+
+**Channel support:** Baileys only. Results are deduplicated by instance and message ID. The response includes `requested`, `stored`, and `timedOut`; a timed-out response can report partial results.
 
 ---
 
@@ -1908,6 +1966,84 @@ Reject an incoming voice or video call. The call ID is received via the `whatsap
 
 ---
 
+### 2.10 Message Search (1 tool)
+
+#### `wa_search_messages`
+
+Search the local message database for a case-insensitive text substring. Results are ordered by timestamp descending and message ID descending for stable pagination. `%`, `_`, and `\\` in the query are treated as literal characters.
+
+| Parameter | Type | Required | Description |
+| --------- | ---- | -------- | ----------- |
+| `instanceId` | string | Yes | The instance ID to search |
+| `query` | string | Yes | Text substring, 1–500 characters |
+| `from` | ISO datetime | No | Inclusive lower timestamp bound |
+| `to` | ISO datetime | No | Inclusive upper timestamp bound |
+| `sender` | string | No | Exact stored sender ID |
+| `chatId` | string | No | Restrict to one chat; omit to search all chats |
+| `limit` | number | No | Page size (default 20, max 100) |
+| `offset` | number | No | Result offset (default 0) |
+
+**Channel support:** Both. This searches messages already stored locally; it does not request remote Cloud API history.
+
+**Response:** `{ count, limit, offset, hasMore, nextOffset, messages }`.
+
+---
+
+### 2.11 WhatsApp Business Labels (8 tools)
+
+Baileys label tools require a connected WhatsApp Business account. Label changes and associations are stored locally when Baileys emits `labels.edit` and `labels.association`; chat listing and message reads include active assigned labels. Cloud API label operations return an explicit unsupported-operation error.
+
+| Tool | Input | Description |
+| ---- | ----- | ----------- |
+| `wa_list_labels` | `instanceId`, optional `includeDeleted` | List labels received from Baileys and stored locally |
+| `wa_create_label` | `instanceId`, `name`, `color` | Create a label (color ID 0–19); the server generates an ID |
+| `wa_edit_label` | `instanceId`, `labelId`, optional `name` and/or `color` | Rename or recolor a label |
+| `wa_delete_label` | `instanceId`, `labelId` | Soft-delete using Baileys' `deleted` label flag |
+| `wa_add_chat_label` | `instanceId`, `chatId`, `labelId` | Apply a label to a chat |
+| `wa_remove_chat_label` | `instanceId`, `chatId`, `labelId` | Remove a label from a chat |
+| `wa_add_message_label` | `instanceId`, `chatId`, `messageId`, `labelId` | Apply a label to a message |
+| `wa_remove_message_label` | `instanceId`, `chatId`, `messageId`, `labelId` | Remove a label from a message |
+
+**Channel support:** Baileys WhatsApp Business accounts only.
+
+---
+
+### 2.12 WhatsApp Events (2 tools)
+
+#### `wa_send_event`
+
+Send a native Baileys event message. A location text or a voice/video call link can be added; an existing message can be quoted.
+
+| Parameter | Type | Required | Description |
+| --------- | ---- | -------- | ----------- |
+| `instanceId` | string | Yes | The instance ID |
+| `to` | string | Yes | Recipient phone number or chat JID |
+| `name` | string | Yes | Event name |
+| `description` | string | No | Event description |
+| `start` | ISO datetime | Yes | Start datetime with timezone |
+| `end` | ISO datetime | No | Optional end datetime, later than start |
+| `locationText` | string | No | Location label; mutually exclusive with `callType` |
+| `callType` | `voice` or `video` | No | Ask Baileys to generate an audio/video call link |
+| `quotedMessageId` | string | No | Stored message to quote in the event message |
+
+**Channel support:** Baileys only. Cloud API does not support native event messages.
+
+---
+
+#### `wa_get_event_responses`
+
+Read event responses persisted from Baileys message updates.
+
+| Parameter | Type | Required | Description |
+| --------- | ---- | -------- | ----------- |
+| `instanceId` | string | Yes | The instance ID |
+| `chatId` | string | Yes | Chat JID containing the event |
+| `eventMessageId` | string | Yes | Event message ID |
+
+**Channel support:** Baileys only. Baileys decrypts and emits response updates when it can associate the reply with the event message. Responses that Baileys cannot decrypt or associate are unavailable to this tool.
+
+---
+
 ## 3. Resources Reference
 
 Resources provide read-only data that agents can query for context. All resources return `application/json`.
@@ -1975,9 +2111,9 @@ Single instance details.
 
 ### 3.3 `whatsapp://instances/{id}/chats`
 
-Active chats for an instance.
+Cached chats for an instance.
 
-**Description:** Active chats for an instance: JID, last message, unread count, pinned, muted, archived.
+**Description:** Cached chats for an instance: JID, name, unread count, pinned, muted, archived, last message timestamp, and active associated Business labels when available.
 
 **URI parameters:**
 | Parameter | Description |
@@ -1996,7 +2132,10 @@ Active chats for an instance.
     "isPinned": true,
     "isMuted": false,
     "isArchived": false,
-    "lastMessageAt": 1709222400000
+    "lastMessageAt": 1709222400000,
+    "labels": [
+      { "id": "label_1", "name": "Follow up", "color": 4, "deleted": false }
+    ]
   }
 ]
 ```
@@ -2471,6 +2610,14 @@ Fired when an incoming voice or video call is received. Use the `callId` with `w
   "callId": "call_abc123"
 }
 ```
+
+---
+
+### 4.13 `whatsapp/label.updated`
+
+Fired when Baileys reports a label edit or a chat/message label association change.
+
+**Payload:** `instanceId`, `action` (`edited`, `associated`, or `disassociated`), and `label`. Association changes also include `chatId` and `association` (`type`, `chatId`, optional `messageId`).
 
 ---
 

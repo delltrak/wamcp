@@ -62,3 +62,32 @@ export const GetMessagesSchema = z
       .describe("Maximum number of messages to return (default 50, max 100)"),
   })
   .strict();
+
+export const ListChatsSchema = z
+  .object({ instanceId: z.string().min(1).describe("The instance ID") })
+  .strict();
+
+export const MarkChatUnreadSchema = z
+  .object({
+    instanceId: z.string().min(1).describe("The instance ID"),
+    chatId: z.string().min(5).describe("Chat JID to mark unread"),
+  })
+  .strict();
+
+export const StarMessageSchema = z
+  .object({
+    instanceId: z.string().min(1).describe("The instance ID"),
+    chatId: z.string().min(5).describe("Chat JID containing the message"),
+    messageId: z.string().min(1).describe("Message ID to star or unstar"),
+    star: z.boolean().describe("true to star, false to unstar"),
+  })
+  .strict();
+
+export const FetchMessageHistorySchema = z
+  .object({
+    instanceId: z.string().min(1).describe("The instance ID"),
+    chatId: z.string().min(5).describe("Chat JID whose older messages should be fetched"),
+    count: z.number().int().min(1).max(100).default(50),
+    timeoutMs: z.number().int().min(1_000).max(30_000).default(10_000),
+  })
+  .strict();

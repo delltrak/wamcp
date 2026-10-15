@@ -16,6 +16,10 @@ import {
   DeleteChatSchema,
   ClearChatSchema,
   GetMessagesSchema,
+  ListChatsSchema,
+  MarkChatUnreadSchema,
+  StarMessageSchema,
+  FetchMessageHistorySchema,
 } from "../schemas/chat.schema.js";
 
 export function registerChatTools(
@@ -153,6 +157,77 @@ export function registerChatTools(
         return toolSuccess({ chatId: params.chatId, count: messages.length, messages });
       } catch (err) {
         return handleToolError("wa_get_messages", err, params.instanceId);
+      }
+    },
+  );
+
+  server.registerTool(
+    "wa_list_chats",
+    {
+      description:
+        "List chats stored for an instance, including each chat's current WhatsApp Business labels.",
+      inputSchema: ListChatsSchema,
+    },
+    async (params) => {
+      try {
+        const chats = await instanceManager.getAdapter(params.instanceId).getChats();
+        return toolSuccess({ count: chats.length, chats });
+      } catch (err) {
+        return handleToolError("wa_list_chats", err, params.instanceId);
+      }
+    },
+  );
+
+  server.registerTool(
+    "wa_mark_chat_unread",
+    {
+      description:
+        "Mark a chat unread on Baileys. The stored recent messages are supplied as the required chat-modification range.",
+      inputSchema: MarkChatUnreadSchema,
+    },
+    async (params) => {
+      try {
+        await instanceManager.getAdapter(params.instanceId).markChatUnread(params.chatId);
+        return toolSuccess({ success: true, chatId: params.chatId, unread: true });
+      } catch (err) {
+        return handleToolError("wa_mark_chat_unread", err, params.instanceId);
+      }
+    },
+  );
+
+  server.registerTool(
+    "wa_star_message",
+    {
+      description: "Star or unstar a stored message on a Baileys account.",
+      inputSchema: StarMessageSchema,
+    },
+    async (params) => {
+      try {
+        await instanceManager
+          .getAdapter(params.instanceId)
+          .starMessage(params.chatId, params.messageId, params.star);
+        return toolSuccess({ success: true, messageId: params.messageId, starred: params.star });
+      } catch (err) {
+        return handleToolError("wa_star_message", err, params.instanceId);
+      }
+    },
+  );
+
+  server.registerTool(
+    "wa_fetch_message_history",
+    {
+      description:
+        "Request older messages for a chat from Baileys using the oldest stored message as the anchor. Waits for ON_DEMAND history results up to timeoutMs.",
+      inputSchema: FetchMessageHistorySchema,
+    },
+    async (params) => {
+      try {
+        const result = await instanceManager
+          .getAdapter(params.instanceId)
+          .fetchMessageHistory(params.chatId, params.count, params.timeoutMs);
+        return toolSuccess({ chatId: params.chatId, ...result });
+      } catch (err) {
+        return handleToolError("wa_fetch_message_history", err, params.instanceId);
       }
     },
   );
