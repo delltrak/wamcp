@@ -1,6 +1,8 @@
 import { createCipheriv, createHash, createHmac, randomUUID } from "node:crypto";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
+  BufferJSON,
+  generateWAMessage,
   proto,
   type BaileysEventMap,
   type WASocket,
@@ -21,8 +23,13 @@ import type { MessageQueue } from "../src/services/message-queue.js";
 import type { z } from "zod";
 
 const ACCOUNT_ID = "5500000000002@s.whatsapp.net";
+const ACCOUNT_LID = "9000000000002@lid";
 const POLL_CREATOR = "5500000000010@s.whatsapp.net";
 const VOTER = "5500000000011@s.whatsapp.net";
+const VOTER_LID = "9000000000011@lid";
+const SECOND_VOTER = "5500000000012@s.whatsapp.net";
+const SECOND_VOTER_LID = "9000000000012@lid";
+const THIRD_VOTER = "5500000000013@s.whatsapp.net";
 const GROUP_ID = "120363000000000001@g.us";
 const CONTACT_ID = "5500000000003@s.whatsapp.net";
 const initialAppStateWritesEnabled = process.env.WA_APP_STATE_WRITES_ENABLED;
@@ -403,6 +410,239 @@ describe("issue 78 messaging and group features", () => {
       .prepare("SELECT raw_data FROM messages WHERE instance_id = ? AND id = ?")
       .get(instanceId, sent.messageId) as { raw_data: string };
     expect(saved.raw_data).toContain("messageSecret");
+  });
+
+  it("decrypts real votes on polls sent by this account across LID and PN key variants", async () => {
+    const pollMessageId = "real-crypto-sent-poll-78";
+    const sendMessage = vi.fn(async (jid: string, content: unknown) =>
+      generateWAMessage(jid, content as Parameters<typeof generateWAMessage>[1], {
+        userJid: ACCOUNT_LID,
+        messageId: pollMessageId,
+      }),
+    );
+    const lidToPn = new Map([
+      [ACCOUNT_LID, ACCOUNT_ID],
+      [VOTER_LID, VOTER],
+      [SECOND_VOTER_LID, SECOND_VOTER],
+    ]);
+    const pnToLid = new Map([...lidToPn].map(([lid, pn]) => [pn, lid]));
+    const { instanceId, invoke, processEvents } = createFixture({
+      user: { id: ACCOUNT_ID, lid: ACCOUNT_LID },
+      signalRepository: {
+        lidMapping: {
+          getPNForLID: vi.fn(async (lid: string) => lidToPn.get(lid) ?? null),
+          getLIDForPN: vi.fn(async (pn: string) => pnToLid.get(pn) ?? null),
+        },
+      },
+      sendMessage,
+    });
+
+    const sent = await invoke("wa_send_poll", {
+      to: GROUP_ID,
+      question: "Real crypto?",
+      options: ["Yes", "No"],
+    });
+    const sentResult = JSON.parse(sent.content[0]?.text ?? "{}") as { messageId: string };
+    expect(sentResult.messageId).toBe(pollMessageId);
+    const storedPollRow = sqlite
+      .prepare("SELECT type, raw_data FROM messages WHERE instance_id = ? AND id = ?")
+      .get(instanceId, pollMessageId) as { type: string; raw_data: string };
+    expect(storedPollRow.type).toBe("poll");
+    const storedPoll = JSON.parse(storedPollRow.raw_data, BufferJSON.reviver) as WAMessage;
+    const messageSecret = storedPoll.message?.messageContextInfo?.messageSecret;
+    expect(messageSecret).toBeInstanceOf(Uint8Array);
+    expect(messageSecret?.byteLength).toBe(32);
+
+    const createVote = (
+      id: string,
+      voterJid: string,
+      voterAltJid: string,
+      creatorJid: string,
+      creatorAltJid: string,
+      encryptedVoterJid: string,
+      encryptedCreatorJid: string,
+      wrapped = false,
+    ): WAMessage => {
+      const pollUpdateMessage = {
+        pollCreationMessageKey: {
+          remoteJid: GROUP_ID,
+          id: pollMessageId,
+          fromMe: false,
+          participant: creatorJid,
+          participantAlt: creatorAltJid,
+        },
+        vote: encryptPollVote(
+          messageSecret!,
+          pollMessageId,
+          encryptedCreatorJid,
+          encryptedVoterJid,
+          ["Yes"],
+        ),
+      };
+      const voteContent = wrapped
+        ? {
+            ephemeralMessage: {
+              message: {
+                viewOnceMessage: {
+                  message: {
+                    deviceSentMessage: { message: { pollUpdateMessage } },
+                  },
+                },
+              },
+            },
+          }
+        : { pollUpdateMessage };
+      return {
+        key: {
+          remoteJid: GROUP_ID,
+          id,
+          fromMe: false,
+          participant: voterJid,
+          participantAlt: voterAltJid,
+        },
+        message: voteContent,
+        messageTimestamp: 1_800_000_000,
+      } as unknown as WAMessage;
+    };
+
+    const votes = [
+      // The actual crypto uses LIDs even though the PN aliases are present and preferred by
+      // Baileys' single getKeyAuthor() lookup. This first update is also deeply wrapped.
+      createVote(
+        "real-crypto-vote-lid-lid",
+        VOTER_LID,
+        VOTER,
+        ACCOUNT_LID,
+        ACCOUNT_ID,
+        VOTER_LID,
+        ACCOUNT_LID,
+        true,
+      ),
+      // The poll key's aliases are reversed, and only the voter is encrypted as a LID.
+      createVote(
+        "real-crypto-vote-pn-lid",
+        SECOND_VOTER_LID,
+        SECOND_VOTER,
+        ACCOUNT_ID,
+        ACCOUNT_LID,
+        SECOND_VOTER_LID,
+        ACCOUNT_ID,
+      ),
+      // This PN/PN combination matches Baileys' preferred aliases without a fallback.
+      createVote(
+        "real-crypto-vote-pn-pn",
+        THIRD_VOTER,
+        THIRD_VOTER,
+        ACCOUNT_LID,
+        ACCOUNT_ID,
+        THIRD_VOTER,
+        ACCOUNT_ID,
+      ),
+    ];
+    await processEvents({ "messages.upsert": { type: "notify", messages: votes } });
+
+    const response = await invoke("wa_get_poll_results", {
+      chatId: GROUP_ID,
+      messageId: pollMessageId,
+    });
+    const results = JSON.parse(response.content[0]?.text ?? "{}") as {
+      question: string;
+      totalVotes: number;
+      totalVoters: number;
+      options: Array<{ name: string; count: number; voters: string[] }>;
+    };
+    expect(results).toMatchObject({ question: "Real crypto?", totalVotes: 3, totalVoters: 3 });
+    expect(results.options).toEqual([
+      { name: "Yes", count: 3, voters: [VOTER, SECOND_VOTER, THIRD_VOTER] },
+      { name: "No", count: 0, voters: [] },
+    ]);
+  });
+
+  it("retries pending poll votes when results are read after a LID mapping arrives", async () => {
+    const pollMessageId = "pending-real-crypto-sent-poll-78";
+    let voterMappingAvailable = false;
+    const sendMessage = vi.fn(async (jid: string, content: unknown) =>
+      generateWAMessage(jid, content as Parameters<typeof generateWAMessage>[1], {
+        userJid: ACCOUNT_LID,
+        messageId: pollMessageId,
+      }),
+    );
+    const { instanceId, invoke, processEvents } = createFixture({
+      user: { id: ACCOUNT_ID, lid: ACCOUNT_LID },
+      signalRepository: {
+        lidMapping: {
+          getPNForLID: vi.fn(async (lid: string) => {
+            if (lid === ACCOUNT_LID) return ACCOUNT_ID;
+            if (lid === VOTER_LID && voterMappingAvailable) return VOTER;
+            return null;
+          }),
+          getLIDForPN: vi.fn(async (pn: string) =>
+            pn === ACCOUNT_ID ? ACCOUNT_LID : pn === VOTER ? VOTER_LID : null,
+          ),
+        },
+      },
+      sendMessage,
+    });
+
+    await invoke("wa_send_poll", {
+      to: GROUP_ID,
+      question: "Retry?",
+      options: ["Yes", "No"],
+    });
+    const stored = sqlite
+      .prepare("SELECT raw_data FROM messages WHERE instance_id = ? AND id = ?")
+      .get(instanceId, pollMessageId) as { raw_data: string };
+    const poll = JSON.parse(stored.raw_data, BufferJSON.reviver) as WAMessage;
+    const messageSecret = poll.message?.messageContextInfo?.messageSecret;
+    expect(messageSecret).toBeInstanceOf(Uint8Array);
+
+    const voteMessage: WAMessage = {
+      key: {
+        remoteJid: GROUP_ID,
+        id: "pending-real-crypto-vote-78",
+        fromMe: false,
+        participant: VOTER_LID,
+      },
+      message: {
+        pollUpdateMessage: {
+          pollCreationMessageKey: {
+            remoteJid: GROUP_ID,
+            id: pollMessageId,
+            fromMe: false,
+            participant: ACCOUNT_LID,
+            participantAlt: ACCOUNT_ID,
+          },
+          vote: encryptPollVote(messageSecret!, pollMessageId, ACCOUNT_LID, VOTER, ["Yes"]),
+        },
+      },
+      messageTimestamp: 1_800_000_100,
+    } as WAMessage;
+    await processEvents({ "messages.upsert": { type: "notify", messages: [voteMessage] } });
+    expect(
+      sqlite
+        .prepare("SELECT COUNT(*) AS count FROM pending_poll_votes WHERE instance_id = ?")
+        .get(instanceId),
+    ).toMatchObject({ count: 1 });
+
+    voterMappingAvailable = true;
+    const response = await invoke("wa_get_poll_results", {
+      chatId: GROUP_ID,
+      messageId: pollMessageId,
+    });
+    const results = JSON.parse(response.content[0]?.text ?? "{}") as {
+      totalVotes: number;
+      options: Array<{ name: string; count: number; voters: string[] }>;
+    };
+    expect(results.totalVotes).toBe(1);
+    expect(results.options).toEqual([
+      { name: "Yes", count: 1, voters: [VOTER] },
+      { name: "No", count: 0, voters: [] },
+    ]);
+    expect(
+      sqlite
+        .prepare("SELECT COUNT(*) AS count FROM pending_poll_votes WHERE instance_id = ?")
+        .get(instanceId),
+    ).toMatchObject({ count: 0 });
   });
 
   it("sends view-once audio and live locations through normal message sends", async () => {

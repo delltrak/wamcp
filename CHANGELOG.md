@@ -27,6 +27,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Poll votes on polls sent by this account now decrypt across LID/PN identity variants, including
+  wrapped updates. Unresolved votes retry after poll storage and when results are read.
 - Event messages sent by this account now retain their binary protobuf message secret in local
   history, allowing encrypted RSVP responses to decrypt after the send and later message upserts.
 - Outgoing event webhook delivery failures now log the attempt, HTTP status, safe error details,
