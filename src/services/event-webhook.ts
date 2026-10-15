@@ -37,6 +37,7 @@ export interface EventWebhookPayload {
   fileName?: string;
   caption?: string;
   size?: number;
+  isForwarded?: boolean;
   buttons?: MessageButton[];
   rawType?: string;
 }
@@ -60,6 +61,7 @@ export interface GrokBotWebhookPayload {
   fileName?: string;
   caption?: string;
   size?: number;
+  isForwarded?: boolean;
   buttons?: MessageButton[];
   rawType?: string;
 }
@@ -308,6 +310,7 @@ export function normalizeEventWebhookPayload(
     ...(fileName ? { fileName } : {}),
     ...(caption ? { caption } : {}),
     ...(size !== null ? { size } : {}),
+    ...(isRecord(data.message) ? { isForwarded: message.isForwarded === true } : {}),
     ...(buttons ? { buttons } : {}),
     ...(typeof message.rawType === "string" ? { rawType: message.rawType } : {}),
   };
@@ -350,6 +353,7 @@ export function normalizeGrokBotWebhookPayload(
     ...((payload.message.size ?? payload.message.mediaSize)
       ? { size: payload.message.size ?? payload.message.mediaSize }
       : {}),
+    isForwarded: payload.message.isForwarded === true,
     ...(payload.message.buttons ? { buttons: payload.message.buttons } : {}),
     ...(payload.message.rawType ? { rawType: payload.message.rawType } : {}),
   };

@@ -1,8 +1,14 @@
 import { describe, it, expect } from "vitest";
+import { randomUUID } from "node:crypto";
+import { eq } from "drizzle-orm";
 import {
   normalizeWebhookPayload,
   type MetaWebhookPayload,
 } from "../src/channels/cloud-api/cloud.events.js";
+import { CloudApiAdapter } from "../src/channels/cloud-api/cloud.adapter.js";
+import { db } from "../src/db/client.js";
+import { instances, messages } from "../src/db/schema.js";
+import type { NormalizedMessageEvent } from "../src/types/channel.types.js";
 
 function makePayload(
   overrides: Partial<MetaWebhookPayload> & {
@@ -11,12 +17,7 @@ function makePayload(
     contacts?: unknown[];
   } = {},
 ): MetaWebhookPayload {
-  const {
-    messages,
-    statuses,
-    contacts,
-    ...rest
-  } = overrides;
+  const { messages, statuses, contacts, ...rest } = overrides;
 
   return {
     object: "whatsapp_business_account",
@@ -74,6 +75,28 @@ describe("normalizeWebhookPayload", () => {
       expect(msg.type).toBe("text");
       expect(msg.content).toBe("Hello from WhatsApp!");
       expect(msg.isFromMe).toBe(false);
+      expect(msg.isForwarded).toBe(false);
+    });
+
+    it("maps forwarded and frequently forwarded context flags", () => {
+      for (const context of [{ forwarded: true }, { frequently_forwarded: true }]) {
+        const [event] = normalizeWebhookPayload(
+          makePayload({
+            messages: [
+              {
+                from: "5511888888888",
+                id: "wamid.forwarded-text",
+                timestamp: "1700000000",
+                type: "text",
+                text: { body: "Forwarded" },
+                context,
+              },
+            ],
+          }),
+        );
+        const message = (event.payload as { message: Record<string, unknown> }).message;
+        expect(message.isForwarded).toBe(true);
+      }
     });
   });
 
@@ -616,5 +639,49 @@ describe("normalizeWebhookPayload", () => {
       const p = events[0].payload as { instanceId: string };
       expect(p.instanceId).toBe("");
     });
+  });
+
+  it("persists Cloud API forwarded media and never downgrades it on conflict", () => {
+    const instanceId = `cloud_forward_${randomUUID()}`;
+    const now = Date.now();
+    db.insert(instances)
+      .values({ id: instanceId, name: "cloud forward test", createdAt: now, updatedAt: now })
+      .run();
+
+    try {
+      const adapter = new CloudApiAdapter(instanceId);
+      const createPayload = (context?: Record<string, boolean>) => {
+        const [event] = normalizeWebhookPayload(
+          makePayload({
+            messages: [
+              {
+                from: "5511888888888",
+                id: "wamid.cloud-forwarded-image",
+                timestamp: "1700000000",
+                type: "image",
+                image: { id: "media-forwarded-image" },
+                context,
+              },
+            ],
+          }),
+        );
+        return {
+          ...(event.payload as NormalizedMessageEvent),
+          instanceId,
+        };
+      };
+
+      adapter.emit("message.received", createPayload({ forwarded: true }));
+      adapter.emit("message.received", createPayload({ forwarded: false }));
+
+      const stored = db
+        .select({ isForwarded: messages.isForwarded })
+        .from(messages)
+        .where(eq(messages.id, "wamid.cloud-forwarded-image"))
+        .get();
+      expect(stored?.isForwarded).toBe(1);
+    } finally {
+      db.delete(instances).where(eq(instances.id, instanceId)).run();
+    }
   });
 });

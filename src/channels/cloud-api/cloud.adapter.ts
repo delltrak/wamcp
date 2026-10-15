@@ -5,7 +5,7 @@
 // ============================================================
 
 import type { ChannelAdapter, ChannelEventHandler } from "../channel.interface.js";
-import { and, eq } from "drizzle-orm";
+import { and, eq, sql } from "drizzle-orm";
 import { db } from "../../db/client.js";
 import { messages as messagesTable } from "../../db/schema.js";
 import { getWebPInfo, mediaResponseToBuffer } from "../../services/media.js";
@@ -941,7 +941,7 @@ export class CloudApiAdapter implements ChannelAdapter {
           mediaMimetype: event.message.mimeType ?? event.message.mediaMimetype ?? null,
           quotedId: event.message.quotedMessageId,
           isFromMe: event.message.isFromMe ? 1 : 0,
-          isForwarded: 0,
+          isForwarded: event.message.isForwarded === true ? 1 : 0,
           status: "received",
           timestamp: event.message.timestamp,
           rawData,
@@ -953,6 +953,7 @@ export class CloudApiAdapter implements ChannelAdapter {
             mediaMimetype: event.message.mimeType ?? event.message.mediaMimetype ?? null,
             content: event.message.content,
             rawData,
+            isForwarded: sql`CASE WHEN excluded.is_forwarded = 1 THEN 1 ELSE ${messagesTable.isForwarded} END`,
           },
         })
         .run();

@@ -2,9 +2,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { randomUUID } from "node:crypto";
 import { BufferJSON, type WAMessage, type WASocket } from "@whiskeysockets/baileys";
 import { BaileysAdapter } from "../src/channels/baileys/baileys.adapter.js";
+import { normalizeMessagesUpsert } from "../src/channels/baileys/baileys.events.js";
 import { db } from "../src/db/client.js";
 import { instances, messages } from "../src/db/schema.js";
 import { WHATSAPP_VOICE_MIME_TYPE } from "../src/tts/audio.js";
+import type { NormalizedMessageEvent } from "../src/types/channel.types.js";
 import { eq } from "drizzle-orm";
 
 const pttHarness = vi.hoisted(() => ({
@@ -136,7 +138,13 @@ describe("Baileys message forwarding", () => {
     db.delete(instances).where(eq(instances.id, instanceId)).run();
   });
 
-  function insertStoredMessage(id: string, type: string, rawData: string | null, content?: string) {
+  function insertStoredMessage(
+    id: string,
+    type: string,
+    rawData: string | null,
+    content?: string,
+    isFromMe = false,
+  ) {
     db.insert(messages)
       .values({
         id,
@@ -145,8 +153,8 @@ describe("Baileys message forwarding", () => {
         senderId: SOURCE_CHAT,
         type: type as "text" | "image" | "video" | "audio" | "document" | "sticker",
         content: content ?? null,
-        isFromMe: 0,
-        status: "received",
+        isFromMe: isFromMe ? 1 : 0,
+        status: isFromMe ? "sent" : "received",
         timestamp: 1_700_000_000,
         rawData,
       })
@@ -161,6 +169,24 @@ describe("Baileys message forwarding", () => {
     const adapter = new BaileysAdapter(instanceId);
     Object.assign(adapter, { sock: socket, status: "connected" });
     return { adapter, socket };
+  }
+
+  function persistIncomingMessage(
+    adapter: BaileysAdapter,
+    source: WAMessage,
+  ): NormalizedMessageEvent {
+    const event = normalizeMessagesUpsert(instanceId, {
+      type: "notify",
+      messages: [source],
+    } as Parameters<typeof normalizeMessagesUpsert>[1])[0];
+    if (!event) throw new Error("Synthetic message did not normalize");
+
+    (
+      adapter as unknown as {
+        persistMessage: (normalized: NormalizedMessageEvent, source: WAMessage) => void;
+      }
+    ).persistMessage(event, source);
+    return event;
   }
 
   it.each(mediaCases())(
@@ -267,6 +293,110 @@ describe("Baileys message forwarding", () => {
     expect(revived.message?.audioMessage?.ptt).toBe(true);
     expect(Buffer.isBuffer(revived.message?.audioMessage?.mediaKey)).toBe(true);
     expect(Buffer.isBuffer(revived.message?.audioMessage?.waveform)).toBe(true);
+  });
+
+  it("stores forwarded metadata returned when forwarding a received audio message", async () => {
+    const sourceId = "received-audio-to-forward";
+    const outgoingId = "forwarded-received-audio";
+    insertStoredMessage(
+      sourceId,
+      "audio",
+      JSON.stringify(sourceMessage(sourceId, audioMessage(false)), BufferJSON.replacer),
+    );
+
+    const forwardedAudio = audioMessage(false);
+    Object.assign(forwardedAudio.audioMessage, {
+      contextInfo: { isForwarded: true, forwardingScore: 1 },
+    });
+    const outgoing = sourceMessage(outgoingId, forwardedAudio, true);
+    outgoing.key.remoteJid = DESTINATION;
+    const { adapter } = createAdapter(async () => outgoing);
+
+    await adapter.forwardMessage(DESTINATION, sourceId, SOURCE_CHAT);
+
+    const stored = db
+      .select({ isForwarded: messages.isForwarded })
+      .from(messages)
+      .where(eq(messages.id, outgoingId))
+      .get();
+    expect(stored?.isForwarded).toBe(1);
+  });
+
+  it("does not add forwarded metadata when forwarding this account's own message", async () => {
+    const sourceId = "own-audio-to-forward";
+    const outgoingId = "forwarded-own-audio";
+    const source = sourceMessage(sourceId, audioMessage(false), true);
+    insertStoredMessage(
+      sourceId,
+      "audio",
+      JSON.stringify(source, BufferJSON.replacer),
+      undefined,
+      true,
+    );
+
+    const forwardedAudio = audioMessage(false);
+    Object.assign(forwardedAudio.audioMessage, {
+      contextInfo: { isForwarded: false, forwardingScore: 0 },
+    });
+    const outgoing = sourceMessage(outgoingId, forwardedAudio, true);
+    outgoing.key.remoteJid = DESTINATION;
+    const { adapter } = createAdapter(async () => outgoing);
+
+    await adapter.forwardMessage(DESTINATION, sourceId, SOURCE_CHAT);
+
+    const stored = db
+      .select({ isForwarded: messages.isForwarded })
+      .from(messages)
+      .where(eq(messages.id, outgoingId))
+      .get();
+    expect(stored?.isForwarded).toBe(0);
+  });
+
+  it("stores an incoming forwarded text message", () => {
+    const incoming = sourceMessage("incoming-forwarded-text", {
+      ephemeralMessage: {
+        message: {
+          extendedTextMessage: {
+            text: "Forwarded text",
+            contextInfo: { isForwarded: false, forwardingScore: 1 },
+          },
+        },
+      },
+    });
+    const { adapter } = createAdapter(async () => ({ key: { id: "unused" } }) as WAMessage);
+
+    const event = persistIncomingMessage(adapter, incoming);
+    const stored = db
+      .select({ isForwarded: messages.isForwarded })
+      .from(messages)
+      .where(eq(messages.id, incoming.key.id!))
+      .get();
+
+    expect(event.message.isForwarded).toBe(true);
+    expect(stored?.isForwarded).toBe(1);
+  });
+
+  it("upgrades forwarded state on conflict and never downgrades it", () => {
+    const id = "incoming-forwarded-text-conflict";
+    const { adapter } = createAdapter(async () => ({ key: { id: "unused" } }) as WAMessage);
+    const makeIncoming = (forwardingScore: number) =>
+      sourceMessage(id, {
+        extendedTextMessage: {
+          text: "Forwarded text",
+          contextInfo: { forwardingScore },
+        },
+      });
+
+    persistIncomingMessage(adapter, makeIncoming(0));
+    persistIncomingMessage(adapter, makeIncoming(1));
+    persistIncomingMessage(adapter, makeIncoming(0));
+
+    const stored = db
+      .select({ isForwarded: messages.isForwarded })
+      .from(messages)
+      .where(eq(messages.id, id))
+      .get();
+    expect(stored?.isForwarded).toBe(1);
   });
 
   it("stores the current outgoing timestamp in seconds when it is missing", async () => {

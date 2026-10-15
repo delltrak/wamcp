@@ -613,7 +613,9 @@ Send a text message with a rich link preview.
 #### `wa_forward_message`
 
 Forward an existing message with its original content to another chat. Baileys forwards stored
-media content when available; older media messages without stored content return an error.
+media content when available; older media messages without stored content return an error. WhatsApp
+may omit the "Forwarded" label when the source message was sent by this account. The API records the
+forwarded metadata returned with the sent message and does not force that label.
 
 | Parameter    | Type   | Required | Description                                       |
 | ------------ | ------ | -------- | ------------------------------------------------- |
@@ -2245,16 +2247,19 @@ Fired when a new message is received in any chat.
       }
     ],
     "quotedMessageId": null,
-    "isFromMe": false
+    "isFromMe": false,
+    "isForwarded": false
   }
 }
 ```
 
-`mediaMimetype`, `mimeType`, `fileName`, `caption`, `size`, `buttons`, and `rawType` are optional
-additions to the message object. Media details are included when available from the channel; media
-bytes are not copied into notifications or outgoing event webhooks. Business template, interactive,
-list, and button messages include their readable text in `content`; unknown Baileys content types
-use `type: "text"` and include their source name in `rawType`.
+`mediaMimetype`, `mimeType`, `fileName`, `caption`, `size`, `isForwarded`, `buttons`, and
+`rawType` are optional additions to the message object. Message notifications and outgoing generic
+and Grok Bot event webhook payloads expose a boolean `isForwarded`. Media details are included when
+available from the channel; media bytes are not copied into notifications or outgoing event
+webhooks. Business template, interactive, list, and button messages include their readable text in
+`content`; unknown Baileys content types use `type: "text"` and include their source name in
+`rawType`.
 
 Outgoing generic and Grok Bot event webhooks also include available media metadata as `mimeType`,
 `fileName`, `caption`, and `size`. The top-level `type` field identifies the media type.
