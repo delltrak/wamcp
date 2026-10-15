@@ -136,10 +136,68 @@ function seedStoredMessage(instanceId: string, messageId: string, timestamp: num
 
 afterEach(() => {
   vi.useRealTimers();
+  vi.unstubAllEnvs();
   vi.restoreAllMocks();
 });
 
 describe("Baileys offline append notifications", () => {
+  it("auto-reads an eligible append once when on_receive is enabled", async () => {
+    vi.stubEnv("WA_AUTO_READ", "on_receive");
+    const { instanceId, adapter, dispatch } = createFixture();
+    const markRead = vi.spyOn(adapter, "markRead").mockResolvedValue(undefined);
+    const message = fixtureMessage("auto-read-offline-append");
+
+    try {
+      await dispatch("append", [message]);
+      await dispatch("append", [message]);
+      await new Promise<void>((resolve) => setImmediate(resolve));
+
+      expect(markRead).toHaveBeenCalledTimes(1);
+      expect(markRead).toHaveBeenCalledWith(CHAT_JID, ["auto-read-offline-append"], undefined);
+    } finally {
+      deleteInstance(instanceId);
+    }
+  });
+
+  it("does not auto-read capped, old, from-me, or duplicate append messages", async () => {
+    vi.stubEnv("WA_AUTO_READ", "on_receive");
+    vi.stubEnv("WA_BAILEYS_APPEND_NOTIFY_MAX_PER_BATCH", "1");
+    const now = Date.now();
+    const { instanceId, adapter, dispatch } = createFixture();
+    const markRead = vi.spyOn(adapter, "markRead").mockResolvedValue(undefined);
+
+    try {
+      await dispatch("append", [
+        fixtureMessage("append-winner", { timestampMs: now - 60_000 }),
+        fixtureMessage("append-winner", { timestampMs: now - 60_000 }),
+        fixtureMessage("append-capped", { timestampMs: now - 60_000 }),
+        fixtureMessage("append-old", { timestampMs: now - 25 * 60 * 60_000 }),
+        fixtureMessage("append-from-me", { timestampMs: now - 60_000, fromMe: true }),
+      ]);
+      await new Promise<void>((resolve) => setImmediate(resolve));
+
+      expect(markRead).toHaveBeenCalledTimes(1);
+      expect(markRead).toHaveBeenCalledWith(CHAT_JID, ["append-winner"], undefined);
+    } finally {
+      deleteInstance(instanceId);
+    }
+  });
+
+  it("leaves append messages unread in modes other than on_receive", async () => {
+    vi.stubEnv("WA_AUTO_READ", "on_fetch");
+    const { instanceId, adapter, dispatch } = createFixture();
+    const markRead = vi.spyOn(adapter, "markRead").mockResolvedValue(undefined);
+
+    try {
+      await dispatch("append", [fixtureMessage("append-on-fetch")]);
+      await new Promise<void>((resolve) => setImmediate(resolve));
+
+      expect(markRead).not.toHaveBeenCalled();
+    } finally {
+      deleteInstance(instanceId);
+    }
+  });
+
   it("normalizes millisecond-stored message timestamps and still emits newer appends", async () => {
     const now = Date.now();
     const storedTimestampMs = now - 2 * 60_000;

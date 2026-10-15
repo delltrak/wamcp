@@ -5283,11 +5283,20 @@ export class BaileysAdapter implements ChannelAdapter {
           }
         }
 
-        scheduleBaileysMessagesRead(this, data.type, data.messages, this.instanceId);
+        if (data.type === "notify") {
+          scheduleBaileysMessagesRead(this, data.type, data.messages, this.instanceId);
+        }
 
         const normalizedEvents = normalizeMessagesUpsert(this.instanceId, data);
         if (data.type === "append") {
           let appendEmitted = 0;
+          const appendMessagesById = new Map<string, WAMessage>();
+          for (const message of data.messages) {
+            if (message.key.id && !appendMessagesById.has(message.key.id)) {
+              appendMessagesById.set(message.key.id, message);
+            }
+          }
+          const emittedAppendMessages: WAMessage[] = [];
           for (const event of normalizedEvents) {
             const messageId = event.message.id;
             if (!messageId || preexistingAppendMessageIds.has(messageId)) continue;
@@ -5309,8 +5318,11 @@ export class BaileysAdapter implements ChannelAdapter {
 
             if (!this.messageDedup.markProcessed(this.instanceId, messageId)) continue;
             this.emit("message.received", this.attachMessageLabels(event));
+            const sourceMessage = appendMessagesById.get(messageId);
+            if (sourceMessage) emittedAppendMessages.push(sourceMessage);
             appendEmitted++;
           }
+          scheduleBaileysMessagesRead(this, data.type, emittedAppendMessages, this.instanceId);
 
           logger.info(
             {
