@@ -44,11 +44,17 @@ export interface MessageSearchOptions {
 }
 
 export interface EventResponse {
+  participant: string;
   responder: string;
+  phone?: string;
+  status: EventResponseStatus;
   response: string;
   timestamp: number | null;
   messageId: string | null;
+  extraGuestCount?: number;
 }
+
+export type EventResponseStatus = "GOING" | "NOT_GOING" | "MAYBE" | "UNKNOWN";
 
 export interface SendEventOptions {
   to: string;
@@ -487,6 +493,17 @@ export interface NormalizedLabelUpdateEvent {
   };
 }
 
+export interface NormalizedEventResponseEvent {
+  instanceId: string;
+  chatId: string;
+  eventMessageId: string;
+  participant: string;
+  responseMessageId: string | null;
+  status: EventResponseStatus;
+  timestamp: number | null;
+  extraGuestCount?: number;
+}
+
 // Channel event names
 export type ChannelEvent =
   | "message.received"
@@ -501,7 +518,8 @@ export type ChannelEvent =
   | "contact.updated"
   | "connection.changed"
   | "call.received"
-  | "label.updated";
+  | "label.updated"
+  | "event.response";
 
 // Event payload map
 export type ChannelEventPayload = {
@@ -518,4 +536,5 @@ export type ChannelEventPayload = {
   "connection.changed": NormalizedConnectionEvent;
   "call.received": NormalizedCallEvent;
   "label.updated": NormalizedLabelUpdateEvent;
+  "event.response": NormalizedEventResponseEvent;
 };

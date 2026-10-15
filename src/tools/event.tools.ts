@@ -35,7 +35,7 @@ export function registerEventTools(server: McpServer, instanceManager: InstanceM
     "wa_get_event_responses",
     {
       description:
-        "Read event responses already received and stored locally for a Baileys event message.",
+        "Read locally stored RSVP participants, statuses, timestamps, extra guests, and per-status counts for a Baileys event message.",
       inputSchema: GetEventResponsesSchema,
     },
     async (params) => {
@@ -43,10 +43,18 @@ export function registerEventTools(server: McpServer, instanceManager: InstanceM
         const responses = await instanceManager
           .getAdapter(params.instanceId)
           .getEventResponses(params.chatId, params.eventMessageId);
+        const counts = {
+          GOING: 0,
+          NOT_GOING: 0,
+          MAYBE: 0,
+          UNKNOWN: 0,
+        };
+        for (const response of responses) counts[response.status]++;
         return toolSuccess({
           chatId: params.chatId,
           eventMessageId: params.eventMessageId,
           count: responses.length,
+          counts,
           responses,
         });
       } catch (err) {

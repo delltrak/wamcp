@@ -9,6 +9,8 @@ import makeWASocket, {
   proto,
   BufferJSON,
   downloadMediaMessage,
+  decryptEventResponse,
+  getKeyAuthor,
   makeCacheableSignalKeyStore,
   type WASocket,
   type GroupParticipant as BaileysGroupParticipant,
@@ -53,6 +55,7 @@ import type {
   MessageDeliveryStatus,
   BusinessLabel,
   EventResponse,
+  EventResponseStatus,
   MessageSearchOptions,
   SendEventOptions,
   NormalizedLabelUpdateEvent,
@@ -69,8 +72,9 @@ import {
   labels as labelsTable,
   labelAssociations as labelAssociationsTable,
   eventResponses as eventResponsesTable,
+  contacts as contactsTable,
 } from "../../db/schema.js";
-import { eq, and, desc, asc, ne, inArray, sql } from "drizzle-orm";
+import { eq, and, desc, asc, ne, inArray, or, sql } from "drizzle-orm";
 import { searchStoredMessages } from "../../services/message-search.js";
 import {
   normalizeMessagesUpsert,
@@ -183,6 +187,7 @@ function parsePositiveIntegerEnv(value: string | undefined, key: string, fallbac
 
 function serializeIncomingMessage(message?: WAMessage): string | null {
   if (!message) return null;
+  // Keep the complete proto message: event and poll decryption need messageContextInfo.messageSecret.
   return JSON.stringify(
     {
       key: message.key,
@@ -331,8 +336,8 @@ function labelOperationError(error: unknown): Error {
   return error instanceof Error ? error : new Error(message);
 }
 
-function eventResponseName(value: number | string | null | undefined): string {
-  if (typeof value === "string") return value;
+function eventResponseName(value: number | string | null | undefined): EventResponseStatus {
+  if (value === "GOING" || value === "NOT_GOING" || value === "MAYBE") return value;
   switch (value) {
     case 1:
       return "GOING";
@@ -673,7 +678,15 @@ export class BaileysAdapter implements ChannelAdapter {
           eq(messagesTable.instanceId, this.instanceId),
           eq(messagesTable.id, key.id),
         ];
-        if (key.remoteJid) conditions.push(eq(messagesTable.chatId, key.remoteJid));
+        const remoteJids = new Set<string>();
+        for (const jid of [key.remoteJid, key.remoteJidAlt]) {
+          if (!jid) continue;
+          remoteJids.add(jidNormalizedUser(jid));
+          remoteJids.add(await this.resolveJidToPn(jid));
+        }
+        if (remoteJids.size > 0) {
+          conditions.push(inArray(messagesTable.chatId, [...remoteJids]));
+        }
         const row = db
           .select({ rawData: messagesTable.rawData })
           .from(messagesTable)
@@ -904,7 +917,10 @@ export class BaileysAdapter implements ChannelAdapter {
     }
 
     const result = await sock.sendMessage(jid, { event }, sendOptions);
-    if (result) this.persistSourceMessage(result);
+    if (result) {
+      this.persistSourceMessage(result);
+      if (result.key.id) await this.retryPendingEventResponses(result.key.id);
+    }
     return {
       messageId: result?.key.id ?? "",
       timestamp: Date.now(),
@@ -913,25 +929,85 @@ export class BaileysAdapter implements ChannelAdapter {
   }
 
   async getEventResponses(chatId: string, eventMessageId: string): Promise<EventResponse[]> {
-    const jid = this.normalizeJid(chatId);
+    const jid = jidNormalizedUser(this.normalizeJid(chatId));
+    const chatAliases = new Set([jid, await this.resolveJidToPn(jid)]);
+    const eventMessage = db
+      .select({ chatId: messagesTable.chatId, rawData: messagesTable.rawData })
+      .from(messagesTable)
+      .where(
+        and(
+          eq(messagesTable.instanceId, this.instanceId),
+          eq(messagesTable.id, eventMessageId),
+          eq(messagesTable.type, "event"),
+        ),
+      )
+      .get();
+
+    if (eventMessage) {
+      const eventChatAliases = new Set([
+        eventMessage.chatId,
+        await this.resolveJidToPn(eventMessage.chatId),
+      ]);
+      if (eventMessage.rawData) {
+        try {
+          const stored = JSON.parse(eventMessage.rawData, BufferJSON.reviver) as WAMessage;
+          const key = stored.key;
+          for (const keyJid of [key.remoteJid, key.remoteJidAlt]) {
+            if (!keyJid) continue;
+            eventChatAliases.add(keyJid);
+            eventChatAliases.add(await this.resolveJidToPn(keyJid));
+          }
+        } catch {
+          // The normalized row chat ID remains sufficient if raw proto data is malformed.
+        }
+      }
+
+      if (![...chatAliases].some((alias) => eventChatAliases.has(alias))) return [];
+      for (const alias of eventChatAliases) chatAliases.add(alias);
+    }
+
     const rows = db
       .select()
       .from(eventResponsesTable)
       .where(
         and(
           eq(eventResponsesTable.instanceId, this.instanceId),
-          eq(eventResponsesTable.chatId, jid),
           eq(eventResponsesTable.eventMessageId, eventMessageId),
+          inArray(eventResponsesTable.chatId, [...chatAliases]),
         ),
       )
       .orderBy(asc(eventResponsesTable.timestamp), asc(eventResponsesTable.responder))
       .all();
-    return rows.map((row) => ({
-      responder: row.responder,
-      response: row.response,
-      timestamp: row.timestamp,
-      messageId: row.responseMessageId,
-    }));
+
+    return Promise.all(
+      rows.map(async (row) => {
+        const participant = await this.resolveJidToPn(row.responder);
+        const contact = db
+          .select({ phone: contactsTable.phone })
+          .from(contactsTable)
+          .where(
+            and(
+              eq(contactsTable.instanceId, this.instanceId),
+              or(eq(contactsTable.jid, row.responder), eq(contactsTable.lid, row.responder)),
+            ),
+          )
+          .get();
+        const phone =
+          contact?.phone ??
+          (participant.endsWith("@s.whatsapp.net") ? participant.slice(0, -15) : undefined);
+        const status = eventResponseName(row.response);
+        return {
+          participant,
+          responder: participant,
+          ...(phone ? { phone } : {}),
+          status,
+          response: status,
+          timestamp: row.timestamp,
+          messageId: row.responseMessageId,
+          ...(row.extraGuestCount === null ? {} : { extraGuestCount: row.extraGuestCount }),
+        };
+      }),
+    );
   }
 
   async starMessage(chatId: string, messageId: string, star: boolean): Promise<void> {
@@ -2561,49 +2637,320 @@ export class BaileysAdapter implements ChannelAdapter {
     };
   }
 
-  private persistEventResponses(key: WAMessageKey, responses: proto.IEventResponse[]): void {
+  private async resolveJidToPn(jid: string): Promise<string> {
+    const normalized = jidNormalizedUser(jid);
+    if (!normalized.endsWith("@lid")) return normalized;
+    try {
+      return jidNormalizedUser(await this.resolvePn(normalized));
+    } catch {
+      return normalized;
+    }
+  }
+
+  private async canonicalEventChatJid(key: WAMessageKey): Promise<string> {
+    const candidates = [key.remoteJid, key.remoteJidAlt].filter((jid): jid is string => !!jid);
+    const groupJid = candidates.find((jid) => jid.endsWith("@g.us"));
+    if (groupJid) return jidNormalizedUser(groupJid);
+    const pnJid = candidates.find((jid) => jidNormalizedUser(jid).endsWith("@s.whatsapp.net"));
+    return this.resolveJidToPn(pnJid ?? candidates[0] ?? "");
+  }
+
+  private async canonicalEventAuthorJid(key: WAMessageKey): Promise<string> {
+    const meId = jidNormalizedUser(this.sock?.user?.id ?? "me");
+    const author = getKeyAuthor(key, meId);
+    return author ? this.resolveJidToPn(author) : "";
+  }
+
+  private async getStoredEventMessage(key: WAMessageKey): Promise<WAMessage | null> {
+    if (!key.id) return null;
+    const row = db
+      .select({
+        chatId: messagesTable.chatId,
+        type: messagesTable.type,
+        rawData: messagesTable.rawData,
+      })
+      .from(messagesTable)
+      .where(and(eq(messagesTable.instanceId, this.instanceId), eq(messagesTable.id, key.id)))
+      .get();
+    if (!row || row.type !== "event" || !row.rawData) return null;
+
+    try {
+      const stored = JSON.parse(row.rawData, BufferJSON.reviver) as WAMessage;
+      const requestedChat = await this.canonicalEventChatJid(key);
+      const storedChat = await this.resolveJidToPn(row.chatId);
+      const storedKey = stored.key;
+      const storedAliases = new Set([storedChat]);
+      for (const jid of [storedKey.remoteJid, storedKey.remoteJidAlt]) {
+        if (!jid) continue;
+        storedAliases.add(jidNormalizedUser(jid));
+        storedAliases.add(await this.resolveJidToPn(jid));
+      }
+      if (requestedChat && !storedAliases.has(requestedChat)) return null;
+      if (!stored.message?.messageContextInfo?.messageSecret) return null;
+      return stored;
+    } catch {
+      return null;
+    }
+  }
+
+  private async decryptStoredEventResponse(
+    encrypted: proto.Message.IEncEventResponseMessage,
+    responseKey: WAMessageKey,
+  ): Promise<{
+    eventMessageId: string;
+    chatId: string;
+    responder: string;
+    response: EventResponseStatus;
+    timestamp: number | null;
+    extraGuestCount: number | null;
+  } | null> {
+    const eventKey = encrypted.eventCreationMessageKey;
+    if (!eventKey?.id) return null;
+    const storedEvent = await this.getStoredEventMessage(eventKey);
+    const messageSecret = storedEvent?.message?.messageContextInfo?.messageSecret;
+    if (!storedEvent?.key || !messageSecret) return null;
+
+    const responder = await this.canonicalEventAuthorJid(responseKey);
+    const eventCreator = await this.canonicalEventAuthorJid(storedEvent.key);
+    const chatId = await this.canonicalEventChatJid(storedEvent.key);
+    if (!responder || !eventCreator || !chatId) return null;
+
+    try {
+      const decoded = decryptEventResponse(encrypted, {
+        eventCreatorJid: eventCreator,
+        eventMsgId: eventKey.id,
+        eventEncKey: messageSecret,
+        responderJid: responder,
+      });
+      const timestampValue = decoded.timestampMs;
+      const timestamp =
+        timestampValue === null || timestampValue === undefined
+          ? null
+          : Number(timestampValue.toString());
+      return {
+        eventMessageId: eventKey.id,
+        chatId,
+        responder,
+        response: eventResponseName(decoded.response),
+        timestamp: timestamp !== null && Number.isFinite(timestamp) ? timestamp : null,
+        extraGuestCount: decoded.extraGuestCount ?? null,
+      };
+    } catch (error) {
+      logger.debug(
+        { instanceId: this.instanceId, eventMessageId: eventKey.id, error },
+        "Unable to decrypt event response",
+      );
+      return null;
+    }
+  }
+
+  private persistResolvedEventResponse(
+    response: {
+      eventMessageId: string;
+      chatId: string;
+      responder: string;
+      response: EventResponseStatus;
+      timestamp: number | null;
+      responseMessageId: string | null;
+      extraGuestCount: number | null;
+      rawData: string | null;
+    },
+    emitEvent = true,
+  ): void {
+    const previous = db
+      .select()
+      .from(eventResponsesTable)
+      .where(
+        and(
+          eq(eventResponsesTable.instanceId, this.instanceId),
+          eq(eventResponsesTable.eventMessageId, response.eventMessageId),
+          eq(eventResponsesTable.responder, response.responder),
+        ),
+      )
+      .get();
+
+    if (
+      previous &&
+      previous.response !== "UNKNOWN" &&
+      previous.timestamp !== null &&
+      response.timestamp !== null &&
+      response.timestamp < previous.timestamp
+    ) {
+      return;
+    }
+
+    const changed =
+      !previous ||
+      previous.response !== response.response ||
+      previous.timestamp !== response.timestamp ||
+      previous.responseMessageId !== response.responseMessageId ||
+      previous.extraGuestCount !== response.extraGuestCount;
+
+    db.insert(eventResponsesTable)
+      .values({
+        instanceId: this.instanceId,
+        eventMessageId: response.eventMessageId,
+        chatId: response.chatId,
+        responder: response.responder,
+        response: response.response,
+        timestamp: response.timestamp,
+        responseMessageId: response.responseMessageId,
+        extraGuestCount: response.extraGuestCount,
+        rawData: response.rawData,
+      })
+      .onConflictDoUpdate({
+        target: [
+          eventResponsesTable.instanceId,
+          eventResponsesTable.eventMessageId,
+          eventResponsesTable.responder,
+        ],
+        set: {
+          chatId: response.chatId,
+          response: response.response,
+          timestamp: response.timestamp,
+          responseMessageId: response.responseMessageId,
+          extraGuestCount: response.extraGuestCount,
+          rawData: response.rawData,
+        },
+      })
+      .run();
+
+    if (!emitEvent || !changed) return;
+    this.emit("event.response", {
+      instanceId: this.instanceId,
+      chatId: response.chatId,
+      eventMessageId: response.eventMessageId,
+      participant: response.responder,
+      responseMessageId: response.responseMessageId,
+      status: response.response,
+      timestamp: response.timestamp,
+      ...(response.extraGuestCount === null ? {} : { extraGuestCount: response.extraGuestCount }),
+    });
+  }
+
+  private async persistEventResponses(
+    key: WAMessageKey,
+    responses: proto.IEventResponse[],
+  ): Promise<void> {
     const eventMessageId = key.id;
-    const chatId = key.remoteJid;
-    if (!eventMessageId || !chatId) return;
+    if (!eventMessageId || !key.remoteJid) return;
+    const chatId = await this.canonicalEventChatJid(key);
 
     for (const entry of responses) {
       const responseKey = entry.eventResponseMessageKey;
-      const responder = responseKey?.participant ?? responseKey?.remoteJid;
+      if (!responseKey) continue;
+      const responder = await this.canonicalEventAuthorJid(responseKey);
       if (!responder) continue;
       const eventResponse = entry as proto.IEventResponse & {
         senderTimestampMs?: number | { toString(): string } | null;
         response?: proto.Message.IEventResponseMessage | null;
       };
-      const timestampValue = eventResponse.senderTimestampMs ?? entry.timestampMs;
-      const timestamp =
-        timestampValue === null || timestampValue === undefined
-          ? null
-          : Number(timestampValue.toString());
-      const response = eventResponseName(
-        eventResponse.response?.response ?? entry.eventResponseMessage?.response,
-      );
-      const responseMessageId = responseKey?.id ?? null;
-      const rawData = JSON.stringify(entry, BufferJSON.replacer);
-      db.insert(eventResponsesTable)
-        .values({
-          instanceId: this.instanceId,
-          eventMessageId,
-          chatId,
-          responder,
-          response,
-          timestamp,
-          responseMessageId,
-          rawData,
-        })
-        .onConflictDoUpdate({
-          target: [
-            eventResponsesTable.instanceId,
-            eventResponsesTable.eventMessageId,
-            eventResponsesTable.responder,
-          ],
-          set: { response, timestamp, responseMessageId, rawData },
-        })
-        .run();
+      const responseMessage = eventResponse.response ?? entry.eventResponseMessage;
+      const timestampValue =
+        eventResponse.senderTimestampMs ?? responseMessage?.timestampMs ?? entry.timestampMs;
+      const timestamp = this.timestampValueToMilliseconds(timestampValue);
+      this.persistResolvedEventResponse({
+        eventMessageId,
+        chatId,
+        responder,
+        response: eventResponseName(responseMessage?.response),
+        timestamp,
+        responseMessageId: responseKey.id ?? null,
+        extraGuestCount: responseMessage?.extraGuestCount ?? null,
+        rawData: JSON.stringify(entry, BufferJSON.replacer),
+      });
+    }
+  }
+
+  private timestampValueToMilliseconds(value: unknown): number | null {
+    if (value === null || value === undefined) return null;
+    const timestamp = Number(
+      typeof value === "object" && value !== null && "toString" in value
+        ? (value as { toString(): string }).toString()
+        : value,
+    );
+    return Number.isFinite(timestamp) ? timestamp : null;
+  }
+
+  private async persistEncryptedEventResponse(
+    message: WAMessage,
+    encrypted: proto.Message.IEncEventResponseMessage,
+  ): Promise<void> {
+    const eventKey = encrypted.eventCreationMessageKey;
+    if (!eventKey?.id || !eventKey.remoteJid) return;
+    const responder = await this.canonicalEventAuthorJid(message.key);
+    if (!responder) return;
+    const chatId = await this.canonicalEventChatJid(eventKey);
+    const rawData = serializeIncomingMessage(message);
+    const decrypted = await this.decryptStoredEventResponse(encrypted, message.key);
+    if (decrypted) {
+      this.persistResolvedEventResponse({
+        ...decrypted,
+        responseMessageId: message.key.id ?? null,
+        rawData,
+      });
+      return;
+    }
+
+    this.persistResolvedEventResponse(
+      {
+        eventMessageId: eventKey.id,
+        chatId,
+        responder,
+        response: "UNKNOWN",
+        timestamp: messageTimestampToMilliseconds(message.messageTimestamp, 0) || null,
+        responseMessageId: message.key.id ?? null,
+        extraGuestCount: null,
+        rawData,
+      },
+      false,
+    );
+  }
+
+  private async retryPendingEventResponses(eventMessageId?: string): Promise<void> {
+    const conditions = [
+      eq(eventResponsesTable.instanceId, this.instanceId),
+      eq(eventResponsesTable.response, "UNKNOWN"),
+    ];
+    if (eventMessageId) conditions.push(eq(eventResponsesTable.eventMessageId, eventMessageId));
+    const pending = db
+      .select()
+      .from(eventResponsesTable)
+      .where(and(...conditions))
+      .all();
+
+    for (const row of pending) {
+      if (!row.rawData) continue;
+      try {
+        const message = JSON.parse(row.rawData, BufferJSON.reviver) as WAMessage;
+        const content = unwrapMessageContent(message.message, { unwrapProtocolEdits: false });
+        const encrypted = content?.encEventResponseMessage;
+        if (!encrypted) continue;
+        const decrypted = await this.decryptStoredEventResponse(encrypted, message.key);
+        if (!decrypted) continue;
+        this.persistResolvedEventResponse({
+          ...decrypted,
+          responseMessageId: message.key.id ?? row.responseMessageId,
+          rawData: row.rawData,
+        });
+        if (row.responder !== decrypted.responder) {
+          db.delete(eventResponsesTable)
+            .where(
+              and(
+                eq(eventResponsesTable.instanceId, this.instanceId),
+                eq(eventResponsesTable.eventMessageId, row.eventMessageId),
+                eq(eventResponsesTable.responder, row.responder),
+                eq(eventResponsesTable.response, "UNKNOWN"),
+              ),
+            )
+            .run();
+        }
+      } catch (error) {
+        logger.debug(
+          { instanceId: this.instanceId, eventMessageId: row.eventMessageId, error },
+          "Unable to retry pending event response decryption",
+        );
+      }
     }
   }
 
@@ -2830,6 +3177,7 @@ export class BaileysAdapter implements ChannelAdapter {
       if (events["lid-mapping.update"]) {
         const mapping = events["lid-mapping.update"];
         this.contactStore.updateLidMapping(mapping.lid, mapping.pn);
+        await this.retryPendingEventResponses();
         logger.info(
           { instanceId: this.instanceId, lid: mapping.lid, pn: mapping.pn },
           "LID mapping updated",
@@ -2925,6 +3273,15 @@ export class BaileysAdapter implements ChannelAdapter {
 
           for (const message of messages) {
             const inserted = this.persistSourceMessage(message);
+            const content = unwrapMessageContent(message.message, {
+              unwrapProtocolEdits: false,
+            });
+            if (content?.encEventResponseMessage) {
+              await this.persistEncryptedEventResponse(message, content.encEventResponseMessage);
+            }
+            if (content?.eventMessage && message.key.id) {
+              await this.retryPendingEventResponses(message.key.id);
+            }
             const messageChatId = message.key.remoteJid ?? "";
             if (
               inserted &&
@@ -3009,6 +3366,13 @@ export class BaileysAdapter implements ChannelAdapter {
             };
             this.persistMessage(normalized, msg);
           }
+
+          if (unwrappedContent?.encEventResponseMessage) {
+            await this.persistEncryptedEventResponse(msg, unwrappedContent.encEventResponseMessage);
+          }
+          if (unwrappedContent?.eventMessage && msg.key.id) {
+            await this.retryPendingEventResponses(msg.key.id);
+          }
         }
 
         scheduleBaileysMessagesRead(this, data.type, data.messages, this.instanceId);
@@ -3039,7 +3403,7 @@ export class BaileysAdapter implements ChannelAdapter {
               .run();
           }
           if (update.key.id && update.key.remoteJid && update.update.eventResponses) {
-            this.persistEventResponses(update.key, update.update.eventResponses);
+            await this.persistEventResponses(update.key, update.update.eventResponses);
           }
         }
         const normalized = normalizeMessagesUpdate(this.instanceId, events["messages.update"]);
