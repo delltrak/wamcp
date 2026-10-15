@@ -77,41 +77,83 @@ async function callTool(tool: RegisteredTool, input: unknown): Promise<ToolResul
 
 describe("Baileys privacy tools", () => {
   it("calls the matching Baileys update method with each accepted value", async () => {
-    const { adapter, socket } = makeConnectedAdapter();
-    const tools = registerTools(adapter);
-    const updateTool = tools.get("wa_update_privacy");
-    expect(updateTool).toBeDefined();
+    const previous = process.env.WA_APP_STATE_WRITES_ENABLED;
+    process.env.WA_APP_STATE_WRITES_ENABLED = "true";
+    try {
+      const { adapter, socket } = makeConnectedAdapter();
+      const tools = registerTools(adapter);
+      const updateTool = tools.get("wa_update_privacy");
+      expect(updateTool).toBeDefined();
 
-    const updates: PrivacyUpdate[] = [
-      { setting: "lastSeen", value: "none" },
-      { setting: "online", value: "match_last_seen" },
-      { setting: "profilePic", value: "contact_blacklist" },
-      { setting: "status", value: "contacts" },
-      { setting: "readReceipts", value: "none" },
-      { setting: "groupAdd", value: "contact_blacklist" },
-      { setting: "calls", value: "known" },
-      { setting: "defaultDisappearingMode", value: 0 },
-      { setting: "defaultDisappearingMode", value: 86400 },
-      { setting: "defaultDisappearingMode", value: 604800 },
-      { setting: "defaultDisappearingMode", value: 7776000 },
-    ];
+      const updates: PrivacyUpdate[] = [
+        { setting: "lastSeen", value: "none" },
+        { setting: "online", value: "match_last_seen" },
+        { setting: "profilePic", value: "contact_blacklist" },
+        { setting: "status", value: "contacts" },
+        { setting: "readReceipts", value: "none" },
+        { setting: "groupAdd", value: "contact_blacklist" },
+        { setting: "calls", value: "known" },
+        { setting: "defaultDisappearingMode", value: 0 },
+        { setting: "defaultDisappearingMode", value: 86400 },
+        { setting: "defaultDisappearingMode", value: 604800 },
+        { setting: "defaultDisappearingMode", value: 7776000 },
+      ];
 
-    for (const update of updates) {
-      const result = await callTool(updateTool!, { instanceId: "synthetic-instance", ...update });
-      expect(result.isError).toBeUndefined();
+      for (const update of updates) {
+        const result = await callTool(updateTool!, { instanceId: "synthetic-instance", ...update });
+        expect(result.isError).toBeUndefined();
+      }
+
+      expect(socket.updateLastSeenPrivacy).toHaveBeenCalledWith("none");
+      expect(socket.updateOnlinePrivacy).toHaveBeenCalledWith("match_last_seen");
+      expect(socket.updateProfilePicturePrivacy).toHaveBeenCalledWith("contact_blacklist");
+      expect(socket.updateStatusPrivacy).toHaveBeenCalledWith("contacts");
+      expect(socket.updateReadReceiptsPrivacy).toHaveBeenCalledWith("none");
+      expect(socket.updateGroupsAddPrivacy).toHaveBeenCalledWith("contact_blacklist");
+      expect(socket.updateCallPrivacy).toHaveBeenCalledWith("known");
+      expect(socket.updateDefaultDisappearingMode).toHaveBeenNthCalledWith(1, 0);
+      expect(socket.updateDefaultDisappearingMode).toHaveBeenNthCalledWith(2, 86400);
+      expect(socket.updateDefaultDisappearingMode).toHaveBeenNthCalledWith(3, 604800);
+      expect(socket.updateDefaultDisappearingMode).toHaveBeenNthCalledWith(4, 7776000);
+    } finally {
+      if (previous === undefined) delete process.env.WA_APP_STATE_WRITES_ENABLED;
+      else process.env.WA_APP_STATE_WRITES_ENABLED = previous;
     }
+  });
 
-    expect(socket.updateLastSeenPrivacy).toHaveBeenCalledWith("none");
-    expect(socket.updateOnlinePrivacy).toHaveBeenCalledWith("match_last_seen");
-    expect(socket.updateProfilePicturePrivacy).toHaveBeenCalledWith("contact_blacklist");
-    expect(socket.updateStatusPrivacy).toHaveBeenCalledWith("contacts");
-    expect(socket.updateReadReceiptsPrivacy).toHaveBeenCalledWith("none");
-    expect(socket.updateGroupsAddPrivacy).toHaveBeenCalledWith("contact_blacklist");
-    expect(socket.updateCallPrivacy).toHaveBeenCalledWith("known");
-    expect(socket.updateDefaultDisappearingMode).toHaveBeenNthCalledWith(1, 0);
-    expect(socket.updateDefaultDisappearingMode).toHaveBeenNthCalledWith(2, 86400);
-    expect(socket.updateDefaultDisappearingMode).toHaveBeenNthCalledWith(3, 604800);
-    expect(socket.updateDefaultDisappearingMode).toHaveBeenNthCalledWith(4, 7776000);
+  it("allows other privacy updates but blocks the default disappearing mode when writes are disabled", async () => {
+    const previous = process.env.WA_APP_STATE_WRITES_ENABLED;
+    delete process.env.WA_APP_STATE_WRITES_ENABLED;
+    try {
+      const { adapter, socket } = makeConnectedAdapter();
+      const updates: PrivacyUpdate[] = [
+        { setting: "lastSeen", value: "none" },
+        { setting: "online", value: "match_last_seen" },
+        { setting: "profilePic", value: "contact_blacklist" },
+        { setting: "status", value: "contacts" },
+        { setting: "readReceipts", value: "none" },
+        { setting: "groupAdd", value: "contact_blacklist" },
+        { setting: "calls", value: "known" },
+      ];
+      for (const update of updates) {
+        await expect(adapter.updatePrivacy(update)).resolves.toBeUndefined();
+      }
+      await expect(
+        adapter.updatePrivacy({ setting: "defaultDisappearingMode", value: 86400 }),
+      ).rejects.toThrow("WA_APP_STATE_WRITES_ENABLED=true");
+
+      expect(socket.updateLastSeenPrivacy).toHaveBeenCalledWith("none");
+      expect(socket.updateOnlinePrivacy).toHaveBeenCalledWith("match_last_seen");
+      expect(socket.updateProfilePicturePrivacy).toHaveBeenCalledWith("contact_blacklist");
+      expect(socket.updateStatusPrivacy).toHaveBeenCalledWith("contacts");
+      expect(socket.updateReadReceiptsPrivacy).toHaveBeenCalledWith("none");
+      expect(socket.updateGroupsAddPrivacy).toHaveBeenCalledWith("contact_blacklist");
+      expect(socket.updateCallPrivacy).toHaveBeenCalledWith("known");
+      expect(socket.updateDefaultDisappearingMode).not.toHaveBeenCalled();
+    } finally {
+      if (previous === undefined) delete process.env.WA_APP_STATE_WRITES_ENABLED;
+      else process.env.WA_APP_STATE_WRITES_ENABLED = previous;
+    }
   });
 
   it("normalizes the Baileys privacy dictionary and forwards forceRefresh", async () => {

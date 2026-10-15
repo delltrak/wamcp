@@ -199,7 +199,7 @@ export function registerProfileTools(
     "wa_update_privacy",
     {
       description:
-        "Update Baileys account privacy settings: lastSeen, online, profilePic, status (About/profile text visibility), readReceipts, groupAdd, calls, or defaultDisappearingMode.",
+        "Update Baileys account privacy settings: lastSeen, online, profilePic, status (About/profile text visibility), readReceipts, groupAdd, calls, or defaultDisappearingMode. Updating defaultDisappearingMode is blocked unless WA_APP_STATE_WRITES_ENABLED=true; other privacy settings remain available when writes are disabled.",
       inputSchema: UpdatePrivacySchema,
     },
     async (params) => {

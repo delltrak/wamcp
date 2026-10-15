@@ -66,7 +66,7 @@ export const UpdatePrivacySchema = z
     setting: z
       .enum(PRIVACY_SETTINGS)
       .describe(
-        "Privacy setting: lastSeen, online, profilePic, status (About/profile text visibility), readReceipts, groupAdd, calls, or defaultDisappearingMode",
+        "Privacy setting: lastSeen, online, profilePic, status (About/profile text visibility), readReceipts, groupAdd, calls, or defaultDisappearingMode (requires WA_APP_STATE_WRITES_ENABLED=true)",
       ),
     value: z
       .union([z.string(), z.number()])

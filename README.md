@@ -331,7 +331,7 @@ this operation.
 | `wa_update_profile_name`    | Change display name     |
 | `wa_update_profile_status`  | Change status text      |
 | `wa_get_privacy_settings`   | Read account privacy    |
-| `wa_update_privacy`         | Update privacy settings |
+| `wa_update_privacy`         | Update privacy settings (`defaultDisappearingMode` is gated) |
 | `wa_get_profile_picture`    | Get a contact or group's profile picture URL (Baileys) |
 
 </details>
@@ -352,8 +352,8 @@ this operation.
 
 | Tool                     | Description           |
 | ------------------------ | --------------------- |
-| `wa_newsletter_follow`   | Follow a newsletter   |
-| `wa_newsletter_unfollow` | Unfollow a newsletter |
+| `wa_newsletter_follow`   | Follow a newsletter (gated write)   |
+| `wa_newsletter_unfollow` | Unfollow a newsletter (gated write) |
 | `wa_newsletter_send`     | Send to newsletter    |
 | `wa_create_newsletter` | Create a Channel (Baileys, gated write) |
 | `wa_get_newsletter_metadata` | Read Channel metadata (Baileys) |
@@ -417,6 +417,9 @@ Baileys rc14 has no quick-reply list API, and this server does not store quick-r
 | `groupAdd` | `all`, `contacts`, `contact_blacklist` |
 | `calls` | `all`, `known` |
 | `defaultDisappearingMode` | `0`, `86400`, `604800`, `7776000` seconds (remove, 24 hours, 7 days, 90 days) |
+
+Only `defaultDisappearingMode` is blocked unless `WA_APP_STATE_WRITES_ENABLED=true`; the other privacy
+settings remain available while writes are disabled.
 
 Baileys' `status` privacy category and `updateStatusPrivacy` control About/profile text visibility. Story audiences are configured separately through the status tools' `statusJidList`. `fetchPrivacySettings` does not return the default disappearing duration, so that duration can be updated but is not included in the read result.
 
@@ -689,7 +692,8 @@ Baileys blocks `wa_archive_chat`, `wa_pin_chat`, `wa_mute_chat`, `wa_delete_chat
 `wa_update_profile_name`, `wa_create_quick_reply`, `wa_edit_quick_reply`, and
 `wa_delete_quick_reply`, plus
 `wa_create_community`, `wa_community_link_group`, `wa_community_unlink_group`, `wa_leave_community`,
-`wa_create_newsletter`, `wa_newsletter_update_name`, `wa_newsletter_update_description`,
+`wa_newsletter_follow`, `wa_newsletter_unfollow`, `wa_create_newsletter`,
+`wa_newsletter_update_name`, `wa_newsletter_update_description`,
 `wa_newsletter_update_picture`, `wa_newsletter_react`, `wa_create_catalog_product`,
 `wa_update_catalog_product`, `wa_delete_catalog_products`, `wa_group_join_approval_mode`, and
 `wa_group_member_add_mode`, `wa_set_disappearing_messages`, `wa_create_group`,
@@ -697,8 +701,9 @@ Baileys blocks `wa_archive_chat`, `wa_pin_chat`, `wa_mute_chat`, `wa_delete_chat
 `wa_group_leave`, `wa_group_revoke_invite`, `wa_group_toggle_ephemeral`, `wa_group_join`,
 `wa_group_add_participants`, `wa_group_remove_participants`, `wa_group_promote`, `wa_group_demote`,
 `wa_group_update_picture`, `wa_group_remove_picture`, and `wa_group_handle_request` before they
-reach the socket. The flag covers account and server changes even when Baileys sends them through
-IQ or MEX queries instead of an app-state patch. Quick reply writes call Baileys
+reach the socket. `wa_update_privacy` is gated only when `setting` is `defaultDisappearingMode`;
+other privacy settings remain available. The flag covers account and server changes even when
+Baileys sends them through IQ or MEX queries instead of an app-state patch. Quick reply writes call Baileys
 `addOrEditQuickReply` or `removeQuickReply`, which use `chatModify` and `appPatch`; those changes can
 get the linked device removed. Set the variable to `true` only if you accept that risk. Read-only
 metadata, group invite metadata, pending-request listings, catalog, collection, order, blocklist,

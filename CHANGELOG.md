@@ -27,6 +27,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   result reads, and Baileys-only group helpers also return explicit Cloud API unsupported errors.
 - Group setting updates now apply both announcement and locked modes using their corresponding
   Baileys enum values.
+- Channel follow/unfollow and the `defaultDisappearingMode` privacy update are now blocked unless
+  `WA_APP_STATE_WRITES_ENABLED=true`; other privacy setting updates remain available with writes
+  disabled.
 - Test databases and media directories now use temporary per-run paths.
 
 ### Changed
