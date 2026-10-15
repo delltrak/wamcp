@@ -234,6 +234,41 @@ describe("Baileys message forwarding", () => {
     expect(Buffer.isBuffer(audio?.waveform)).toBe(true);
   });
 
+  it("persists and forwards the full incoming album parent protobuf", async () => {
+    const id = "incoming-album-parent";
+    const content = {
+      albumMessage: {
+        expectedImageCount: 2,
+        contextInfo: { stanzaId: "album-context" },
+      },
+    };
+    const original = sourceMessage(id, content);
+    const { adapter, socket } = createAdapter(
+      async () => ({ key: { id: "forwarded-album-parent" } }) as WAMessage,
+    );
+
+    const normalized = persistIncomingMessage(adapter, original);
+    expect(normalized.message.type).toBe("album");
+
+    const stored = db
+      .select({ rawData: messages.rawData, type: messages.type })
+      .from(messages)
+      .where(eq(messages.id, id))
+      .get();
+    expect(stored?.type).toBe("album");
+    expect(stored?.rawData).toBeTruthy();
+    const reconstructed = JSON.parse(stored!.rawData!, BufferJSON.reviver) as WAMessage;
+    expect(reconstructed.message).toEqual(content);
+
+    await expect(adapter.forwardMessage(DESTINATION, id, SOURCE_CHAT)).resolves.toMatchObject({
+      messageId: "forwarded-album-parent",
+      status: "sent",
+    });
+    const forwarded = (socket.sendMessage.mock.calls[0]?.[1] as { forward: WAMessage }).forward;
+    expect(forwarded.message).toEqual(content);
+    expect(forwarded.key).toMatchObject({ id, remoteJid: SOURCE_CHAT, fromMe: false });
+  });
+
   it("forwards a stored empty protobuf message body", async () => {
     const id = "stored-empty-request-phone-number";
     const original = sourceMessage(id, { requestPhoneNumberMessage: {} });

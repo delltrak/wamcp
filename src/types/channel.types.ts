@@ -24,7 +24,8 @@ export type MessageType =
   | "poll"
   | "reaction"
   | "sticker"
-  | "event";
+  | "event"
+  | "album";
 
 export interface BusinessLabel {
   id: string;

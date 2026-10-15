@@ -49,7 +49,9 @@ function messageForSend(jid: string, content: unknown): WAMessage {
   let message: WAMessage["message"];
   if (payload.image !== undefined) message = { imageMessage: {} };
   else if (payload.video !== undefined) message = { videoMessage: {} };
-  else if (typeof payload.text === "string") message = { conversation: payload.text };
+  else if (payload.album !== undefined) {
+    message = { albumMessage: payload.album as NonNullable<WAMessage["message"]>["albumMessage"] };
+  } else if (typeof payload.text === "string") message = { conversation: payload.text };
   else message = {};
   return {
     key: { remoteJid: jid, id: `issue80-${randomUUID()}`, fromMe: true },
@@ -556,6 +558,13 @@ describe("issue 80 feature completion", () => {
       caption: "One",
       albumParentKey: expect.any(Object),
     });
+    const albumRows = sqlite
+      .prepare(
+        "SELECT type, raw_data AS rawData FROM messages WHERE instance_id = ? ORDER BY rowid",
+      )
+      .all(instanceId) as Array<{ type: string; rawData: string | null }>;
+    expect(albumRows.map((row) => row.type)).toEqual(["album", "image", "image"]);
+    expect(albumRows[0]?.rawData).toContain('"albumMessage"');
 
     sqlite
       .prepare(

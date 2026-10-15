@@ -109,13 +109,28 @@ export interface EventWebhookDnsAddress {
 
 export type EventWebhookDnsResolver = (hostname: string) => Promise<EventWebhookDnsAddress[]>;
 
+export interface EventWebhookFailureDiagnostics {
+  httpStatus?: number;
+  errorName?: string;
+  errorMessage?: string;
+  errorCode?: string;
+}
+
 export class EventWebhookRetryableError extends Error {
   readonly retryAfterMs: number | undefined;
+  readonly httpStatus: number | undefined;
+  readonly errorName: string | undefined;
+  readonly errorMessage: string | undefined;
+  readonly errorCode: string | undefined;
 
-  constructor(retryAfterMs?: number) {
+  constructor(retryAfterMs?: number, diagnostics: EventWebhookFailureDiagnostics = {}) {
     super("Event webhook delivery failed transiently");
     this.name = "EventWebhookRetryableError";
     this.retryAfterMs = retryAfterMs;
+    this.httpStatus = diagnostics.httpStatus;
+    this.errorName = diagnostics.errorName;
+    this.errorMessage = diagnostics.errorMessage;
+    this.errorCode = diagnostics.errorCode;
   }
 }
 
@@ -888,6 +903,143 @@ export function createEventWebhookHeaders(
   return headers;
 }
 
+function redactedWebhookEndpoint(value: string): string {
+  try {
+    return new URL(value).origin;
+  } catch {
+    return "[invalid URL]";
+  }
+}
+
+function safeWebhookErrorMessage(value: string, destination?: EventWebhookDestination): string {
+  let message = value;
+  const destinationUrl = destination?.url;
+  if (destinationUrl) {
+    message = message.split(destinationUrl).join("[redacted URL]");
+    try {
+      const path = new URL(destinationUrl).pathname;
+      if (path.length > 1) {
+        message = message.split(path).join("[redacted path]");
+        try {
+          const decodedPath = decodeURIComponent(path);
+          if (decodedPath !== path && decodedPath.length > 1) {
+            message = message.split(decodedPath).join("[redacted path]");
+          }
+        } catch {
+          // Keep the encoded path redaction when it is not valid percent encoding.
+        }
+      }
+    } catch {
+      // Invalid destinations are rejected before delivery; continue scrubbing other secrets.
+    }
+  }
+  const secrets = [
+    destinationUrl,
+    destination?.secret,
+    ...Object.values(destination?.headers ?? {}),
+  ]
+    .filter((secret): secret is string => !!secret)
+    .sort((left, right) => right.length - left.length);
+  for (const secret of secrets) message = message.split(secret).join("[redacted]");
+  message = message.replace(/https?:\/\/[^\s"'<>]+/gi, "[redacted URL]");
+  message = message.replace(/([?&][^=\s]+)=([^&#\s]*)/g, "$1=[redacted]");
+  message = message.replace(/\b(Bearer|Basic)\s+[^\s,;]+/gi, "$1 [redacted]");
+  return message.trim().slice(0, 240) || "Event webhook delivery failed";
+}
+
+function readWebhookFailureDiagnostics(
+  error: unknown,
+  destination?: EventWebhookDestination,
+): EventWebhookFailureDiagnostics {
+  let candidate = error;
+  let selected: unknown = error;
+  let code: unknown;
+  const visited = new Set<unknown>();
+  while (candidate && !visited.has(candidate)) {
+    visited.add(candidate);
+    const candidateCode = errorProperty(candidate, "code");
+    const candidateName = errorProperty(candidate, "name");
+    if (code === undefined && typeof candidateCode === "string") code = candidateCode;
+    if (
+      typeof candidateCode === "string" ||
+      candidateName === "TimeoutError" ||
+      candidateName === "AbortError"
+    ) {
+      selected = candidate;
+    }
+    const cause = errorProperty(candidate, "cause");
+    if (cause === undefined) break;
+    candidate = cause;
+  }
+
+  const existingStatus = errorProperty(error, "httpStatus");
+  const statusCode = errorProperty(error, "statusCode");
+  const candidateStatus =
+    typeof existingStatus === "number"
+      ? existingStatus
+      : typeof statusCode === "number"
+        ? statusCode
+        : undefined;
+  const existingName = errorProperty(error, "errorName");
+  const sourceName = errorProperty(selected, "name");
+  const errorName =
+    typeof existingName === "string"
+      ? existingName
+      : typeof sourceName === "string"
+        ? sourceName
+        : "Error";
+  const existingMessage = errorProperty(error, "errorMessage");
+  const sourceMessage = errorProperty(selected, "message");
+  const message =
+    typeof existingMessage === "string"
+      ? existingMessage
+      : typeof sourceMessage === "string"
+        ? sourceMessage
+        : "Event webhook delivery failed";
+  const existingCode = errorProperty(error, "errorCode");
+  const errorCode = typeof existingCode === "string" ? existingCode : code;
+
+  return {
+    ...(typeof candidateStatus === "number" && candidateStatus >= 100 && candidateStatus <= 599
+      ? { httpStatus: candidateStatus }
+      : {}),
+    errorName: /^[A-Za-z][A-Za-z0-9_.-]{0,79}$/.test(errorName) ? errorName : "Error",
+    errorMessage: safeWebhookErrorMessage(message, destination),
+    ...(typeof errorCode === "string" && /^[A-Za-z0-9_.-]{1,80}$/.test(errorCode)
+      ? { errorCode }
+      : {}),
+  };
+}
+
+function addWebhookFailureDiagnostics<T extends Error>(
+  error: T,
+  diagnostics: EventWebhookFailureDiagnostics,
+): T {
+  Object.assign(error, diagnostics);
+  return error;
+}
+
+/** Safe structured fields shared by failed-attempt logs and their unit tests. */
+export function eventWebhookFailureLogData(
+  attempt: number | undefined,
+  error: unknown,
+  destination?: EventWebhookDestination,
+): Record<string, unknown> {
+  const diagnostics = readWebhookFailureDiagnostics(error, destination);
+  return {
+    ...(attempt !== undefined
+      ? { attempt: Number.isFinite(attempt) ? Math.max(1, Math.floor(attempt)) : 1 }
+      : {}),
+    ...(destination
+      ? { destinationId: destination.id, endpoint: redactedWebhookEndpoint(destination.url) }
+      : {}),
+    httpStatus: diagnostics.httpStatus ?? null,
+    errorName: diagnostics.errorName ?? "Error",
+    errorMessage: diagnostics.errorMessage ?? "Event webhook delivery failed",
+    errorCode: diagnostics.errorCode ?? null,
+  };
+}
+
 /** Make one bounded HTTP attempt. Rejections are generic so errors cannot leak URL secrets. */
 export async function postEventWebhook(
   destination: EventWebhookDestination,
@@ -904,9 +1056,17 @@ export async function postEventWebhook(
     try {
       pinned = await resolvePinnedWebhookAddress(url, resolveDns);
     } catch (error) {
-      if (error instanceof UnrecoverableError) throw error;
-      if (isRetryableNetworkError(error)) throw new EventWebhookRetryableError();
-      throw new UnrecoverableError("Event webhook delivery failed permanently");
+      const diagnostics = readWebhookFailureDiagnostics(error, destination);
+      if (error instanceof UnrecoverableError) {
+        throw addWebhookFailureDiagnostics(error, diagnostics);
+      }
+      if (isRetryableNetworkError(error)) {
+        throw new EventWebhookRetryableError(undefined, diagnostics);
+      }
+      throw addWebhookFailureDiagnostics(
+        new UnrecoverableError("Event webhook delivery failed permanently"),
+        diagnostics,
+      );
     }
     dispatcher = new Agent({
       connect: createPinnedWebhookConnectionOptions(
@@ -927,24 +1087,44 @@ export async function postEventWebhook(
         dispatcher,
       } as RequestInit & { dispatcher: Agent });
     } catch (error) {
-      if (isRetryableNetworkError(error)) throw new EventWebhookRetryableError();
-      throw new UnrecoverableError("Event webhook delivery failed permanently");
+      const diagnostics = readWebhookFailureDiagnostics(error, destination);
+      if (isRetryableNetworkError(error)) {
+        throw new EventWebhookRetryableError(undefined, diagnostics);
+      }
+      throw addWebhookFailureDiagnostics(
+        new UnrecoverableError("Event webhook delivery failed permanently"),
+        diagnostics,
+      );
     }
 
     if (response.status === 429 || response.status >= 500) {
       throw new EventWebhookRetryableError(
         parseEventWebhookRetryAfter(response.headers.get("retry-after")),
+        {
+          httpStatus: response.status,
+          errorName: "HttpError",
+          errorMessage: `HTTP ${response.status}`,
+        },
       );
     }
     if (!response.ok) {
-      throw new UnrecoverableError("Event webhook delivery failed permanently");
+      throw addWebhookFailureDiagnostics(
+        new UnrecoverableError("Event webhook delivery failed permanently"),
+        {
+          httpStatus: response.status,
+          errorName: "HttpError",
+          errorMessage: `HTTP ${response.status}`,
+        },
+      );
     }
   } catch (error) {
     if (error instanceof EventWebhookRetryableError || error instanceof UnrecoverableError) {
       throw error;
     }
-    // Never include the URL, response body, headers, or underlying network error.
-    throw new UnrecoverableError("Event webhook delivery failed permanently");
+    throw addWebhookFailureDiagnostics(
+      new UnrecoverableError("Event webhook delivery failed permanently"),
+      readWebhookFailureDiagnostics(error, destination),
+    );
   } finally {
     try {
       await response?.body?.cancel();
@@ -1004,8 +1184,12 @@ export class EventWebhookService {
         settings: { backoffStrategy: eventWebhookBackoffStrategy(this.config.retryDelayMs) },
       },
     );
-    this.worker.on("failed", () => {
-      logger.warn("Outgoing event webhook delivery attempt failed");
+    this.worker.on("failed", (job, error) => {
+      const destination = job ? destinations.get(job.data.destinationId) : undefined;
+      logger.warn(
+        eventWebhookFailureLogData(job?.attemptsMade, error, destination),
+        "Outgoing event webhook delivery attempt failed",
+      );
     });
     this.worker.on("error", () => {
       logger.error("Outgoing event webhook worker encountered an error");

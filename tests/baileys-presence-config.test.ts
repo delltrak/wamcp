@@ -82,7 +82,7 @@ describe("Baileys markOnlineOnConnect configuration", () => {
     await adapter.disconnect();
   });
 
-  it("loads stored event content for Baileys retries and filters by remote JID", async () => {
+  it("restores legacy stored message secrets for Baileys retries", async () => {
     const instanceId = `stored-message-${randomUUID()}`;
     activeInstanceId = instanceId;
     sqlite
@@ -91,7 +91,7 @@ describe("Baileys markOnlineOnConnect configuration", () => {
       )
       .run(instanceId, "Stored message test");
 
-    const messageSecret = Buffer.from([1, 2, 3, 4]);
+    const messageSecret = Buffer.alloc(32, 0x42);
     const outgoing = {
       key: { id: "sent-event", remoteJid: "5500000000001@s.whatsapp.net", fromMe: true },
       message: {
@@ -109,6 +109,16 @@ describe("Baileys markOnlineOnConnect configuration", () => {
       name: "Planning",
       start: "2027-01-15T08:00:00.000Z",
     });
+    const legacyRawData = JSON.stringify({
+      ...outgoing,
+      message: {
+        ...outgoing.message,
+        messageContextInfo: { messageSecret: messageSecret.toString("base64") },
+      },
+    });
+    sqlite
+      .prepare("UPDATE messages SET raw_data = ? WHERE instance_id = ? AND id = ?")
+      .run(legacyRawData, instanceId, "sent-event");
 
     const options = mocks.makeWASocket.mock.calls.at(-1)?.[0] as {
       getMessage: (key: {
@@ -125,6 +135,7 @@ describe("Baileys markOnlineOnConnect configuration", () => {
     });
 
     expect(restored?.eventMessage?.name).toBe("Planning");
+    expect(restored?.messageContextInfo?.messageSecret).toBeInstanceOf(Buffer);
     expect(restored?.messageContextInfo?.messageSecret).toEqual(messageSecret);
     await expect(
       options.getMessage({ id: "sent-event", remoteJid: "5500000000009@s.whatsapp.net" }),

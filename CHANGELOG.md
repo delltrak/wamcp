@@ -27,6 +27,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Event messages sent by this account now retain their binary protobuf message secret in local
+  history, allowing encrypted RSVP responses to decrypt after the send and later message upserts.
+- Outgoing event webhook delivery failures now log the attempt, HTTP status, safe error details,
+  and an endpoint with query strings removed.
+- Media albums now store the album parent as `album` and each child under its extracted media type.
 - On-demand history sync now decrypts and persists poll votes, retrying votes that arrive before
   their poll.
 - View-once audio now uses detected MP3, M4A, or OGG MIME types and only marks verified OGG/Opus

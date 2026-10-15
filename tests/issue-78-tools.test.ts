@@ -250,7 +250,7 @@ describe("issue 78 messaging and group features", () => {
     };
   }
 
-  it("decrypts incoming poll votes and reads aggregated results from persisted poll data", async () => {
+  it("decrypts poll votes when the stored poll secret uses legacy base64", async () => {
     const { instanceId, invoke, processEvents } = createFixture();
     const secret = Buffer.alloc(32, 0x77);
     const pollMessageId = "stored-poll-78";
@@ -274,6 +274,13 @@ describe("issue 78 messaging and group features", () => {
     expect(JSON.parse(savedPoll.raw_data, (key, value) => value)).toMatchObject({
       message: { messageContextInfo: expect.any(Object) },
     });
+    const legacyPoll = JSON.parse(savedPoll.raw_data) as {
+      message: { messageContextInfo: { messageSecret: unknown } };
+    };
+    legacyPoll.message.messageContextInfo.messageSecret = secret.toString("base64");
+    sqlite
+      .prepare("UPDATE messages SET raw_data = ? WHERE instance_id = ? AND id = ?")
+      .run(JSON.stringify(legacyPoll), instanceId, pollMessageId);
 
     const pollCreationMessageKey = {
       remoteJid: GROUP_ID,

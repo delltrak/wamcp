@@ -79,6 +79,7 @@ export const messages = sqliteTable(
         "reaction",
         "sticker",
         "event",
+        "album",
       ],
     }).notNull(),
     content: text("content"),
