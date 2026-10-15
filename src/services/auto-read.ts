@@ -90,14 +90,15 @@ export function scheduleIncomingMessageRead(
   scheduleReadReceipt(adapter, chatId, [messageId], instanceId, participant);
 }
 
-/** Only Baileys notify upserts represent newly arriving messages; history appends stay unread. */
+/** Schedule on-receive receipts for notify messages or append messages admitted for emission. */
 export function scheduleBaileysMessagesRead(
   adapter: Pick<ChannelAdapter, "markRead">,
   upsertType: string,
   messages: BaileysMessageKeyForRead[],
   instanceId: string,
 ): void {
-  if (upsertType !== "notify" || getAutoReadMode() !== "on_receive") return;
+  if ((upsertType !== "notify" && upsertType !== "append") || getAutoReadMode() !== "on_receive")
+    return;
 
   for (const message of messages) {
     scheduleIncomingMessageRead(

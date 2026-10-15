@@ -34,6 +34,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   socket so the existing reconnect flow can recover silent drops. A Baileys event buffer that stalls
   past `WA_BAILEYS_EVENT_BUFFER_STALL_MS` is flushed once, and the socket ends if buffering persists
   at the next check.
+- Baileys `on_receive` auto-read now marks only offline append messages that pass emission eligibility
+  and deduplication.
 - Poll votes on polls sent by this account now decrypt across LID/PN identity variants, including
   wrapped updates. Unresolved votes retry after poll storage and when results are read.
 - Event messages sent by this account now retain their binary protobuf message secret in local

@@ -87,36 +87,27 @@ describe("automatic read receipts", () => {
     const markRead = vi.fn().mockResolvedValue(undefined);
     const adapter = { markRead };
 
-    scheduleBaileysMessagesRead(adapter, "notify", [
-      {
-        key: {
-          remoteJid: "120363000000000000@g.us",
-          id: "group-incoming",
-          fromMe: false,
-          participant: "5511999999999@s.whatsapp.net",
-        },
-      },
-      {
-        key: {
-          remoteJid: "5511999999999@s.whatsapp.net",
-          id: "outgoing",
-          fromMe: true,
-        },
-      },
-      { key: { remoteJid: "status@broadcast", id: "status", fromMe: false } },
-      { key: { remoteJid: "123@broadcast", id: "broadcast", fromMe: false } },
-    ], "inst_test");
     scheduleBaileysMessagesRead(
       adapter,
-      "append",
+      "notify",
       [
         {
           key: {
-            remoteJid: "5511999999999@s.whatsapp.net",
-            id: "history-message",
+            remoteJid: "120363000000000000@g.us",
+            id: "group-incoming",
             fromMe: false,
+            participant: "5511999999999@s.whatsapp.net",
           },
         },
+        {
+          key: {
+            remoteJid: "5511999999999@s.whatsapp.net",
+            id: "outgoing",
+            fromMe: true,
+          },
+        },
+        { key: { remoteJid: "status@broadcast", id: "status", fromMe: false } },
+        { key: { remoteJid: "123@broadcast", id: "broadcast", fromMe: false } },
       ],
       "inst_test",
     );
@@ -168,7 +159,9 @@ describe("BaileysAdapter.markRead", () => {
   beforeEach(() => {
     instanceId = `test_${randomUUID()}`;
     const now = Date.now();
-    db.insert(instances).values({ id: instanceId, name: "test", createdAt: now, updatedAt: now }).run();
+    db.insert(instances)
+      .values({ id: instanceId, name: "test", createdAt: now, updatedAt: now })
+      .run();
   });
 
   afterEach(() => {
