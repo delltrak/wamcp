@@ -75,6 +75,7 @@ import type {
 import { useSqliteAuthState, clearAuthState } from "./baileys.auth.js";
 import { normalizePrivacySettings } from "./privacy.js";
 import { getWaVersion } from "./baileys.version.js";
+import { decodeEventResponseMessage, eventResponseName } from "./event-response.js";
 import { messageTimestampToMilliseconds, messageTimestampToSeconds } from "./message-timestamp.js";
 import { db, sqlite } from "../../db/client.js";
 import {
@@ -515,20 +516,6 @@ function labelOperationError(error: unknown): Error {
     return businessLabelsUnsupported();
   }
   return error instanceof Error ? error : new Error(message);
-}
-
-function eventResponseName(value: number | string | null | undefined): EventResponseStatus {
-  if (value === "GOING" || value === "NOT_GOING" || value === "MAYBE") return value;
-  switch (value) {
-    case 1:
-      return "GOING";
-    case 2:
-      return "NOT_GOING";
-    case 3:
-      return "MAYBE";
-    default:
-      return "UNKNOWN";
-  }
 }
 
 export class BaileysAdapter implements ChannelAdapter {
@@ -1147,6 +1134,8 @@ export class BaileysAdapter implements ChannelAdapter {
       if (![...chatAliases].some((alias) => eventChatAliases.has(alias))) return [];
       for (const alias of eventChatAliases) chatAliases.add(alias);
     }
+
+    await this.retryPendingEventResponses(eventMessageId);
 
     const rows = db
       .select()
@@ -3144,13 +3133,14 @@ export class BaileysAdapter implements ChannelAdapter {
     if (!responder || !eventCreator || !chatId) return null;
 
     try {
-      const decoded = decryptEventResponse(encrypted, {
+      const decrypted = decryptEventResponse(encrypted, {
         eventCreatorJid: eventCreator,
         eventMsgId: eventKey.id,
         eventEncKey: messageSecret,
         responderJid: responder,
       });
-      const timestampValue = decoded.timestampMs;
+      const decoded = decodeEventResponseMessage(decrypted);
+      const timestampValue = decoded?.timestampMs;
       const timestamp =
         timestampValue === null || timestampValue === undefined
           ? null
@@ -3159,9 +3149,12 @@ export class BaileysAdapter implements ChannelAdapter {
         eventMessageId: eventKey.id,
         chatId,
         responder,
-        response: eventResponseName(decoded.response),
+        response: eventResponseName(decoded?.response),
         timestamp: timestamp !== null && Number.isFinite(timestamp) ? timestamp : null,
-        extraGuestCount: decoded.extraGuestCount ?? null,
+        extraGuestCount:
+          typeof decoded?.extraGuestCount === "number" && Number.isFinite(decoded.extraGuestCount)
+            ? decoded.extraGuestCount
+            : null,
       };
     } catch (error) {
       logger.debug(
@@ -3270,10 +3263,11 @@ export class BaileysAdapter implements ChannelAdapter {
       const responder = await this.canonicalEventAuthorJid(responseKey);
       if (!responder) continue;
       const eventResponse = entry as proto.IEventResponse & {
-        senderTimestampMs?: number | { toString(): string } | null;
-        response?: proto.Message.IEventResponseMessage | null;
+        senderTimestampMs?: unknown;
+        response?: unknown;
+        eventResponse?: unknown;
       };
-      const responseMessage = eventResponse.response ?? entry.eventResponseMessage;
+      const responseMessage = decodeEventResponseMessage(eventResponse);
       const timestampValue =
         eventResponse.senderTimestampMs ?? responseMessage?.timestampMs ?? entry.timestampMs;
       const timestamp = this.timestampValueToMilliseconds(timestampValue);
@@ -3284,7 +3278,11 @@ export class BaileysAdapter implements ChannelAdapter {
         response: eventResponseName(responseMessage?.response),
         timestamp,
         responseMessageId: responseKey.id ?? null,
-        extraGuestCount: responseMessage?.extraGuestCount ?? null,
+        extraGuestCount:
+          typeof responseMessage?.extraGuestCount === "number" &&
+          Number.isFinite(responseMessage.extraGuestCount)
+            ? responseMessage.extraGuestCount
+            : null,
         rawData: JSON.stringify(entry, BufferJSON.replacer),
       });
     }
