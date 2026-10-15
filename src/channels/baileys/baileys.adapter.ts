@@ -10,7 +10,6 @@ import makeWASocket, {
   BufferJSON,
   downloadMediaMessage,
   decryptEventResponse,
-  getKeyAuthor,
   makeCacheableSignalKeyStore,
   type WASocket,
   type GroupParticipant as BaileysGroupParticipant,
@@ -2657,8 +2656,19 @@ export class BaileysAdapter implements ChannelAdapter {
 
   private async canonicalEventAuthorJid(key: WAMessageKey): Promise<string> {
     const meId = jidNormalizedUser(this.sock?.user?.id ?? "me");
-    const author = getKeyAuthor(key, meId);
-    return author ? this.resolveJidToPn(author) : "";
+    const author = key.fromMe ? meId : (key.participant ?? key.remoteJid);
+    if (!author) return "";
+
+    const normalizedAuthor = jidNormalizedUser(author);
+    const resolvedAuthor = await this.resolveJidToPn(normalizedAuthor);
+    if (!normalizedAuthor.endsWith("@lid") || !resolvedAuthor.endsWith("@lid")) {
+      return resolvedAuthor;
+    }
+    if (key.fromMe) return resolvedAuthor;
+
+    const alternateAuthor = key.participant ? key.participantAlt : key.remoteJidAlt;
+    const normalizedAlternate = alternateAuthor ? jidNormalizedUser(alternateAuthor) : "";
+    return normalizedAlternate.endsWith("@s.whatsapp.net") ? normalizedAlternate : resolvedAuthor;
   }
 
   private async getStoredEventMessage(key: WAMessageKey): Promise<WAMessage | null> {

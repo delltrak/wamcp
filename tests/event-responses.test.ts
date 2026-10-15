@@ -17,6 +17,8 @@ import { registerEventTools } from "../src/tools/event.tools.js";
 const ACCOUNT_ID = "5500000000002@s.whatsapp.net";
 const RESPONDER_ID = "5500000000009@s.whatsapp.net";
 const RESPONDER_LID = "9000000000009@lid";
+const UNRESOLVED_RESPONDER_ID = "5500000000011@s.whatsapp.net";
+const UNRESOLVED_RESPONDER_LID = "9000000000011@lid";
 const EVENT_CREATOR_ID = "5500000000010@s.whatsapp.net";
 const EVENT_CREATOR_LID = "9000000000010@lid";
 const GROUP_ID = "120363000000000001@g.us";
@@ -264,7 +266,6 @@ describe("Baileys event responses", () => {
       id: eventId,
       remoteJid: GROUP_ID,
       participant: EVENT_CREATOR_LID,
-      participantAlt: EVENT_CREATOR_ID,
       fromMe: false,
     };
     const encrypted = encryptEventResponse(
@@ -281,7 +282,6 @@ describe("Baileys event responses", () => {
     const responseKey: WAMessageKey = {
       remoteJid: GROUP_ID,
       participant: RESPONDER_LID,
-      participantAlt: RESPONDER_ID,
     };
 
     await upsert(processEvents, eventMessage(eventId, GROUP_ID, eventKey, messageSecret));
@@ -296,6 +296,109 @@ describe("Baileys event responses", () => {
         status: "MAYBE",
         response: "MAYBE",
         messageId: "group-response-lid",
+      },
+    ]);
+  });
+
+  it("uses participantAlt PN when an event response author LID has no mapping", async () => {
+    const { instanceId, adapter, processEvents } = createFixture();
+    const eventId = "group-event-unresolved-lid-author";
+    const messageSecret = Buffer.alloc(32, 0x31);
+    const eventKey: WAMessageKey = {
+      id: eventId,
+      remoteJid: GROUP_ID,
+      fromMe: true,
+    };
+    const encrypted = encryptEventResponse(
+      messageSecret,
+      eventId,
+      ACCOUNT_ID,
+      UNRESOLVED_RESPONDER_ID,
+      proto.Message.EventResponseMessage.create({
+        response: proto.Message.EventResponseMessage.EventResponseType.GOING,
+        timestampMs: 1_800_000_127_000,
+      }),
+      eventKey,
+    );
+    const responseKey: WAMessageKey = {
+      remoteJid: GROUP_ID,
+      participant: UNRESOLVED_RESPONDER_LID,
+      participantAlt: UNRESOLVED_RESPONDER_ID,
+    };
+
+    await upsert(processEvents, eventMessage(eventId, GROUP_ID, eventKey, messageSecret));
+    await upsert(
+      processEvents,
+      encryptedResponseMessage("group-response-unresolved-lid", GROUP_ID, responseKey, encrypted),
+    );
+
+    const stored = sqlite
+      .prepare(
+        "SELECT responder, response FROM event_responses WHERE instance_id = ? AND event_message_id = ?",
+      )
+      .get(instanceId, eventId) as { responder: string; response: string };
+    expect(stored).toEqual({ responder: UNRESOLVED_RESPONDER_ID, response: "GOING" });
+    await expect(adapter.getEventResponses(GROUP_ID, eventId)).resolves.toMatchObject([
+      {
+        participant: UNRESOLVED_RESPONDER_ID,
+        status: "GOING",
+        messageId: "group-response-unresolved-lid",
+      },
+    ]);
+  });
+
+  it("uses remoteJidAlt PN when an unresolved one-to-one author LID has no mapping", async () => {
+    const { instanceId, adapter, processEvents } = createFixture();
+    const eventId = "private-event-unresolved-lid-author";
+    const messageSecret = Buffer.alloc(32, 0x32);
+    const eventKey: WAMessageKey = {
+      id: eventId,
+      remoteJid: UNRESOLVED_RESPONDER_ID,
+      fromMe: true,
+    };
+    const encrypted = encryptEventResponse(
+      messageSecret,
+      eventId,
+      ACCOUNT_ID,
+      UNRESOLVED_RESPONDER_ID,
+      proto.Message.EventResponseMessage.create({
+        response: proto.Message.EventResponseMessage.EventResponseType.MAYBE,
+        timestampMs: 1_800_000_128_000,
+      }),
+      eventKey,
+    );
+    const responseKey: WAMessageKey = {
+      remoteJid: UNRESOLVED_RESPONDER_LID,
+      remoteJidAlt: UNRESOLVED_RESPONDER_ID,
+    };
+
+    await upsert(
+      processEvents,
+      eventMessage(eventId, UNRESOLVED_RESPONDER_ID, eventKey, messageSecret),
+    );
+    await upsert(
+      processEvents,
+      encryptedResponseMessage(
+        "private-response-unresolved-lid",
+        UNRESOLVED_RESPONDER_LID,
+        responseKey,
+        encrypted,
+      ),
+    );
+
+    const stored = sqlite
+      .prepare(
+        "SELECT responder, response FROM event_responses WHERE instance_id = ? AND event_message_id = ?",
+      )
+      .get(instanceId, eventId) as { responder: string; response: string };
+    expect(stored).toEqual({ responder: UNRESOLVED_RESPONDER_ID, response: "MAYBE" });
+    await expect(
+      adapter.getEventResponses(UNRESOLVED_RESPONDER_ID, eventId),
+    ).resolves.toMatchObject([
+      {
+        participant: UNRESOLVED_RESPONDER_ID,
+        status: "MAYBE",
+        messageId: "private-response-unresolved-lid",
       },
     ]);
   });

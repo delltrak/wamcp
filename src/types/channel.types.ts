@@ -504,22 +504,25 @@ export interface NormalizedEventResponseEvent {
   extraGuestCount?: number;
 }
 
-// Channel event names
-export type ChannelEvent =
-  | "message.received"
-  | "message.updated"
-  | "message.deleted"
-  | "message.reaction"
-  | "message.edited"
-  | "presence.updated"
-  | "chat.updated"
-  | "group.updated"
-  | "group.participants_changed"
-  | "contact.updated"
-  | "connection.changed"
-  | "call.received"
-  | "label.updated"
-  | "event.response";
+// Keep the runtime event list and compile-time union together so subscribers do not drift.
+export const CHANNEL_EVENTS = [
+  "message.received",
+  "message.updated",
+  "message.deleted",
+  "message.reaction",
+  "message.edited",
+  "presence.updated",
+  "chat.updated",
+  "group.updated",
+  "group.participants_changed",
+  "contact.updated",
+  "connection.changed",
+  "call.received",
+  "label.updated",
+  "event.response",
+] as const;
+
+export type ChannelEvent = (typeof CHANNEL_EVENTS)[number];
 
 // Event payload map
 export type ChannelEventPayload = {
