@@ -69,6 +69,7 @@ import type {
   EventResponse,
   PollResults,
   GroupJoinRequest,
+  EventResponseUnknownReason,
   EventResponseStatus,
   MessageSearchOptions,
   SendEventOptions,
@@ -81,6 +82,7 @@ import type {
 import { useSqliteAuthState, clearAuthState } from "./baileys.auth.js";
 import { normalizePrivacySettings } from "./privacy.js";
 import { getWaVersion } from "./baileys.version.js";
+import { decodeEventResponseMessage, eventResponseName } from "./event-response.js";
 import { messageTimestampToMilliseconds, messageTimestampToSeconds } from "./message-timestamp.js";
 import { db, sqlite } from "../../db/client.js";
 import {
@@ -140,11 +142,43 @@ const logger = createChildLogger({ service: "baileys-adapter" });
 const mediaService = new MediaService();
 const DEFAULT_STATUS_MAX_RECIPIENTS = 256;
 const STATUS_BROADCAST_JID = "status@broadcast";
+const MAX_EVENT_RESPONSE_DECRYPT_ATTEMPTS = 16;
 const APP_STATE_WRITES_DISABLED_ERROR =
   "WhatsApp account, server, and app-state writes are disabled because changes can get this linked device removed (see issue #71). Set WA_APP_STATE_WRITES_ENABLED=true to enable at your own risk.";
 
+interface EventResponseJidCandidate {
+  jid: string;
+  kind: string;
+}
+
+interface DecryptedStoredEventResponse {
+  eventMessageId: string;
+  chatId: string;
+  responder: string;
+  response: EventResponseStatus;
+  timestamp: number | null;
+  extraGuestCount: number | null;
+}
+
+type StoredEventResponseDecryptResult =
+  | { status: "decrypted"; value: DecryptedStoredEventResponse; attemptedCombinations: number }
+  | { status: "failed"; attemptedCombinations: number }
+  | { status: "missing" };
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
+}
+
+function isStoredEventResponseEntry(value: unknown): value is Record<string, unknown> {
+  if (!isRecord(value)) return false;
+  return [
+    "eventResponseMessageKey",
+    "response",
+    "eventResponseMessage",
+    "event_response_message",
+    "eventResponse",
+    "event_response",
+  ].some((field) => Object.hasOwn(value, field));
 }
 
 function isBinaryNode(value: unknown): value is BinaryNode {
@@ -558,20 +592,6 @@ function labelOperationError(error: unknown): Error {
   return error instanceof Error ? error : new Error(message);
 }
 
-function eventResponseName(value: number | string | null | undefined): EventResponseStatus {
-  if (value === "GOING" || value === "NOT_GOING" || value === "MAYBE") return value;
-  switch (value) {
-    case 1:
-      return "GOING";
-    case 2:
-      return "NOT_GOING";
-    case 3:
-      return "MAYBE";
-    default:
-      return "UNKNOWN";
-  }
-}
-
 export class BaileysAdapter implements ChannelAdapter {
   private sock: WASocket | null = null;
   private readonly contactStore: ContactStore;
@@ -583,6 +603,8 @@ export class BaileysAdapter implements ChannelAdapter {
   private reconnectAttempt = 0;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private saveCreds: (() => Promise<void>) | null = null;
+  private authMeId: string | undefined;
+  private authMeLid: string | undefined;
 
   private readonly autoReconnect: boolean;
   private readonly appStateWritesEnabled: boolean;
@@ -885,6 +907,8 @@ export class BaileysAdapter implements ChannelAdapter {
 
     const { state, saveCreds } = await useSqliteAuthState(this.instanceId);
     this.saveCreds = saveCreds;
+    this.authMeId = state.creds.me?.id;
+    this.authMeLid = state.creds.me?.lid;
 
     const { version } = await getWaVersion();
 
@@ -1206,6 +1230,9 @@ export class BaileysAdapter implements ChannelAdapter {
       for (const alias of eventChatAliases) chatAliases.add(alias);
     }
 
+    // Retry by event ID so stored rows under either LID or PN chat aliases are included.
+    await this.retryPendingEventResponses(eventMessageId);
+
     const rows = db
       .select()
       .from(eventResponsesTable)
@@ -1236,6 +1263,8 @@ export class BaileysAdapter implements ChannelAdapter {
           contact?.phone ??
           (participant.endsWith("@s.whatsapp.net") ? participant.slice(0, -15) : undefined);
         const status = eventResponseName(row.response);
+        const unknownDetails =
+          status === "UNKNOWN" ? await this.getUnknownEventResponseDetails(row) : {};
         return {
           participant,
           responder: participant,
@@ -1245,6 +1274,7 @@ export class BaileysAdapter implements ChannelAdapter {
           timestamp: row.timestamp,
           messageId: row.responseMessageId,
           ...(row.extraGuestCount === null ? {} : { extraGuestCount: row.extraGuestCount }),
+          ...unknownDetails,
         };
       }),
     );
@@ -1961,6 +1991,7 @@ export class BaileysAdapter implements ChannelAdapter {
     chatId: string,
     duration: 0 | 86400 | 604800 | 7776000,
   ): Promise<void> {
+    this.requireAppStateWritesEnabled();
     const sock = this.getSock();
     const jid = this.normalizeStatusRecipient(chatId);
     if (!jid) {
@@ -1976,6 +2007,7 @@ export class BaileysAdapter implements ChannelAdapter {
   // ---- Groups ----
 
   async createGroup(name: string, participants: string[]): Promise<GroupResponse> {
+    this.requireAppStateWritesEnabled();
     const sock = this.getSock();
     const jids = participants.map((p) => this.normalizeJid(p));
     const result = await sock.groupCreate(name, jids);
@@ -1983,6 +2015,7 @@ export class BaileysAdapter implements ChannelAdapter {
   }
 
   async modifyGroup(groupId: string, modification: GroupModification): Promise<void> {
+    this.requireAppStateWritesEnabled();
     const sock = this.getSock();
     const jid = normalizeGroupJid(groupId);
 
@@ -2023,6 +2056,7 @@ export class BaileysAdapter implements ChannelAdapter {
     participants: string[],
     action: ParticipantAction,
   ): Promise<void> {
+    this.requireAppStateWritesEnabled();
     const sock = this.getSock();
     const jid = normalizeGroupJid(groupId);
     const jids = participants.map((p) => this.normalizeJid(p));
@@ -2110,6 +2144,7 @@ export class BaileysAdapter implements ChannelAdapter {
   }
 
   async updateGroupPicture(groupId: string, image: string): Promise<void> {
+    this.requireAppStateWritesEnabled();
     const sock = this.getSock();
     const jid = normalizeGroupJid(groupId);
     await this.requireGroupPictureAdmin(sock, jid, "update");
@@ -2122,6 +2157,7 @@ export class BaileysAdapter implements ChannelAdapter {
   }
 
   async removeGroupPicture(groupId: string): Promise<void> {
+    this.requireAppStateWritesEnabled();
     const sock = this.getSock();
     const jid = normalizeGroupJid(groupId);
     await this.requireGroupPictureAdmin(sock, jid, "remove");
@@ -2219,6 +2255,7 @@ export class BaileysAdapter implements ChannelAdapter {
   }
 
   async joinGroup(inviteCode: string): Promise<string> {
+    this.requireAppStateWritesEnabled();
     const sock = this.getSock();
     const groupId = await sock.groupAcceptInvite(normalizeGroupInviteCode(inviteCode));
     return groupId ?? "";
@@ -2263,6 +2300,7 @@ export class BaileysAdapter implements ChannelAdapter {
     participantJid: string,
     action: "approve" | "reject",
   ): Promise<void> {
+    this.requireAppStateWritesEnabled();
     const sock = this.getSock();
     const jid = normalizeGroupJid(groupId);
     const participant = this.normalizeJid(participantJid);
@@ -3302,55 +3340,212 @@ export class BaileysAdapter implements ChannelAdapter {
     }
   }
 
+  private async eventResponseJidCandidates(
+    key: WAMessageKey,
+    kind: "creator" | "responder",
+    supplementalKeys: WAMessageKey[] = [],
+  ): Promise<EventResponseJidCandidate[]> {
+    const candidates: EventResponseJidCandidate[] = [];
+    const seeds: EventResponseJidCandidate[] = [];
+    const seen = new Set<string>();
+    const add = (jid: string | null | undefined, candidateKind: string): void => {
+      if (!jid) return;
+      try {
+        const normalized = jidNormalizedUser(jid);
+        if (
+          !normalized ||
+          normalized.endsWith("@g.us") ||
+          normalized.endsWith("@broadcast") ||
+          seen.has(normalized)
+        ) {
+          return;
+        }
+        seen.add(normalized);
+        const candidate = { jid: normalized, kind: candidateKind };
+        candidates.push(candidate);
+        seeds.push(candidate);
+      } catch {
+        // Malformed stored JIDs are ignored; remaining aliases may still be usable.
+      }
+    };
+
+    const addOwnAccount = (): void => {
+      const user = this.sock?.user;
+      const sockId = user?.id;
+      add(sockId, sockId?.endsWith("@lid") ? "own_lid" : "own_pn");
+      add(user?.phoneNumber, "own_phone_number");
+      const authMeId = this.authMeId;
+      add(authMeId, authMeId?.endsWith("@lid") ? "auth_creds_me_lid" : "auth_creds_me_id");
+      add(user?.lid, "own_lid");
+      add(this.authMeLid, "auth_creds_me_lid");
+    };
+
+    const addKeyAuthor = (
+      authorKey: WAMessageKey,
+      keyKind: string,
+      includeFromMeFields = false,
+    ): void => {
+      if (authorKey.fromMe) {
+        addOwnAccount();
+        if (!includeFromMeFields) return;
+      }
+
+      const isGroup =
+        authorKey.remoteJid?.endsWith("@g.us") || authorKey.remoteJidAlt?.endsWith("@g.us");
+      const fields = isGroup
+        ? ([
+            [authorKey.participant, `${keyKind}_participant`],
+            [authorKey.participantAlt, `${keyKind}_participant_alt`],
+            [authorKey.remoteJid, `${keyKind}_remote_jid`],
+            [authorKey.remoteJidAlt, `${keyKind}_remote_jid_alt`],
+          ] as const)
+        : ([
+            [authorKey.remoteJid, `${keyKind}_remote_jid`],
+            [authorKey.remoteJidAlt, `${keyKind}_remote_jid_alt`],
+            [authorKey.participant, `${keyKind}_participant`],
+            [authorKey.participantAlt, `${keyKind}_participant_alt`],
+          ] as const);
+      for (const [jid, fieldKind] of fields) add(jid, fieldKind);
+    };
+
+    addKeyAuthor(key, `${kind}_stored_key`);
+    for (const [index, supplementalKey] of supplementalKeys.entries()) {
+      addKeyAuthor(supplementalKey, `${kind}_creation_key_${index}`, true);
+    }
+
+    const lidMapping = this.sock?.signalRepository?.lidMapping;
+    for (const seed of [...seeds]) {
+      if (seed.jid.endsWith("@lid") && lidMapping?.getPNForLID) {
+        try {
+          add(await lidMapping.getPNForLID(seed.jid), `${seed.kind}_mapped_pn`);
+        } catch {
+          // Mapping is best effort; retain the stored identity candidate.
+        }
+      } else if (seed.jid.endsWith("@s.whatsapp.net") && lidMapping?.getLIDForPN) {
+        try {
+          add(await lidMapping.getLIDForPN(seed.jid), `${seed.kind}_mapped_lid`);
+        } catch {
+          // Mapping is best effort; retain the stored identity candidate.
+        }
+      }
+    }
+
+    return candidates;
+  }
+
   private async decryptStoredEventResponse(
     encrypted: proto.Message.IEncEventResponseMessage,
     responseKey: WAMessageKey,
-  ): Promise<{
-    eventMessageId: string;
-    chatId: string;
-    responder: string;
-    response: EventResponseStatus;
-    timestamp: number | null;
-    extraGuestCount: number | null;
-  } | null> {
+  ): Promise<StoredEventResponseDecryptResult> {
     const eventKey = encrypted.eventCreationMessageKey;
-    if (!eventKey?.id) return null;
+    if (!eventKey?.id) return { status: "missing" };
     const storedEvent = await this.getStoredEventMessage(eventKey);
     const messageSecret = storedEvent?.message?.messageContextInfo?.messageSecret;
-    if (!storedEvent?.key || !messageSecret) return null;
+    if (!storedEvent?.key || !messageSecret) return { status: "missing" };
 
-    const responder = await this.canonicalEventAuthorJid(responseKey);
-    const eventCreator = await this.canonicalEventAuthorJid(storedEvent.key);
+    const creatorCandidates = await this.eventResponseJidCandidates(storedEvent.key, "creator", [
+      eventKey,
+    ]);
+    const responderCandidates = await this.eventResponseJidCandidates(responseKey, "responder");
+    const responder =
+      (await this.canonicalEventAuthorJid(responseKey)) ||
+      responderCandidates.find((candidate) => candidate.jid.endsWith("@s.whatsapp.net"))?.jid ||
+      responderCandidates[0]?.jid ||
+      "";
     const chatId = await this.canonicalEventChatJid(storedEvent.key);
-    if (!responder || !eventCreator || !chatId) return null;
-
-    try {
-      const decoded = decryptEventResponse(encrypted, {
-        eventCreatorJid: eventCreator,
-        eventMsgId: eventKey.id,
-        eventEncKey: messageSecret,
-        responderJid: responder,
-      });
-      const timestampValue = decoded.timestampMs;
-      const timestamp =
-        timestampValue === null || timestampValue === undefined
-          ? null
-          : Number(timestampValue.toString());
-      return {
-        eventMessageId: eventKey.id,
-        chatId,
-        responder,
-        response: eventResponseName(decoded.response),
-        timestamp: timestamp !== null && Number.isFinite(timestamp) ? timestamp : null,
-        extraGuestCount: decoded.extraGuestCount ?? null,
-      };
-    } catch (error) {
+    if (!responder || !chatId) {
       logger.debug(
-        { instanceId: this.instanceId, eventMessageId: eventKey.id, error },
+        {
+          instanceId: this.instanceId,
+          eventMessageId: eventKey.id,
+          attempts: 0,
+          candidateJidsTried: { creator: [], responder: [] },
+        },
         "Unable to decrypt event response",
       );
-      return null;
+      return { status: "failed", attemptedCombinations: 0 };
     }
+
+    let attemptedCombinations = 0;
+    const triedCreatorIndices = new Set<number>();
+    const triedResponderIndices = new Set<number>();
+    for (const [creatorCandidateIndex, creatorCandidate] of creatorCandidates.entries()) {
+      for (const [responderCandidateIndex, responderCandidate] of responderCandidates.entries()) {
+        if (attemptedCombinations >= MAX_EVENT_RESPONSE_DECRYPT_ATTEMPTS) break;
+        attemptedCombinations += 1;
+        triedCreatorIndices.add(creatorCandidateIndex);
+        triedResponderIndices.add(responderCandidateIndex);
+        try {
+          const decrypted = decryptEventResponse(encrypted, {
+            eventCreatorJid: creatorCandidate.jid,
+            eventMsgId: eventKey.id,
+            eventEncKey: messageSecret,
+            responderJid: responderCandidate.jid,
+          });
+          const decoded = decodeEventResponseMessage(decrypted);
+          const timestampValue = decoded?.timestampMs;
+          const timestamp =
+            timestampValue === null || timestampValue === undefined
+              ? null
+              : Number(timestampValue.toString());
+          if (attemptedCombinations > 1) {
+            logger.debug(
+              {
+                instanceId: this.instanceId,
+                eventMessageId: eventKey.id,
+                attempts: attemptedCombinations,
+                creatorCandidateIndex,
+                creatorKind: creatorCandidate.kind,
+                creatorJid: creatorCandidate.jid,
+                responderCandidateIndex,
+                responderKind: responderCandidate.kind,
+                responderJid: responderCandidate.jid,
+              },
+              "Decrypted event response with an alternate JID combination",
+            );
+          }
+          return {
+            status: "decrypted",
+            attemptedCombinations,
+            value: {
+              eventMessageId: eventKey.id,
+              chatId,
+              responder,
+              response: eventResponseName(decoded?.response),
+              timestamp: timestamp !== null && Number.isFinite(timestamp) ? timestamp : null,
+              extraGuestCount:
+                typeof decoded?.extraGuestCount === "number" &&
+                Number.isFinite(decoded.extraGuestCount)
+                  ? decoded.extraGuestCount
+                  : null,
+            },
+          };
+        } catch {
+          // A different LID/PN combination may match the encrypted payload.
+        }
+      }
+      if (attemptedCombinations >= MAX_EVENT_RESPONSE_DECRYPT_ATTEMPTS) break;
+    }
+
+    logger.debug(
+      {
+        instanceId: this.instanceId,
+        eventMessageId: eventKey.id,
+        attempts: attemptedCombinations,
+        candidateJidsTried: {
+          creator: [...triedCreatorIndices].map((index) => ({
+            index,
+            ...creatorCandidates[index],
+          })),
+          responder: [...triedResponderIndices].map((index) => ({
+            index,
+            ...responderCandidates[index],
+          })),
+        },
+      },
+      "Unable to decrypt event response",
+    );
+    return { status: "failed", attemptedCombinations };
   }
 
   private persistResolvedEventResponse(
@@ -3377,6 +3572,10 @@ export class BaileysAdapter implements ChannelAdapter {
         ),
       )
       .get();
+
+    if (previous && previous.response !== "UNKNOWN" && response.response === "UNKNOWN") {
+      return;
+    }
 
     if (
       previous &&
@@ -3451,10 +3650,11 @@ export class BaileysAdapter implements ChannelAdapter {
       const responder = await this.canonicalEventAuthorJid(responseKey);
       if (!responder) continue;
       const eventResponse = entry as proto.IEventResponse & {
-        senderTimestampMs?: number | { toString(): string } | null;
-        response?: proto.Message.IEventResponseMessage | null;
+        senderTimestampMs?: unknown;
+        response?: unknown;
+        eventResponse?: unknown;
       };
-      const responseMessage = eventResponse.response ?? entry.eventResponseMessage;
+      const responseMessage = decodeEventResponseMessage(eventResponse);
       const timestampValue =
         eventResponse.senderTimestampMs ?? responseMessage?.timestampMs ?? entry.timestampMs;
       const timestamp = this.timestampValueToMilliseconds(timestampValue);
@@ -3465,7 +3665,11 @@ export class BaileysAdapter implements ChannelAdapter {
         response: eventResponseName(responseMessage?.response),
         timestamp,
         responseMessageId: responseKey.id ?? null,
-        extraGuestCount: responseMessage?.extraGuestCount ?? null,
+        extraGuestCount:
+          typeof responseMessage?.extraGuestCount === "number" &&
+          Number.isFinite(responseMessage.extraGuestCount)
+            ? responseMessage.extraGuestCount
+            : null,
         rawData: JSON.stringify(entry, BufferJSON.replacer),
       });
     }
@@ -3492,9 +3696,9 @@ export class BaileysAdapter implements ChannelAdapter {
     const chatId = await this.canonicalEventChatJid(eventKey);
     const rawData = serializeIncomingMessage(message);
     const decrypted = await this.decryptStoredEventResponse(encrypted, message.key);
-    if (decrypted) {
+    if (decrypted.status === "decrypted") {
       this.persistResolvedEventResponse({
-        ...decrypted,
+        ...decrypted.value,
         responseMessageId: message.key.id ?? null,
         rawData,
       });
@@ -3531,18 +3735,69 @@ export class BaileysAdapter implements ChannelAdapter {
     for (const row of pending) {
       if (!row.rawData) continue;
       try {
-        const message = JSON.parse(row.rawData, BufferJSON.reviver) as WAMessage;
+        const stored: unknown = JSON.parse(row.rawData, BufferJSON.reviver);
+        if (isStoredEventResponseEntry(stored)) {
+          const responseKey = isRecord(stored.eventResponseMessageKey)
+            ? (stored.eventResponseMessageKey as WAMessageKey)
+            : undefined;
+          const decoded = decodeEventResponseMessage(stored);
+          const responderFromKey = responseKey
+            ? await this.canonicalEventAuthorJid(responseKey)
+            : "";
+          const responder =
+            responderFromKey ||
+            (await this.canonicalEventAuthorJid({
+              remoteJid: row.chatId,
+              participant: row.responder,
+              fromMe: false,
+            }));
+          if (!responder) continue;
+          const chatFromKey = responseKey ? await this.canonicalEventChatJid(responseKey) : "";
+          const chatId = chatFromKey || (await this.resolveJidToPn(row.chatId));
+          this.persistResolvedEventResponse({
+            eventMessageId: row.eventMessageId,
+            chatId,
+            responder,
+            response: eventResponseName(decoded?.response),
+            timestamp: this.timestampValueToMilliseconds(
+              stored.senderTimestampMs ?? decoded?.timestampMs ?? stored.timestampMs,
+            ),
+            responseMessageId: responseKey?.id ?? row.responseMessageId,
+            extraGuestCount:
+              typeof decoded?.extraGuestCount === "number" &&
+              Number.isFinite(decoded.extraGuestCount)
+                ? decoded.extraGuestCount
+                : null,
+            rawData: row.rawData,
+          });
+          if (row.responder !== responder) {
+            db.delete(eventResponsesTable)
+              .where(
+                and(
+                  eq(eventResponsesTable.instanceId, this.instanceId),
+                  eq(eventResponsesTable.eventMessageId, row.eventMessageId),
+                  eq(eventResponsesTable.responder, row.responder),
+                  eq(eventResponsesTable.response, "UNKNOWN"),
+                ),
+              )
+              .run();
+          }
+          continue;
+        }
+
+        if (!isRecord(stored)) continue;
+        const message = stored as unknown as WAMessage;
         const content = unwrapMessageContent(message.message, { unwrapProtocolEdits: false });
         const encrypted = content?.encEventResponseMessage;
         if (!encrypted) continue;
         const decrypted = await this.decryptStoredEventResponse(encrypted, message.key);
-        if (!decrypted) continue;
+        if (decrypted.status !== "decrypted") continue;
         this.persistResolvedEventResponse({
-          ...decrypted,
+          ...decrypted.value,
           responseMessageId: message.key.id ?? row.responseMessageId,
           rawData: row.rawData,
         });
-        if (row.responder !== decrypted.responder) {
+        if (row.responder !== decrypted.value.responder) {
           db.delete(eventResponsesTable)
             .where(
               and(
@@ -3561,6 +3816,88 @@ export class BaileysAdapter implements ChannelAdapter {
         );
       }
     }
+  }
+
+  private async getUnknownEventResponseDetails(row: {
+    eventMessageId: string;
+    rawData: string | null;
+  }): Promise<{
+    unknownReason: EventResponseUnknownReason;
+    recoverable: boolean;
+    attemptedCombinations?: number;
+  }> {
+    const details = (unknownReason: EventResponseUnknownReason) => ({
+      unknownReason,
+      recoverable: unknownReason !== "missing_payload" && unknownReason !== "missing_event_secret",
+    });
+    if (!row.rawData) return details("missing_payload");
+
+    let stored: unknown;
+    try {
+      stored = JSON.parse(row.rawData, BufferJSON.reviver);
+    } catch {
+      return details("unrecognized_response");
+    }
+
+    if (isStoredEventResponseEntry(stored)) {
+      const unknownReason =
+        eventResponseName(decodeEventResponseMessage(stored)?.response) === "UNKNOWN"
+          ? "unrecognized_response"
+          : "decrypt_failed";
+      return {
+        ...details(unknownReason),
+        ...(unknownReason === "decrypt_failed" ? { attemptedCombinations: 0 } : {}),
+      };
+    }
+    if (!isRecord(stored)) return details("unrecognized_response");
+
+    const message = stored as unknown as WAMessage;
+    const content = unwrapMessageContent(message.message, { unwrapProtocolEdits: false });
+    const encrypted = content?.encEventResponseMessage as
+      proto.Message.IEncEventResponseMessage | undefined;
+    if (!encrypted?.eventCreationMessageKey?.id) return details("unrecognized_response");
+
+    const event = db
+      .select({ type: messagesTable.type, rawData: messagesTable.rawData })
+      .from(messagesTable)
+      .where(
+        and(
+          eq(messagesTable.instanceId, this.instanceId),
+          eq(messagesTable.id, encrypted.eventCreationMessageKey.id),
+        ),
+      )
+      .get();
+    if (!event || event.type !== "event" || !event.rawData) {
+      return details("missing_event_secret");
+    }
+
+    try {
+      const eventMessage = JSON.parse(event.rawData, BufferJSON.reviver) as WAMessage;
+      if (!eventMessage.message?.messageContextInfo?.messageSecret) {
+        return details("missing_event_secret");
+      }
+    } catch {
+      return details("missing_event_secret");
+    }
+
+    const decrypted = await this.decryptStoredEventResponse(encrypted, message.key);
+    if (decrypted.status === "failed") {
+      return {
+        ...details("decrypt_failed"),
+        attemptedCombinations: decrypted.attemptedCombinations,
+      };
+    }
+    if (decrypted.status === "missing") {
+      return { ...details("decrypt_failed"), attemptedCombinations: 0 };
+    }
+    const unknownReason =
+      decrypted.value.response === "UNKNOWN" ? "unrecognized_response" : "decrypt_failed";
+    return {
+      ...details(unknownReason),
+      ...(unknownReason === "decrypt_failed"
+        ? { attemptedCombinations: decrypted.attemptedCombinations }
+        : {}),
+    };
   }
 
   private persistChats(chats: Array<{ id?: string | null; name?: string | null }>): void {

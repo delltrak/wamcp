@@ -237,7 +237,7 @@ export function registerChatTools(
     "wa_set_disappearing_messages",
     {
       description:
-        "Set disappearing messages for a private chat: off, 24 hours, 7 days, or 90 days. Baileys sends the protocol control message; Cloud API does not support this operation.",
+        "Set disappearing messages for a private chat: off, 24 hours, 7 days, or 90 days. This account/server change is blocked unless WA_APP_STATE_WRITES_ENABLED=true. Baileys sends the protocol control message; Cloud API does not support this operation.",
       inputSchema: SetDisappearingMessagesSchema,
     },
     async (params) => {

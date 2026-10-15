@@ -119,6 +119,30 @@ function makeSocket(overrides: Record<string, unknown> = {}) {
     communityLinkGroup: vi.fn(async () => undefined),
     communityUnlinkGroup: vi.fn(async () => undefined),
     communityLeave: vi.fn(async () => undefined),
+    groupMetadata: vi.fn(async () => ({
+      id: GROUP_JID,
+      subject: "Group",
+      participants: [{ id: CONTACT_JID, admin: "admin" }],
+    })),
+    groupFetchAllParticipating: vi.fn(async () => ({
+      [GROUP_JID]: {
+        id: GROUP_JID,
+        subject: "Group",
+        participants: [{ id: CONTACT_JID, admin: "admin" }],
+      },
+    })),
+    groupInviteCode: vi.fn(async () => "AbCdEfGh"),
+    groupCreate: vi.fn(async () => ({ id: GROUP_JID })),
+    groupUpdateSubject: vi.fn(async () => undefined),
+    groupUpdateDescription: vi.fn(async () => undefined),
+    groupSettingUpdate: vi.fn(async () => undefined),
+    groupLeave: vi.fn(async () => undefined),
+    groupRevokeInvite: vi.fn(async () => undefined),
+    groupParticipantsUpdate: vi.fn(async () => undefined),
+    groupAcceptInvite: vi.fn(async () => GROUP_JID),
+    groupRequestParticipantsUpdate: vi.fn(async () => undefined),
+    updateProfilePicture: vi.fn(async () => undefined),
+    removeProfilePicture: vi.fn(async () => undefined),
     groupJoinApprovalMode: vi.fn(async () => undefined),
     groupMemberAddMode: vi.fn(async () => undefined),
     newsletterCreate: vi.fn(async () => ({ id: NEWSLETTER_JID, name: "Channel" })),
@@ -207,6 +231,118 @@ const CATALOG_PRODUCT_INPUT = {
 };
 
 const GATED_WRITE_CASES = [
+  {
+    toolName: "wa_set_disappearing_messages",
+    params: { chatId: CONTACT_JID, duration: 86400 },
+    run: (adapter: BaileysAdapter) => adapter.setDisappearingMessages(CONTACT_JID, 86400),
+    socketMethod: "sendMessage",
+  },
+  {
+    toolName: "wa_group_update_picture",
+    params: { groupId: GROUP_JID, image: "aW1hZ2U=" },
+    run: (adapter: BaileysAdapter) => adapter.updateGroupPicture(GROUP_JID, "aW1hZ2U="),
+    socketMethod: "updateProfilePicture",
+  },
+  {
+    toolName: "wa_group_remove_picture",
+    params: { groupId: GROUP_JID },
+    run: (adapter: BaileysAdapter) => adapter.removeGroupPicture(GROUP_JID),
+    socketMethod: "removeProfilePicture",
+  },
+  {
+    toolName: "wa_create_group",
+    params: { name: "Group", participants: [CONTACT_JID] },
+    run: (adapter: BaileysAdapter) => adapter.createGroup("Group", [CONTACT_JID]),
+    socketMethod: "groupCreate",
+  },
+  {
+    toolName: "wa_group_add_participants",
+    params: { groupId: GROUP_JID, participants: [CONTACT_JID] },
+    run: (adapter: BaileysAdapter) => adapter.modifyParticipants(GROUP_JID, [CONTACT_JID], "add"),
+    socketMethod: "groupParticipantsUpdate",
+  },
+  {
+    toolName: "wa_group_remove_participants",
+    params: { groupId: GROUP_JID, participants: [CONTACT_JID] },
+    run: (adapter: BaileysAdapter) =>
+      adapter.modifyParticipants(GROUP_JID, [CONTACT_JID], "remove"),
+    socketMethod: "groupParticipantsUpdate",
+  },
+  {
+    toolName: "wa_group_promote",
+    params: { groupId: GROUP_JID, participants: [CONTACT_JID] },
+    run: (adapter: BaileysAdapter) =>
+      adapter.modifyParticipants(GROUP_JID, [CONTACT_JID], "promote"),
+    socketMethod: "groupParticipantsUpdate",
+  },
+  {
+    toolName: "wa_group_demote",
+    params: { groupId: GROUP_JID, participants: [CONTACT_JID] },
+    run: (adapter: BaileysAdapter) =>
+      adapter.modifyParticipants(GROUP_JID, [CONTACT_JID], "demote"),
+    socketMethod: "groupParticipantsUpdate",
+  },
+  {
+    toolName: "wa_group_update_subject",
+    params: { groupId: GROUP_JID, subject: "Updated group" },
+    run: (adapter: BaileysAdapter) =>
+      adapter.modifyGroup(GROUP_JID, { action: "updateSubject", value: "Updated group" }),
+    socketMethod: "groupUpdateSubject",
+  },
+  {
+    toolName: "wa_group_update_description",
+    params: { groupId: GROUP_JID, description: "Updated description" },
+    run: (adapter: BaileysAdapter) =>
+      adapter.modifyGroup(GROUP_JID, {
+        action: "updateDescription",
+        value: "Updated description",
+      }),
+    socketMethod: "groupUpdateDescription",
+  },
+  {
+    toolName: "wa_group_update_settings",
+    params: { groupId: GROUP_JID, announce: true, locked: true },
+    run: (adapter: BaileysAdapter) =>
+      adapter.modifyGroup(GROUP_JID, { action: "updateSettings", value: "announcement" }),
+    socketMethod: "groupSettingUpdate",
+  },
+  {
+    toolName: "wa_group_leave",
+    params: { groupId: GROUP_JID },
+    run: (adapter: BaileysAdapter) => adapter.modifyGroup(GROUP_JID, { action: "leave" }),
+    socketMethod: "groupLeave",
+  },
+  {
+    toolName: "wa_group_revoke_invite",
+    params: { groupId: GROUP_JID },
+    run: (adapter: BaileysAdapter) => adapter.modifyGroup(GROUP_JID, { action: "revokeInvite" }),
+    socketMethod: "groupRevokeInvite",
+  },
+  {
+    toolName: "wa_group_join",
+    params: { inviteCode: "AbCdEfGh" },
+    run: (adapter: BaileysAdapter) => adapter.joinGroup("AbCdEfGh"),
+    socketMethod: "groupAcceptInvite",
+  },
+  {
+    toolName: "wa_group_toggle_ephemeral",
+    params: { groupId: GROUP_JID, duration: 86400 },
+    run: (adapter: BaileysAdapter) =>
+      adapter.modifyGroup(GROUP_JID, { action: "toggleEphemeral", value: 86400 }),
+    socketMethod: "sendMessage",
+  },
+  {
+    toolName: "wa_group_handle_request",
+    params: { groupId: GROUP_JID, participantId: CONTACT_JID, action: "approve" },
+    run: (adapter: BaileysAdapter) => adapter.handleJoinRequest(GROUP_JID, CONTACT_JID, "approve"),
+    socketMethod: "groupRequestParticipantsUpdate",
+  },
+  {
+    toolName: "wa_group_handle_request",
+    params: { groupId: GROUP_JID, participantId: CONTACT_JID, action: "reject" },
+    run: (adapter: BaileysAdapter) => adapter.handleJoinRequest(GROUP_JID, CONTACT_JID, "reject"),
+    socketMethod: "groupRequestParticipantsUpdate",
+  },
   {
     toolName: "wa_create_community",
     params: { name: "Community", description: "About" },
@@ -613,6 +749,10 @@ describe("issue #74 tools", () => {
         const result = await invoke(registerTools(adapter), toolName, params);
         expect(result.isError).toBe(true);
         expect(socket[socketMethod]).not.toHaveBeenCalled();
+        if (toolName === "wa_group_update_picture" || toolName === "wa_group_remove_picture") {
+          expect(socket.groupMetadata).not.toHaveBeenCalled();
+          expect(MediaService.prototype.prepareGroupProfilePicture).not.toHaveBeenCalled();
+        }
         if (toolName === "wa_newsletter_update_picture") {
           expect(MediaService.prototype.prepareGroupProfilePicture).not.toHaveBeenCalled();
         }
@@ -638,6 +778,7 @@ describe("issue #74 tools", () => {
       const tools = registerTools(makeAdapter(socket));
 
       for (const { toolName, params, socketMethod } of GATED_WRITE_CASES) {
+        vi.clearAllMocks();
         const result = await invoke(tools, toolName, params);
         expect(result.isError).toBeUndefined();
         expect(socket[socketMethod]).toHaveBeenCalled();
@@ -681,6 +822,29 @@ describe("issue #74 tools", () => {
       }
     },
   );
+
+  it("keeps group reads available when account/server writes are disabled", async () => {
+    const previous = process.env.WA_APP_STATE_WRITES_ENABLED;
+    delete process.env.WA_APP_STATE_WRITES_ENABLED;
+    try {
+      const socket = makeSocket();
+      const adapter = makeAdapter(socket);
+
+      await expect(adapter.listGroups()).resolves.toMatchObject([{ jid: GROUP_JID }]);
+      await expect(adapter.getGroupMetadata(GROUP_JID)).resolves.toMatchObject({
+        jid: GROUP_JID,
+        subject: "Group",
+      });
+      await expect(adapter.getGroupInviteCode(GROUP_JID)).resolves.toBe("AbCdEfGh");
+
+      expect(socket.groupFetchAllParticipating).toHaveBeenCalledOnce();
+      expect(socket.groupMetadata).toHaveBeenCalledOnce();
+      expect(socket.groupInviteCode).toHaveBeenCalledOnce();
+    } finally {
+      if (previous === undefined) delete process.env.WA_APP_STATE_WRITES_ENABLED;
+      else process.env.WA_APP_STATE_WRITES_ENABLED = previous;
+    }
+  });
 
   it("sends PTV using the existing queued video path and Baileys ptv flag", async () => {
     const socket = makeSocket();

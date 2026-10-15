@@ -82,12 +82,17 @@ Tools marked **Baileys only** are not available on Cloud API instances.
   `wa_leave_community`, `wa_create_newsletter`, `wa_newsletter_update_name`,
   `wa_newsletter_update_description`, `wa_newsletter_update_picture`, `wa_newsletter_react`,
   `wa_create_catalog_product`, `wa_update_catalog_product`, `wa_delete_catalog_products`,
-  `wa_group_join_approval_mode`, and `wa_group_member_add_mode`. The flag covers account/server
-  changes even when Baileys uses IQ or MEX queries instead of an app-state patch. These changes can
-  get the linked device removed. Read-only calls, normal message sends, and disappearing-message
-  control messages sent through `sendMessage` are not gated.
+  `wa_group_join_approval_mode`, `wa_group_member_add_mode`, `wa_set_disappearing_messages`,
+  `wa_create_group`, `wa_group_update_subject`, `wa_group_update_description`,
+  `wa_group_update_settings`, `wa_group_leave`, `wa_group_revoke_invite`, `wa_group_toggle_ephemeral`,
+  `wa_group_join`, `wa_group_add_participants`, `wa_group_remove_participants`, `wa_group_promote`,
+  `wa_group_demote`, `wa_group_update_picture`, `wa_group_remove_picture`, and
+  `wa_group_handle_request`. The flag covers account/server changes even when Baileys uses IQ or MEX
+  queries instead of an app-state patch. These changes can get the linked device removed. Read-only
+  calls and normal message sends are not gated.
 - **Protocol classification for issue #74 operations** -- `wa_set_disappearing_messages` sends a
-  `sendMessage` protocol control message; blocklist/About are reads; communities use `w:g2` IQs;
+  `sendMessage` protocol control message and is gated because it changes account state;
+  blocklist/About are reads; communities use `w:g2` IQs;
   Channel metadata/posts/reactions use newsletter/MEX queries or message nodes; group modes use IQs;
   catalog operations use IQ/MEX queries; and PTV sends a video message with `ptv: true`. Only quick
   reply create/edit/delete use `chatModify` → `appPatch` and are gated above.
@@ -1094,7 +1099,8 @@ Request older messages from Baileys' on-demand history sync. The oldest stored m
 #### `wa_set_disappearing_messages`
 
 Set a disappearing-message duration in a private chat. Baileys sends the protocol control message
-through `sendMessage`; this does not call `chatModify` or write app state.
+through `sendMessage`; this does not call `chatModify` or write app state. The account/server change
+is blocked unless `WA_APP_STATE_WRITES_ENABLED=true`.
 
 | Parameter    | Type                              | Required | Description                                                     |
 | ------------ | --------------------------------- | -------- | --------------------------------------------------------------- |
@@ -1109,6 +1115,12 @@ through `sendMessage`; this does not call `chatModify` or write app state.
 ### 2.4 Group Management (23 tools)
 
 Tools for creating and managing WhatsApp groups.
+
+Group creation, settings, membership changes, join-request decisions, picture updates, invite-link
+revocations, group joins, and group or private disappearing-message changes are blocked unless
+`WA_APP_STATE_WRITES_ENABLED=true`. Group listing, metadata and pending-request reads, and
+invite-code reads remain available while the flag is disabled. Sending a group-invitation card uses
+the regular message-send path and remains available while the flag is disabled.
 
 #### `wa_list_groups`
 
@@ -1486,6 +1498,8 @@ Revoke the current invite link for a WhatsApp group, generating a new one.
 #### `wa_send_group_invite_message`
 
 Send a WhatsApp group invitation card to an individual or group chat.
+This uses the regular outgoing message path and does not modify group membership or invite-link
+state.
 
 | Parameter    | Type   | Required | Description                                |
 | ------------ | ------ | -------- | ------------------------------------------ |
@@ -2280,8 +2294,20 @@ available are retained and retried when the event arrives.
 The result includes `count`, per-status `counts`, and `responses`. Each response contains
 `participant` (the responder JID), `status` (`GOING`, `NOT_GOING`, `MAYBE`, or `UNKNOWN`),
 `timestamp` in Unix milliseconds or `null`, `messageId`, and `extraGuestCount` when supplied.
-`phone` is included when a phone number can be resolved. `UNKNOWN` indicates that an encrypted
-response is stored but its event secret or author mapping is not available yet.
+`phone` is included when a phone number can be resolved. `UNKNOWN` means the stored data did not
+produce a recognized RSVP status. UNKNOWN responses also include `unknownReason` and `recoverable`:
+
+- `missing_payload`: no response payload was stored; `recoverable` is `false`.
+- `missing_event_secret`: the event message or its `messageSecret` was not stored, so the encrypted
+  response cannot be decrypted; `recoverable` is `false`.
+- `decrypt_failed`: the response payload and event secret are present, but decryption failed;
+  `recoverable` is `true`, and `attemptedCombinations` reports the number of normalized creator and
+  responder JID combinations tried during the latest decryption attempt.
+- `unrecognized_response`: the stored response could not be mapped to a supported RSVP status;
+  `recoverable` is `true`.
+
+Responses whose payload was never stored cannot be recovered from local data. The responder can
+answer the event again to create a new response.
 
 ```json
 {
