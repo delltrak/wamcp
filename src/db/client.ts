@@ -3,12 +3,12 @@
 // ============================================================
 
 import { existsSync, mkdirSync } from "node:fs";
-import { dirname } from "node:path";
+import { dirname, resolve } from "node:path";
 import Database, { type Database as DatabaseType } from "better-sqlite3";
 import { drizzle } from "drizzle-orm/better-sqlite3";
 import * as schema from "./schema.js";
 
-const DB_PATH = "data/whatsapp.db";
+const DB_PATH = resolve(process.env.WA_DATABASE_PATH?.trim() || "data/whatsapp.db");
 
 // Ensure the data directory exists
 const dir = dirname(DB_PATH);
@@ -179,6 +179,16 @@ function initializeDatabase(): void {
     );
     CREATE INDEX IF NOT EXISTS idx_event_responses_chat
       ON event_responses(instance_id, chat_id, event_message_id);
+
+    CREATE TABLE IF NOT EXISTS pending_poll_votes (
+      instance_id     TEXT NOT NULL REFERENCES instances(id) ON DELETE CASCADE,
+      poll_message_id TEXT NOT NULL,
+      vote_message_id TEXT NOT NULL,
+      raw_data        TEXT NOT NULL,
+      PRIMARY KEY (instance_id, poll_message_id, vote_message_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_pending_poll_votes_poll
+      ON pending_poll_votes(instance_id, poll_message_id);
 
     CREATE TABLE IF NOT EXISTS wa_version_cache (
       id              INTEGER PRIMARY KEY DEFAULT 1,

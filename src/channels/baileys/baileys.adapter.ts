@@ -10,6 +10,10 @@ import makeWASocket, {
   BufferJSON,
   downloadMediaMessage,
   decryptEventResponse,
+  decryptPollVote,
+  getAggregateVotesInPollMessage,
+  getKeyAuthor,
+  updateMessageWithPollUpdate,
   makeCacheableSignalKeyStore,
   type WASocket,
   type GroupParticipant as BaileysGroupParticipant,
@@ -63,6 +67,8 @@ import type {
   MessageDeliveryStatus,
   BusinessLabel,
   EventResponse,
+  PollResults,
+  GroupJoinRequest,
   EventResponseUnknownReason,
   EventResponseStatus,
   MessageSearchOptions,
@@ -86,6 +92,7 @@ import {
   labels as labelsTable,
   labelAssociations as labelAssociationsTable,
   eventResponses as eventResponsesTable,
+  pendingPollVotes as pendingPollVotesTable,
   contacts as contactsTable,
 } from "../../db/schema.js";
 import { eq, and, desc, asc, ne, inArray, or, sql } from "drizzle-orm";
@@ -124,8 +131,12 @@ import { QuotedMessageResolutionError } from "../../utils/quoted-message.js";
 import { isValidStatusRecipient } from "../../utils/validation.js";
 import { normalizeGroupJid } from "../../utils/group-jid.js";
 import { MediaService } from "../../services/media.js";
-import { resolveFfmpegTimeoutMs, WHATSAPP_VOICE_MIME_TYPE } from "../../tts/audio.js";
-import { preparePttAudio } from "../../tts/waveform.js";
+import {
+  isOggContainer,
+  resolveFfmpegTimeoutMs,
+  WHATSAPP_VOICE_MIME_TYPE,
+} from "../../tts/audio.js";
+import { isOggOpus, preparePttAudio } from "../../tts/waveform.js";
 import {
   ContactStore,
   type ContactPnResolver,
@@ -139,6 +150,100 @@ const STATUS_BROADCAST_JID = "status@broadcast";
 const MAX_EVENT_RESPONSE_DECRYPT_ATTEMPTS = 16;
 const APP_STATE_WRITES_DISABLED_ERROR =
   "WhatsApp account, server, and app-state writes are disabled because changes can get this linked device removed (see issue #71). Set WA_APP_STATE_WRITES_ENABLED=true to enable at your own risk.";
+
+interface ViewOnceAudio {
+  audio: Buffer;
+  mimeType: string;
+  ptt: boolean;
+}
+
+function parseAudioDataUri(input: string): { data: Buffer; contentType?: string } {
+  const comma = input.indexOf(",");
+  if (comma < 5) throw new Error("Invalid view-once audio data URI.");
+
+  const metadata = input.slice(5, comma).split(";");
+  const mediaType = metadata.shift()?.trim();
+  const isBase64 = metadata.some((parameter) => parameter.trim().toLowerCase() === "base64");
+  if (!isBase64) {
+    throw new Error("View-once audio data URI must use base64 encoding.");
+  }
+
+  const base64 = input.slice(comma + 1);
+  if (!/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(base64)) {
+    throw new Error("View-once audio data URI contains invalid base64 data.");
+  }
+  const parameters = metadata.filter((parameter) => parameter.trim().toLowerCase() !== "base64");
+  return {
+    data: mediaService.decodeBase64Media(base64, MAX_BASE64_MEDIA_BYTES),
+    ...(mediaType ? { contentType: [mediaType, ...parameters].join(";") } : {}),
+  };
+}
+
+function sniffViewOnceAudioMimeType(audio: Buffer): string | undefined {
+  if (isOggContainer(audio)) return isOggOpus(audio) ? WHATSAPP_VOICE_MIME_TYPE : "audio/ogg";
+  if (
+    audio.subarray(0, 3).toString("ascii") === "ID3" ||
+    (audio.length >= 2 && audio[0] === 0xff && (audio[1]! & 0xe0) === 0xe0)
+  ) {
+    return "audio/mpeg";
+  }
+  if (
+    audio.length >= 12 &&
+    audio.subarray(4, 8).toString("ascii") === "ftyp" &&
+    /^m4[abp] ?$/i.test(audio.subarray(8, 12).toString("ascii"))
+  ) {
+    return "audio/mp4";
+  }
+  return undefined;
+}
+
+function normalizeViewOnceAudioMimeType(contentType: string | undefined): string | undefined {
+  const mediaType = contentType?.split(";", 1)[0]?.trim().toLowerCase();
+  switch (mediaType) {
+    case "audio/mpeg":
+    case "audio/mp3":
+    case "audio/x-mp3":
+      return "audio/mpeg";
+    case "audio/mp4":
+    case "audio/m4a":
+    case "audio/x-m4a":
+      return "audio/mp4";
+    case "audio/ogg":
+    case "audio/x-ogg":
+    case "application/ogg":
+      return "audio/ogg";
+    case "audio/opus":
+      return "audio/opus";
+    default:
+      return undefined;
+  }
+}
+
+async function prepareViewOnceAudio(input: string): Promise<ViewOnceAudio> {
+  const source = input.startsWith("data:")
+    ? parseAudioDataUri(input)
+    : await mediaService.getMediaBuffer(input, {
+        maxBytes: MAX_BASE64_MEDIA_BYTES,
+        includeContentType: true,
+      });
+  const detectedMimeType = sniffViewOnceAudioMimeType(source.data);
+  const sourceMimeType = normalizeViewOnceAudioMimeType(source.contentType);
+  const isOpus = isOggOpus(source.data);
+  const mimeType = detectedMimeType ?? sourceMimeType;
+
+  if (!mimeType || (mimeType === "audio/opus" && !isOpus)) {
+    const declaredType = source.contentType ? ` (${source.contentType})` : "";
+    throw new Error(
+      `Unsupported or unknown view-once audio format${declaredType}. Supported formats are MP3, M4A, and OGG audio.`,
+    );
+  }
+
+  return {
+    audio: source.data,
+    mimeType: isOpus ? WHATSAPP_VOICE_MIME_TYPE : mimeType,
+    ptt: isOpus,
+  };
+}
 
 interface EventResponseJidCandidate {
   jid: string;
@@ -398,6 +503,41 @@ function parsePositiveIntegerEnv(value: string | undefined, key: string, fallbac
     throw new Error(`Invalid ${key}; expected a positive integer`);
   }
   return parsed;
+}
+
+function normalizeGroupInviteCode(input: string): string {
+  const value = input.trim();
+  if (!value) throw new Error("A group invite code or link is required");
+
+  if (/^(?:https?:\/\/|(?:www\.)?chat\.whatsapp\.com\/)/i.test(value)) {
+    const inviteUrl = /^(?:www\.)?chat\.whatsapp\.com\//i.test(value) ? `https://${value}` : value;
+    let parsed: URL;
+    try {
+      parsed = new URL(inviteUrl);
+    } catch {
+      throw new Error("Invalid WhatsApp group invite link");
+    }
+    if (
+      parsed.protocol !== "https:" ||
+      !["chat.whatsapp.com", "www.chat.whatsapp.com"].includes(parsed.hostname.toLowerCase())
+    ) {
+      throw new Error("Expected an HTTPS link from chat.whatsapp.com");
+    }
+    const encodedCode = parsed.pathname.replace(/^\//, "").replace(/\/$/, "");
+    if (!encodedCode || encodedCode.includes("/"))
+      throw new Error("Invalid WhatsApp group invite link");
+    let code: string;
+    try {
+      code = decodeURIComponent(encodedCode);
+    } catch {
+      throw new Error("Invalid WhatsApp group invite link");
+    }
+    if (!code || /[/?#\\]/.test(code)) throw new Error("Invalid WhatsApp group invite link");
+    return code;
+  }
+
+  if (/[/?#\\]/.test(value)) throw new Error("Invalid WhatsApp group invite code");
+  return value;
 }
 
 function serializeIncomingMessage(message?: WAMessage): string | null {
@@ -724,10 +864,15 @@ export class BaileysAdapter implements ChannelAdapter {
 
   private generateVCard(name: string, phone: string): string {
     const cleaned = phone.replace(/[^0-9]/g, "");
+    const escapedName = name
+      .replace(/\\/g, "\\\\")
+      .replace(/;/g, "\\;")
+      .replace(/,/g, "\\,")
+      .replace(/\r\n|\r|\n/g, "\\n");
     return [
       "BEGIN:VCARD",
       "VERSION:3.0",
-      `FN:${name}`,
+      `FN:${escapedName}`,
       `TEL;type=CELL;waid=${cleaned}:+${cleaned}`,
       "END:VCARD",
     ].join("\n");
@@ -1067,17 +1212,29 @@ export class BaileysAdapter implements ChannelAdapter {
             degreesLongitude: content.longitude,
             name: content.name,
             address: content.address,
+            ...(content.isLive ? { isLive: true } : {}),
+            ...(content.accuracyInMeters !== undefined
+              ? { accuracyInMeters: content.accuracyInMeters }
+              : {}),
+            ...(content.comment ? { comment: content.comment } : {}),
           },
         };
         break;
-      case "contact":
+      case "contact": {
+        const contacts =
+          "contacts" in content
+            ? content.contacts
+            : [{ name: content.contactName, phone: content.contactPhone }];
         msg = {
           contacts: {
-            displayName: content.contactName,
-            contacts: [{ vcard: this.generateVCard(content.contactName, content.contactPhone) }],
+            displayName: contacts.length === 1 ? contacts[0]!.name : `${contacts.length} contacts`,
+            contacts: contacts.map(({ name, phone }) => ({
+              vcard: this.generateVCard(name, phone),
+            })),
           },
         };
         break;
+      }
       case "poll":
         msg = {
           poll: {
@@ -1220,6 +1377,69 @@ export class BaileysAdapter implements ChannelAdapter {
         };
       }),
     );
+  }
+
+  async getPollResults(chatId: string, pollMessageId: string): Promise<PollResults> {
+    const requestedChat = jidNormalizedUser(this.normalizeJid(chatId));
+    const row = db
+      .select({
+        chatId: messagesTable.chatId,
+        type: messagesTable.type,
+        content: messagesTable.content,
+        rawData: messagesTable.rawData,
+      })
+      .from(messagesTable)
+      .where(
+        and(eq(messagesTable.instanceId, this.instanceId), eq(messagesTable.id, pollMessageId)),
+      )
+      .get();
+    if (!row || row.type !== "poll") {
+      throw new Error(`Poll '${pollMessageId}' was not found`);
+    }
+    if (jidNormalizedUser(row.chatId) !== requestedChat) {
+      throw new Error(`Poll '${pollMessageId}' was not found in chat '${requestedChat}'`);
+    }
+    if (!row.rawData) {
+      throw new Error(`Poll '${pollMessageId}' has no stored poll data`);
+    }
+
+    let poll: WAMessage;
+    try {
+      poll = JSON.parse(row.rawData, BufferJSON.reviver) as WAMessage;
+    } catch {
+      throw new Error(`Poll '${pollMessageId}' has invalid stored data`);
+    }
+    const creation =
+      poll.message?.pollCreationMessage ??
+      poll.message?.pollCreationMessageV2 ??
+      poll.message?.pollCreationMessageV3;
+    if (!creation) throw new Error(`Poll '${pollMessageId}' has no stored poll question`);
+
+    // Persisted encrypted poll-vote option hashes may be represented as base64 strings after
+    // BufferJSON round-tripping. Baileys' aggregate helper expects byte arrays.
+    for (const update of poll.pollUpdates ?? []) {
+      if (!update.vote?.selectedOptions) continue;
+      update.vote.selectedOptions = update.vote.selectedOptions.map((option) => {
+        const value = option as Uint8Array | string;
+        return typeof value === "string" ? Buffer.from(value, "base64") : Buffer.from(value);
+      });
+    }
+
+    const meId = this.sock?.user?.id ? jidNormalizedUser(this.sock.user.id) : undefined;
+    const options = getAggregateVotesInPollMessage(poll, meId).map(({ name, voters }) => ({
+      name,
+      count: voters.length,
+      voters,
+    }));
+    const voterCount = new Set(options.flatMap((option) => option.voters)).size;
+    return {
+      chatId: row.chatId,
+      messageId: pollMessageId,
+      question: creation.name ?? row.content ?? "",
+      options,
+      totalVotes: options.reduce((total, option) => total + option.count, 0),
+      totalVoters: voterCount,
+    };
   }
 
   async starMessage(chatId: string, messageId: string, star: boolean): Promise<void> {
@@ -1439,15 +1659,30 @@ export class BaileysAdapter implements ChannelAdapter {
     await sock.sendMessage(jid, pinMsg as unknown as AnyMessageContent);
   }
 
-  async sendViewOnce(to: string, media: string, type: "image" | "video"): Promise<MessageResponse> {
+  async sendViewOnce(
+    to: string,
+    media: string,
+    type: "image" | "video" | "audio",
+  ): Promise<MessageResponse> {
     const sock = this.getSock();
     const jid = this.normalizeJid(to);
-    const resolved = this.resolveMedia(media);
-
-    const msg: AnyMessageContent =
-      type === "image" ? { image: resolved, viewOnce: true } : { video: resolved, viewOnce: true };
+    let msg: AnyMessageContent;
+    if (type === "image") {
+      msg = { image: this.resolveMedia(media), viewOnce: true };
+    } else if (type === "video") {
+      msg = { video: this.resolveMedia(media), viewOnce: true };
+    } else {
+      const audio = await prepareViewOnceAudio(media);
+      msg = {
+        audio: audio.audio,
+        ptt: audio.ptt,
+        mimetype: audio.mimeType,
+        viewOnce: true,
+      };
+    }
 
     const result = await sock.sendMessage(jid, msg);
+    this.persistOutgoingMessage(result, jid);
     return { messageId: result?.key.id ?? "", timestamp: Date.now(), status: "sent" };
   }
 
@@ -1882,7 +2117,7 @@ export class BaileysAdapter implements ChannelAdapter {
   async modifyGroup(groupId: string, modification: GroupModification): Promise<void> {
     this.requireAppStateWritesEnabled();
     const sock = this.getSock();
-    const jid = this.normalizeJid(groupId);
+    const jid = normalizeGroupJid(groupId);
 
     switch (modification.action) {
       case "updateSubject":
@@ -1892,10 +2127,15 @@ export class BaileysAdapter implements ChannelAdapter {
         await sock.groupUpdateDescription(jid, String(modification.value ?? ""));
         break;
       case "updateSettings":
-        await sock.groupSettingUpdate(
-          jid,
-          modification.value === "announcement" ? "announcement" : "not_announcement",
-        );
+        if (
+          modification.value !== "announcement" &&
+          modification.value !== "not_announcement" &&
+          modification.value !== "locked" &&
+          modification.value !== "unlocked"
+        ) {
+          throw new Error("Invalid group setting update");
+        }
+        await sock.groupSettingUpdate(jid, modification.value);
         break;
       case "leave":
         await sock.groupLeave(jid);
@@ -1918,7 +2158,7 @@ export class BaileysAdapter implements ChannelAdapter {
   ): Promise<void> {
     this.requireAppStateWritesEnabled();
     const sock = this.getSock();
-    const jid = this.normalizeJid(groupId);
+    const jid = normalizeGroupJid(groupId);
     const jids = participants.map((p) => this.normalizeJid(p));
     await sock.groupParticipantsUpdate(jid, jids, action);
   }
@@ -2104,15 +2344,55 @@ export class BaileysAdapter implements ChannelAdapter {
 
   async getGroupInviteCode(groupId: string): Promise<string> {
     const sock = this.getSock();
-    const code = await sock.groupInviteCode(this.normalizeJid(groupId));
+    const code = await sock.groupInviteCode(normalizeGroupJid(groupId));
     return code ?? "";
+  }
+
+  async getGroupInviteInfo(inviteCode: string): Promise<GroupMetadata> {
+    const sock = this.getSock();
+    const metadata = await sock.groupGetInviteInfo(normalizeGroupInviteCode(inviteCode));
+    return this.normalizeGroupMetadata(metadata);
   }
 
   async joinGroup(inviteCode: string): Promise<string> {
     this.requireAppStateWritesEnabled();
     const sock = this.getSock();
-    const groupId = await sock.groupAcceptInvite(inviteCode);
+    const groupId = await sock.groupAcceptInvite(normalizeGroupInviteCode(inviteCode));
     return groupId ?? "";
+  }
+
+  async listGroupJoinRequests(groupId: string): Promise<GroupJoinRequest[]> {
+    const sock = this.getSock();
+    const requests = await sock.groupRequestParticipantsList(normalizeGroupJid(groupId));
+    return requests.flatMap((attributes) => {
+      const jid = attributes.jid ?? attributes.participant;
+      return jid ? [{ jid, attributes: { ...attributes } }] : [];
+    });
+  }
+
+  async sendGroupInviteMessage(
+    to: string,
+    groupId: string,
+    text = "Join my WhatsApp group",
+  ): Promise<MessageResponse> {
+    const sock = this.getSock();
+    const groupJid = normalizeGroupJid(groupId);
+    const [inviteCode, metadata] = await Promise.all([
+      sock.groupInviteCode(groupJid),
+      sock.groupMetadata(groupJid),
+    ]);
+    if (!inviteCode) throw new Error("WhatsApp did not return an invite code for this group");
+    const result = await sock.sendMessage(this.normalizeJid(to), {
+      groupInvite: {
+        inviteCode,
+        inviteExpiration: 0,
+        text,
+        jid: groupJid,
+        subject: metadata.subject ?? "",
+      },
+    });
+    this.persistOutgoingMessage(result, this.normalizeJid(to));
+    return { messageId: result?.key.id ?? "", timestamp: Date.now(), status: "sent" };
   }
 
   async handleJoinRequest(
@@ -2122,7 +2402,7 @@ export class BaileysAdapter implements ChannelAdapter {
   ): Promise<void> {
     this.requireAppStateWritesEnabled();
     const sock = this.getSock();
-    const jid = this.normalizeJid(groupId);
+    const jid = normalizeGroupJid(groupId);
     const participant = this.normalizeJid(participantJid);
     await sock.groupRequestParticipantsUpdate(jid, [participant], action);
   }
@@ -3028,6 +3308,7 @@ export class BaileysAdapter implements ChannelAdapter {
         message.type === "audio" ||
         message.type === "document" ||
         message.type === "sticker" ||
+        message.type === "poll" ||
         message.type === "event" ||
         !!message.buttons?.length ||
         !!message.rawType;
@@ -3782,6 +4063,171 @@ export class BaileysAdapter implements ChannelAdapter {
     }
   }
 
+  private persistDecryptedPollUpdates(pollKey: WAMessageKey, updates: proto.IPollUpdate[]): void {
+    if (!pollKey.id) return;
+    const conditions = [
+      eq(messagesTable.instanceId, this.instanceId),
+      eq(messagesTable.id, pollKey.id),
+    ];
+    const requestedChat = pollKey.remoteJid ? jidNormalizedUser(pollKey.remoteJid) : undefined;
+    if (requestedChat) conditions.push(eq(messagesTable.chatId, requestedChat));
+    const row = db
+      .select({
+        chatId: messagesTable.chatId,
+        type: messagesTable.type,
+        rawData: messagesTable.rawData,
+      })
+      .from(messagesTable)
+      .where(and(...conditions))
+      .get();
+    if (!row || row.type !== "poll" || !row.rawData) return;
+
+    try {
+      const poll = JSON.parse(row.rawData, BufferJSON.reviver) as WAMessage;
+      for (const update of updates) updateMessageWithPollUpdate(poll, update);
+      db.update(messagesTable)
+        .set({ rawData: serializeWAMessage(poll) })
+        .where(
+          and(
+            eq(messagesTable.instanceId, this.instanceId),
+            eq(messagesTable.chatId, row.chatId),
+            eq(messagesTable.id, pollKey.id),
+          ),
+        )
+        .run();
+    } catch (error) {
+      logger.debug(
+        { instanceId: this.instanceId, pollMessageId: pollKey.id, error },
+        "Unable to persist poll vote updates",
+      );
+    }
+  }
+
+  private persistPollVote(
+    message: WAMessage,
+    update: NonNullable<proto.Message.IPollUpdateMessage>,
+  ): boolean {
+    const pollKey = update.pollCreationMessageKey;
+    const pollMessageId = typeof pollKey?.id === "string" ? pollKey.id : undefined;
+    const encryptedVote = update.vote;
+    const voteMessageId = typeof message.key.id === "string" ? message.key.id : undefined;
+    if (!pollKey || !pollMessageId || !voteMessageId || !encryptedVote) return false;
+
+    const messageSecret = this.sock?.user?.id;
+    const row = db
+      .select({
+        chatId: messagesTable.chatId,
+        type: messagesTable.type,
+        rawData: messagesTable.rawData,
+      })
+      .from(messagesTable)
+      .where(
+        and(eq(messagesTable.instanceId, this.instanceId), eq(messagesTable.id, pollMessageId)),
+      )
+      .get();
+    if (!row || row.type !== "poll" || !row.rawData || !messageSecret) {
+      this.queuePendingPollVote(pollMessageId, voteMessageId, message);
+      return false;
+    }
+
+    try {
+      const poll = JSON.parse(row.rawData, BufferJSON.reviver) as WAMessage;
+      const pollSecret = poll.message?.messageContextInfo?.messageSecret;
+      if (!pollSecret) {
+        this.queuePendingPollVote(pollMessageId, voteMessageId, message);
+        return false;
+      }
+      const normalizedMeId = jidNormalizedUser(messageSecret);
+      const pollCreatorJid = getKeyAuthor(pollKey, normalizedMeId);
+      const voterJid = getKeyAuthor(message.key, normalizedMeId);
+      const vote = decryptPollVote(encryptedVote, {
+        pollCreatorJid,
+        pollMsgId: pollMessageId,
+        pollEncKey: pollSecret,
+        voterJid,
+      });
+      this.persistDecryptedPollUpdates(pollKey, [
+        {
+          pollUpdateMessageKey: message.key,
+          vote,
+          ...(update.senderTimestampMs !== undefined
+            ? { senderTimestampMs: update.senderTimestampMs }
+            : {}),
+        },
+      ]);
+      db.delete(pendingPollVotesTable)
+        .where(
+          and(
+            eq(pendingPollVotesTable.instanceId, this.instanceId),
+            eq(pendingPollVotesTable.pollMessageId, pollMessageId),
+            eq(pendingPollVotesTable.voteMessageId, voteMessageId),
+          ),
+        )
+        .run();
+      return true;
+    } catch (error) {
+      logger.debug(
+        { instanceId: this.instanceId, pollMessageId, error },
+        "Unable to decrypt poll vote",
+      );
+      return false;
+    }
+  }
+
+  private queuePendingPollVote(
+    pollMessageId: string,
+    voteMessageId: string,
+    message: WAMessage,
+  ): void {
+    const rawData = serializeWAMessage(message);
+    if (!rawData) return;
+
+    db.insert(pendingPollVotesTable)
+      .values({
+        instanceId: this.instanceId,
+        pollMessageId,
+        voteMessageId,
+        rawData,
+      })
+      .onConflictDoUpdate({
+        target: [
+          pendingPollVotesTable.instanceId,
+          pendingPollVotesTable.pollMessageId,
+          pendingPollVotesTable.voteMessageId,
+        ],
+        set: { rawData },
+      })
+      .run();
+  }
+
+  private retryPendingPollVotes(pollMessageId: string): void {
+    const pending = db
+      .select()
+      .from(pendingPollVotesTable)
+      .where(
+        and(
+          eq(pendingPollVotesTable.instanceId, this.instanceId),
+          eq(pendingPollVotesTable.pollMessageId, pollMessageId),
+        ),
+      )
+      .all();
+
+    for (const row of pending) {
+      try {
+        const message = JSON.parse(row.rawData, BufferJSON.reviver) as WAMessage;
+        const content = unwrapMessageContent(message.message, { unwrapProtocolEdits: false });
+        if (content?.pollUpdateMessage) {
+          this.persistPollVote(message, content.pollUpdateMessage);
+        }
+      } catch (error) {
+        logger.debug(
+          { instanceId: this.instanceId, pollMessageId, voteMessageId: row.voteMessageId, error },
+          "Unable to retry pending poll vote",
+        );
+      }
+    }
+  }
+
   private persistStatusAudience(messageId: string, recipientJids: string[]): void {
     try {
       db.insert(statusAudiencesTable)
@@ -4053,6 +4499,12 @@ export class BaileysAdapter implements ChannelAdapter {
             const content = unwrapMessageContent(message.message, {
               unwrapProtocolEdits: false,
             });
+            if (content?.pollUpdateMessage) {
+              this.persistPollVote(message, content.pollUpdateMessage);
+            }
+            if (extractMessageDetails(message).type === "poll" && message.key.id) {
+              this.retryPendingPollVotes(message.key.id);
+            }
             if (content?.encEventResponseMessage) {
               await this.persistEncryptedEventResponse(message, content.encEventResponseMessage);
             }
@@ -4106,6 +4558,11 @@ export class BaileysAdapter implements ChannelAdapter {
           const protocolMessage = unwrappedContent?.protocolMessage as
             NonNullable<WAMessage["message"]>["protocolMessage"] | undefined;
 
+          if (unwrappedContent?.pollUpdateMessage) {
+            this.persistPollVote(msg, unwrappedContent.pollUpdateMessage);
+            continue;
+          }
+
           if (protocolMessage?.type === 14) {
             const editEvent = normalizeMessageEdit(
               this.instanceId,
@@ -4142,6 +4599,7 @@ export class BaileysAdapter implements ChannelAdapter {
               },
             };
             this.persistMessage(normalized, msg);
+            if (details.type === "poll") this.retryPendingPollVotes(msg.key.id);
           }
 
           if (unwrappedContent?.encEventResponseMessage) {
@@ -4181,6 +4639,9 @@ export class BaileysAdapter implements ChannelAdapter {
           }
           if (update.key.id && update.key.remoteJid && update.update.eventResponses) {
             await this.persistEventResponses(update.key, update.update.eventResponses);
+          }
+          if (update.key.id && update.update.pollUpdates) {
+            this.persistDecryptedPollUpdates(update.key, update.update.pollUpdates);
           }
         }
         const normalized = normalizeMessagesUpdate(this.instanceId, events["messages.update"]);

@@ -110,8 +110,33 @@ export const SendContactSchema = z
   .object({
     instanceId: z.string().min(1).describe("The instance ID to send from"),
     to: z.string().min(5).describe("Recipient phone number or group JID"),
-    contactName: z.string().min(1).describe("Contact display name"),
-    contactPhone: z.string().min(5).describe("Contact phone number"),
+    contactName: z.string().min(1).optional().describe("Contact display name for one contact"),
+    contactPhone: z.string().min(5).optional().describe("Contact phone number for one contact"),
+    contacts: z
+      .array(
+        z
+          .object({
+            name: z.string().min(1).describe("Contact display name"),
+            phone: z.string().min(5).describe("Contact phone number"),
+          })
+          .strict(),
+      )
+      .min(1)
+      .max(20)
+      .optional()
+      .describe("One or more contacts to share as vCards"),
+  })
+  .superRefine((value, context) => {
+    const hasLegacyName = value.contactName !== undefined;
+    const hasLegacyPhone = value.contactPhone !== undefined;
+    const hasContacts = value.contacts !== undefined;
+    if (hasLegacyName !== hasLegacyPhone || hasContacts === hasLegacyName) {
+      context.addIssue({
+        code: "custom",
+        path: ["contacts"],
+        message: "Provide either contacts or both contactName and contactPhone, but not both forms",
+      });
+    }
   })
   .strict();
 
@@ -122,6 +147,14 @@ export const SendPollSchema = z
     question: z.string().min(1).describe("Poll question"),
     options: z.array(z.string().min(1)).min(2).max(12).describe("Poll options (2-12 choices)"),
     multiSelect: z.boolean().default(false).describe("Allow multiple selections"),
+  })
+  .strict();
+
+export const GetPollResultsSchema = z
+  .object({
+    instanceId: z.string().min(1).describe("The instance ID"),
+    chatId: z.string().min(5).describe("Chat JID containing the poll"),
+    messageId: z.string().min(1).describe("Poll creation message ID"),
   })
   .strict();
 
@@ -201,8 +234,22 @@ export const SendViewOnceSchema = z
   .object({
     instanceId: z.string().min(1).describe("The instance ID to send from"),
     to: z.string().min(5).describe("Recipient phone number or group JID"),
-    media: z.string().min(1).describe("Media URL or base64-encoded data"),
-    type: z.enum(["image", "video"]).describe("Media type: image or video"),
+    media: z
+      .string()
+      .min(1)
+      .describe("Media URL or base64-encoded data; audio also accepts a base64 data URI"),
+    type: z.enum(["image", "video", "audio"]).describe("Media type: image, video, or audio"),
+  })
+  .strict();
+
+export const SendLiveLocationSchema = z
+  .object({
+    instanceId: z.string().min(1).describe("The instance ID to send from"),
+    to: z.string().min(5).describe("Recipient phone number or group JID"),
+    latitude: z.number().min(-90).max(90).describe("Current GPS latitude"),
+    longitude: z.number().min(-180).max(180).describe("Current GPS longitude"),
+    accuracyInMeters: z.number().int().min(0).optional().describe("Location accuracy in meters"),
+    comment: z.string().max(256).optional().describe("Optional note shown with the live location"),
   })
   .strict();
 

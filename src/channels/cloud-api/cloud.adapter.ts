@@ -36,6 +36,8 @@ import type {
   NormalizedMessageEvent,
   BusinessLabel,
   EventResponse,
+  PollResults,
+  GroupJoinRequest,
   MessageSearchOptions,
   SendEventOptions,
   CatalogProductCreateInput,
@@ -382,6 +384,11 @@ export class CloudApiAdapter implements ChannelAdapter {
       }
 
       case "location": {
+        if (content.isLive) {
+          throw new Error(
+            "Live location messages are not supported on Cloud API; use a Baileys instance",
+          );
+        }
         const res = await this.sendRaw({
           recipient_type: "individual",
           to: phone,
@@ -397,16 +404,18 @@ export class CloudApiAdapter implements ChannelAdapter {
       }
 
       case "contact": {
+        const contacts =
+          "contacts" in content
+            ? content.contacts
+            : [{ name: content.contactName, phone: content.contactPhone }];
         const res = await this.sendRaw({
           recipient_type: "individual",
           to: phone,
           type: "contacts",
-          contacts: [
-            {
-              name: { formatted_name: content.contactName },
-              phones: [{ phone: content.contactPhone, type: "CELL" }],
-            },
-          ],
+          contacts: contacts.map(({ name, phone: contactPhone }) => ({
+            name: { formatted_name: name },
+            phones: [{ phone: contactPhone, type: "CELL" }],
+          })),
         });
         return this.toMessageResponse(res);
       }
@@ -439,20 +448,16 @@ export class CloudApiAdapter implements ChannelAdapter {
     throw new Error("WhatsApp event responses are only available on Baileys instances");
   }
 
+  async getPollResults(_chatId: string, _pollMessageId: string): Promise<PollResults> {
+    throw new Error("Poll results are only available on Baileys instances");
+  }
+
   async starMessage(_chatId: string, _messageId: string, _star: boolean): Promise<void> {
     throw new Error("Starring messages is not supported on Cloud API; use a Baileys instance");
   }
 
-  async editMessage(_chatId: string, msgId: string, newText: string): Promise<void> {
-    const phone = this.normalizePhone(_chatId);
-    await this.sendRaw({
-      recipient_type: "individual",
-      to: phone,
-      type: "text",
-      text: { body: newText },
-      biz_opaque_callback_data: `edit_${msgId}`,
-      context: { message_id: msgId },
-    });
+  async editMessage(_chatId: string, _msgId: string, _newText: string): Promise<void> {
+    throw new Error("Editing sent messages is not supported on Cloud API; use a Baileys instance");
   }
 
   async deleteMessage(_chatId: string, _msgId: string): Promise<void> {
@@ -484,17 +489,12 @@ export class CloudApiAdapter implements ChannelAdapter {
     throw new Error("Pinning messages is not supported on Cloud API");
   }
 
-  async sendViewOnce(to: string, media: string, type: "image" | "video"): Promise<MessageResponse> {
-    // Cloud API doesn't have a direct viewOnce parameter the same way.
-    // We send as a normal media message (viewOnce is controlled client-side on Cloud API).
-    const phone = this.normalizePhone(to);
-    const mediaPayload = this.resolveMediaPayload(media, type);
-    const res = await this.sendRaw({
-      recipient_type: "individual",
-      to: phone,
-      ...mediaPayload,
-    });
-    return this.toMessageResponse(res);
+  async sendViewOnce(
+    _to: string,
+    _media: string,
+    _type: "image" | "video" | "audio",
+  ): Promise<MessageResponse> {
+    throw new Error("View-once media is not supported on Cloud API; use a Baileys instance");
   }
 
   async sendLinkPreview(to: string, text: string, _url: string): Promise<MessageResponse> {
@@ -636,8 +636,26 @@ export class CloudApiAdapter implements ChannelAdapter {
     throw new Error("Group management is not supported on Cloud API");
   }
 
+  async getGroupInviteInfo(_inviteCode: string): Promise<GroupMetadata> {
+    throw new Error("Group invite lookup is not supported on Cloud API; use a Baileys instance");
+  }
+
   async joinGroup(_inviteCode: string): Promise<string> {
     throw new Error("Group management is not supported on Cloud API");
+  }
+
+  async listGroupJoinRequests(_groupId: string): Promise<GroupJoinRequest[]> {
+    throw new Error(
+      "Group join-request lists are not supported on Cloud API; use a Baileys instance",
+    );
+  }
+
+  async sendGroupInviteMessage(
+    _to: string,
+    _groupId: string,
+    _text?: string,
+  ): Promise<MessageResponse> {
+    throw new Error("Group invite messages are not supported on Cloud API; use a Baileys instance");
   }
 
   async handleJoinRequest(
