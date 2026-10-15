@@ -2191,8 +2191,19 @@ available are retained and retried when the event arrives.
 The result includes `count`, per-status `counts`, and `responses`. Each response contains
 `participant` (the responder JID), `status` (`GOING`, `NOT_GOING`, `MAYBE`, or `UNKNOWN`),
 `timestamp` in Unix milliseconds or `null`, `messageId`, and `extraGuestCount` when supplied.
-`phone` is included when a phone number can be resolved. `UNKNOWN` indicates that an encrypted
-response is stored but its event secret or author mapping is not available yet.
+`phone` is included when a phone number can be resolved. `UNKNOWN` means the stored data did not
+produce a recognized RSVP status. UNKNOWN responses also include `unknownReason` and `recoverable`:
+
+- `missing_payload`: no response payload was stored; `recoverable` is `false`.
+- `missing_event_secret`: the event message or its `messageSecret` was not stored, so the encrypted
+  response cannot be decrypted; `recoverable` is `false`.
+- `decrypt_failed`: the response payload and event secret are present, but decryption failed;
+  `recoverable` is `true`.
+- `unrecognized_response`: the stored response could not be mapped to a supported RSVP status;
+  `recoverable` is `true`.
+
+Responses whose payload was never stored cannot be recovered from local data. The responder can
+answer the event again to create a new response.
 
 ```json
 {

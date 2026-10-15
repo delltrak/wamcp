@@ -63,6 +63,7 @@ import type {
   MessageDeliveryStatus,
   BusinessLabel,
   EventResponse,
+  EventResponseUnknownReason,
   EventResponseStatus,
   MessageSearchOptions,
   SendEventOptions,
@@ -140,6 +141,18 @@ const APP_STATE_WRITES_DISABLED_ERROR =
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
+}
+
+function isStoredEventResponseEntry(value: unknown): value is Record<string, unknown> {
+  if (!isRecord(value)) return false;
+  return [
+    "eventResponseMessageKey",
+    "response",
+    "eventResponseMessage",
+    "event_response_message",
+    "eventResponse",
+    "event_response",
+  ].some((field) => Object.hasOwn(value, field));
 }
 
 function isBinaryNode(value: unknown): value is BinaryNode {
@@ -1135,6 +1148,7 @@ export class BaileysAdapter implements ChannelAdapter {
       for (const alias of eventChatAliases) chatAliases.add(alias);
     }
 
+    // Retry by event ID so stored rows under either LID or PN chat aliases are included.
     await this.retryPendingEventResponses(eventMessageId);
 
     const rows = db
@@ -1167,6 +1181,8 @@ export class BaileysAdapter implements ChannelAdapter {
           contact?.phone ??
           (participant.endsWith("@s.whatsapp.net") ? participant.slice(0, -15) : undefined);
         const status = eventResponseName(row.response);
+        const unknownDetails =
+          status === "UNKNOWN" ? await this.getUnknownEventResponseDetails(row) : {};
         return {
           participant,
           responder: participant,
@@ -1176,6 +1192,7 @@ export class BaileysAdapter implements ChannelAdapter {
           timestamp: row.timestamp,
           messageId: row.responseMessageId,
           ...(row.extraGuestCount === null ? {} : { extraGuestCount: row.extraGuestCount }),
+          ...unknownDetails,
         };
       }),
     );
@@ -3198,6 +3215,10 @@ export class BaileysAdapter implements ChannelAdapter {
       )
       .get();
 
+    if (previous && previous.response !== "UNKNOWN" && response.response === "UNKNOWN") {
+      return;
+    }
+
     if (
       previous &&
       previous.response !== "UNKNOWN" &&
@@ -3356,7 +3377,58 @@ export class BaileysAdapter implements ChannelAdapter {
     for (const row of pending) {
       if (!row.rawData) continue;
       try {
-        const message = JSON.parse(row.rawData, BufferJSON.reviver) as WAMessage;
+        const stored: unknown = JSON.parse(row.rawData, BufferJSON.reviver);
+        if (isStoredEventResponseEntry(stored)) {
+          const responseKey = isRecord(stored.eventResponseMessageKey)
+            ? (stored.eventResponseMessageKey as WAMessageKey)
+            : undefined;
+          const decoded = decodeEventResponseMessage(stored);
+          const responderFromKey = responseKey
+            ? await this.canonicalEventAuthorJid(responseKey)
+            : "";
+          const responder =
+            responderFromKey ||
+            (await this.canonicalEventAuthorJid({
+              remoteJid: row.chatId,
+              participant: row.responder,
+              fromMe: false,
+            }));
+          if (!responder) continue;
+          const chatFromKey = responseKey ? await this.canonicalEventChatJid(responseKey) : "";
+          const chatId = chatFromKey || (await this.resolveJidToPn(row.chatId));
+          this.persistResolvedEventResponse({
+            eventMessageId: row.eventMessageId,
+            chatId,
+            responder,
+            response: eventResponseName(decoded?.response),
+            timestamp: this.timestampValueToMilliseconds(
+              stored.senderTimestampMs ?? decoded?.timestampMs ?? stored.timestampMs,
+            ),
+            responseMessageId: responseKey?.id ?? row.responseMessageId,
+            extraGuestCount:
+              typeof decoded?.extraGuestCount === "number" &&
+              Number.isFinite(decoded.extraGuestCount)
+                ? decoded.extraGuestCount
+                : null,
+            rawData: row.rawData,
+          });
+          if (row.responder !== responder) {
+            db.delete(eventResponsesTable)
+              .where(
+                and(
+                  eq(eventResponsesTable.instanceId, this.instanceId),
+                  eq(eventResponsesTable.eventMessageId, row.eventMessageId),
+                  eq(eventResponsesTable.responder, row.responder),
+                  eq(eventResponsesTable.response, "UNKNOWN"),
+                ),
+              )
+              .run();
+          }
+          continue;
+        }
+
+        if (!isRecord(stored)) continue;
+        const message = stored as unknown as WAMessage;
         const content = unwrapMessageContent(message.message, { unwrapProtocolEdits: false });
         const encrypted = content?.encEventResponseMessage;
         if (!encrypted) continue;
@@ -3386,6 +3458,66 @@ export class BaileysAdapter implements ChannelAdapter {
         );
       }
     }
+  }
+
+  private async getUnknownEventResponseDetails(row: {
+    eventMessageId: string;
+    rawData: string | null;
+  }): Promise<{ unknownReason: EventResponseUnknownReason; recoverable: boolean }> {
+    const details = (unknownReason: EventResponseUnknownReason) => ({
+      unknownReason,
+      recoverable: unknownReason !== "missing_payload" && unknownReason !== "missing_event_secret",
+    });
+    if (!row.rawData) return details("missing_payload");
+
+    let stored: unknown;
+    try {
+      stored = JSON.parse(row.rawData, BufferJSON.reviver);
+    } catch {
+      return details("unrecognized_response");
+    }
+
+    if (isStoredEventResponseEntry(stored)) {
+      return details(
+        eventResponseName(decodeEventResponseMessage(stored)?.response) === "UNKNOWN"
+          ? "unrecognized_response"
+          : "decrypt_failed",
+      );
+    }
+    if (!isRecord(stored)) return details("unrecognized_response");
+
+    const message = stored as unknown as WAMessage;
+    const content = unwrapMessageContent(message.message, { unwrapProtocolEdits: false });
+    const encrypted = content?.encEventResponseMessage as
+      proto.Message.IEncEventResponseMessage | undefined;
+    if (!encrypted?.eventCreationMessageKey?.id) return details("unrecognized_response");
+
+    const event = db
+      .select({ type: messagesTable.type, rawData: messagesTable.rawData })
+      .from(messagesTable)
+      .where(
+        and(
+          eq(messagesTable.instanceId, this.instanceId),
+          eq(messagesTable.id, encrypted.eventCreationMessageKey.id),
+        ),
+      )
+      .get();
+    if (!event || event.type !== "event" || !event.rawData) {
+      return details("missing_event_secret");
+    }
+
+    try {
+      const eventMessage = JSON.parse(event.rawData, BufferJSON.reviver) as WAMessage;
+      if (!eventMessage.message?.messageContextInfo?.messageSecret) {
+        return details("missing_event_secret");
+      }
+    } catch {
+      return details("missing_event_secret");
+    }
+
+    const decrypted = await this.decryptStoredEventResponse(encrypted, message.key);
+    if (!decrypted) return details("decrypt_failed");
+    return details(decrypted.response === "UNKNOWN" ? "unrecognized_response" : "decrypt_failed");
   }
 
   private persistChats(chats: Array<{ id?: string | null; name?: string | null }>): void {
