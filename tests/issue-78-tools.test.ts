@@ -110,6 +110,24 @@ function encryptPollVote(
   return { encPayload, encIv: iv };
 }
 
+function oggOpusFixture(): Buffer {
+  const audio = Buffer.alloc(47);
+  audio.write("OggS", 0, "ascii");
+  audio[26] = 1;
+  audio[27] = 19;
+  audio.write("OpusHead", 28, "ascii");
+  return audio;
+}
+
+function m4aFixture(): Buffer {
+  const audio = Buffer.alloc(24);
+  audio.writeUInt32BE(audio.length, 0);
+  audio.write("ftyp", 4, "ascii");
+  audio.write("M4A ", 8, "ascii");
+  audio.write("M4A ", 16, "ascii");
+  return audio;
+}
+
 function groupMetadata() {
   return {
     id: GROUP_ID,
@@ -182,6 +200,7 @@ describe("issue 78 messaging and group features", () => {
     } as unknown as WASocket;
     const adapter = new BaileysAdapter(instanceId, {
       getContacts: vi.fn(() => []),
+      handleHistorySync: vi.fn(async () => undefined),
     } as unknown as ContactStore);
     const internals = adapter as unknown as {
       sock: WASocket;
@@ -291,6 +310,76 @@ describe("issue 78 messaging and group features", () => {
     expect(savedVotes.raw_data).toContain("pollUpdates");
   });
 
+  it("decrypts history-fetched poll votes and retries votes that arrive before their poll", async () => {
+    const { instanceId, invoke, processEvents } = createFixture();
+    const secret = Buffer.alloc(32, 0x78);
+    const pollMessageId = "history-poll-vote-78";
+    const pollCreationMessageKey = {
+      remoteJid: GROUP_ID,
+      id: pollMessageId,
+      fromMe: false,
+      participant: POLL_CREATOR,
+    };
+    const voteMessage: WAMessage = {
+      key: {
+        remoteJid: GROUP_ID,
+        id: "history-poll-vote-message-78",
+        fromMe: false,
+        participant: VOTER,
+      },
+      message: {
+        pollUpdateMessage: {
+          pollCreationMessageKey,
+          vote: encryptPollVote(secret, pollMessageId, POLL_CREATOR, VOTER, ["Sushi"]),
+        },
+      },
+      messageTimestamp: 1_700_000_201,
+    } as WAMessage;
+    const pollMessage: WAMessage = {
+      key: { remoteJid: GROUP_ID, id: pollMessageId, fromMe: false, participant: POLL_CREATOR },
+      message: {
+        pollCreationMessageV3: {
+          name: "History dinner?",
+          selectableOptionsCount: 1,
+          options: [{ optionName: "Pizza" }, { optionName: "Sushi" }],
+        },
+        messageContextInfo: { messageSecret: secret },
+      },
+      messageTimestamp: 1_700_000_200,
+    } as WAMessage;
+
+    await processEvents({
+      "messaging-history.set": {
+        contacts: [],
+        chats: [],
+        messages: [voteMessage, pollMessage],
+        syncType: proto.HistorySync.HistorySyncType.ON_DEMAND,
+        peerDataRequestSessionId: "poll-history-request",
+      },
+    });
+
+    const response = await invoke("wa_get_poll_results", {
+      chatId: GROUP_ID,
+      messageId: pollMessageId,
+    });
+    const results = JSON.parse(response.content[0]?.text ?? "{}") as {
+      question: string;
+      totalVotes: number;
+      totalVoters: number;
+      options: Array<{ name: string; count: number; voters: string[] }>;
+    };
+    expect(results).toMatchObject({ question: "History dinner?", totalVotes: 1, totalVoters: 1 });
+    expect(results.options).toEqual([
+      { name: "Pizza", count: 0, voters: [] },
+      { name: "Sushi", count: 1, voters: [VOTER] },
+    ]);
+    expect(
+      sqlite
+        .prepare("SELECT COUNT(*) AS count FROM pending_poll_votes WHERE instance_id = ?")
+        .get(instanceId),
+    ).toMatchObject({ count: 0 });
+  });
+
   it("sends single-select polls with their message secret stored", async () => {
     const { instanceId, socket, invoke } = createFixture();
     const response = await invoke("wa_send_poll", {
@@ -311,14 +400,16 @@ describe("issue 78 messaging and group features", () => {
 
   it("sends view-once audio and live locations through normal message sends", async () => {
     const { socket, invoke } = createFixture();
+    const oggOpus = oggOpusFixture();
     await invoke("wa_send_view_once", {
       to: "5511999999999",
-      media: Buffer.from("audio").toString("base64"),
+      media: oggOpus.toString("base64"),
       type: "audio",
     });
     expect(vi.mocked(socket.sendMessage).mock.calls[0]?.[1]).toMatchObject({
       audio: expect.any(Buffer),
-      ptt: false,
+      ptt: true,
+      mimetype: "audio/ogg; codecs=opus",
       viewOnce: true,
     });
 
@@ -382,6 +473,45 @@ describe("issue 78 messaging and group features", () => {
     await expect(
       new CloudApiAdapter("cloud-test").sendViewOnce("5511999999999", "aGVsbG8=", "audio"),
     ).rejects.toThrow("View-once media is not supported on Cloud API");
+  });
+
+  it("uses detected MP3 and M4A MIME types for view-once audio", async () => {
+    const { socket, invoke } = createFixture();
+    const mp3 = Buffer.from("ID3\x04\x00\x00\x00\x00\x00\x00MP3 fixture", "binary");
+    await invoke("wa_send_view_once", {
+      to: "5511999999999",
+      media: `data:audio/mpeg;base64,${mp3.toString("base64")}`,
+      type: "audio",
+    });
+    expect(vi.mocked(socket.sendMessage).mock.calls[0]?.[1]).toMatchObject({
+      audio: mp3,
+      ptt: false,
+      mimetype: "audio/mpeg",
+      viewOnce: true,
+    });
+
+    const m4a = m4aFixture();
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(m4a, { headers: { "content-type": "audio/mp4; codecs=mp4a.40.2" } }),
+    );
+    await invoke("wa_send_view_once", {
+      to: "5511999999999",
+      media: "https://audio.example.test/sample.m4a",
+      type: "audio",
+    });
+    expect(vi.mocked(socket.sendMessage).mock.calls[1]?.[1]).toMatchObject({
+      audio: m4a,
+      ptt: false,
+      mimetype: "audio/mp4",
+      viewOnce: true,
+    });
+  });
+
+  it("rejects view-once audio with unknown or unsupported formats", async () => {
+    const { adapter } = createFixture();
+    await expect(
+      adapter.sendViewOnce("5511999999999", Buffer.from("not audio").toString("base64"), "audio"),
+    ).rejects.toThrow("Unsupported or unknown view-once audio format");
   });
 
   it("sends one or more contacts as vCards", async () => {

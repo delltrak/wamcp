@@ -18,6 +18,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- On-demand history sync now decrypts and persists poll votes, retrying votes that arrive before
+  their poll.
+- View-once audio now uses detected MP3, M4A, or OGG MIME types and only marks verified OGG/Opus
+  as PTT.
 - Cloud API now returns unsupported-operation errors for edits and view-once messages instead of
   sending ordinary messages or media that appeared to meet those requests. Live locations, poll
   result reads, and Baileys-only group helpers also return explicit Cloud API unsupported errors.

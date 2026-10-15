@@ -53,7 +53,7 @@ export type VoiceNoteConverter = (
 const defaultVoiceNoteConverter: VoiceNoteConverter = (audio, executable, timeoutMs) =>
   convertToWhatsAppVoiceNote(audio, executable, undefined, timeoutMs);
 
-function isOggOpus(audio: Buffer): boolean {
+export function isOggOpus(audio: Buffer): boolean {
   if (!isOggContainer(audio) || audio.length < 28) return false;
 
   const segmentCount = audio[26]!;

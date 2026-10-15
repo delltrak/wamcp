@@ -234,7 +234,10 @@ export const SendViewOnceSchema = z
   .object({
     instanceId: z.string().min(1).describe("The instance ID to send from"),
     to: z.string().min(5).describe("Recipient phone number or group JID"),
-    media: z.string().min(1).describe("Media URL or base64-encoded data"),
+    media: z
+      .string()
+      .min(1)
+      .describe("Media URL or base64-encoded data; audio also accepts a base64 data URI"),
     type: z.enum(["image", "video", "audio"]).describe("Media type: image, video, or audio"),
   })
   .strict();

@@ -180,6 +180,16 @@ function initializeDatabase(): void {
     CREATE INDEX IF NOT EXISTS idx_event_responses_chat
       ON event_responses(instance_id, chat_id, event_message_id);
 
+    CREATE TABLE IF NOT EXISTS pending_poll_votes (
+      instance_id     TEXT NOT NULL REFERENCES instances(id) ON DELETE CASCADE,
+      poll_message_id TEXT NOT NULL,
+      vote_message_id TEXT NOT NULL,
+      raw_data        TEXT NOT NULL,
+      PRIMARY KEY (instance_id, poll_message_id, vote_message_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_pending_poll_votes_poll
+      ON pending_poll_votes(instance_id, poll_message_id);
+
     CREATE TABLE IF NOT EXISTS wa_version_cache (
       id              INTEGER PRIMARY KEY DEFAULT 1,
       version_json    TEXT NOT NULL,

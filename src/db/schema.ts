@@ -286,6 +286,22 @@ export const eventResponses = sqliteTable(
   ],
 );
 
+export const pendingPollVotes = sqliteTable(
+  "pending_poll_votes",
+  {
+    instanceId: text("instance_id")
+      .notNull()
+      .references(() => instances.id, { onDelete: "cascade" }),
+    pollMessageId: text("poll_message_id").notNull(),
+    voteMessageId: text("vote_message_id").notNull(),
+    rawData: text("raw_data").notNull(),
+  },
+  (table) => [
+    primaryKey({ columns: [table.instanceId, table.pollMessageId, table.voteMessageId] }),
+    index("idx_pending_poll_votes_poll").on(table.instanceId, table.pollMessageId),
+  ],
+);
+
 // ============================================================
 // VERSION CACHE
 // WhatsApp Web version auto-update (daily check)

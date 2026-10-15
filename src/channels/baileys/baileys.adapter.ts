@@ -92,6 +92,7 @@ import {
   labels as labelsTable,
   labelAssociations as labelAssociationsTable,
   eventResponses as eventResponsesTable,
+  pendingPollVotes as pendingPollVotesTable,
   contacts as contactsTable,
 } from "../../db/schema.js";
 import { eq, and, desc, asc, ne, inArray, or, sql } from "drizzle-orm";
@@ -130,8 +131,12 @@ import { QuotedMessageResolutionError } from "../../utils/quoted-message.js";
 import { isValidStatusRecipient } from "../../utils/validation.js";
 import { normalizeGroupJid } from "../../utils/group-jid.js";
 import { MediaService } from "../../services/media.js";
-import { resolveFfmpegTimeoutMs, WHATSAPP_VOICE_MIME_TYPE } from "../../tts/audio.js";
-import { preparePttAudio } from "../../tts/waveform.js";
+import {
+  isOggContainer,
+  resolveFfmpegTimeoutMs,
+  WHATSAPP_VOICE_MIME_TYPE,
+} from "../../tts/audio.js";
+import { isOggOpus, preparePttAudio } from "../../tts/waveform.js";
 import {
   ContactStore,
   type ContactPnResolver,
@@ -145,6 +150,100 @@ const STATUS_BROADCAST_JID = "status@broadcast";
 const MAX_EVENT_RESPONSE_DECRYPT_ATTEMPTS = 16;
 const APP_STATE_WRITES_DISABLED_ERROR =
   "WhatsApp account, server, and app-state writes are disabled because changes can get this linked device removed (see issue #71). Set WA_APP_STATE_WRITES_ENABLED=true to enable at your own risk.";
+
+interface ViewOnceAudio {
+  audio: Buffer;
+  mimeType: string;
+  ptt: boolean;
+}
+
+function parseAudioDataUri(input: string): { data: Buffer; contentType?: string } {
+  const comma = input.indexOf(",");
+  if (comma < 5) throw new Error("Invalid view-once audio data URI.");
+
+  const metadata = input.slice(5, comma).split(";");
+  const mediaType = metadata.shift()?.trim();
+  const isBase64 = metadata.some((parameter) => parameter.trim().toLowerCase() === "base64");
+  if (!isBase64) {
+    throw new Error("View-once audio data URI must use base64 encoding.");
+  }
+
+  const base64 = input.slice(comma + 1);
+  if (!/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(base64)) {
+    throw new Error("View-once audio data URI contains invalid base64 data.");
+  }
+  const parameters = metadata.filter((parameter) => parameter.trim().toLowerCase() !== "base64");
+  return {
+    data: mediaService.decodeBase64Media(base64, MAX_BASE64_MEDIA_BYTES),
+    ...(mediaType ? { contentType: [mediaType, ...parameters].join(";") } : {}),
+  };
+}
+
+function sniffViewOnceAudioMimeType(audio: Buffer): string | undefined {
+  if (isOggContainer(audio)) return isOggOpus(audio) ? WHATSAPP_VOICE_MIME_TYPE : "audio/ogg";
+  if (
+    audio.subarray(0, 3).toString("ascii") === "ID3" ||
+    (audio.length >= 2 && audio[0] === 0xff && (audio[1]! & 0xe0) === 0xe0)
+  ) {
+    return "audio/mpeg";
+  }
+  if (
+    audio.length >= 12 &&
+    audio.subarray(4, 8).toString("ascii") === "ftyp" &&
+    /^m4[abp] ?$/i.test(audio.subarray(8, 12).toString("ascii"))
+  ) {
+    return "audio/mp4";
+  }
+  return undefined;
+}
+
+function normalizeViewOnceAudioMimeType(contentType: string | undefined): string | undefined {
+  const mediaType = contentType?.split(";", 1)[0]?.trim().toLowerCase();
+  switch (mediaType) {
+    case "audio/mpeg":
+    case "audio/mp3":
+    case "audio/x-mp3":
+      return "audio/mpeg";
+    case "audio/mp4":
+    case "audio/m4a":
+    case "audio/x-m4a":
+      return "audio/mp4";
+    case "audio/ogg":
+    case "audio/x-ogg":
+    case "application/ogg":
+      return "audio/ogg";
+    case "audio/opus":
+      return "audio/opus";
+    default:
+      return undefined;
+  }
+}
+
+async function prepareViewOnceAudio(input: string): Promise<ViewOnceAudio> {
+  const source = input.startsWith("data:")
+    ? parseAudioDataUri(input)
+    : await mediaService.getMediaBuffer(input, {
+        maxBytes: MAX_BASE64_MEDIA_BYTES,
+        includeContentType: true,
+      });
+  const detectedMimeType = sniffViewOnceAudioMimeType(source.data);
+  const sourceMimeType = normalizeViewOnceAudioMimeType(source.contentType);
+  const isOpus = isOggOpus(source.data);
+  const mimeType = detectedMimeType ?? sourceMimeType;
+
+  if (!mimeType || (mimeType === "audio/opus" && !isOpus)) {
+    const declaredType = source.contentType ? ` (${source.contentType})` : "";
+    throw new Error(
+      `Unsupported or unknown view-once audio format${declaredType}. Supported formats are MP3, M4A, and OGG audio.`,
+    );
+  }
+
+  return {
+    audio: source.data,
+    mimeType: isOpus ? WHATSAPP_VOICE_MIME_TYPE : mimeType,
+    ptt: isOpus,
+  };
+}
 
 interface EventResponseJidCandidate {
   jid: string;
@@ -1567,19 +1666,20 @@ export class BaileysAdapter implements ChannelAdapter {
   ): Promise<MessageResponse> {
     const sock = this.getSock();
     const jid = this.normalizeJid(to);
-    const resolved = this.resolveMedia(media);
-
-    const msg: AnyMessageContent =
-      type === "image"
-        ? { image: resolved, viewOnce: true }
-        : type === "video"
-          ? { video: resolved, viewOnce: true }
-          : {
-              audio: resolved,
-              ptt: false,
-              mimetype: WHATSAPP_VOICE_MIME_TYPE,
-              viewOnce: true,
-            };
+    let msg: AnyMessageContent;
+    if (type === "image") {
+      msg = { image: this.resolveMedia(media), viewOnce: true };
+    } else if (type === "video") {
+      msg = { video: this.resolveMedia(media), viewOnce: true };
+    } else {
+      const audio = await prepareViewOnceAudio(media);
+      msg = {
+        audio: audio.audio,
+        ptt: audio.ptt,
+        mimetype: audio.mimeType,
+        viewOnce: true,
+      };
+    }
 
     const result = await sock.sendMessage(jid, msg);
     this.persistOutgoingMessage(result, jid);
@@ -3994,12 +4094,14 @@ export class BaileysAdapter implements ChannelAdapter {
   private persistPollVote(
     message: WAMessage,
     update: NonNullable<proto.Message.IPollUpdateMessage>,
-  ): void {
+  ): boolean {
     const pollKey = update.pollCreationMessageKey;
+    const pollMessageId = typeof pollKey?.id === "string" ? pollKey.id : undefined;
     const encryptedVote = update.vote;
-    const messageSecret = this.sock?.user?.id;
-    if (!pollKey?.id || !encryptedVote || !messageSecret) return;
+    const voteMessageId = typeof message.key.id === "string" ? message.key.id : undefined;
+    if (!pollKey || !pollMessageId || !voteMessageId || !encryptedVote) return false;
 
+    const messageSecret = this.sock?.user?.id;
     const row = db
       .select({
         chatId: messagesTable.chatId,
@@ -4007,20 +4109,28 @@ export class BaileysAdapter implements ChannelAdapter {
         rawData: messagesTable.rawData,
       })
       .from(messagesTable)
-      .where(and(eq(messagesTable.instanceId, this.instanceId), eq(messagesTable.id, pollKey.id)))
+      .where(
+        and(eq(messagesTable.instanceId, this.instanceId), eq(messagesTable.id, pollMessageId)),
+      )
       .get();
-    if (!row || row.type !== "poll" || !row.rawData) return;
+    if (!row || row.type !== "poll" || !row.rawData || !messageSecret) {
+      this.queuePendingPollVote(pollMessageId, voteMessageId, message);
+      return false;
+    }
 
     try {
       const poll = JSON.parse(row.rawData, BufferJSON.reviver) as WAMessage;
       const pollSecret = poll.message?.messageContextInfo?.messageSecret;
-      if (!pollSecret) return;
+      if (!pollSecret) {
+        this.queuePendingPollVote(pollMessageId, voteMessageId, message);
+        return false;
+      }
       const normalizedMeId = jidNormalizedUser(messageSecret);
       const pollCreatorJid = getKeyAuthor(pollKey, normalizedMeId);
       const voterJid = getKeyAuthor(message.key, normalizedMeId);
       const vote = decryptPollVote(encryptedVote, {
         pollCreatorJid,
-        pollMsgId: pollKey.id,
+        pollMsgId: pollMessageId,
         pollEncKey: pollSecret,
         voterJid,
       });
@@ -4033,11 +4143,76 @@ export class BaileysAdapter implements ChannelAdapter {
             : {}),
         },
       ]);
+      db.delete(pendingPollVotesTable)
+        .where(
+          and(
+            eq(pendingPollVotesTable.instanceId, this.instanceId),
+            eq(pendingPollVotesTable.pollMessageId, pollMessageId),
+            eq(pendingPollVotesTable.voteMessageId, voteMessageId),
+          ),
+        )
+        .run();
+      return true;
     } catch (error) {
       logger.debug(
-        { instanceId: this.instanceId, pollMessageId: pollKey.id, error },
+        { instanceId: this.instanceId, pollMessageId, error },
         "Unable to decrypt poll vote",
       );
+      return false;
+    }
+  }
+
+  private queuePendingPollVote(
+    pollMessageId: string,
+    voteMessageId: string,
+    message: WAMessage,
+  ): void {
+    const rawData = serializeWAMessage(message);
+    if (!rawData) return;
+
+    db.insert(pendingPollVotesTable)
+      .values({
+        instanceId: this.instanceId,
+        pollMessageId,
+        voteMessageId,
+        rawData,
+      })
+      .onConflictDoUpdate({
+        target: [
+          pendingPollVotesTable.instanceId,
+          pendingPollVotesTable.pollMessageId,
+          pendingPollVotesTable.voteMessageId,
+        ],
+        set: { rawData },
+      })
+      .run();
+  }
+
+  private retryPendingPollVotes(pollMessageId: string): void {
+    const pending = db
+      .select()
+      .from(pendingPollVotesTable)
+      .where(
+        and(
+          eq(pendingPollVotesTable.instanceId, this.instanceId),
+          eq(pendingPollVotesTable.pollMessageId, pollMessageId),
+        ),
+      )
+      .all();
+
+    for (const row of pending) {
+      try {
+        const message = JSON.parse(row.rawData, BufferJSON.reviver) as WAMessage;
+        const content = unwrapMessageContent(message.message, { unwrapProtocolEdits: false });
+        if (content?.pollUpdateMessage) {
+          this.persistPollVote(message, content.pollUpdateMessage);
+        }
+      } catch (error) {
+        logger.debug(
+          { instanceId: this.instanceId, pollMessageId, voteMessageId: row.voteMessageId, error },
+          "Unable to retry pending poll vote",
+        );
+      }
     }
   }
 
@@ -4312,6 +4487,12 @@ export class BaileysAdapter implements ChannelAdapter {
             const content = unwrapMessageContent(message.message, {
               unwrapProtocolEdits: false,
             });
+            if (content?.pollUpdateMessage) {
+              this.persistPollVote(message, content.pollUpdateMessage);
+            }
+            if (extractMessageDetails(message).type === "poll" && message.key.id) {
+              this.retryPendingPollVotes(message.key.id);
+            }
             if (content?.encEventResponseMessage) {
               await this.persistEncryptedEventResponse(message, content.encEventResponseMessage);
             }
@@ -4406,6 +4587,7 @@ export class BaileysAdapter implements ChannelAdapter {
               },
             };
             this.persistMessage(normalized, msg);
+            if (details.type === "poll") this.retryPendingPollVotes(msg.key.id);
           }
 
           if (unwrappedContent?.encEventResponseMessage) {
