@@ -1,7 +1,12 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import Database from "better-sqlite3";
 import { randomUUID } from "node:crypto";
-import { proto, type BaileysEventMap, type WASocket, type WAMessage } from "@whiskeysockets/baileys";
+import {
+  proto,
+  type BaileysEventMap,
+  type WASocket,
+  type WAMessage,
+} from "@whiskeysockets/baileys";
 import { BaileysAdapter } from "../src/channels/baileys/baileys.adapter.js";
 import { CloudApiAdapter } from "../src/channels/cloud-api/cloud.adapter.js";
 import { sqlite } from "../src/db/client.js";
@@ -50,14 +55,28 @@ function seedSearchMessage(
        (id, instance_id, chat_id, sender_id, type, content, timestamp)
        VALUES (?, 'search-instance', ?, ?, 'text', ?, ?)`,
     )
-    .run(message.id, message.chatId ?? CHAT_ID, message.sender ?? ACCOUNT_ID, message.content, message.timestamp);
+    .run(
+      message.id,
+      message.chatId ?? CHAT_ID,
+      message.sender ?? ACCOUNT_ID,
+      message.content,
+      message.timestamp,
+    );
 }
 
 describe("local message search", () => {
   it("matches case-insensitive substrings and treats LIKE wildcards literally", () => {
     const database = memorySearchDb();
-    seedSearchMessage(database, { id: "literal", content: "Contains 100%_done\\today", timestamp: 10 });
-    seedSearchMessage(database, { id: "wildcard", content: "Contains 100XYdoneXtoday", timestamp: 11 });
+    seedSearchMessage(database, {
+      id: "literal",
+      content: "Contains 100%_done\\today",
+      timestamp: 10,
+    });
+    seedSearchMessage(database, {
+      id: "wildcard",
+      content: "Contains 100XYdoneXtoday",
+      timestamp: 11,
+    });
 
     const result = searchStoredMessages(database, "search-instance", {
       query: "%_done\\",
@@ -144,14 +163,20 @@ describe("Baileys business and message features", () => {
   function addStoredMessage(
     instanceId: string,
     id: string,
-    options: { chatId?: string; sender?: string; fromMe?: boolean; timestamp?: number } = {},
+    options: {
+      chatId?: string;
+      sender?: string;
+      fromMe?: boolean;
+      timestamp?: number;
+      rawData?: string;
+    } = {},
   ): void {
     sqlite
       .prepare(
         `INSERT INTO messages
          (id, instance_id, chat_id, sender_id, type, content, media_url,
-          is_from_me, status, timestamp)
-         VALUES (?, ?, ?, ?, 'text', ?, NULL, ?, 'received', ?)`,
+          is_from_me, status, timestamp, raw_data)
+         VALUES (?, ?, ?, ?, 'text', ?, NULL, ?, 'received', ?, ?)`,
       )
       .run(
         id,
@@ -161,6 +186,7 @@ describe("Baileys business and message features", () => {
         `Stored ${id}`,
         options.fromMe ? 1 : 0,
         options.timestamp ?? 100,
+        options.rawData ?? null,
       );
   }
 
@@ -290,7 +316,9 @@ describe("Baileys business and message features", () => {
       CHAT_ID,
     );
     expect(
-      sqlite.prepare("SELECT starred FROM messages WHERE instance_id = ? AND id = ?").get(id, "outgoing"),
+      sqlite
+        .prepare("SELECT starred FROM messages WHERE instance_id = ? AND id = ?")
+        .get(id, "outgoing"),
     ).toEqual({ starred: 1 });
   });
 
@@ -299,7 +327,9 @@ describe("Baileys business and message features", () => {
     addStoredMessage(id, "quoted-message");
     const outgoing = {
       key: { id: "event-1", remoteJid: CHAT_ID, fromMe: true },
-      message: { eventMessage: { name: "Planning", description: "Review", startTime: 1_800_000_000 } },
+      message: {
+        eventMessage: { name: "Planning", description: "Review", startTime: 1_800_000_000 },
+      },
       messageTimestamp: 1_800_000_000,
     } as WAMessage;
     const { socket, processEvents } = installSocket(adapter, {
@@ -342,7 +372,11 @@ describe("Baileys business and message features", () => {
       expect.objectContaining({
         event: expect.objectContaining({ name: "Planning", call: "audio" }),
       }),
-      expect.objectContaining({ quoted: expect.objectContaining({ key: { remoteJid: CHAT_ID, id: "quoted-message", fromMe: false } }) }),
+      expect.objectContaining({
+        quoted: expect.objectContaining({
+          key: { remoteJid: CHAT_ID, id: "quoted-message", fromMe: false },
+        }),
+      }),
     );
     expect(await adapter.getEventResponses(CHAT_ID, "event-1")).toEqual([
       {
@@ -353,13 +387,22 @@ describe("Baileys business and message features", () => {
       },
     ]);
     expect(
-      sqlite.prepare("SELECT type, raw_data FROM messages WHERE instance_id = ? AND id = ?").get(id, "event-1"),
+      sqlite
+        .prepare("SELECT type, raw_data FROM messages WHERE instance_id = ? AND id = ?")
+        .get(id, "event-1"),
     ).toMatchObject({ type: "event", raw_data: expect.any(String) });
   });
 
   it("anchors on-demand history at the oldest stored message and persists only new results", async () => {
     const { instanceId: id, adapter } = createFixture();
-    addStoredMessage(id, "history-anchor", { timestamp: 50 });
+    addStoredMessage(id, "history-anchor", {
+      timestamp: 50,
+      rawData: JSON.stringify({
+        key: { id: "history-anchor", remoteJid: CHAT_ID, fromMe: false },
+        message: { conversation: "Anchor" },
+        messageTimestamp: "50",
+      }),
+    });
     let processEvents: ((events: Partial<BaileysEventMap>) => Promise<void> | void) | undefined;
     const historyMessage: WAMessage = {
       key: { id: "history-new", remoteJid: CHAT_ID, fromMe: false },
@@ -383,6 +426,7 @@ describe("Baileys business and message features", () => {
               chats: [],
               messages: [historyMessage],
               syncType: proto.HistorySync.HistorySyncType.ON_DEMAND,
+              peerDataRequestSessionId: "history-request",
             },
             "messaging-history.status": {
               syncType: proto.HistorySync.HistorySyncType.ON_DEMAND,
@@ -408,21 +452,103 @@ describe("Baileys business and message features", () => {
     expect(socket.fetchMessageHistory).toHaveBeenCalledWith(
       20,
       expect.objectContaining({ remoteJid: CHAT_ID, id: "history-anchor", fromMe: false }),
-      50,
+      50_000,
     );
     expect(result).toEqual({ requested: 20, stored: 1, timedOut: false });
     expect(await adapter.getMessages(CHAT_ID)).toContainEqual(
       expect.objectContaining({ id: "history-new", content: "Older fetched text" }),
     );
   });
+
+  it("does not let a timed-out history session complete the next request", async () => {
+    const { instanceId: id, adapter } = createFixture();
+    addStoredMessage(id, "history-anchor", { timestamp: 50 });
+    let processEvents: ((events: Partial<BaileysEventMap>) => Promise<void> | void) | undefined;
+    const oldMessage: WAMessage = {
+      key: { id: "late-history-message", remoteJid: CHAT_ID, fromMe: false },
+      message: { conversation: "Late history" },
+      messageTimestamp: 40,
+    };
+    const currentMessage: WAMessage = {
+      key: { id: "current-history-message", remoteJid: CHAT_ID, fromMe: false },
+      message: { conversation: "Current history" },
+      messageTimestamp: 30,
+    };
+    const socket = {
+      user: { id: ACCOUNT_ID },
+      ev: {
+        on: vi.fn(),
+        process: vi.fn((handler: (events: Partial<BaileysEventMap>) => Promise<void> | void) => {
+          processEvents = handler;
+          return vi.fn();
+        }),
+      },
+      fetchMessageHistory: vi
+        .fn()
+        .mockResolvedValueOnce("old-session")
+        .mockResolvedValueOnce("new-session"),
+    } as unknown as WASocket;
+    const privateAdapter = adapter as unknown as {
+      sock: WASocket;
+      status: "connected";
+      bindEvents: (value: WASocket) => void;
+    };
+    privateAdapter.sock = socket;
+    privateAdapter.status = "connected";
+    privateAdapter.bindEvents(socket);
+
+    const timedOut = await adapter.fetchMessageHistory(CHAT_ID, 20, 5);
+    expect(timedOut).toEqual({ requested: 20, stored: 0, timedOut: true });
+
+    const currentRequest = adapter.fetchMessageHistory(CHAT_ID, 20, 1_000);
+    await Promise.resolve();
+    await processEvents?.({
+      "messaging-history.set": {
+        contacts: [],
+        chats: [],
+        messages: [oldMessage],
+        syncType: proto.HistorySync.HistorySyncType.ON_DEMAND,
+        peerDataRequestSessionId: "old-session",
+      },
+      "messaging-history.status": {
+        syncType: proto.HistorySync.HistorySyncType.ON_DEMAND,
+        status: "complete",
+        explicit: true,
+      },
+    });
+
+    let currentRequestSettled = false;
+    void currentRequest.then(() => {
+      currentRequestSettled = true;
+    });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(currentRequestSettled).toBe(false);
+
+    await processEvents?.({
+      "messaging-history.set": {
+        contacts: [],
+        chats: [],
+        messages: [currentMessage],
+        syncType: proto.HistorySync.HistorySyncType.ON_DEMAND,
+        peerDataRequestSessionId: "new-session",
+      },
+      "messaging-history.status": {
+        syncType: proto.HistorySync.HistorySyncType.ON_DEMAND,
+        status: "complete",
+        explicit: true,
+      },
+    });
+
+    await expect(currentRequest).resolves.toEqual({ requested: 20, stored: 1, timedOut: false });
+  });
 });
 
 describe("Cloud API unsupported operations and label webhooks", () => {
   it("returns explicit unsupported errors for Baileys-only features", async () => {
     const adapter = new CloudApiAdapter("cloud-feature-test");
-    await expect(adapter.sendEvent({ to: CHAT_ID, name: "Event", start: "2027-01-15T08:00:00Z" })).rejects.toThrow(
-      "not supported on Cloud API",
-    );
+    await expect(
+      adapter.sendEvent({ to: CHAT_ID, name: "Event", start: "2027-01-15T08:00:00Z" }),
+    ).rejects.toThrow("not supported on Cloud API");
     await expect(adapter.markChatUnread(CHAT_ID)).rejects.toThrow("not supported on Cloud API");
     await expect(adapter.listLabels()).rejects.toThrow("not supported on Cloud API");
     await expect(adapter.fetchMessageHistory(CHAT_ID, 10)).rejects.toThrow(

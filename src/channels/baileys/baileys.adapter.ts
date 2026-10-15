@@ -60,7 +60,7 @@ import type {
 import { useSqliteAuthState, clearAuthState } from "./baileys.auth.js";
 import { normalizePrivacySettings } from "./privacy.js";
 import { getWaVersion } from "./baileys.version.js";
-import { messageTimestampToSeconds } from "./message-timestamp.js";
+import { messageTimestampToMilliseconds, messageTimestampToSeconds } from "./message-timestamp.js";
 import { db, sqlite } from "../../db/client.js";
 import {
   chats as chatsTable,
@@ -306,6 +306,8 @@ interface HistoryFetchWaiter {
   chatId: string;
   requested: number;
   stored: number;
+  peerDataRequestSessionId?: string;
+  receivedMatchingHistorySet: boolean;
   seenMessageIds: Set<string>;
   resolve: (result: { requested: number; stored: number; timedOut: boolean }) => void;
   reject: (error: unknown) => void;
@@ -652,6 +654,27 @@ export class BaileysAdapter implements ChannelAdapter {
       generateHighQualityLinkPreview: true,
       syncFullHistory: true,
       markOnlineOnConnect: this.markOnlineOnConnect,
+      getMessage: async (key: WAMessageKey): Promise<proto.IMessage | undefined> => {
+        if (!key.id) return undefined;
+        const conditions = [
+          eq(messagesTable.instanceId, this.instanceId),
+          eq(messagesTable.id, key.id),
+        ];
+        if (key.remoteJid) conditions.push(eq(messagesTable.chatId, key.remoteJid));
+        const row = db
+          .select({ rawData: messagesTable.rawData })
+          .from(messagesTable)
+          .where(and(...conditions))
+          .get();
+        if (!row?.rawData) return undefined;
+
+        try {
+          const stored = JSON.parse(row.rawData, BufferJSON.reviver) as WAMessage;
+          return stored.message ?? undefined;
+        } catch {
+          return undefined;
+        }
+      },
     });
 
     this.sock = sock;
@@ -947,7 +970,10 @@ export class BaileysAdapter implements ChannelAdapter {
       .get();
     if (!stored) throw new Error(`Message '${messageId}' was not found in chat '${jid}'`);
 
-    await sock.chatModify({ star: { messages: [{ id: messageId, fromMe: stored.fromMe === 1 }], star } }, jid);
+    await sock.chatModify(
+      { star: { messages: [{ id: messageId, fromMe: stored.fromMe === 1 }], star } },
+      jid,
+    );
     db.update(messagesTable)
       .set({ starred: star ? 1 : 0 })
       .where(
@@ -1395,7 +1421,12 @@ export class BaileysAdapter implements ChannelAdapter {
     const jid = await this.requireBusinessLabelSupport(sock, ["addLabel"]);
     const label: BusinessLabel = { id: randomUUID(), name, color, deleted: false };
     try {
-      await sock.addLabel(jid, { id: label.id, name: label.name, color: label.color, deleted: false });
+      await sock.addLabel(jid, {
+        id: label.id,
+        name: label.name,
+        color: label.color,
+        deleted: false,
+      });
     } catch (error) {
       throw labelOperationError(error);
     }
@@ -2125,7 +2156,9 @@ export class BaileysAdapter implements ChannelAdapter {
     const sock = this.getSock();
     const jid = this.normalizeJid(chatId);
     if (this.activeHistoryFetch) {
-      throw new Error("Another on-demand message history fetch is already in progress for this instance");
+      throw new Error(
+        "Another on-demand message history fetch is already in progress for this instance",
+      );
     }
     const oldest = db
       .select({
@@ -2162,44 +2195,56 @@ export class BaileysAdapter implements ChannelAdapter {
     } else if (jid.endsWith("@g.us") && oldestKey.fromMe && !oldestKey.participant) {
       oldestKey.participant = sock.user?.id;
     }
-    const oldestTimestamp = Number(raw?.messageTimestamp ?? oldest.timestamp);
+    const oldestTimestamp = messageTimestampToMilliseconds(
+      raw?.messageTimestamp ?? oldest.timestamp,
+      Number(oldest.timestamp) * 1000,
+    );
 
     const resultPromise = new Promise<{ requested: number; stored: number; timedOut: boolean }>(
       (resolve, reject) => {
-        const waiter: HistoryFetchWaiter = {
+        const waiter = {
           chatId: jid,
           requested: count,
           stored: 0,
+          receivedMatchingHistorySet: false,
           seenMessageIds: new Set(),
           resolve,
           reject,
-          timer: setTimeout(() => this.finishHistoryFetch(true), timeoutMs),
-        };
+          timer: undefined as unknown as ReturnType<typeof setTimeout>,
+        } satisfies HistoryFetchWaiter;
+        waiter.timer = setTimeout(() => this.finishHistoryFetch(true, waiter), timeoutMs);
         this.activeHistoryFetch = waiter;
       },
     );
 
     try {
-      void sock.fetchMessageHistory(count, oldestKey, oldestTimestamp).catch((error: unknown) => {
-        this.failHistoryFetch(error);
-      });
+      const waiter = this.activeHistoryFetch as HistoryFetchWaiter | null;
+      if (!waiter) throw new Error("History fetch waiter was not initialized");
+      void sock
+        .fetchMessageHistory(count, oldestKey, oldestTimestamp)
+        .then((peerDataRequestSessionId) => {
+          waiter.peerDataRequestSessionId = peerDataRequestSessionId;
+        })
+        .catch((error: unknown) => {
+          this.failHistoryFetch(error, waiter);
+        });
     } catch (error) {
       this.failHistoryFetch(error);
     }
     return resultPromise;
   }
 
-  private finishHistoryFetch(timedOut: boolean): void {
+  private finishHistoryFetch(timedOut: boolean, expectedWaiter?: HistoryFetchWaiter): void {
     const waiter = this.activeHistoryFetch;
-    if (!waiter) return;
+    if (!waiter || (expectedWaiter && waiter !== expectedWaiter)) return;
     clearTimeout(waiter.timer);
     this.activeHistoryFetch = null;
     waiter.resolve({ requested: waiter.requested, stored: waiter.stored, timedOut });
   }
 
-  private failHistoryFetch(error: unknown): void {
+  private failHistoryFetch(error: unknown, expectedWaiter?: HistoryFetchWaiter): void {
     const waiter = this.activeHistoryFetch;
-    if (!waiter) return;
+    if (!waiter || (expectedWaiter && waiter !== expectedWaiter)) return;
     clearTimeout(waiter.timer);
     this.activeHistoryFetch = null;
     waiter.reject(error);
@@ -2809,8 +2854,13 @@ export class BaileysAdapter implements ChannelAdapter {
 
       // --- History sync: contacts arrive here during first sync ---
       if (events["messaging-history.set"]) {
-        const { contacts = [], chats = [], messages = [], syncType } =
-          events["messaging-history.set"];
+        const {
+          contacts = [],
+          chats = [],
+          messages = [],
+          syncType,
+          peerDataRequestSessionId,
+        } = events["messaging-history.set"];
         this.persistChats(chats);
         const contactCount = contacts.filter((contact) => contact.id).length;
         const chatContactCount = chats.filter(
@@ -2835,12 +2885,19 @@ export class BaileysAdapter implements ChannelAdapter {
         }
 
         if (syncType === proto.HistorySync.HistorySyncType.ON_DEMAND) {
+          const waiter = this.activeHistoryFetch;
+          const sessionMatchesWaiter =
+            !!waiter &&
+            (peerDataRequestSessionId == null ||
+              peerDataRequestSessionId === waiter.peerDataRequestSessionId);
+          if (sessionMatchesWaiter) waiter.receivedMatchingHistorySet = true;
+
           for (const message of messages) {
             const inserted = this.persistSourceMessage(message);
-            const waiter = this.activeHistoryFetch;
             const messageChatId = message.key.remoteJid ?? "";
             if (
               inserted &&
+              sessionMatchesWaiter &&
               waiter &&
               messageChatId === waiter.chatId &&
               message.key.id &&
@@ -2855,11 +2912,17 @@ export class BaileysAdapter implements ChannelAdapter {
 
       if (events["messaging-history.status"]) {
         const historyStatus = events["messaging-history.status"];
+        const waiter = this.activeHistoryFetch;
+        const statusSessionId = (
+          historyStatus as typeof historyStatus & { peerDataRequestSessionId?: string | null }
+        ).peerDataRequestSessionId;
         if (
           historyStatus.syncType === proto.HistorySync.HistorySyncType.ON_DEMAND &&
-          historyStatus.status === "complete"
+          historyStatus.status === "complete" &&
+          waiter?.receivedMatchingHistorySet &&
+          (statusSessionId == null || statusSessionId === waiter.peerDataRequestSessionId)
         ) {
-          this.finishHistoryFetch(false);
+          this.finishHistoryFetch(false, waiter);
         }
       }
 
