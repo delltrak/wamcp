@@ -79,7 +79,8 @@ export function registerGroupTools(
   server.registerTool(
     "wa_group_update_picture",
     {
-      description: "Set a WhatsApp group picture from an HTTPS URL or base64 image.",
+      description:
+        "Set a WhatsApp group picture from an HTTPS URL or base64 image. This account/server change is blocked unless WA_APP_STATE_WRITES_ENABLED=true.",
       inputSchema: UpdateGroupPictureSchema,
     },
     async (params) => {
@@ -99,7 +100,8 @@ export function registerGroupTools(
   server.registerTool(
     "wa_group_remove_picture",
     {
-      description: "Remove the WhatsApp group picture.",
+      description:
+        "Remove the WhatsApp group picture. This account/server change is blocked unless WA_APP_STATE_WRITES_ENABLED=true.",
       inputSchema: RemoveGroupPictureSchema,
     },
     async (params) => {
@@ -119,7 +121,8 @@ export function registerGroupTools(
   server.registerTool(
     "wa_create_group",
     {
-      description: "Create a new WhatsApp group with a name and initial participants.",
+      description:
+        "Create a new WhatsApp group with a name and initial participants. This account/server change is blocked unless WA_APP_STATE_WRITES_ENABLED=true.",
       inputSchema: CreateGroupSchema,
     },
     async (params) => {
@@ -139,7 +142,8 @@ export function registerGroupTools(
   server.registerTool(
     "wa_group_add_participants",
     {
-      description: "Add members to a WhatsApp group.",
+      description:
+        "Add members to a WhatsApp group. This account/server change is blocked unless WA_APP_STATE_WRITES_ENABLED=true.",
       inputSchema: AddParticipantsSchema,
     },
     async (params) => {
@@ -159,7 +163,8 @@ export function registerGroupTools(
   server.registerTool(
     "wa_group_remove_participants",
     {
-      description: "Remove members from a WhatsApp group.",
+      description:
+        "Remove members from a WhatsApp group. This account/server change is blocked unless WA_APP_STATE_WRITES_ENABLED=true.",
       inputSchema: RemoveParticipantsSchema,
     },
     async (params) => {
@@ -179,7 +184,8 @@ export function registerGroupTools(
   server.registerTool(
     "wa_group_promote",
     {
-      description: "Promote members to group admin.",
+      description:
+        "Promote members to group admin. This account/server change is blocked unless WA_APP_STATE_WRITES_ENABLED=true.",
       inputSchema: PromoteParticipantSchema,
     },
     async (params) => {
@@ -199,7 +205,8 @@ export function registerGroupTools(
   server.registerTool(
     "wa_group_demote",
     {
-      description: "Demote group admins to regular members.",
+      description:
+        "Demote group admins to regular members. This account/server change is blocked unless WA_APP_STATE_WRITES_ENABLED=true.",
       inputSchema: DemoteParticipantSchema,
     },
     async (params) => {
@@ -219,7 +226,8 @@ export function registerGroupTools(
   server.registerTool(
     "wa_group_update_subject",
     {
-      description: "Change the name/subject of a WhatsApp group.",
+      description:
+        "Change the name/subject of a WhatsApp group. This account/server change is blocked unless WA_APP_STATE_WRITES_ENABLED=true.",
       inputSchema: UpdateSubjectSchema,
     },
     async (params) => {
@@ -242,7 +250,8 @@ export function registerGroupTools(
   server.registerTool(
     "wa_group_update_description",
     {
-      description: "Change the description of a WhatsApp group.",
+      description:
+        "Change the description of a WhatsApp group. This account/server change is blocked unless WA_APP_STATE_WRITES_ENABLED=true.",
       inputSchema: UpdateDescriptionSchema,
     },
     async (params) => {
@@ -266,7 +275,7 @@ export function registerGroupTools(
     "wa_group_update_settings",
     {
       description:
-        "Change group settings (announce: only admins can send, locked: only admins can edit info).",
+        "Change group settings (announce: only admins can send, locked: only admins can edit info). This account/server change is blocked unless WA_APP_STATE_WRITES_ENABLED=true.",
       inputSchema: UpdateSettingsSchema,
     },
     async (params) => {
@@ -297,7 +306,8 @@ export function registerGroupTools(
   server.registerTool(
     "wa_group_leave",
     {
-      description: "Leave a WhatsApp group.",
+      description:
+        "Leave a WhatsApp group. This account/server change is blocked unless WA_APP_STATE_WRITES_ENABLED=true.",
       inputSchema: LeaveGroupSchema,
     },
     async (params) => {
@@ -341,7 +351,8 @@ export function registerGroupTools(
   server.registerTool(
     "wa_group_revoke_invite",
     {
-      description: "Revoke the current invite link for a WhatsApp group, generating a new one.",
+      description:
+        "Revoke the current invite link for a WhatsApp group, generating a new one. This account/server change is blocked unless WA_APP_STATE_WRITES_ENABLED=true.",
       inputSchema: RevokeInviteSchema,
     },
     async (params) => {
@@ -361,7 +372,8 @@ export function registerGroupTools(
   server.registerTool(
     "wa_group_join",
     {
-      description: "Join a WhatsApp group using an invite code or link.",
+      description:
+        "Join a WhatsApp group using an invite code or link. This account/server change is blocked unless WA_APP_STATE_WRITES_ENABLED=true.",
       inputSchema: JoinGroupSchema,
     },
     async (params) => {
@@ -382,7 +394,7 @@ export function registerGroupTools(
     "wa_group_toggle_ephemeral",
     {
       description:
-        "Enable or disable disappearing messages in a group. Duration is in seconds (0 to disable).",
+        "Enable or disable disappearing messages in a group. Duration is in seconds (0 to disable). This account/server change is blocked unless WA_APP_STATE_WRITES_ENABLED=true.",
       inputSchema: ToggleEphemeralSchema,
     },
     async (params) => {
@@ -405,7 +417,8 @@ export function registerGroupTools(
   server.registerTool(
     "wa_group_handle_request",
     {
-      description: "Approve or reject a pending join request for a WhatsApp group.",
+      description:
+        "Approve or reject a pending join request for a WhatsApp group. This account/server change is blocked unless WA_APP_STATE_WRITES_ENABLED=true.",
       inputSchema: HandleJoinRequestSchema,
     },
     async (params) => {
