@@ -565,6 +565,7 @@ Copy `.env.example` to `.env` and configure:
 | `WA_CLOUD_RATE_LIMIT`       | `80`                     | Messages/min per Cloud API instance      |
 | `WA_MESSAGE_RETENTION_DAYS` | `30`                     | Auto-delete old messages                 |
 | `WA_AUTO_RECONNECT`         | `true`                   | Auto-reconnect on disconnect             |
+| `WA_APP_STATE_WRITES_ENABLED` | `false`                 | Enable Baileys app-state writes; these changes can remove the linked device |
 | `WA_MARK_ONLINE_ON_CONNECT` | `false`                  | Mark the Baileys account online when its socket connects |
 | `WA_STATUS_MAX_RECIPIENTS`  | `256`                    | Maximum recipients per Baileys status; excess recipients are truncated and reported |
 | `WA_AUTO_READ`              | `false`                  | `on_fetch` marks incoming messages read when fetched; `on_receive` marks them read on arrival |
@@ -632,6 +633,14 @@ directory.
 `WA_AUTO_READ` accepts `false`, `on_fetch`, or `on_receive`. Invalid values disable automatic
 read receipts and produce a warning. Automatic receipts never delay message delivery or tool
 responses; receipt failures are logged.
+
+`WA_APP_STATE_WRITES_ENABLED` accepts `true` or `false` and defaults to `false`. When disabled,
+Baileys blocks `wa_archive_chat`, `wa_pin_chat`, `wa_mute_chat`, `wa_delete_chat`, `wa_clear_chat`,
+`wa_mark_chat_unread`, `wa_star_message`, `wa_create_label`, `wa_edit_label`, `wa_delete_label`,
+`wa_add_chat_label`, `wa_remove_chat_label`, `wa_add_message_label`, `wa_remove_message_label`, and
+`wa_update_profile_name` before sending them to WhatsApp. These app-state changes can get the linked
+device removed. Set the variable to `true` only if you accept that risk. This does not disable read
+receipts or app-state reads and resyncs.
 
 Baileys status stories go to the account's own normalized JID and known individual contacts by
 default. Each status tool accepts an optional `statusJidList` of phone numbers or individual JIDs
