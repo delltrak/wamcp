@@ -23,6 +23,9 @@ import {
   UpdateSettingsSchema,
   LeaveGroupSchema,
   GetInviteCodeSchema,
+  GetGroupInviteInfoSchema,
+  ListGroupJoinRequestsSchema,
+  SendGroupInviteMessageSchema,
   RevokeInviteSchema,
   JoinGroupSchema,
   ToggleEphemeralSchema,
@@ -72,6 +75,27 @@ export function registerGroupTools(
         return toolSuccess(info);
       } catch (err) {
         return handleToolError("wa_get_group_info", err, params.instanceId);
+      }
+    },
+  );
+
+  server.registerTool(
+    "wa_get_group_invite_info",
+    {
+      description:
+        "Read group metadata from a WhatsApp invite code or chat.whatsapp.com link before joining. Baileys only.",
+      inputSchema: GetGroupInviteInfoSchema,
+    },
+    async (params) => {
+      const log = createRequestLogger("wa_get_group_invite_info", params.instanceId);
+      const start = Date.now();
+      try {
+        const adapter = instanceManager.getAdapter(params.instanceId);
+        const info = await adapter.getGroupInviteInfo(params.inviteCode);
+        log.info({ duration: Date.now() - start }, "Group invite information retrieved");
+        return toolSuccess(info);
+      } catch (err) {
+        return handleToolError("wa_get_group_invite_info", err, params.instanceId);
       }
     },
   );
@@ -339,6 +363,27 @@ export function registerGroupTools(
   );
 
   server.registerTool(
+    "wa_send_group_invite_message",
+    {
+      description:
+        "Send a WhatsApp group invite card to a contact or group using the current invite code. Baileys only.",
+      inputSchema: SendGroupInviteMessageSchema,
+    },
+    async (params) => {
+      const log = createRequestLogger("wa_send_group_invite_message", params.instanceId);
+      const start = Date.now();
+      try {
+        const adapter = instanceManager.getAdapter(params.instanceId);
+        const result = await adapter.sendGroupInviteMessage(params.to, params.groupId, params.text);
+        log.info({ duration: Date.now() - start, to: params.to }, "Group invite message sent");
+        return toolSuccess(result);
+      } catch (err) {
+        return handleToolError("wa_send_group_invite_message", err, params.instanceId);
+      }
+    },
+  );
+
+  server.registerTool(
     "wa_group_revoke_invite",
     {
       description: "Revoke the current invite link for a WhatsApp group, generating a new one.",
@@ -398,6 +443,26 @@ export function registerGroupTools(
         return toolSuccess({ success: true, ephemeralDuration: params.duration });
       } catch (err) {
         return handleToolError("wa_group_toggle_ephemeral", err, params.instanceId);
+      }
+    },
+  );
+
+  server.registerTool(
+    "wa_group_list_join_requests",
+    {
+      description: "List pending join requests for a WhatsApp group. Baileys only.",
+      inputSchema: ListGroupJoinRequestsSchema,
+    },
+    async (params) => {
+      const log = createRequestLogger("wa_group_list_join_requests", params.instanceId);
+      const start = Date.now();
+      try {
+        const adapter = instanceManager.getAdapter(params.instanceId);
+        const requests = await adapter.listGroupJoinRequests(params.groupId);
+        log.info({ duration: Date.now() - start, count: requests.length }, "Group requests listed");
+        return toolSuccess({ groupId: params.groupId, count: requests.length, requests });
+      } catch (err) {
+        return handleToolError("wa_group_list_join_requests", err, params.instanceId);
       }
     },
   );

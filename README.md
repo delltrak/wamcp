@@ -36,7 +36,7 @@
 
 **WA MCP** is a WhatsApp MCP server built with TypeScript that gives AI agents full access to WhatsApp through the [Model Context Protocol](https://modelcontextprotocol.io). It supports both **Baileys** (WhatsApp Web) and **Meta Cloud API** as dual-channel backends, deployable with **Docker** in a single command.
 
-Your agent connects once and auto-discovers **118 tools**, **10 resources**, and **13 real-time events** — zero configuration, zero REST wrappers, zero glue code.
+Your agent connects once and auto-discovers **124 tools**, **10 resources**, and **13 real-time events** — zero configuration, zero REST wrappers, zero glue code.
 
 ```
 Your AI Agent ←→ MCP Protocol ←→ WA MCP ←→ WhatsApp
@@ -82,7 +82,7 @@ from google.adk.tools.mcp_tool import McpToolset
 
 tools = McpToolset(url="http://localhost:3000/mcp")
 
-# Agent auto-discovers 118 WhatsApp tools
+# Agent auto-discovers 124 WhatsApp tools
 # wa_create_instance, wa_send_text, wa_send_image, ...
 ```
 
@@ -146,7 +146,7 @@ Add to your `claude_desktop_config.json`:
 
 ## 🛠️ Tools
 
-WA MCP exposes **118 tools** across 15 domains. All tools use the `wa_` prefix.
+WA MCP exposes **124 tools** across 15 domains. All tools use the `wa_` prefix.
 
 <details>
 <summary>📋 <strong>Instance Management</strong> (8 tools)</summary>
@@ -165,7 +165,7 @@ WA MCP exposes **118 tools** across 15 domains. All tools use the `wa_` prefix.
 </details>
 
 <details>
-<summary>💬 <strong>Messaging</strong> (21 tools)</summary>
+<summary>💬 <strong>Messaging</strong> (23 tools)</summary>
 
 | Tool                   | Description             |
 | ---------------------- | ----------------------- |
@@ -179,8 +179,10 @@ WA MCP exposes **118 tools** across 15 domains. All tools use the `wa_` prefix.
 | `wa_send_document`     | Send file / document    |
 | `wa_download_media`    | Save received media or return base64 |
 | `wa_send_location`     | Send GPS location       |
+| `wa_send_live_location` | Send a live location (Baileys) |
 | `wa_send_contact`      | Send vCard contact      |
 | `wa_send_poll`         | Create a poll           |
+| `wa_get_poll_results`  | Read decrypted poll votes (Baileys) |
 | `wa_send_reaction`     | React with emoji        |
 | `wa_send_link_preview` | Send URL with preview   |
 | `wa_forward_message`   | Forward a message       |
@@ -266,12 +268,13 @@ WA MCP exposes **118 tools** across 15 domains. All tools use the `wa_` prefix.
 </details>
 
 <details>
-<summary>👥 <strong>Groups</strong> (20 tools)</summary>
+<summary>👥 <strong>Groups</strong> (23 tools)</summary>
 
 | Tool                           | Description                   |
 | ------------------------------ | ----------------------------- |
 | `wa_list_groups`               | List groups and account role  |
 | `wa_get_group_info`            | Get group metadata and members |
+| `wa_get_group_invite_info`     | Read invite metadata before joining (Baileys) |
 | `wa_create_group`              | Create group                  |
 | `wa_group_add_participants`    | Add members                   |
 | `wa_group_remove_participants` | Remove members                |
@@ -283,9 +286,11 @@ WA MCP exposes **118 tools** across 15 domains. All tools use the `wa_` prefix.
 | `wa_group_leave`               | Leave group                   |
 | `wa_group_get_invite_code`     | Get invite link               |
 | `wa_group_revoke_invite`       | Revoke invite link            |
+| `wa_send_group_invite_message` | Send a group invite card (Baileys) |
 | `wa_group_join`                | Join via invite code          |
 | `wa_group_toggle_ephemeral`    | Toggle disappearing messages  |
 | `wa_group_handle_request`      | Approve / reject join request |
+| `wa_group_list_join_requests`  | List pending join requests (Baileys) |
 | `wa_group_update_picture`      | Set group picture (Baileys)   |
 | `wa_group_remove_picture`      | Remove group picture (Baileys) |
 | `wa_group_join_approval_mode`  | Set join-request approval mode (Baileys, gated write) |
@@ -317,7 +322,7 @@ stored in SQLite and remain available after server restarts. The Cloud API chann
 this operation.
 
 <details>
-<summary>👤 <strong>Profile</strong> (6 tools)</summary>
+<summary>👤 <strong>Profile</strong> (7 tools)</summary>
 
 | Tool                        | Description             |
 | --------------------------- | ----------------------- |
@@ -327,6 +332,7 @@ this operation.
 | `wa_update_profile_status`  | Change status text      |
 | `wa_get_privacy_settings`   | Read account privacy    |
 | `wa_update_privacy`         | Update privacy settings |
+| `wa_get_profile_picture`    | Get a contact or group's profile picture URL (Baileys) |
 
 </details>
 
@@ -414,7 +420,7 @@ Baileys rc14 has no quick-reply list API, and this server does not store quick-r
 
 Baileys' `status` privacy category and `updateStatusPrivacy` control About/profile text visibility. Story audiences are configured separately through the status tools' `statusJidList`. `fetchPrivacySettings` does not return the default disappearing duration, so that duration can be updated but is not included in the read result.
 
-See the [API reference](docs/API_REFERENCE.md#26-profile-management-6-tools) for tool input and response details.
+See the [API reference](docs/API_REFERENCE.md#26-profile-management-7-tools) for tool input and response details.
 
 ## 📖 Resources
 
@@ -560,7 +566,7 @@ See [Outgoing event webhooks](docs/event-webhooks.md) for configuration details.
 │  │  Layer 1 — MCP Transport (HTTP/stdio) │ │
 │  ├────────────────────────────────────────┤ │
 │  │  Layer 2 — MCP Core                   │ │
-│  │ 118 Tools │ 10 Resources │ 13 Events  │ │
+│  │ 124 Tools │ 10 Resources │ 13 Events  │ │
 │  ├────────────────────────────────────────┤ │
 │  │  Layer 3 — Services                   │ │
 │  │  Instance Manager │ Queue │ Dedup     │ │
@@ -759,7 +765,7 @@ src/
 ├── index.ts                     # Entry point (HTTP/stdio)
 ├── constants.ts                 # Defaults and limits
 ├── server/mcp.ts                # MCP server setup
-├── tools/                       # 🔧 118 MCP tools (15 files)
+├── tools/                       # 🔧 124 MCP tools (15 files)
 ├── resources/                   # 📖 10 MCP resources (8 files)
 ├── notifications/events.ts      # 📡 12 event types
 ├── channels/

@@ -1,13 +1,12 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { existsSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { existsSync, rmSync } from "node:fs";
 import { join } from "node:path";
 
-// We test MediaService methods by instantiating it in a temp directory.
-// The MediaService constructor checks/creates MEDIA_DIR at "data/media".
+// Vitest points media storage at its per-run temporary directory.
 // We mock the fetch function and filesystem operations as needed.
 
 describe("MediaService", () => {
-  const TEST_MEDIA_DIR = "data/media";
+  const TEST_MEDIA_DIR = process.env.WA_MEDIA_DIR!;
 
   // Clean up before/after to avoid leftover test files
   afterEach(() => {
@@ -162,7 +161,7 @@ describe("MediaService", () => {
       const buffer = Buffer.from("test content");
       const path = await media.cacheMedia(buffer, ".txt");
 
-      expect(path).toMatch(/^data\/media\//);
+      expect(path.startsWith(`${TEST_MEDIA_DIR}/`)).toBe(true);
       expect(path).toMatch(/\.txt$/);
       expect(existsSync(path)).toBe(true);
 

@@ -13,6 +13,7 @@ import type { PrivacyUpdate } from "../types/channel.types.js";
 import {
   UpdateProfilePictureSchema,
   RemoveProfilePictureSchema,
+  GetProfilePictureSchema,
   UpdateProfileNameSchema,
   UpdateProfileStatusSchema,
   UpdatePrivacySchema,
@@ -102,6 +103,33 @@ export function registerProfileTools(
         return toolSuccess({ success: true });
       } catch (err) {
         return handleToolError("wa_remove_profile_picture", err, params.instanceId);
+      }
+    },
+  );
+
+  server.registerTool(
+    "wa_get_profile_picture",
+    {
+      description:
+        "Fetch the current profile-picture URL for a contact or group. This uses a Baileys read query and is unavailable on Cloud API.",
+      inputSchema: GetProfilePictureSchema,
+    },
+    async (params) => {
+      const log = createRequestLogger("wa_get_profile_picture", params.instanceId);
+      const start = Date.now();
+      try {
+        if (instanceManager.getInstanceChannel(params.instanceId) === "cloud") {
+          throw new Error(
+            "Contact and group profile-picture lookup is not supported on Cloud API; use a Baileys instance",
+          );
+        }
+        const url = await instanceManager
+          .getAdapter(params.instanceId)
+          .getProfilePicture(params.jid);
+        log.info({ duration: Date.now() - start, found: url !== null }, "Profile picture URL read");
+        return toolSuccess({ jid: params.jid, url });
+      } catch (err) {
+        return handleToolError("wa_get_profile_picture", err, params.instanceId);
       }
     },
   );

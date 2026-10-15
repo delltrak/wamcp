@@ -22,6 +22,8 @@ import {
   SendLocationSchema,
   SendContactSchema,
   SendPollSchema,
+  GetPollResultsSchema,
+  SendLiveLocationSchema,
   SendReactionSchema,
   SendLinkPreviewSchema,
   ForwardMessageSchema,
@@ -391,9 +393,43 @@ Returns: { status: "queued", jobId }`,
   );
 
   server.registerTool(
+    "wa_send_live_location",
+    {
+      description:
+        "Send a live location message to a WhatsApp contact or group. Live location messages are available on Baileys only.",
+      inputSchema: SendLiveLocationSchema,
+    },
+    async (params) => {
+      const log = createRequestLogger("wa_send_live_location", params.instanceId);
+      const start = Date.now();
+      try {
+        const channel = instanceManager.getInstanceChannel(params.instanceId);
+        const result = await messageQueue.enqueueMessage(
+          params.instanceId,
+          params.to,
+          {
+            type: "location",
+            latitude: params.latitude,
+            longitude: params.longitude,
+            isLive: true,
+            accuracyInMeters: params.accuracyInMeters,
+            comment: params.comment,
+          },
+          channel,
+        );
+        log.info({ duration: Date.now() - start, to: params.to }, "Live location queued");
+        return toolSuccess(result);
+      } catch (err) {
+        return handleToolError("wa_send_live_location", err, params.instanceId);
+      }
+    },
+  );
+
+  server.registerTool(
     "wa_send_contact",
     {
-      description: "Send a vCard contact to a WhatsApp contact or group.",
+      description:
+        "Send one or more contacts as vCards to a WhatsApp contact or group. contactName/contactPhone remains available for one contact.",
       inputSchema: SendContactSchema,
     },
     async (params) => {
@@ -404,7 +440,13 @@ Returns: { status: "queued", jobId }`,
         const result = await messageQueue.enqueueMessage(
           params.instanceId,
           params.to,
-          { type: "contact", contactName: params.contactName, contactPhone: params.contactPhone },
+          params.contacts
+            ? { type: "contact", contacts: params.contacts }
+            : {
+                type: "contact",
+                contactName: params.contactName!,
+                contactPhone: params.contactPhone!,
+              },
           channel,
         );
         log.info({ duration: Date.now() - start, to: params.to }, "Contact message queued");
@@ -441,6 +483,30 @@ Returns: { status: "queued", jobId }`,
         return toolSuccess(result);
       } catch (err) {
         return handleToolError("wa_send_poll", err, params.instanceId);
+      }
+    },
+  );
+
+  server.registerTool(
+    "wa_get_poll_results",
+    {
+      description:
+        "Read locally stored, decrypted votes for a WhatsApp poll. Requires the poll message to be stored on this Baileys instance.",
+      inputSchema: GetPollResultsSchema,
+    },
+    async (params) => {
+      const log = createRequestLogger("wa_get_poll_results", params.instanceId);
+      const start = Date.now();
+      try {
+        const adapter = instanceManager.getAdapter(params.instanceId);
+        const results = await adapter.getPollResults(params.chatId, params.messageId);
+        log.info(
+          { duration: Date.now() - start, options: results.options.length },
+          "Poll results read",
+        );
+        return toolSuccess(results);
+      } catch (err) {
+        return handleToolError("wa_get_poll_results", err, params.instanceId);
       }
     },
   );
@@ -572,8 +638,7 @@ Returns: { status: "queued", jobId }`,
   server.registerTool(
     "wa_send_view_once",
     {
-      description:
-        "Send a view-once image or video. The media disappears after the recipient views it once.",
+      description: "Send a view-once image, video, or audio clip. Available on Baileys only.",
       inputSchema: SendViewOnceSchema,
     },
     async (params) => {

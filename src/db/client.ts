@@ -3,12 +3,12 @@
 // ============================================================
 
 import { existsSync, mkdirSync } from "node:fs";
-import { dirname } from "node:path";
+import { dirname, resolve } from "node:path";
 import Database, { type Database as DatabaseType } from "better-sqlite3";
 import { drizzle } from "drizzle-orm/better-sqlite3";
 import * as schema from "./schema.js";
 
-const DB_PATH = "data/whatsapp.db";
+const DB_PATH = resolve(process.env.WA_DATABASE_PATH?.trim() || "data/whatsapp.db");
 
 // Ensure the data directory exists
 const dir = dirname(DB_PATH);

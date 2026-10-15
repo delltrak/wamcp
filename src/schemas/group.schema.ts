@@ -51,7 +51,7 @@ export const CreateGroupSchema = z
 export const AddParticipantsSchema = z
   .object({
     instanceId: z.string().min(1).describe("The instance ID"),
-    groupId: z.string().min(5).describe("Group JID"),
+    groupId: GroupIdSchema.describe("WhatsApp group JID or bare group ID"),
     participants: z.array(z.string().min(5)).min(1).describe("Phone numbers or JIDs to add"),
   })
   .strict();
@@ -59,7 +59,7 @@ export const AddParticipantsSchema = z
 export const RemoveParticipantsSchema = z
   .object({
     instanceId: z.string().min(1).describe("The instance ID"),
-    groupId: z.string().min(5).describe("Group JID"),
+    groupId: GroupIdSchema.describe("WhatsApp group JID or bare group ID"),
     participants: z.array(z.string().min(5)).min(1).describe("Phone numbers or JIDs to remove"),
   })
   .strict();
@@ -67,7 +67,7 @@ export const RemoveParticipantsSchema = z
 export const PromoteParticipantSchema = z
   .object({
     instanceId: z.string().min(1).describe("The instance ID"),
-    groupId: z.string().min(5).describe("Group JID"),
+    groupId: GroupIdSchema.describe("WhatsApp group JID or bare group ID"),
     participants: z
       .array(z.string().min(5))
       .min(1)
@@ -78,7 +78,7 @@ export const PromoteParticipantSchema = z
 export const DemoteParticipantSchema = z
   .object({
     instanceId: z.string().min(1).describe("The instance ID"),
-    groupId: z.string().min(5).describe("Group JID"),
+    groupId: GroupIdSchema.describe("WhatsApp group JID or bare group ID"),
     participants: z
       .array(z.string().min(5))
       .min(1)
@@ -89,7 +89,7 @@ export const DemoteParticipantSchema = z
 export const UpdateSubjectSchema = z
   .object({
     instanceId: z.string().min(1).describe("The instance ID"),
-    groupId: z.string().min(5).describe("Group JID"),
+    groupId: GroupIdSchema.describe("WhatsApp group JID or bare group ID"),
     subject: z.string().min(1).max(100).describe("New group name/subject"),
   })
   .strict();
@@ -97,7 +97,7 @@ export const UpdateSubjectSchema = z
 export const UpdateDescriptionSchema = z
   .object({
     instanceId: z.string().min(1).describe("The instance ID"),
-    groupId: z.string().min(5).describe("Group JID"),
+    groupId: GroupIdSchema.describe("WhatsApp group JID or bare group ID"),
     description: z.string().max(2048).describe("New group description (empty string to clear)"),
   })
   .strict();
@@ -105,7 +105,7 @@ export const UpdateDescriptionSchema = z
 export const UpdateSettingsSchema = z
   .object({
     instanceId: z.string().min(1).describe("The instance ID"),
-    groupId: z.string().min(5).describe("Group JID"),
+    groupId: GroupIdSchema.describe("WhatsApp group JID or bare group ID"),
     announce: z.boolean().optional().describe("Only admins can send messages"),
     locked: z.boolean().optional().describe("Only admins can edit group info"),
   })
@@ -114,21 +114,44 @@ export const UpdateSettingsSchema = z
 export const LeaveGroupSchema = z
   .object({
     instanceId: z.string().min(1).describe("The instance ID"),
-    groupId: z.string().min(5).describe("Group JID to leave"),
+    groupId: GroupIdSchema.describe("WhatsApp group JID or bare group ID to leave"),
   })
   .strict();
 
 export const GetInviteCodeSchema = z
   .object({
     instanceId: z.string().min(1).describe("The instance ID"),
-    groupId: z.string().min(5).describe("Group JID"),
+    groupId: GroupIdSchema.describe("WhatsApp group JID or bare group ID"),
+  })
+  .strict();
+
+export const GetGroupInviteInfoSchema = z
+  .object({
+    instanceId: z.string().min(1).describe("The instance ID"),
+    inviteCode: z.string().trim().min(1).describe("Group invite code or chat.whatsapp.com link"),
+  })
+  .strict();
+
+export const ListGroupJoinRequestsSchema = z
+  .object({
+    instanceId: z.string().min(1).describe("The instance ID"),
+    groupId: GroupIdSchema.describe("WhatsApp group JID or bare group ID"),
+  })
+  .strict();
+
+export const SendGroupInviteMessageSchema = z
+  .object({
+    instanceId: z.string().min(1).describe("The instance ID to send from"),
+    to: z.string().min(5).describe("Contact phone number or group JID receiving the invite"),
+    groupId: GroupIdSchema.describe("Group JID or bare group ID to invite people to"),
+    text: z.string().max(1024).optional().describe("Optional text accompanying the invite card"),
   })
   .strict();
 
 export const RevokeInviteSchema = z
   .object({
     instanceId: z.string().min(1).describe("The instance ID"),
-    groupId: z.string().min(5).describe("Group JID"),
+    groupId: GroupIdSchema.describe("WhatsApp group JID or bare group ID"),
   })
   .strict();
 
@@ -142,7 +165,7 @@ export const JoinGroupSchema = z
 export const ToggleEphemeralSchema = z
   .object({
     instanceId: z.string().min(1).describe("The instance ID"),
-    groupId: z.string().min(5).describe("Group JID"),
+    groupId: GroupIdSchema.describe("WhatsApp group JID or bare group ID"),
     duration: z
       .number()
       .int()
@@ -154,7 +177,7 @@ export const ToggleEphemeralSchema = z
 export const HandleJoinRequestSchema = z
   .object({
     instanceId: z.string().min(1).describe("The instance ID"),
-    groupId: z.string().min(5).describe("Group JID"),
+    groupId: GroupIdSchema.describe("WhatsApp group JID or bare group ID"),
     participantId: z.string().min(5).describe("JID of the requester"),
     action: z.enum(["approve", "reject"]).describe("Whether to approve or reject the join request"),
   })

@@ -677,9 +677,10 @@ export function normalizeMessagesUpsert(
   if (data.type !== "notify") return [];
 
   return data.messages
-    .filter(
-      (msg) => !unwrapMessageContent(msg.message, { unwrapProtocolEdits: false })?.protocolMessage,
-    )
+    .filter((msg) => {
+      const content = unwrapMessageContent(msg.message, { unwrapProtocolEdits: false });
+      return !content?.protocolMessage && !content?.pollUpdateMessage;
+    })
     .map((msg) => {
       normalizeLidInMessage(msg);
       const details = extractMessageDetails(msg);

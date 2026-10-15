@@ -17,6 +17,13 @@ export const RemoveProfilePictureSchema = z
   })
   .strict();
 
+export const GetProfilePictureSchema = z
+  .object({
+    instanceId: z.string().min(1).describe("The instance ID"),
+    jid: z.string().trim().min(5).describe("Contact or group JID"),
+  })
+  .strict();
+
 export const UpdateProfileNameSchema = z
   .object({
     instanceId: z.string().min(1).describe("The instance ID"),

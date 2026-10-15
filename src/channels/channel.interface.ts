@@ -30,6 +30,8 @@ import type {
   ChannelEventPayload,
   BusinessLabel,
   EventResponse,
+  PollResults,
+  GroupJoinRequest,
   MessageSearchOptions,
   SendEventOptions,
   CatalogProductCreateInput,
@@ -70,6 +72,7 @@ export interface ChannelAdapter {
   sendMessage(to: string, content: MessageContent): Promise<MessageResponse>;
   sendEvent(options: SendEventOptions): Promise<MessageResponse>;
   getEventResponses(chatId: string, eventMessageId: string): Promise<EventResponse[]>;
+  getPollResults(chatId: string, pollMessageId: string): Promise<PollResults>;
   starMessage(chatId: string, messageId: string, star: boolean): Promise<void>;
   validateQuotedMessage?(to: string, messageId: string): void;
   editMessage(chatId: string, msgId: string, newText: string): Promise<void>;
@@ -77,7 +80,11 @@ export interface ChannelAdapter {
   forwardMessage(to: string, msgId: string, fromChat: string): Promise<MessageResponse>;
   sendReaction(chatId: string, msgId: string, emoji: string): Promise<void>;
   pinMessage(chatId: string, msgId: string, pin: boolean): Promise<void>;
-  sendViewOnce(to: string, media: string, type: "image" | "video"): Promise<MessageResponse>;
+  sendViewOnce(
+    to: string,
+    media: string,
+    type: "image" | "video" | "audio",
+  ): Promise<MessageResponse>;
   sendLinkPreview(to: string, text: string, url: string): Promise<MessageResponse>;
 
   // ---- Presence ----
@@ -114,7 +121,10 @@ export interface ChannelAdapter {
   updateGroupPicture(groupId: string, image: string): Promise<void>;
   removeGroupPicture(groupId: string): Promise<void>;
   getGroupInviteCode(groupId: string): Promise<string>;
+  getGroupInviteInfo(inviteCode: string): Promise<GroupMetadata>;
   joinGroup(inviteCode: string): Promise<string>;
+  listGroupJoinRequests(groupId: string): Promise<GroupJoinRequest[]>;
+  sendGroupInviteMessage(to: string, groupId: string, text?: string): Promise<MessageResponse>;
   handleJoinRequest(
     groupId: string,
     participantJid: string,

@@ -95,6 +95,26 @@ export interface EventResponse {
   extraGuestCount?: number;
 }
 
+export interface PollOptionResult {
+  name: string;
+  count: number;
+  voters: string[];
+}
+
+export interface PollResults {
+  chatId: string;
+  messageId: string;
+  question: string;
+  options: PollOptionResult[];
+  totalVotes: number;
+  totalVoters: number;
+}
+
+export interface GroupJoinRequest {
+  jid: string;
+  attributes: Record<string, string>;
+}
+
 export type EventResponseStatus = "GOING" | "NOT_GOING" | "MAYBE" | "UNKNOWN";
 
 export interface SendEventOptions {
@@ -194,13 +214,19 @@ export interface LocationContent {
   longitude: number;
   name?: string;
   address?: string;
+  isLive?: boolean;
+  accuracyInMeters?: number;
+  comment?: string;
 }
 
-export interface ContactContent {
-  type: "contact";
-  contactName: string;
-  contactPhone: string;
+export interface ContactCard {
+  name: string;
+  phone: string;
 }
+
+export type ContactContent =
+  | { type: "contact"; contactName: string; contactPhone: string }
+  | { type: "contact"; contacts: ContactCard[] };
 
 export interface PollContent {
   type: "poll";

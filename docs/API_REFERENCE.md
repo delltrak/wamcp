@@ -9,11 +9,11 @@
 1. [Overview](#1-overview)
 2. [Tools Reference](#2-tools-reference)
    - [Instance Management](#21-instance-management-8-tools)
-   - [Messaging](#22-messaging-21-tools)
+   - [Messaging](#22-messaging-23-tools)
    - [Chat Management](#23-chat-management-11-tools)
-   - [Group Management](#24-group-management-20-tools)
+   - [Group Management](#24-group-management-23-tools)
    - [Contact Management](#25-contact-management-8-tools)
-   - [Profile Management](#26-profile-management-6-tools)
+   - [Profile Management](#26-profile-management-7-tools)
    - [Status / Stories](#27-status--stories-3-tools)
    - [Newsletter / Channels](#28-newsletter--channels-10-tools)
    - [Call Management](#29-call-management-1-tool)
@@ -98,7 +98,7 @@ Tools marked **Baileys only** are not available on Cloud API instances.
 
 ## 2. Tools Reference
 
-WA MCP exposes **118 tools** grouped by domain. All tools return MCP-standard responses.
+WA MCP exposes **124 tools** grouped by domain. All tools return MCP-standard responses.
 
 ### Success Response Format
 
@@ -319,7 +319,7 @@ Configure Meta Cloud API credentials for a Cloud API instance. Required before c
 
 ---
 
-### 2.2 Messaging (21 tools)
+### 2.2 Messaging (23 tools)
 
 Tools for sending messages, media, reactions, and managing message state.
 
@@ -554,18 +554,39 @@ Send a GPS location to a WhatsApp contact or group.
 
 ---
 
+#### `wa_send_live_location`
+
+Send a live location with the current coordinates and optional accuracy and comment. Baileys only.
+
+| Parameter          | Type   | Required | Description                         |
+| ------------------ | ------ | -------- | ----------------------------------- |
+| `instanceId`       | string | Yes      | The instance to send from           |
+| `to`               | string | Yes      | Recipient phone number or group JID |
+| `latitude`         | number | Yes      | Current latitude (-90 to 90)        |
+| `longitude`        | number | Yes      | Current longitude (-180 to 180)     |
+| `accuracyInMeters` | number | No       | Location accuracy                   |
+| `comment`          | string | No       | Optional note (max 256 chars)       |
+
+**Channel support:** Baileys only. Cloud API does not support live location messages.
+
+**Response:** The standard queued message response.
+
+---
+
 #### `wa_send_contact`
 
-Send a vCard contact to a WhatsApp contact or group.
+Send one vCard or an array of up to 20 vCards to a WhatsApp contact or group. Use either the
+legacy `contactName`/`contactPhone` pair or the `contacts` array.
 
-| Parameter      | Type   | Required | Description                         |
-| -------------- | ------ | -------- | ----------------------------------- |
-| `instanceId`   | string | Yes      | The instance to send from           |
-| `to`           | string | Yes      | Recipient phone number or group JID |
-| `contactName`  | string | Yes      | Contact display name                |
-| `contactPhone` | string | Yes      | Contact phone number                |
+| Parameter      | Type              | Required | Description                                    |
+| -------------- | ----------------- | -------- | ---------------------------------------------- |
+| `instanceId`   | string            | Yes      | The instance to send from                      |
+| `to`           | string            | Yes      | Recipient phone number or group JID            |
+| `contactName`  | string            | One form | Legacy display name for one vCard              |
+| `contactPhone` | string            | One form | Legacy phone number for one vCard              |
+| `contacts`     | `{name, phone}[]` | One form | 1-20 contacts; cannot combine with legacy fields |
 
-**Channel support:** Both
+**Channel support:** Both. Cloud API supports multiple contact cards.
 
 **Response:**
 
@@ -590,7 +611,7 @@ Create and send a poll to a WhatsApp contact or group.
 | `options`     | string[] | Yes                   | Poll options (2-12 choices)         |
 | `multiSelect` | boolean  | No (default: `false`) | Allow multiple selections           |
 
-**Channel support:** Both
+**Channel support:** Baileys only. Cloud API does not support poll creation.
 
 **Response:**
 
@@ -600,6 +621,23 @@ Create and send a poll to a WhatsApp contact or group.
   "jobId": "job_130"
 }
 ```
+
+---
+
+#### `wa_get_poll_results`
+
+Read decrypted votes for a locally stored poll. Incoming poll message secrets and decrypted vote
+updates are retained with the poll message so results remain available after reconnecting.
+
+| Parameter    | Type   | Required | Description                 |
+| ------------ | ------ | -------- | --------------------------- |
+| `instanceId` | string | Yes      | The instance ID              |
+| `chatId`     | string | Yes      | Chat JID containing the poll |
+| `messageId`  | string | Yes      | Poll creation message ID     |
+
+**Channel support:** Baileys only. Cloud API does not expose poll votes.
+
+**Response:** `{ "chatId": "...", "messageId": "...", "question": "Dinner?", "options": [{ "name": "Pizza", "count": 2, "voters": ["..."] }], "totalVotes": 2, "totalVoters": 2 }`
 
 ---
 
@@ -688,7 +726,7 @@ Edit a previously sent message. Only text messages sent by this instance can be 
 | `messageId`  | string | Yes      | Message ID to edit               |
 | `newText`    | string | Yes      | New text content for the message |
 
-**Channel support:** Both
+**Channel support:** Baileys only. Cloud API does not support message edits.
 
 **Response:**
 
@@ -718,7 +756,7 @@ When provided, `statusJidList` accepts individual phone numbers or user JIDs and
 stored/default audience. The local message status is set to `revoked` after Baileys confirms the
 delete. Status deletion is supported by Baileys.
 
-**Channel support:** Both
+**Channel support:** Baileys only. Cloud API does not support delete-for-everyone.
 
 **Response:**
 
@@ -741,7 +779,7 @@ Pin or unpin a message in a chat.
 | `messageId`  | string  | Yes      | Message ID to pin or unpin      |
 | `pin`        | boolean | Yes      | `true` to pin, `false` to unpin |
 
-**Channel support:** Both
+**Channel support:** Baileys only. Cloud API does not support pinning messages.
 
 **Response:**
 
@@ -756,16 +794,16 @@ Pin or unpin a message in a chat.
 
 #### `wa_send_view_once`
 
-Send a view-once image or video. The media disappears after the recipient views it once.
+Send a view-once image, video, or audio message. The media disappears after the recipient views or plays it once.
 
 | Parameter    | Type                   | Required | Description                         |
 | ------------ | ---------------------- | -------- | ----------------------------------- |
 | `instanceId` | string                 | Yes      | The instance to send from           |
 | `to`         | string                 | Yes      | Recipient phone number or group JID |
 | `media`      | string                 | Yes      | Media URL or base64-encoded data    |
-| `type`       | `"image"` \| `"video"` | Yes      | Media type                          |
+| `type`       | `"image"` \| `"video"` \| `"audio"` | Yes | Media type                          |
 
-**Channel support:** Both
+**Channel support:** Baileys only. Cloud API does not support view-once media.
 
 **Response:**
 
@@ -1068,7 +1106,7 @@ through `sendMessage`; this does not call `chatModify` or write app state.
 
 ---
 
-### 2.4 Group Management (20 tools)
+### 2.4 Group Management (23 tools)
 
 Tools for creating and managing WhatsApp groups.
 
@@ -1143,6 +1181,21 @@ phone numbers are included when available, including when a LID can be resolved 
 
 ---
 
+#### `wa_get_group_invite_info`
+
+Read group metadata using an invite code or `chat.whatsapp.com` link before joining.
+
+| Parameter    | Type   | Required | Description                   |
+| ------------ | ------ | -------- | ----------------------------- |
+| `instanceId` | string | Yes      | The instance ID                |
+| `inviteCode` | string | Yes      | Invite code or full invite link |
+
+**Channel support:** Baileys only. Cloud API does not expose group invites.
+
+**Response:** Group metadata from the invite, including the group JID, subject, and available details.
+
+---
+
 #### `wa_group_update_picture`
 
 Set a group's picture. The image may be an HTTPS URL or base64-encoded PNG, JPG, GIF, or WebP; it is
@@ -1198,14 +1251,13 @@ Create a new WhatsApp group with a name and initial participants.
 | `name`         | string   | Yes      | Group name/subject (max 100 chars)                    |
 | `participants` | string[] | Yes      | Phone numbers or JIDs of initial participants (min 1) |
 
-**Channel support:** Both
+**Channel support:** Baileys only. Cloud API does not support group management.
 
 **Response:**
 
 ```json
 {
-  "groupId": "120363...@g.us",
-  "inviteCode": "AbCdEfGh"
+  "groupId": "120363...@g.us"
 }
 ```
 
@@ -1221,7 +1273,7 @@ Add members to a WhatsApp group.
 | `groupId`      | string   | Yes      | Group JID                            |
 | `participants` | string[] | Yes      | Phone numbers or JIDs to add (min 1) |
 
-**Channel support:** Both
+**Channel support:** Baileys only. Cloud API does not support group management.
 
 **Response:**
 
@@ -1243,7 +1295,7 @@ Remove members from a WhatsApp group.
 | `groupId`      | string   | Yes      | Group JID                               |
 | `participants` | string[] | Yes      | Phone numbers or JIDs to remove (min 1) |
 
-**Channel support:** Both
+**Channel support:** Baileys only. Cloud API does not support group management.
 
 **Response:**
 
@@ -1265,7 +1317,7 @@ Promote members to group admin.
 | `groupId`      | string   | Yes      | Group JID                                         |
 | `participants` | string[] | Yes      | Phone numbers or JIDs to promote to admin (min 1) |
 
-**Channel support:** Both
+**Channel support:** Baileys only. Cloud API does not support group management.
 
 **Response:**
 
@@ -1287,7 +1339,7 @@ Demote group admins to regular members.
 | `groupId`      | string   | Yes      | Group JID                                          |
 | `participants` | string[] | Yes      | Phone numbers or JIDs to demote from admin (min 1) |
 
-**Channel support:** Both
+**Channel support:** Baileys only. Cloud API does not support group management.
 
 **Response:**
 
@@ -1309,7 +1361,7 @@ Change the name/subject of a WhatsApp group.
 | `groupId`    | string | Yes      | Group JID                              |
 | `subject`    | string | Yes      | New group name/subject (max 100 chars) |
 
-**Channel support:** Both
+**Channel support:** Baileys only. Cloud API does not support group management.
 
 **Response:**
 
@@ -1331,7 +1383,7 @@ Change the description of a WhatsApp group.
 | `groupId`     | string | Yes      | Group JID                                                     |
 | `description` | string | Yes      | New group description (max 2048 chars, empty string to clear) |
 
-**Channel support:** Both
+**Channel support:** Baileys only. Cloud API does not support group management.
 
 **Response:**
 
@@ -1354,7 +1406,7 @@ Change group settings.
 | `announce`   | boolean | No       | Only admins can send messages   |
 | `locked`     | boolean | No       | Only admins can edit group info |
 
-**Channel support:** Both
+**Channel support:** Baileys only. Cloud API does not support group management.
 
 **Response:**
 
@@ -1375,7 +1427,7 @@ Leave a WhatsApp group.
 | `instanceId` | string | Yes      | The instance ID    |
 | `groupId`    | string | Yes      | Group JID to leave |
 
-**Channel support:** Both
+**Channel support:** Baileys only. Cloud API does not support group management.
 
 **Response:**
 
@@ -1396,7 +1448,7 @@ Get the shareable invite link for a WhatsApp group.
 | `instanceId` | string | Yes      | The instance ID |
 | `groupId`    | string | Yes      | Group JID       |
 
-**Channel support:** Both
+**Channel support:** Baileys only. Cloud API does not support group management.
 
 **Response:**
 
@@ -1419,7 +1471,7 @@ Revoke the current invite link for a WhatsApp group, generating a new one.
 | `instanceId` | string | Yes      | The instance ID |
 | `groupId`    | string | Yes      | Group JID       |
 
-**Channel support:** Both
+**Channel support:** Baileys only. Cloud API does not support group management.
 
 **Response:**
 
@@ -1428,6 +1480,23 @@ Revoke the current invite link for a WhatsApp group, generating a new one.
   "success": true
 }
 ```
+
+---
+
+#### `wa_send_group_invite_message`
+
+Send a WhatsApp group invitation card to an individual or group chat.
+
+| Parameter    | Type   | Required | Description                                |
+| ------------ | ------ | -------- | ------------------------------------------ |
+| `instanceId` | string | Yes      | The instance to send from                   |
+| `to`         | string | Yes      | Phone number or group JID receiving it      |
+| `groupId`    | string | Yes      | Group JID or bare numeric group ID          |
+| `text`       | string | No       | Optional accompanying text (max 1024 chars) |
+
+**Channel support:** Baileys only. Cloud API does not support group invitation cards.
+
+**Response:** `{ "messageId": "...", "timestamp": 1709136000, "status": "sent" }`
 
 ---
 
@@ -1440,7 +1509,7 @@ Join a WhatsApp group using an invite code or link.
 | `instanceId` | string | Yes      | The instance ID                |
 | `inviteCode` | string | Yes      | Group invite code or full link |
 
-**Channel support:** Both
+**Channel support:** Baileys only. Cloud API does not support group management.
 
 **Response:**
 
@@ -1462,7 +1531,7 @@ Enable or disable disappearing messages in a group.
 | `groupId`    | string       | Yes      | Group JID                                                                                        |
 | `duration`   | number (int) | Yes      | Duration in seconds (0 to disable). Common values: `86400` (24h), `604800` (7d), `7776000` (90d) |
 
-**Channel support:** Both
+**Channel support:** Baileys only. Cloud API does not support group management.
 
 **Response:**
 
@@ -1486,7 +1555,7 @@ Approve or reject a pending join request for a WhatsApp group.
 | `participantId` | string                    | Yes      | JID of the requester         |
 | `action`        | `"approve"` \| `"reject"` | Yes      | Whether to approve or reject |
 
-**Channel support:** Both
+**Channel support:** Baileys only. Cloud API does not support group management.
 
 **Response:**
 
@@ -1496,6 +1565,21 @@ Approve or reject a pending join request for a WhatsApp group.
   "action": "approve"
 }
 ```
+
+---
+
+#### `wa_group_list_join_requests`
+
+List pending requests to join a group, including the requester JID and Baileys request attributes.
+
+| Parameter    | Type   | Required | Description                  |
+| ------------ | ------ | -------- | ---------------------------- |
+| `instanceId` | string | Yes      | The instance ID               |
+| `groupId`    | string | Yes      | Group JID or bare numeric ID  |
+
+**Channel support:** Baileys only. Cloud API does not expose group join requests.
+
+**Response:** `{ "groupId": "120363...@g.us", "count": 1, "requests": [{ "jid": "...", "attributes": { "t": "..." } }] }`
 
 ---
 
@@ -1743,9 +1827,25 @@ Read a contact's About text with Baileys `fetchStatus`, a USync read.
 
 ---
 
-### 2.6 Profile Management (6 tools)
+### 2.6 Profile Management (7 tools)
 
 Tools for managing the instance's own WhatsApp profile.
+
+#### `wa_get_profile_picture`
+
+Read the current profile-picture URL for a contact or group. This is a Baileys query and is not
+available on Cloud API.
+
+| Parameter    | Type   | Required | Description                          |
+| ------------ | ------ | -------- | ------------------------------------ |
+| `instanceId` | string | Yes      | The instance ID                       |
+| `jid`        | string | Yes      | Contact phone number/JID or group JID |
+
+**Channel support:** Baileys only.
+
+**Response:** `{ "jid": "5511999999999@s.whatsapp.net", "url": "https://..." }`
+
+---
 
 #### `wa_update_profile_picture`
 
@@ -2940,7 +3040,7 @@ Add to your Claude Desktop MCP configuration:
 }
 ```
 
-Once configured, Claude will auto-discover all 118 WA MCP tools and can interact with WhatsApp directly.
+Once configured, Claude will auto-discover all 124 WA MCP tools and can interact with WhatsApp directly.
 
 ### 6.3 LangChain (Python)
 
@@ -2953,7 +3053,7 @@ toolkit = MCPToolkit(
 )
 
 tools = toolkit.get_tools()
-# tools now contains all 118 WA MCP tools, ready for any LangChain agent
+# tools now contains all 124 WA MCP tools, ready for any LangChain agent
 ```
 
 ---
@@ -2963,21 +3063,21 @@ tools = toolkit.get_tools()
 | Domain                            | Tools | Channel                              |
 | --------------------------------- | ----- | ------------------------------------ |
 | Instance Management              | 8     | Both (2 Baileys only, 1 Cloud only)  |
-| Messaging                         | 21    | Both                                 |
+| Messaging                         | 23    | Both                                 |
 | Audio Transcription               | 1     | Both                                 |
 | Text-to-speech                    | 3     | Provider-dependent                   |
 | Chat Management                   | 11    | Both                                 |
 | Message Search                    | 1     | Both                                 |
 | WhatsApp Business Labels          | 8     | Baileys                              |
 | WhatsApp Events                   | 2     | Baileys                              |
-| Group Management                  | 20    | Baileys                              |
+| Group Management                  | 23    | Baileys                              |
 | Contact Management                | 8     | Both                                 |
-| Profile Management                | 6     | Both                                 |
+| Profile Management                | 7     | Both                                 |
 | Status / Stories                  | 3     | Baileys only                         |
 | Newsletter / Channels             | 10    | Baileys only                         |
 | Business, Communities, and Catalog| 15    | Baileys only                         |
 | Call Management                   | 1     | Baileys only                         |
-| **Total**                         | **118** |                                    |
+| **Total**                         | **124** |                                    |
 
 | Resources     | 10  |
 | ------------- | --- |

@@ -14,7 +14,7 @@ import {
 } from "../tts/audio.js";
 import { validateMediaUrl, validateBase64Size } from "../utils/validation.js";
 
-const MEDIA_DIR = "data/media";
+const MEDIA_DIR = process.env.WA_MEDIA_DIR?.trim() || "data/media";
 export const DEFAULT_MEDIA_DOWNLOAD_MAX_BYTES = 25 * 1024 * 1024;
 export const DEFAULT_MEDIA_DOWNLOAD_BASE64_MAX_BYTES = 5 * 1024 * 1024;
 export const DEFAULT_MEDIA_DOWNLOAD_DIR = "data/media-downloads";

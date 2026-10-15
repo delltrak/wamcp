@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Added Baileys poll vote decryption and persisted poll results, live location sends, audio view-once
+  messages, and multi-contact vCards. Poll results use the stored poll message secret and decrypted
+  vote updates, so they remain available after reconnecting.
+- Added Baileys group invite metadata lookup, pending join-request listing, group invitation cards,
+  and contact/group profile-picture URL lookup. Group invite joining now accepts validated WhatsApp
+  invite links.
+
+### Fixed
+
+- Cloud API now returns unsupported-operation errors for edits and view-once messages instead of
+  sending ordinary messages or media that appeared to meet those requests. Live locations, poll
+  result reads, and Baileys-only group helpers also return explicit Cloud API unsupported errors.
+- Group setting updates now apply both announcement and locked modes using their corresponding
+  Baileys enum values.
+- Test databases and media directories now use temporary per-run paths.
+
 ### Changed
 
 - Added `WA_MARK_ONLINE_ON_CONNECT` to control whether Baileys marks the linked account online
