@@ -69,6 +69,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Baileys event responses now map numeric, named, Long-like, and encoded WAProto RSVP values to
+  `GOING`, `NOT_GOING`, or `MAYBE`; stored encrypted responses with an earlier `UNKNOWN` status are
+  re-decoded on read when possible.
 - Event RSVP responses now decrypt with the original event's `messageSecret`, including LID/PN
   author resolution; encrypted responses are retained until the event is available, and the last
   response per participant is stored with its timestamp and extra guest count.

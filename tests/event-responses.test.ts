@@ -10,9 +10,16 @@ import {
 } from "@whiskeysockets/baileys";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { BaileysAdapter } from "../src/channels/baileys/baileys.adapter.js";
+import {
+  decodeEventResponseMessage,
+  eventResponseName,
+} from "../src/channels/baileys/event-response.js";
 import { sqlite } from "../src/db/client.js";
 import type { InstanceManager } from "../src/services/instance-manager.js";
+import { normalizeEventWebhookPayload } from "../src/services/event-webhook.js";
+import { registerEventNotifications } from "../src/notifications/events.js";
 import { registerEventTools } from "../src/tools/event.tools.js";
+import type { ChannelEventPayload } from "../src/types/channel.types.js";
 
 const ACCOUNT_ID = "5500000000002@s.whatsapp.net";
 const RESPONDER_ID = "5500000000009@s.whatsapp.net";
@@ -158,104 +165,305 @@ describe("Baileys event responses", () => {
     } as Partial<BaileysEventMap>);
   }
 
-  it("decrypts an RSVP after its event arrives and returns participant details and counts", async () => {
+  it.each([
+    { responseType: proto.Message.EventResponseMessage.EventResponseType.GOING, status: "GOING" },
+    {
+      responseType: proto.Message.EventResponseMessage.EventResponseType.NOT_GOING,
+      status: "NOT_GOING",
+    },
+    { responseType: proto.Message.EventResponseMessage.EventResponseType.MAYBE, status: "MAYBE" },
+    {
+      responseType: proto.Message.EventResponseMessage.EventResponseType.UNKNOWN,
+      status: "UNKNOWN",
+    },
+  ] as const)(
+    "decrypts an encrypted $status RSVP after its event arrives and returns it through storage, tools, notifications, and webhooks",
+    async ({ responseType, status }) => {
+      const { instanceId, adapter, processEvents } = createFixture();
+      const eventId = `private-event-${status.toLowerCase()}`;
+      const chatId = RESPONDER_ID;
+      const messageSecret = Buffer.alloc(32, 0x42);
+      const originalEventKey: WAMessageKey = {
+        id: eventId,
+        remoteJid: chatId,
+        fromMe: true,
+      };
+      const responseTimestamp = 1_800_000_123_000;
+      const encrypted = encryptEventResponse(
+        messageSecret,
+        eventId,
+        ACCOUNT_ID,
+        RESPONDER_ID,
+        proto.Message.EventResponseMessage.create({
+          response: responseType,
+          timestampMs: responseTimestamp,
+          extraGuestCount: 2,
+        }),
+        originalEventKey,
+      );
+      const responseMessage = encryptedResponseMessage(
+        `private-response-${status.toLowerCase()}`,
+        chatId,
+        { remoteJid: chatId },
+        encrypted,
+      );
+      let emittedResponse: ChannelEventPayload["event.response"] | undefined;
+      adapter.on("event.response", (payload) => {
+        emittedResponse = payload;
+      });
+
+      const notification = vi.fn().mockResolvedValue(undefined);
+      const sendLoggingMessage = vi.fn().mockResolvedValue(undefined);
+      const instanceManager = {
+        onAnyEvent: (
+          handler: (
+            event: "event.response",
+            id: string,
+            payload: ChannelEventPayload["event.response"],
+          ) => void,
+        ) => {
+          const listener = (payload: ChannelEventPayload["event.response"]) =>
+            handler("event.response", instanceId, payload);
+          adapter.on("event.response", listener);
+          return () => adapter.off("event.response", listener);
+        },
+      } as unknown as InstanceManager;
+      const removeNotifications = registerEventNotifications(
+        {
+          server: { notification, sendLoggingMessage },
+        } as unknown as McpServer,
+        instanceManager,
+      );
+
+      await upsert(processEvents, responseMessage);
+
+      const pending = sqlite
+        .prepare(
+          "SELECT response, raw_data FROM event_responses WHERE instance_id = ? AND event_message_id = ?",
+        )
+        .get(instanceId, eventId) as { response: string; raw_data: string };
+      expect(pending.response).toBe("UNKNOWN");
+      expect(JSON.parse(pending.raw_data)).toHaveProperty(
+        "message.encEventResponseMessage.encPayload",
+      );
+
+      await upsert(processEvents, eventMessage(eventId, chatId, originalEventKey, messageSecret));
+
+      const storedEventRawData = sqlite
+        .prepare("SELECT raw_data FROM messages WHERE instance_id = ? AND id = ?")
+        .get(instanceId, eventId) as { raw_data: string };
+      const storedEvent = JSON.parse(storedEventRawData.raw_data, BufferJSON.reviver) as WAMessage;
+      expect(storedEvent.message?.messageContextInfo?.messageSecret).toEqual(messageSecret);
+      expect(emittedResponse).toMatchObject({
+        eventMessageId: eventId,
+        participant: RESPONDER_ID,
+        status,
+        timestamp: responseTimestamp,
+        extraGuestCount: 2,
+      });
+
+      const responses = await adapter.getEventResponses(chatId, eventId);
+      expect(responses).toEqual([
+        {
+          participant: RESPONDER_ID,
+          responder: RESPONDER_ID,
+          phone: "5500000000009",
+          status,
+          response: status,
+          timestamp: responseTimestamp,
+          messageId: `private-response-${status.toLowerCase()}`,
+          extraGuestCount: 2,
+        },
+      ]);
+
+      let registeredHandler:
+        ((params: unknown) => Promise<{ content: Array<{ text?: string }> }>) | undefined;
+      const server = {
+        registerTool: (_name: string, _config: unknown, handler: unknown) => {
+          registeredHandler = handler as typeof registeredHandler;
+        },
+      } as unknown as McpServer;
+      registerEventTools(server, { getAdapter: () => adapter } as unknown as InstanceManager);
+      const toolResponse = await registeredHandler?.({
+        instanceId,
+        chatId,
+        eventMessageId: eventId,
+      });
+      const toolResult = JSON.parse(toolResponse?.content[0]?.text ?? "{}") as {
+        count: number;
+        counts: Record<string, number>;
+        responses: unknown[];
+      };
+      expect(toolResult).toMatchObject({
+        count: 1,
+        counts: {
+          GOING: status === "GOING" ? 1 : 0,
+          NOT_GOING: status === "NOT_GOING" ? 1 : 0,
+          MAYBE: status === "MAYBE" ? 1 : 0,
+          UNKNOWN: status === "UNKNOWN" ? 1 : 0,
+        },
+        responses,
+      });
+
+      await vi.waitFor(() => expect(notification).toHaveBeenCalledOnce());
+      expect(notification).toHaveBeenCalledWith(
+        expect.objectContaining({
+          method: "whatsapp/event.response",
+          params: expect.objectContaining({ status, eventMessageId: eventId }),
+        }),
+      );
+      expect(
+        normalizeEventWebhookPayload("event.response", instanceId, emittedResponse!),
+      ).toMatchObject({
+        event: "event.response",
+        eventMessageId: eventId,
+        participant: RESPONDER_ID,
+        status,
+      });
+      removeNotifications();
+    },
+  );
+
+  it.each([
+    { name: "numeric enum", value: 1, status: "GOING" },
+    { name: "enum name", value: "NOT_GOING", status: "NOT_GOING" },
+    { name: "qualified enum name", value: "EventResponseType.MAYBE", status: "MAYBE" },
+    {
+      name: "Long-like enum",
+      value: { toString: () => "2" },
+      status: "NOT_GOING",
+    },
+    {
+      name: "nested Baileys response object",
+      value: { response: { response: 3 } },
+      status: "MAYBE",
+    },
+    {
+      name: "WAProto eventResponseMessage field",
+      value: { eventResponseMessage: { response: 1 } },
+      status: "GOING",
+    },
+    {
+      name: "encoded WAProto response message",
+      value: proto.Message.EventResponseMessage.encode({ response: 2 }).finish(),
+      status: "NOT_GOING",
+    },
+    { name: "unknown enum zero", value: 0, status: "UNKNOWN" },
+  ] as const)("normalizes $name as $status", ({ value, status }) => {
+    expect(eventResponseName(value)).toBe(status);
+  });
+
+  it("decodes an encoded WAProto event response message", () => {
+    const encoded = proto.Message.EventResponseMessage.encode({
+      response: proto.Message.EventResponseMessage.EventResponseType.NOT_GOING,
+      timestampMs: 1_800_000_123_000,
+    }).finish();
+
+    const decoded = decodeEventResponseMessage(encoded);
+    expect(decoded?.response).toBe(proto.Message.EventResponseMessage.EventResponseType.NOT_GOING);
+    expect(Number((decoded?.timestampMs as { toString(): string }).toString())).toBe(
+      1_800_000_123_000,
+    );
+  });
+
+  it("re-decodes an existing UNKNOWN row on read when its stored encrypted payload is available", async () => {
     const { instanceId, adapter, processEvents } = createFixture();
-    const eventId = "private-event-1";
+    const eventId = "private-event-lazy-redecode";
     const chatId = RESPONDER_ID;
-    const messageSecret = Buffer.alloc(32, 0x42);
-    const originalEventKey: WAMessageKey = {
-      id: eventId,
-      remoteJid: chatId,
-      fromMe: true,
-    };
-    const responseTimestamp = 1_800_000_123_000;
+    const messageSecret = Buffer.alloc(32, 0x51);
+    const eventKey: WAMessageKey = { id: eventId, remoteJid: chatId, fromMe: true };
     const encrypted = encryptEventResponse(
       messageSecret,
       eventId,
       ACCOUNT_ID,
       RESPONDER_ID,
       proto.Message.EventResponseMessage.create({
-        response: proto.Message.EventResponseMessage.EventResponseType.GOING,
-        timestampMs: responseTimestamp,
-        extraGuestCount: 2,
+        response: proto.Message.EventResponseMessage.EventResponseType.MAYBE,
       }),
-      originalEventKey,
+      eventKey,
     );
-    const responseMessage = encryptedResponseMessage(
-      "private-response-1",
-      chatId,
-      { remoteJid: chatId },
-      encrypted,
+
+    await upsert(processEvents, eventMessage(eventId, chatId, eventKey, messageSecret));
+    await upsert(
+      processEvents,
+      encryptedResponseMessage(
+        "private-response-lazy-redecode",
+        chatId,
+        { remoteJid: chatId },
+        encrypted,
+      ),
     );
-    let emittedResponse: unknown;
-    adapter.on("event.response", (payload) => {
-      emittedResponse = payload;
-    });
-
-    await upsert(processEvents, responseMessage);
-
-    const pending = sqlite
+    sqlite
       .prepare(
-        "SELECT response, raw_data FROM event_responses WHERE instance_id = ? AND event_message_id = ?",
+        "UPDATE event_responses SET response = 'UNKNOWN' WHERE instance_id = ? AND event_message_id = ?",
       )
-      .get(instanceId, eventId) as { response: string; raw_data: string };
-    expect(pending.response).toBe("UNKNOWN");
-    expect(JSON.parse(pending.raw_data)).toHaveProperty(
-      "message.encEventResponseMessage.encPayload",
-    );
+      .run(instanceId, eventId);
 
-    await upsert(processEvents, eventMessage(eventId, chatId, originalEventKey, messageSecret));
+    await expect(adapter.getEventResponses(chatId, eventId)).resolves.toMatchObject([
+      { status: "MAYBE", response: "MAYBE" },
+    ]);
+  });
 
-    const storedEventRawData = sqlite
-      .prepare("SELECT raw_data FROM messages WHERE instance_id = ? AND id = ?")
-      .get(instanceId, eventId) as { raw_data: string };
-    const storedEvent = JSON.parse(storedEventRawData.raw_data, BufferJSON.reviver) as WAMessage;
-    expect(storedEvent.message?.messageContextInfo?.messageSecret).toEqual(messageSecret);
-    expect(emittedResponse).toMatchObject({
-      eventMessageId: eventId,
+  it.each([
+    { name: "numeric enum in decrypted response", expected: "GOING", response: { response: 1 } },
+    {
+      name: "enum name in decrypted response",
+      expected: "NOT_GOING",
+      response: { response: "NOT_GOING" },
+    },
+    {
+      name: "Long-like enum in decrypted response",
+      expected: "MAYBE",
+      response: { response: { toString: () => "3" } },
+    },
+    {
+      name: "encoded eventResponseMessage field",
+      expected: "GOING",
+      eventResponseMessage: proto.Message.EventResponseMessage.encode({ response: 1 }).finish(),
+    },
+    { name: "eventResponse enum field", expected: "NOT_GOING", eventResponse: "NOT_GOING" },
+    { name: "unknown enum zero", expected: "UNKNOWN", response: { response: 0 } },
+  ] as const)("persists $name from a Baileys messages.update", async (shape) => {
+    const { adapter, processEvents } = createFixture();
+    const eventId = `group-event-update-${shape.expected.toLowerCase()}`;
+    const eventKey: WAMessageKey = {
+      id: eventId,
+      remoteJid: GROUP_ID,
+      fromMe: true,
+      participant: ACCOUNT_ID,
+    };
+    const responseMessageKey: WAMessageKey = {
+      id: `response-${shape.expected.toLowerCase()}`,
+      remoteJid: GROUP_ID,
       participant: RESPONDER_ID,
-      status: "GOING",
-      timestamp: responseTimestamp,
-      extraGuestCount: 2,
-    });
+    };
+    await upsert(processEvents, eventMessage(eventId, GROUP_ID, eventKey, Buffer.alloc(32, 0x61)));
 
-    const responses = await adapter.getEventResponses(chatId, eventId);
-    expect(responses).toEqual([
+    await processEvents({
+      "messages.update": [
+        {
+          key: eventKey,
+          update: {
+            eventResponses: [
+              {
+                eventResponseMessageKey: responseMessageKey,
+                senderTimestampMs: 1_800_000_126_000,
+                ...shape,
+              },
+            ],
+          },
+        },
+      ],
+    } as unknown as Partial<BaileysEventMap>);
+
+    await expect(adapter.getEventResponses(GROUP_ID, eventId)).resolves.toMatchObject([
       {
         participant: RESPONDER_ID,
-        responder: RESPONDER_ID,
-        phone: "5500000000009",
-        status: "GOING",
-        response: "GOING",
-        timestamp: responseTimestamp,
-        messageId: "private-response-1",
-        extraGuestCount: 2,
+        status: shape.expected,
+        response: shape.expected,
+        timestamp: 1_800_000_126_000,
       },
     ]);
-
-    let registeredHandler:
-      ((params: unknown) => Promise<{ content: Array<{ text?: string }> }>) | undefined;
-    const server = {
-      registerTool: (_name: string, _config: unknown, handler: unknown) => {
-        registeredHandler = handler as typeof registeredHandler;
-      },
-    } as unknown as McpServer;
-    registerEventTools(server, { getAdapter: () => adapter } as unknown as InstanceManager);
-    const toolResponse = await registeredHandler?.({
-      instanceId,
-      chatId,
-      eventMessageId: eventId,
-    });
-    const toolResult = JSON.parse(toolResponse?.content[0]?.text ?? "{}") as {
-      count: number;
-      counts: Record<string, number>;
-      responses: unknown[];
-    };
-    expect(toolResult).toMatchObject({
-      count: 1,
-      counts: { GOING: 1, NOT_GOING: 0, MAYBE: 0, UNKNOWN: 0 },
-      responses,
-    });
   });
 
   it("resolves LID event creators and responders to their PN authors", async () => {
