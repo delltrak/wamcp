@@ -156,7 +156,7 @@ interface DecryptedStoredEventResponse {
 
 type StoredEventResponseDecryptResult =
   | { status: "decrypted"; value: DecryptedStoredEventResponse; attemptedCombinations: number }
-  | { status: "failed"; attemptedCombinations: number }
+  | { status: "failed"; attemptedCombinations: number; allCandidatesTried: boolean }
   | { status: "missing" };
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -3282,7 +3282,7 @@ export class BaileysAdapter implements ChannelAdapter {
         },
         "Unable to decrypt event response",
       );
-      return { status: "failed", attemptedCombinations: 0 };
+      return { status: "failed", attemptedCombinations: 0, allCandidatesTried: false };
     }
 
     let attemptedCombinations = 0;
@@ -3364,7 +3364,12 @@ export class BaileysAdapter implements ChannelAdapter {
       },
       "Unable to decrypt event response",
     );
-    return { status: "failed", attemptedCombinations };
+    return {
+      status: "failed",
+      attemptedCombinations,
+      allCandidatesTried:
+        attemptedCombinations === creatorCandidates.length * responderCandidates.length,
+    };
   }
 
   private persistResolvedEventResponse(
@@ -3647,7 +3652,10 @@ export class BaileysAdapter implements ChannelAdapter {
   }> {
     const details = (unknownReason: EventResponseUnknownReason) => ({
       unknownReason,
-      recoverable: unknownReason !== "missing_payload" && unknownReason !== "missing_event_secret",
+      recoverable:
+        unknownReason !== "missing_payload" &&
+        unknownReason !== "missing_event_secret" &&
+        unknownReason !== "decrypt_failed_all_candidates",
     });
     if (!row.rawData) return details("missing_payload");
 
@@ -3702,7 +3710,11 @@ export class BaileysAdapter implements ChannelAdapter {
     const decrypted = await this.decryptStoredEventResponse(encrypted, message.key);
     if (decrypted.status === "failed") {
       return {
-        ...details("decrypt_failed"),
+        ...details(
+          decrypted.attemptedCombinations > 0 && decrypted.allCandidatesTried
+            ? "decrypt_failed_all_candidates"
+            : "decrypt_failed",
+        ),
         attemptedCombinations: decrypted.attemptedCombinations,
       };
     }

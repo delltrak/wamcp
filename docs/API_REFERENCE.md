@@ -2198,8 +2198,13 @@ produce a recognized RSVP status. UNKNOWN responses also include `unknownReason`
 - `missing_event_secret`: the event message or its `messageSecret` was not stored, so the encrypted
   response cannot be decrypted; `recoverable` is `false`.
 - `decrypt_failed`: the response payload and event secret are present, but decryption failed;
-  `recoverable` is `true`, and `attemptedCombinations` reports the number of normalized creator and
-  responder JID combinations tried during the latest decryption attempt.
+  `recoverable` is `true` when not all candidate combinations could be tried (for example, when no
+  candidates were available), and `attemptedCombinations` reports how many normalized creator and
+  responder JID combinations were tried during the latest decryption attempt.
+- `decrypt_failed_all_candidates`: every available normalized creator and responder JID combination
+  was tried, but decryption failed; `recoverable` is `false`. This usually means the event's stored
+  `messageSecret` on this device does not match the response, commonly because the event predates
+  re-pairing. The participant must answer the event again.
 - `unrecognized_response`: the stored response could not be mapped to a supported RSVP status;
   `recoverable` is `true`.
 

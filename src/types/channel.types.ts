@@ -101,7 +101,11 @@ export interface EventResponse {
 export type EventResponseStatus = "GOING" | "NOT_GOING" | "MAYBE" | "UNKNOWN";
 
 export type EventResponseUnknownReason =
-  "missing_payload" | "missing_event_secret" | "decrypt_failed" | "unrecognized_response";
+  | "missing_payload"
+  | "missing_event_secret"
+  | "decrypt_failed"
+  | "decrypt_failed_all_candidates"
+  | "unrecognized_response";
 
 export interface SendEventOptions {
   to: string;
