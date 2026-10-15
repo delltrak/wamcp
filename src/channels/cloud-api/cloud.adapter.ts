@@ -416,7 +416,9 @@ export class CloudApiAdapter implements ChannelAdapter {
   }
 
   async sendEvent(_options: SendEventOptions): Promise<MessageResponse> {
-    throw new Error("WhatsApp event messages are not supported on Cloud API; use a Baileys instance");
+    throw new Error(
+      "WhatsApp event messages are not supported on Cloud API; use a Baileys instance",
+    );
   }
 
   async getEventResponses(_chatId: string, _eventMessageId: string): Promise<EventResponse[]> {

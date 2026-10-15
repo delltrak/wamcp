@@ -28,10 +28,7 @@ export function searchStoredMessages(
   options: MessageSearchOptions,
 ): { messages: Message[]; hasMore: boolean; nextOffset: number | null } {
   const filters = ["instance_id = ?", "lower(content) LIKE lower(?) ESCAPE '\\'"];
-  const values: Array<string | number> = [
-    instanceId,
-    `%${escapeLikeWildcards(options.query)}%`,
-  ];
+  const values: Array<string | number> = [instanceId, `%${escapeLikeWildcards(options.query)}%`];
 
   if (options.from !== undefined) {
     filters.push("timestamp >= ?");
@@ -70,7 +67,9 @@ export function searchStoredMessages(
     type: row.type,
     content: row.content,
     mediaUrl: row.media_url,
-    ...(row.media_mimetype ? { mediaMimetype: row.media_mimetype, mimeType: row.media_mimetype } : {}),
+    ...(row.media_mimetype
+      ? { mediaMimetype: row.media_mimetype, mimeType: row.media_mimetype }
+      : {}),
     quotedMessageId: row.quoted_id,
     isFromMe: row.is_from_me === 1,
     isForwarded: row.is_forwarded === 1,

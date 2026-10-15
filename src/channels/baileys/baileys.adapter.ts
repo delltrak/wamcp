@@ -947,7 +947,10 @@ export class BaileysAdapter implements ChannelAdapter {
       .get();
     if (!stored) throw new Error(`Message '${messageId}' was not found in chat '${jid}'`);
 
-    await sock.chatModify({ star: { messages: [{ id: messageId, fromMe: stored.fromMe === 1 }], star } }, jid);
+    await sock.chatModify(
+      { star: { messages: [{ id: messageId, fromMe: stored.fromMe === 1 }], star } },
+      jid,
+    );
     db.update(messagesTable)
       .set({ starred: star ? 1 : 0 })
       .where(
@@ -1395,7 +1398,12 @@ export class BaileysAdapter implements ChannelAdapter {
     const jid = await this.requireBusinessLabelSupport(sock, ["addLabel"]);
     const label: BusinessLabel = { id: randomUUID(), name, color, deleted: false };
     try {
-      await sock.addLabel(jid, { id: label.id, name: label.name, color: label.color, deleted: false });
+      await sock.addLabel(jid, {
+        id: label.id,
+        name: label.name,
+        color: label.color,
+        deleted: false,
+      });
     } catch (error) {
       throw labelOperationError(error);
     }
@@ -2125,7 +2133,9 @@ export class BaileysAdapter implements ChannelAdapter {
     const sock = this.getSock();
     const jid = this.normalizeJid(chatId);
     if (this.activeHistoryFetch) {
-      throw new Error("Another on-demand message history fetch is already in progress for this instance");
+      throw new Error(
+        "Another on-demand message history fetch is already in progress for this instance",
+      );
     }
     const oldest = db
       .select({
@@ -2809,8 +2819,12 @@ export class BaileysAdapter implements ChannelAdapter {
 
       // --- History sync: contacts arrive here during first sync ---
       if (events["messaging-history.set"]) {
-        const { contacts = [], chats = [], messages = [], syncType } =
-          events["messaging-history.set"];
+        const {
+          contacts = [],
+          chats = [],
+          messages = [],
+          syncType,
+        } = events["messaging-history.set"];
         this.persistChats(chats);
         const contactCount = contacts.filter((contact) => contact.id).length;
         const chatContactCount = chats.filter(
