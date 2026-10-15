@@ -28,6 +28,7 @@ import type {
   NormalizedCallEvent,
   PresenceStatus,
 } from "../../types/channel.types.js";
+import { messageTimestampToSeconds } from "./message-timestamp.js";
 import { createChildLogger } from "../../utils/logger.js";
 
 const logger = createChildLogger({ service: "baileys-events" });
@@ -668,10 +669,7 @@ export function normalizeMessagesUpsert(
         message: {
           id: msg.key.id ?? "",
           sender: getSenderJid(msg),
-          timestamp:
-            typeof msg.messageTimestamp === "number"
-              ? msg.messageTimestamp
-              : Number(msg.messageTimestamp ?? 0),
+          timestamp: messageTimestampToSeconds(msg.messageTimestamp, 0),
           type: details.type,
           content: details.content,
           mediaUrl: details.mediaUrl,
@@ -766,10 +764,7 @@ export function normalizeMessageEdit(
     chatId,
     messageId: stringValue(recordAt(protocolMessage, "key")?.id) ?? msg.key.id ?? "",
     newContent: editedContent,
-    editedAt:
-      typeof msg.messageTimestamp === "number"
-        ? msg.messageTimestamp
-        : Number(msg.messageTimestamp ?? Date.now() / 1000),
+    editedAt: messageTimestampToSeconds(msg.messageTimestamp, Math.floor(Date.now() / 1000)),
   };
 }
 

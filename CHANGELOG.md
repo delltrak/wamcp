@@ -47,6 +47,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Baileys message forwarding now uses the stored original message content, including outgoing media
+  protos and Buffer fields. Messages without available content return an error instead of sending an
+  empty forwarded bubble.
 - Baileys status deletions now include the original audience (or a validated explicit audience),
   and successful message deletions are marked as revoked in local message history.
 - Baileys status stories now pass a normalized, deduplicated recipient list (the account's own JID
