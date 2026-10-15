@@ -151,6 +151,8 @@ function makeSocket(overrides: Record<string, unknown> = {}) {
     newsletterUpdateDescription: vi.fn(async () => undefined),
     newsletterUpdatePicture: vi.fn(async () => undefined),
     newsletterReactMessage: vi.fn(async () => undefined),
+    newsletterFollow: vi.fn(async () => undefined),
+    newsletterUnfollow: vi.fn(async () => undefined),
     newsletterFetchMessages: vi.fn(async () => makeNewsletterFetchResponse()),
     generateMessageTag: vi.fn(() => "newsletter-query-id"),
     query: vi.fn(async () => makeNewsletterFetchResponse()),
@@ -231,6 +233,18 @@ const CATALOG_PRODUCT_INPUT = {
 };
 
 const GATED_WRITE_CASES = [
+  {
+    toolName: "wa_newsletter_follow",
+    params: { jid: NEWSLETTER_JID },
+    run: (adapter: BaileysAdapter) => adapter.newsletterFollow(NEWSLETTER_JID),
+    socketMethod: "newsletterFollow",
+  },
+  {
+    toolName: "wa_newsletter_unfollow",
+    params: { jid: NEWSLETTER_JID },
+    run: (adapter: BaileysAdapter) => adapter.newsletterUnfollow(NEWSLETTER_JID),
+    socketMethod: "newsletterUnfollow",
+  },
   {
     toolName: "wa_set_disappearing_messages",
     params: { chatId: CONTACT_JID, duration: 86400 },
