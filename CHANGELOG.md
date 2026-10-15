@@ -69,6 +69,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Baileys event response decryption now tries normalized LID and PN creator/responder candidates,
+  retries stored encrypted responses when `wa_get_event_responses` is called, and reports the number
+  of attempted JID combinations when decryption still fails.
 - Baileys event responses now map numeric, named, Long-like, and encoded WAProto RSVP values to
   `GOING`, `NOT_GOING`, or `MAYBE`; stored encrypted responses with an earlier `UNKNOWN` status are
   re-decoded on read when possible.
