@@ -250,7 +250,20 @@ export class InstanceManager {
             updateFields.lastConnected = Date.now();
           }
           if (connPayload.status === "close") {
-            updateFields.lastDisconnected = Date.now();
+            const instance = db
+              .select({
+                lastConnected: instances.lastConnected,
+                lastDisconnected: instances.lastDisconnected,
+              })
+              .from(instances)
+              .where(eq(instances.id, instanceId))
+              .get();
+            const outageAlreadyRecorded =
+              instance?.lastDisconnected != null &&
+              (instance.lastConnected == null ||
+                instance.lastDisconnected >= instance.lastConnected);
+            // Keep the first close time until a successful connection starts a new outage.
+            if (!outageAlreadyRecorded) updateFields.lastDisconnected = Date.now();
           }
           db.update(instances).set(updateFields).where(eq(instances.id, instanceId)).run();
         }

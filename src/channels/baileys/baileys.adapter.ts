@@ -4976,7 +4976,7 @@ export class BaileysAdapter implements ChannelAdapter {
         const connectedDurationMs =
           this.connectedAtMs !== null ? Math.max(0, closedAt - this.connectedAtMs) : undefined;
         this.connectedAtMs = null;
-        this.disconnectedAtMs = closedAt;
+        if (this.disconnectedAtMs === null) this.disconnectedAtMs = closedAt;
         this.lastDisconnectReason = reason;
         this.lastDisconnectStatusCode = typeof statusCode === "number" ? statusCode : null;
         logger.warn(
@@ -5781,7 +5781,7 @@ export class BaileysAdapter implements ChannelAdapter {
 
     const connectionWatermark = watermark - APPEND_NOTIFY_CLOCK_SKEW_MS;
     return lastSeenMessageAt !== null
-      ? Math.max(connectionWatermark, lastSeenMessageAt + 1)
+      ? Math.max(connectionWatermark, lastSeenMessageAt)
       : connectionWatermark;
   }
 }

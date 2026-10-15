@@ -5,6 +5,7 @@ import { and, eq, lt } from "drizzle-orm";
 import { BaileysAdapter } from "../src/channels/baileys/baileys.adapter.js";
 import { db } from "../src/db/client.js";
 import { instances, messages, processedMessages } from "../src/db/schema.js";
+import { InstanceManager } from "../src/services/instance-manager.js";
 import { normalizeEventWebhookPayload } from "../src/services/event-webhook.js";
 import type { NormalizedMessageEvent } from "../src/types/channel.types.js";
 
@@ -32,6 +33,10 @@ interface AdapterInternals {
   saveCreds: (() => Promise<void>) | null;
   bindEvents: (sock: WASocket) => void;
   getAppendNotifyWatermark: (now: number) => number;
+}
+
+interface InstanceManagerInternals {
+  bindAdapterEvents: (instanceId: string, adapter: BaileysAdapter) => void;
 }
 
 function createFixture(options: { lastConnected?: number; lastDisconnected?: number } = {}): {
@@ -71,6 +76,10 @@ function createFixture(options: { lastConnected?: number; lastDisconnected?: num
   } as unknown as WASocket;
   const adapter = new BaileysAdapter(instanceId);
   (adapter as unknown as AdapterInternals).bindEvents(socket);
+  (new InstanceManager() as unknown as InstanceManagerInternals).bindAdapterEvents(
+    instanceId,
+    adapter,
+  );
   const dispatchBatch = async (events: Partial<BaileysEventMap>): Promise<void> => {
     if (!processEvents) throw new Error("Baileys event processor was not registered");
     await processEvents(events);
@@ -129,7 +138,7 @@ describe("Baileys offline append notifications", () => {
 
     try {
       expect((adapter as unknown as AdapterInternals).getAppendNotifyWatermark(now)).toBe(
-        storedTimestampMs + 1,
+        storedTimestampMs,
       );
 
       await dispatch("append", [
@@ -294,14 +303,6 @@ describe("Baileys offline append notifications", () => {
     });
     const received = vi.fn();
     adapter.on("message.received", received);
-    adapter.on("connection.changed", (event) => {
-      if (event.status === "open") {
-        db.update(instances)
-          .set({ lastConnected: Date.now() })
-          .where(eq(instances.id, instanceId))
-          .run();
-      }
-    });
     const offlineMessageTimestampMs = now - 10 * 60_000;
     const offlineMessage = fixtureMessage("offline-after-open", {
       timestampMs: offlineMessageTimestampMs,
@@ -321,6 +322,87 @@ describe("Baileys offline append notifications", () => {
       expect(received).toHaveBeenCalledTimes(1);
       expect(received).toHaveBeenCalledWith(
         expect.objectContaining({ message: expect.objectContaining({ id: "offline-after-open" }) }),
+      );
+    } finally {
+      deleteInstance(instanceId);
+    }
+  });
+
+  it("keeps the first disconnect watermark across failed reconnects until open", async () => {
+    vi.useFakeTimers();
+    const start = new Date("2026-10-15T12:00:00.000Z").getTime();
+    vi.setSystemTime(start);
+    const { instanceId, adapter, dispatch, dispatchConnectionUpdate } = createFixture({
+      lastConnected: start - 10 * 60_000,
+    });
+    const received = vi.fn();
+    adapter.on("message.received", received);
+    const outageMessage = fixtureMessage("message-after-original-disconnect", {
+      timestampMs: start + 1_000,
+    });
+
+    try {
+      dispatchConnectionUpdate({ connection: "close" });
+      const originalDisconnect = db
+        .select({ lastDisconnected: instances.lastDisconnected })
+        .from(instances)
+        .where(eq(instances.id, instanceId))
+        .get()?.lastDisconnected;
+      expect(originalDisconnect).toBe(start);
+
+      for (const elapsedMs of [2, 4, 6].map((minutes) => minutes * 60_000)) {
+        vi.setSystemTime(start + elapsedMs);
+        dispatchConnectionUpdate({ connection: "close" });
+        expect(
+          db
+            .select({ lastDisconnected: instances.lastDisconnected })
+            .from(instances)
+            .where(eq(instances.id, instanceId))
+            .get()?.lastDisconnected,
+        ).toBe(originalDisconnect);
+      }
+
+      vi.setSystemTime(start + 8 * 60_000);
+      dispatchConnectionUpdate({ connection: "open" });
+      await dispatch("append", [outageMessage]);
+      await dispatch("append", [outageMessage]);
+
+      expect(received).toHaveBeenCalledTimes(1);
+      expect(received).toHaveBeenCalledWith(
+        expect.objectContaining({
+          message: expect.objectContaining({ id: "message-after-original-disconnect" }),
+        }),
+      );
+    } finally {
+      deleteInstance(instanceId);
+    }
+  });
+
+  it("notifies a new append sharing the latest stored second but skips stored IDs", async () => {
+    const now = Date.now();
+    const timestampSeconds = Math.floor((now - 60_000) / 1000);
+    const { instanceId, adapter, dispatch } = createFixture({
+      lastConnected: now - 5 * 60_000,
+      lastDisconnected: now - 4 * 60_000,
+    });
+    seedStoredMessage(instanceId, "latest-stored-append", timestampSeconds);
+    const received = vi.fn();
+    adapter.on("message.received", received);
+
+    try {
+      await dispatch("append", [
+        fixtureMessage("new-id-same-second", { timestampMs: timestampSeconds * 1000 }),
+        fixtureMessage("latest-stored-append", { timestampMs: timestampSeconds * 1000 }),
+      ]);
+      await dispatch("append", [
+        fixtureMessage("new-id-same-second", { timestampMs: timestampSeconds * 1000 }),
+      ]);
+
+      expect(received).toHaveBeenCalledTimes(1);
+      expect(received).toHaveBeenCalledWith(
+        expect.objectContaining({
+          message: expect.objectContaining({ id: "new-id-same-second" }),
+        }),
       );
     } finally {
       deleteInstance(instanceId);
