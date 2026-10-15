@@ -150,6 +150,23 @@ describe("Baileys offline append notifications", () => {
     }
   });
 
+  it("picks the newest stored message when timestamps use seconds and milliseconds", () => {
+    const now = Date.now();
+    const olderTimestampMs = now - 10 * 60_000;
+    const newerTimestampSeconds = Math.floor((now - 60_000) / 1000);
+    const { instanceId, adapter } = createFixture();
+    seedStoredMessage(instanceId, "older-millisecond-message", olderTimestampMs);
+    seedStoredMessage(instanceId, "newer-second-message", newerTimestampSeconds);
+
+    try {
+      expect((adapter as unknown as AdapterInternals).getAppendNotifyWatermark(now)).toBe(
+        newerTimestampSeconds * 1000,
+      );
+    } finally {
+      deleteInstance(instanceId);
+    }
+  });
+
   it("skips a redelivered append after its processed-message record was pruned", async () => {
     const now = Date.now();
     const { instanceId, adapter, dispatch } = createFixture();

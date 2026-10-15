@@ -5764,7 +5764,11 @@ export class BaileysAdapter implements ChannelAdapter {
       .select({ timestamp: messagesTable.timestamp })
       .from(messagesTable)
       .where(and(eq(messagesTable.instanceId, this.instanceId), eq(messagesTable.isFromMe, 0)))
-      .orderBy(desc(messagesTable.timestamp))
+      .orderBy(
+        desc(
+          sql`CASE WHEN ${messagesTable.timestamp} > 1000000000000 THEN ${messagesTable.timestamp} ELSE ${messagesTable.timestamp} * 1000 END`,
+        ),
+      )
       .limit(1)
       .get();
     const lastSeenMessageAt = lastMessage?.timestamp
