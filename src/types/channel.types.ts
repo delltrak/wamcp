@@ -93,9 +93,14 @@ export interface EventResponse {
   timestamp: number | null;
   messageId: string | null;
   extraGuestCount?: number;
+  unknownReason?: EventResponseUnknownReason;
+  recoverable?: boolean;
 }
 
 export type EventResponseStatus = "GOING" | "NOT_GOING" | "MAYBE" | "UNKNOWN";
+
+export type EventResponseUnknownReason =
+  "missing_payload" | "missing_event_secret" | "decrypt_failed" | "unrecognized_response";
 
 export interface SendEventOptions {
   to: string;

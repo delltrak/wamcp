@@ -273,6 +273,9 @@ describe("Baileys event responses", () => {
           timestamp: responseTimestamp,
           messageId: `private-response-${status.toLowerCase()}`,
           extraGuestCount: 2,
+          ...(status === "UNKNOWN"
+            ? { unknownReason: "unrecognized_response", recoverable: true }
+            : {}),
         },
       ]);
 
@@ -401,6 +404,185 @@ describe("Baileys event responses", () => {
 
     await expect(adapter.getEventResponses(chatId, eventId)).resolves.toMatchObject([
       { status: "MAYBE", response: "MAYBE" },
+    ]);
+  });
+
+  it("re-decodes an old UNKNOWN messages.update row from its stored IEventResponse payload", async () => {
+    const { instanceId, adapter, processEvents } = createFixture();
+    const eventId = "private-event-old-update-response";
+    const messageSecret = Buffer.alloc(32, 0x52);
+    const eventKey: WAMessageKey = {
+      id: eventId,
+      remoteJid: RESPONDER_LID,
+      remoteJidAlt: RESPONDER_ID,
+      fromMe: true,
+    };
+    await upsert(processEvents, eventMessage(eventId, RESPONDER_LID, eventKey, messageSecret));
+    await processEvents({
+      "messages.update": [
+        {
+          key: eventKey,
+          update: {
+            eventResponses: [
+              {
+                eventResponseMessageKey: {
+                  id: "private-response-old-update",
+                  remoteJid: RESPONDER_LID,
+                  remoteJidAlt: RESPONDER_ID,
+                  participant: RESPONDER_LID,
+                  participantAlt: RESPONDER_ID,
+                },
+                senderTimestampMs: 1_800_000_129_000,
+                response: {
+                  response: proto.Message.EventResponseMessage.EventResponseType.NOT_GOING,
+                  extraGuestCount: 3,
+                },
+              },
+            ],
+          },
+        },
+      ],
+    } as unknown as Partial<BaileysEventMap>);
+
+    const rawRow = sqlite
+      .prepare(
+        "SELECT raw_data FROM event_responses WHERE instance_id = ? AND event_message_id = ?",
+      )
+      .get(instanceId, eventId) as { raw_data: string };
+    expect(JSON.parse(rawRow.raw_data)).toMatchObject({
+      eventResponseMessageKey: { id: "private-response-old-update" },
+      response: { response: 2, extraGuestCount: 3 },
+    });
+    sqlite
+      .prepare(
+        "UPDATE event_responses SET response = 'UNKNOWN' WHERE instance_id = ? AND event_message_id = ?",
+      )
+      .run(instanceId, eventId);
+
+    await expect(adapter.getEventResponses(RESPONDER_LID, eventId)).resolves.toMatchObject([
+      {
+        participant: RESPONDER_ID,
+        status: "NOT_GOING",
+        response: "NOT_GOING",
+        timestamp: 1_800_000_129_000,
+        messageId: "private-response-old-update",
+        extraGuestCount: 3,
+      },
+    ]);
+  });
+
+  it("reports when an UNKNOWN response has no stored payload", async () => {
+    const { instanceId, adapter } = createFixture();
+    const eventId = "event-response-without-payload";
+    sqlite
+      .prepare(
+        `INSERT INTO event_responses
+          (instance_id, event_message_id, chat_id, responder, response, timestamp,
+           extra_guest_count, response_message_id, raw_data)
+         VALUES (?, ?, ?, ?, 'UNKNOWN', NULL, NULL, NULL, NULL)`,
+      )
+      .run(instanceId, eventId, GROUP_ID, RESPONDER_ID);
+
+    await expect(adapter.getEventResponses(GROUP_ID, eventId)).resolves.toMatchObject([
+      {
+        status: "UNKNOWN",
+        unknownReason: "missing_payload",
+        recoverable: false,
+      },
+    ]);
+  });
+
+  it("reports when an encrypted response cannot be decrypted because its event secret is missing", async () => {
+    const { adapter, processEvents } = createFixture();
+    const eventId = "event-response-without-event-secret";
+    const eventKey: WAMessageKey = { id: eventId, remoteJid: GROUP_ID, fromMe: true };
+    await upsert(processEvents, {
+      key: eventKey,
+      message: { eventMessage: { name: "Planning", startTime: 1_800_000_000 } },
+      messageTimestamp: 1_800_000_000,
+    } as WAMessage);
+    const encrypted = encryptEventResponse(
+      Buffer.alloc(32, 0x53),
+      eventId,
+      ACCOUNT_ID,
+      RESPONDER_ID,
+      proto.Message.EventResponseMessage.create({
+        response: proto.Message.EventResponseMessage.EventResponseType.GOING,
+      }),
+      eventKey,
+    );
+    await upsert(
+      processEvents,
+      encryptedResponseMessage(
+        "response-without-event-secret",
+        GROUP_ID,
+        { remoteJid: GROUP_ID, participant: RESPONDER_ID },
+        encrypted,
+      ),
+    );
+
+    await expect(adapter.getEventResponses(GROUP_ID, eventId)).resolves.toMatchObject([
+      {
+        status: "UNKNOWN",
+        unknownReason: "missing_event_secret",
+        recoverable: false,
+      },
+    ]);
+  });
+
+  it("does not replace a resolved response with a later UNKNOWN update", async () => {
+    const { instanceId, adapter, processEvents } = createFixture();
+    const eventId = "group-event-unknown-does-not-overwrite";
+    const eventKey: WAMessageKey = {
+      id: eventId,
+      remoteJid: GROUP_ID,
+      fromMe: true,
+      participant: ACCOUNT_ID,
+    };
+    await upsert(processEvents, eventMessage(eventId, GROUP_ID, eventKey, Buffer.alloc(32, 0x54)));
+    await processEvents({
+      "messages.update": [
+        {
+          key: eventKey,
+          update: {
+            eventResponses: [
+              {
+                eventResponseMessageKey: {
+                  id: "response-known-before-unknown",
+                  remoteJid: GROUP_ID,
+                  participant: RESPONDER_ID,
+                },
+                senderTimestampMs: 1_800_000_130_000,
+                response: { response: proto.Message.EventResponseMessage.EventResponseType.GOING },
+              },
+              {
+                eventResponseMessageKey: {
+                  id: "response-later-unknown",
+                  remoteJid: GROUP_ID,
+                  participant: RESPONDER_ID,
+                },
+                senderTimestampMs: 1_800_000_131_000,
+                response: {
+                  response: proto.Message.EventResponseMessage.EventResponseType.UNKNOWN,
+                },
+              },
+            ],
+          },
+        },
+      ],
+    } as unknown as Partial<BaileysEventMap>);
+
+    const stored = sqlite
+      .prepare(
+        "SELECT response, response_message_id FROM event_responses WHERE instance_id = ? AND event_message_id = ?",
+      )
+      .get(instanceId, eventId) as { response: string; response_message_id: string };
+    expect(stored).toEqual({
+      response: "GOING",
+      response_message_id: "response-known-before-unknown",
+    });
+    await expect(adapter.getEventResponses(GROUP_ID, eventId)).resolves.toMatchObject([
+      { status: "GOING", response: "GOING" },
     ]);
   });
 
