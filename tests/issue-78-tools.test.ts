@@ -1,5 +1,5 @@
 import { createCipheriv, createHash, createHmac, randomUUID } from "node:crypto";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   proto,
   type BaileysEventMap,
@@ -25,6 +25,7 @@ const POLL_CREATOR = "5500000000010@s.whatsapp.net";
 const VOTER = "5500000000011@s.whatsapp.net";
 const GROUP_ID = "120363000000000001@g.us";
 const CONTACT_ID = "5500000000003@s.whatsapp.net";
+const initialAppStateWritesEnabled = process.env.WA_APP_STATE_WRITES_ENABLED;
 
 type RegisteredTool = {
   inputSchema: z.ZodType;
@@ -123,12 +124,18 @@ function groupMetadata() {
 describe("issue 78 messaging and group features", () => {
   const activeInstanceIds = new Set<string>();
 
+  beforeEach(() => {
+    process.env.WA_APP_STATE_WRITES_ENABLED = "true";
+  });
+
   afterEach(() => {
     for (const instanceId of activeInstanceIds) {
       sqlite.prepare("DELETE FROM instances WHERE id = ?").run(instanceId);
     }
     activeInstanceIds.clear();
     vi.restoreAllMocks();
+    if (initialAppStateWritesEnabled === undefined) delete process.env.WA_APP_STATE_WRITES_ENABLED;
+    else process.env.WA_APP_STATE_WRITES_ENABLED = initialAppStateWritesEnabled;
   });
 
   function createFixture(extraSocket: Record<string, unknown> = {}) {
