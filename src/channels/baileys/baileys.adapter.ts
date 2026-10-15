@@ -2542,6 +2542,9 @@ export class BaileysAdapter implements ChannelAdapter {
   }
 
   async updatePrivacy(update: PrivacyUpdate): Promise<void> {
+    if (update.setting === "defaultDisappearingMode") {
+      this.requireAppStateWritesEnabled();
+    }
     const sock = this.getSock();
     // Baileys has separate privacy update methods per setting
     switch (update.setting) {
@@ -2654,11 +2657,13 @@ export class BaileysAdapter implements ChannelAdapter {
   // ---- Newsletter / Channels ----
 
   async newsletterFollow(jid: string): Promise<void> {
+    this.requireAppStateWritesEnabled();
     const sock = this.getSock();
     await sock.newsletterFollow(jid);
   }
 
   async newsletterUnfollow(jid: string): Promise<void> {
+    this.requireAppStateWritesEnabled();
     const sock = this.getSock();
     await sock.newsletterUnfollow(jid);
   }

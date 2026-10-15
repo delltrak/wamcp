@@ -79,7 +79,8 @@ Tools marked **Baileys only** are not available on Cloud API instances.
   `wa_add_message_label`, `wa_remove_message_label`, `wa_update_profile_name`,
   `wa_create_quick_reply`, `wa_edit_quick_reply`, `wa_delete_quick_reply`,
   `wa_create_community`, `wa_community_link_group`, `wa_community_unlink_group`,
-  `wa_leave_community`, `wa_create_newsletter`, `wa_newsletter_update_name`,
+  `wa_leave_community`, `wa_newsletter_follow`, `wa_newsletter_unfollow`, `wa_create_newsletter`,
+  `wa_newsletter_update_name`,
   `wa_newsletter_update_description`, `wa_newsletter_update_picture`, `wa_newsletter_react`,
   `wa_create_catalog_product`, `wa_update_catalog_product`, `wa_delete_catalog_products`,
   `wa_group_join_approval_mode`, `wa_group_member_add_mode`, `wa_set_disappearing_messages`,
@@ -88,8 +89,9 @@ Tools marked **Baileys only** are not available on Cloud API instances.
   `wa_group_join`, `wa_group_add_participants`, `wa_group_remove_participants`, `wa_group_promote`,
   `wa_group_demote`, `wa_group_update_picture`, `wa_group_remove_picture`, and
   `wa_group_handle_request`. The flag covers account/server changes even when Baileys uses IQ or MEX
-  queries instead of an app-state patch. These changes can get the linked device removed. Read-only
-  calls and normal message sends are not gated.
+  queries instead of an app-state patch. `wa_update_privacy` is gated only for the
+  `defaultDisappearingMode` setting; other privacy updates remain available. These changes can get
+  the linked device removed. Read-only calls and normal message sends are not gated.
 - **Protocol classification for issue #74 operations** -- `wa_set_disappearing_messages` sends a
   `sendMessage` protocol control message and is gated because it changes account state;
   blocklist/About are reads; communities use `w:g2` IQs;
@@ -1946,7 +1948,10 @@ Change the text status/bio for a WhatsApp instance.
 
 #### `wa_update_privacy`
 
-Update one Baileys account privacy setting. `setting` determines the accepted `value` enum. The Cloud API channel does not support privacy settings.
+Update one Baileys account privacy setting. `setting` determines the accepted `value` enum. Updating
+`defaultDisappearingMode` is blocked unless `WA_APP_STATE_WRITES_ENABLED=true`; other privacy
+settings remain available with writes disabled. The Cloud API channel does not support privacy
+settings.
 
 | Parameter    | Type                                                                                           | Required | Description               |
 | ------------ | ---------------------------------------------------------------------------------------------- | -------- | ------------------------- |
@@ -2102,7 +2107,8 @@ Tools for interacting with WhatsApp Channels (Newsletters). **Baileys only.**
 
 #### `wa_newsletter_follow`
 
-Follow a WhatsApp Channel/Newsletter.
+Follow a WhatsApp Channel/Newsletter. This account/server change is blocked unless
+`WA_APP_STATE_WRITES_ENABLED=true`.
 
 | Parameter    | Type   | Required | Description                      |
 | ------------ | ------ | -------- | -------------------------------- |
@@ -2123,7 +2129,8 @@ Follow a WhatsApp Channel/Newsletter.
 
 #### `wa_newsletter_unfollow`
 
-Unfollow a WhatsApp Channel/Newsletter.
+Unfollow a WhatsApp Channel/Newsletter. This account/server change is blocked unless
+`WA_APP_STATE_WRITES_ENABLED=true`.
 
 | Parameter    | Type   | Required | Description                        |
 | ------------ | ------ | -------- | ---------------------------------- |
