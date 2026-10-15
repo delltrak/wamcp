@@ -127,7 +127,7 @@ describe("outgoing event webhook config", () => {
 
   it("parses filters, timeouts, retries, JSON headers, and auth header settings", () => {
     const config = configuredWebhook({
-      WA_EVENT_WEBHOOK_EVENTS: "message.received, message.edited, message.received",
+      WA_EVENT_WEBHOOK_EVENTS: "message.received, event.response, message.edited, message.received",
       WA_EVENT_WEBHOOK_IGNORE_FROM_ME: "false",
       WA_EVENT_WEBHOOK_TIMEOUT_MS: "2500",
       WA_EVENT_WEBHOOK_RETRY_ATTEMPTS: "4",
@@ -138,7 +138,7 @@ describe("outgoing event webhook config", () => {
       WA_EVENT_WEBHOOK_SECRET: "hmac-secret",
     });
 
-    expect(config.events).toEqual(["message.received", "message.edited"]);
+    expect(config.events).toEqual(["message.received", "event.response", "message.edited"]);
     expect(config.ignoreFromMe).toBe(false);
     expect(config.timeoutMs).toBe(2500);
     expect(config.retryAttempts).toBe(4);
@@ -295,6 +295,34 @@ describe("outgoing event webhook events", () => {
       text: "hello",
       timestamp: 1_700_000_000,
       isForwarded: false,
+    });
+  });
+
+  it("normalizes decrypted event responses with their status and participant", () => {
+    const response: ChannelEventPayload["event.response"] = {
+      instanceId: "inst_1234abcd",
+      chatId: "5511888888888@g.us",
+      eventMessageId: "event_123",
+      participant: "5511777777777@s.whatsapp.net",
+      responseMessageId: "response_123",
+      status: "GOING",
+      timestamp: 1_800_000_123_000,
+      extraGuestCount: 1,
+    };
+
+    expect(normalizeEventWebhookPayload("event.response", "inst_1234abcd", response)).toEqual({
+      event: "event.response",
+      instanceId: "inst_1234abcd",
+      chat: "5511888888888@g.us",
+      sender: "5511777777777@s.whatsapp.net",
+      type: "event.response",
+      text: null,
+      timestamp: 1_800_000_123_000,
+      eventMessageId: "event_123",
+      responseMessageId: "response_123",
+      participant: "5511777777777@s.whatsapp.net",
+      status: "GOING",
+      extraGuestCount: 1,
     });
   });
 

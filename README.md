@@ -454,6 +454,7 @@ Events are pushed to connected agents via MCP notifications over SSE (Server-Sen
 | `whatsapp/connection.changed`         | Instance status change (includes QR as base64) |
 | `whatsapp/call.received`              | Incoming call                                  |
 | `whatsapp/label.updated`              | Business label or association changed          |
+| `whatsapp/event.response`             | RSVP response to a WhatsApp event              |
 
 ### Outgoing event webhooks
 
@@ -535,6 +536,10 @@ also include `X-WA-Event-Timestamp` and `X-WA-Event-Signature`;
 Baileys message events may also include `chatLabels` and `messageLabels`.
 Opt into the `label.updated` event to receive label edits and chat/message label
 association changes.
+
+Opt into `event.response` to receive event RSVPs with `eventMessageId`,
+`participant`, `status`, and `timestamp`. The status is included after Baileys
+decrypts the response using the original event's message secret.
 
 See [Outgoing event webhooks](docs/event-webhooks.md) for configuration details.
 

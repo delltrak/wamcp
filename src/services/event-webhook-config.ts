@@ -1,24 +1,8 @@
 import { createHash } from "node:crypto";
 import { hostname } from "node:os";
-import type { ChannelEvent } from "../types/channel.types.js";
+import { CHANNEL_EVENTS, type ChannelEvent } from "../types/channel.types.js";
 import { logger } from "../utils/logger.js";
 import { validateWebhookUrl } from "../utils/validation.js";
-
-const CHANNEL_EVENTS: readonly ChannelEvent[] = [
-  "message.received",
-  "message.updated",
-  "message.deleted",
-  "message.reaction",
-  "message.edited",
-  "presence.updated",
-  "chat.updated",
-  "group.updated",
-  "group.participants_changed",
-  "contact.updated",
-  "connection.changed",
-  "call.received",
-  "label.updated",
-];
 
 const DISALLOWED_HEADERS = new Set([
   "connection",

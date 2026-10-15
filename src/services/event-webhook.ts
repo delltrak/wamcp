@@ -10,6 +10,7 @@ import type {
   BusinessLabel,
   ChannelEvent,
   ChannelEventPayload,
+  EventResponseStatus,
   MessageButton,
 } from "../types/channel.types.js";
 import { createChildLogger } from "../utils/logger.js";
@@ -46,6 +47,11 @@ export interface EventWebhookPayload {
   buttons?: MessageButton[];
   rawType?: string;
   action?: string;
+  eventMessageId?: string;
+  responseMessageId?: string;
+  participant?: string;
+  status?: EventResponseStatus;
+  extraGuestCount?: number;
   label?: BusinessLabel;
   association?: { type: "chat" | "message"; chatId: string; messageId?: string };
   chatLabels?: BusinessLabel[];
@@ -341,6 +347,18 @@ export function normalizeEventWebhookPayload(
         }
       : undefined;
   const action = firstString(data.action);
+  const participant = firstString(data.participant);
+  const responseStatus = firstString(data.status);
+  const status =
+    responseStatus === "GOING" ||
+    responseStatus === "NOT_GOING" ||
+    responseStatus === "MAYBE" ||
+    responseStatus === "UNKNOWN"
+      ? responseStatus
+      : undefined;
+  const eventMessageId = firstString(data.eventMessageId);
+  const responseMessageId = firstString(data.responseMessageId);
+  const extraGuestCount = firstNumber(data.extraGuestCount);
 
   return {
     event,
@@ -353,10 +371,16 @@ export function normalizeEventWebhookPayload(
       data.deletedBy,
       data.callerId,
       data.contactId,
+      participant,
     ),
-    type: firstString(message.type, data.action, data.status) ?? event,
+    type:
+      firstString(
+        message.type,
+        data.action,
+        event === "event.response" ? undefined : data.status,
+      ) ?? event,
     text: firstString(message.content, data.newContent, data.emoji, changes.text),
-    timestamp: firstNumber(message.timestamp, data.editedAt),
+    timestamp: firstNumber(message.timestamp, data.editedAt, data.timestamp),
     ...(typeof message.mediaUrl === "string" ? { mediaUrl: message.mediaUrl } : {}),
     ...(typeof message.mediaMimetype === "string" ? { mediaMimetype: message.mediaMimetype } : {}),
     ...(mimeType ? { mimeType } : {}),
@@ -367,6 +391,11 @@ export function normalizeEventWebhookPayload(
     ...(buttons ? { buttons } : {}),
     ...(typeof message.rawType === "string" ? { rawType: message.rawType } : {}),
     ...(action ? { action } : {}),
+    ...(eventMessageId ? { eventMessageId } : {}),
+    ...(responseMessageId ? { responseMessageId } : {}),
+    ...(participant ? { participant } : {}),
+    ...(status ? { status } : {}),
+    ...(extraGuestCount !== null ? { extraGuestCount } : {}),
     ...(label ? { label } : {}),
     ...(association ? { association } : {}),
     ...(chatLabels ? { chatLabels } : {}),
@@ -437,7 +466,12 @@ export function shouldSendEventWebhook(
       : typeof association.chatId === "string"
         ? association.chatId
         : "";
-  const senderId = typeof message.sender === "string" ? message.sender : "";
+  const senderId =
+    typeof message.sender === "string"
+      ? message.sender
+      : typeof data.participant === "string"
+        ? data.participant
+        : "";
 
   if (event === "message.received") {
     if (config.ignoreFromMe && message.isFromMe === true) return false;

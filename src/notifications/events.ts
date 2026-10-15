@@ -24,6 +24,7 @@ const EVENT_TO_METHOD: Record<ChannelEvent, string> = {
   "connection.changed": "whatsapp/connection.changed",
   "call.received": "whatsapp/call.received",
   "label.updated": "whatsapp/label.updated",
+  "event.response": "whatsapp/event.response",
 };
 
 /**

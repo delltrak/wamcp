@@ -29,8 +29,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   reads, MCP notifications, and optional outgoing webhooks include label details.
 - Added `wa_list_chats`, `wa_mark_chat_unread`, and `wa_star_message`. Mark-unread uses the stored
   reverse-chronological message range required by Baileys, and starred state is retained locally.
-- Added `wa_send_event` and `wa_get_event_responses` using Baileys event messages and persisted,
-  decrypted event-response updates when Baileys can associate a response with its event.
+- Added `wa_send_event` and `wa_get_event_responses` with encrypted RSVP decryption, delayed
+  retries when an event message arrives, per-status counts, responder phone lookup, and additive
+  `event.response` notifications and webhooks.
 - Added `wa_fetch_message_history` for Baileys on-demand history sync, anchored at the oldest local
   message, deduplicated through existing message persistence, and bounded by a response timeout.
 - Added additive SQLite tables for Business labels, their associations, and event responses, plus a
@@ -66,6 +67,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Event RSVP responses now decrypt with the original event's `messageSecret`, including LID/PN
+  author resolution; encrypted responses are retained until the event is available, and the last
+  response per participant is stored with its timestamp and extra guest count.
 - Baileys message forwarding now uses the stored original message content, including outgoing media
   protos and Buffer fields. Messages without available content return an error instead of sending an
   empty forwarded bubble.
