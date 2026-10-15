@@ -122,6 +122,43 @@ export const statusAudiences = sqliteTable(
   (table) => [primaryKey({ columns: [table.instanceId, table.messageId] })],
 );
 
+// Participant-level delivery information, including viewers of status stories.
+export const messageReceipts = sqliteTable(
+  "message_receipts",
+  {
+    instanceId: text("instance_id")
+      .notNull()
+      .references(() => instances.id, { onDelete: "cascade" }),
+    chatId: text("chat_id").notNull(),
+    messageId: text("message_id").notNull(),
+    participant: text("participant").notNull(),
+    status: text("status", { enum: ["delivered", "read", "played"] }).notNull(),
+    timestamp: integer("timestamp").notNull(),
+  },
+  (table) => [
+    primaryKey({ columns: [table.instanceId, table.chatId, table.messageId, table.participant] }),
+    index("idx_message_receipts_message").on(table.instanceId, table.chatId, table.messageId),
+  ],
+);
+
+export const messageReactions = sqliteTable(
+  "message_reactions",
+  {
+    instanceId: text("instance_id")
+      .notNull()
+      .references(() => instances.id, { onDelete: "cascade" }),
+    chatId: text("chat_id").notNull(),
+    messageId: text("message_id").notNull(),
+    participant: text("participant").notNull(),
+    emoji: text("emoji").notNull(),
+    timestamp: integer("timestamp").notNull(),
+  },
+  (table) => [
+    primaryKey({ columns: [table.instanceId, table.chatId, table.messageId, table.participant] }),
+    index("idx_message_reactions_message").on(table.instanceId, table.chatId, table.messageId),
+  ],
+);
+
 // ============================================================
 // PROCESSED MESSAGES
 // Deduplication: track which messages have been processed

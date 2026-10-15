@@ -79,7 +79,11 @@ describe("Baileys status audiences", () => {
         font: 2,
       },
     );
-    expect(result).toEqual({ recipientCount: 3, omittedRecipientCount: 0 });
+    expect(result).toEqual({
+      messageId: "SYNTHETIC-STATUS-MESSAGE",
+      recipientCount: 3,
+      omittedRecipientCount: 0,
+    });
   });
 
   it("uses an explicit audience, adds the owner, and normalizes duplicates", async () => {
@@ -143,7 +147,7 @@ describe("Baileys status audiences", () => {
     expect(sendMessage).not.toHaveBeenCalled();
   });
 
-  it("returns recipient counts and cap warnings from the MCP tool", async () => {
+  it("returns message IDs, recipient counts, and cap warnings from every send-status tool", async () => {
     const { adapter, sendMessage } = createAdapter({
       ownJid: OWN_JID,
       contacts: [CONTACT_JID, "5500000000003@s.whatsapp.net"],
@@ -158,22 +162,30 @@ describe("Baileys status audiences", () => {
     const instanceManager = { getAdapter: () => adapter } as unknown as InstanceManager;
     registerStatusTools(server, instanceManager, {} as MessageQueue);
 
-    const handler = handlers.get("wa_send_text_status");
-    if (!handler) throw new Error("Synthetic status tool was not registered");
-    const response = (await handler({
-      instanceId: "synthetic-status-instance",
-      text: "Synthetic status",
-      statusJidList: ["5500000000004", "5500000000005"],
-    })) as {
-      content: { text: string }[];
-    };
+    const cases = [
+      ["wa_send_text_status", { text: "Synthetic status" }],
+      ["wa_send_image_status", { image: "https://example.com/status.jpg" }],
+      ["wa_send_video_status", { video: "https://example.com/status.mp4" }],
+    ] as const;
+    for (const [toolName, content] of cases) {
+      const handler = handlers.get(toolName);
+      if (!handler) throw new Error(`Synthetic status tool ${toolName} was not registered`);
+      const response = (await handler({
+        instanceId: "synthetic-status-instance",
+        ...content,
+        statusJidList: ["5500000000004", "5500000000005"],
+      })) as {
+        content: { text: string }[];
+      };
 
-    expect(JSON.parse(response.content[0]!.text)).toEqual({
-      success: true,
-      recipientCount: 2,
-      omittedRecipientCount: 1,
-      warning: expect.stringContaining("WA_STATUS_MAX_RECIPIENTS (2)"),
-    });
+      expect(JSON.parse(response.content[0]!.text)).toEqual({
+        success: true,
+        messageId: "SYNTHETIC-STATUS-MESSAGE",
+        recipientCount: 2,
+        omittedRecipientCount: 1,
+        warning: expect.stringContaining("WA_STATUS_MAX_RECIPIENTS (2)"),
+      });
+    }
     expect(sendMessage).toHaveBeenCalledWith(
       "status@broadcast",
       { text: "Synthetic status" },

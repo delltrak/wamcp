@@ -729,9 +729,10 @@ export function normalizeMessagesUpdate(
       const statusMap: Record<number, MessageDeliveryStatus> = {
         0: "received",
         1: "sent",
-        2: "delivered",
-        3: "read",
-        4: "played",
+        2: "sent",
+        3: "delivered",
+        4: "read",
+        5: "played",
       };
 
       return {
@@ -894,8 +895,12 @@ export function normalizeCallEvent(
 ): NormalizedCallEvent[] {
   return calls.map((call) => ({
     instanceId,
-    callerId: call.from ?? "",
+    chatId: call.chatId ?? "",
+    callerId: call.from ?? call.callerPn ?? "",
     isVideo: call.isVideo ?? false,
+    ...(call.isGroup !== undefined ? { isGroup: call.isGroup } : {}),
     callId: call.id ?? "",
+    timestamp: call.date?.getTime() ?? Date.now(),
+    status: call.status,
   }));
 }

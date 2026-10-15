@@ -5,12 +5,19 @@
 import { z } from "zod";
 import { isValidStatusRecipient } from "../utils/validation.js";
 
+const MentionsSchema = z
+  .array(z.string().trim().min(5))
+  .max(100)
+  .optional()
+  .describe("Participant phone numbers or JIDs to mention in the message or caption");
+
 export const SendTextSchema = z
   .object({
     instanceId: z.string().min(1).describe("The instance ID to send from"),
     to: z.string().min(5).describe("Recipient phone number or group JID"),
     text: z.string().min(1).max(65536).describe("Message text content"),
     quotedMessageId: z.string().optional().describe("Message ID to reply to"),
+    mentions: MentionsSchema,
   })
   .strict();
 
@@ -21,6 +28,7 @@ export const SendImageSchema = z
     image: z.string().min(1).describe("Image URL or base64-encoded data"),
     caption: z.string().optional().describe("Optional image caption"),
     quotedMessageId: z.string().optional().describe("Message ID to reply to"),
+    mentions: MentionsSchema,
   })
   .strict();
 
@@ -31,6 +39,7 @@ export const SendVideoSchema = z
     video: z.string().min(1).describe("Video URL or base64-encoded data"),
     caption: z.string().optional().describe("Optional video caption"),
     quotedMessageId: z.string().optional().describe("Message ID to reply to"),
+    mentions: MentionsSchema,
   })
   .strict();
 
@@ -40,6 +49,7 @@ export const SendPtvSchema = z
     to: z.string().min(5).describe("Recipient phone number or group JID"),
     video: z.string().min(1).describe("Video URL or base64-encoded data"),
     caption: z.string().optional().describe("Optional video caption"),
+    mentions: MentionsSchema,
   })
   .strict();
 
@@ -63,6 +73,7 @@ export const SendGifSchema = z
     gif: z.string().min(1).describe("GIF or MP4 URL or base64-encoded data"),
     caption: z.string().optional().describe("Optional caption"),
     quotedMessageId: z.string().optional().describe("Message ID to reply to"),
+    mentions: MentionsSchema,
   })
   .strict();
 
@@ -82,6 +93,7 @@ export const SendAudioSchema = z
     audio: z.string().min(1).describe("Audio URL or base64-encoded data"),
     ptt: z.boolean().default(false).describe("Send as voice note (push-to-talk)"),
     quotedMessageId: z.string().optional().describe("Message ID to reply to"),
+    mentions: MentionsSchema,
   })
   .strict();
 
@@ -92,6 +104,7 @@ export const SendDocumentSchema = z
     document: z.string().min(1).describe("Document URL or base64-encoded data"),
     fileName: z.string().min(1).describe("File name with extension"),
     mimeType: z.string().min(1).describe("MIME type of the document"),
+    mentions: MentionsSchema,
   })
   .strict();
 
@@ -173,6 +186,121 @@ export const SendLinkPreviewSchema = z
     to: z.string().min(5).describe("Recipient phone number or group JID"),
     text: z.string().min(1).describe("Message text content"),
     url: z.string().url().describe("URL for the link preview"),
+    title: z.string().max(512).optional().describe("Optional preview title override"),
+    description: z.string().max(2048).optional().describe("Optional preview description override"),
+    thumbnail: z
+      .string()
+      .max(1_000_000)
+      .optional()
+      .describe("Optional preview thumbnail as base64-encoded image data"),
+  })
+  .strict();
+
+export const SendButtonsSchema = z
+  .object({
+    instanceId: z.string().min(1),
+    to: z.string().min(5),
+    text: z.string().min(1).max(1024),
+    footer: z.string().max(60).optional(),
+    buttons: z
+      .array(
+        z
+          .object({ id: z.string().min(1).max(256), text: z.string().trim().min(1).max(20) })
+          .strict(),
+      )
+      .min(1)
+      .max(3),
+  })
+  .strict();
+
+export const SendListSchema = z
+  .object({
+    instanceId: z.string().min(1),
+    to: z.string().min(5),
+    text: z.string().min(1).max(1024),
+    footer: z.string().max(60).optional(),
+    buttonText: z.string().trim().min(1).max(20),
+    sections: z
+      .array(
+        z
+          .object({
+            title: z.string().trim().min(1).max(24),
+            rows: z
+              .array(
+                z
+                  .object({
+                    id: z.string().min(1).max(200),
+                    title: z.string().trim().min(1).max(24),
+                    description: z.string().max(72).optional(),
+                  })
+                  .strict(),
+              )
+              .min(1),
+          })
+          .strict(),
+      )
+      .min(1),
+  })
+  .strict()
+  .refine(
+    (value) => value.sections.reduce((total, section) => total + section.rows.length, 0) <= 10,
+    {
+      message: "A list may contain at most 10 rows",
+      path: ["sections"],
+    },
+  );
+
+export const SendMediaAlbumSchema = z
+  .object({
+    instanceId: z.string().min(1),
+    to: z.string().min(5),
+    images: z
+      .array(
+        z
+          .object({
+            image: z.string().min(1),
+            caption: z.string().max(1024).optional(),
+          })
+          .strict(),
+      )
+      .min(2)
+      .max(10),
+  })
+  .strict();
+
+export const ReplyPrivatelyToGroupMessageSchema = z
+  .object({
+    instanceId: z.string().min(1),
+    groupId: z.string().min(5).describe("Group JID containing the original message"),
+    messageId: z
+      .string()
+      .min(1)
+      .describe("Message ID whose author should receive the private reply"),
+    text: z.string().min(1).max(65536),
+  })
+  .strict();
+
+export const SendGroupMentionAllSchema = z
+  .object({
+    instanceId: z.string().min(1),
+    groupId: z.string().min(5).describe("Group JID whose participants should all be mentioned"),
+    text: z.string().trim().min(1).max(4096).describe("Message text to send with an @all mention"),
+  })
+  .strict();
+
+export const GetMessageReceiptsSchema = z
+  .object({
+    instanceId: z.string().min(1),
+    chatId: z.string().min(5),
+    messageId: z.string().min(1),
+  })
+  .strict();
+
+export const GetMessageReactionsSchema = z
+  .object({
+    instanceId: z.string().min(1),
+    chatId: z.string().min(5),
+    messageId: z.string().min(1),
   })
   .strict();
 
@@ -258,8 +386,18 @@ export const SendPresenceSchema = z
     instanceId: z.string().min(1).describe("The instance ID"),
     chatId: z.string().min(5).describe("Chat JID to send presence to"),
     status: z
-      .enum(["composing", "recording", "paused", "available", "unavailable"])
+      .enum(["typing", "composing", "recording", "paused", "available", "unavailable"])
       .describe("Presence status to send"),
+  })
+  .strict();
+
+export const SubscribePresenceSchema = z
+  .object({
+    instanceId: z.string().min(1),
+    chatId: z
+      .string()
+      .min(5)
+      .describe("Contact or group JID whose presence updates to subscribe to"),
   })
   .strict();
 
@@ -267,7 +405,11 @@ export const MarkReadSchema = z
   .object({
     instanceId: z.string().min(1).describe("The instance ID"),
     chatId: z.string().min(5).describe("Chat JID containing the messages"),
-    messageIds: z.array(z.string().min(1)).min(1).describe("Message IDs to mark as read"),
+    messageIds: z
+      .array(z.string().min(1))
+      .min(1)
+      .max(100)
+      .describe("Message IDs to mark as read (1-100 per request)"),
     participant: z
       .string()
       .min(1)

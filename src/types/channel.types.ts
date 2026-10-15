@@ -9,7 +9,8 @@ export type ConnectionStatus = "connected" | "disconnected" | "connecting" | "qr
 export type ChannelType = "baileys" | "cloud";
 
 // Presence status
-export type PresenceStatus = "composing" | "recording" | "paused" | "available" | "unavailable";
+export type PresenceStatus =
+  "typing" | "composing" | "recording" | "paused" | "available" | "unavailable";
 
 // Message types
 export type MessageType =
@@ -178,6 +179,8 @@ export interface TextContent {
   type: "text";
   text: string;
   quotedMessageId?: string;
+  mentions?: string[];
+  mentionAll?: boolean;
 }
 
 export interface ImageContent {
@@ -185,6 +188,7 @@ export interface ImageContent {
   image: string; // URL or base64
   caption?: string;
   quotedMessageId?: string;
+  mentions?: string[];
 }
 
 export interface VideoContent {
@@ -194,6 +198,7 @@ export interface VideoContent {
   gifPlayback?: boolean;
   ptv?: boolean;
   quotedMessageId?: string;
+  mentions?: string[];
 }
 
 export interface StickerContent {
@@ -209,6 +214,7 @@ export interface AudioContent {
   ptt?: boolean; // voice note
   mimeType?: string;
   quotedMessageId?: string;
+  mentions?: string[];
 }
 
 export interface DocumentContent {
@@ -216,6 +222,25 @@ export interface DocumentContent {
   document: string; // URL or base64
   fileName: string;
   mimeType: string;
+  mentions?: string[];
+}
+
+export interface ButtonsContent {
+  type: "buttons";
+  text: string;
+  footer?: string;
+  buttons: Array<{ id: string; text: string }>;
+}
+
+export interface ListContent {
+  type: "list";
+  text: string;
+  footer?: string;
+  buttonText: string;
+  sections: Array<{
+    title: string;
+    rows: Array<{ id: string; title: string; description?: string }>;
+  }>;
 }
 
 export interface LocationContent {
@@ -250,6 +275,18 @@ export interface ReactionContent {
   emoji: string;
 }
 
+export interface MessageReceipt {
+  participant: string;
+  status: "delivered" | "read" | "played";
+  timestamp: number;
+}
+
+export interface MessageReaction {
+  participant: string;
+  emoji: string;
+  timestamp: number;
+}
+
 export type MessageContent =
   | TextContent
   | ImageContent
@@ -260,7 +297,9 @@ export type MessageContent =
   | LocationContent
   | ContactContent
   | PollContent
-  | ReactionContent;
+  | ReactionContent
+  | ButtonsContent
+  | ListContent;
 
 // ---- Response Types ----
 
@@ -268,6 +307,12 @@ export interface MessageResponse {
   messageId: string;
   timestamp: number;
   status: "queued" | "sent";
+}
+
+export interface LinkPreviewOptions {
+  title?: string;
+  description?: string;
+  thumbnail?: string;
 }
 
 export interface GroupResponse {
@@ -437,6 +482,8 @@ export interface StatusContent {
 }
 
 export interface StatusSendResult {
+  /** Baileys message ID; pass this to wa_get_status_viewers to list observed viewers. */
+  messageId: string;
   recipientCount: number;
   omittedRecipientCount: number;
   warning?: string;
@@ -554,9 +601,22 @@ export interface NormalizedConnectionEvent {
 
 export interface NormalizedCallEvent {
   instanceId: string;
+  chatId: string;
   callerId: string;
   isVideo: boolean;
+  isGroup?: boolean;
   callId: string;
+  timestamp: number;
+  status:
+    | "offer"
+    | "ringing"
+    | "preaccept"
+    | "transport"
+    | "relaylatency"
+    | "timeout"
+    | "reject"
+    | "accept"
+    | "terminate";
 }
 
 export interface NormalizedLabelUpdateEvent {

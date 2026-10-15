@@ -13,11 +13,13 @@ import {
   SendTextStatusSchema,
   SendImageStatusSchema,
   SendVideoStatusSchema,
+  GetStatusViewersSchema,
 } from "../schemas/status.schema.js";
 
 function statusToolSuccess(result: StatusSendResult) {
   return toolSuccess({
     success: true,
+    messageId: result.messageId,
     recipientCount: result.recipientCount,
     ...(result.omittedRecipientCount > 0
       ? {
@@ -54,6 +56,7 @@ export function registerStatusTools(
         log.info(
           {
             duration: Date.now() - start,
+            messageId: result.messageId,
             recipientCount: result.recipientCount,
             omittedRecipientCount: result.omittedRecipientCount,
           },
@@ -86,6 +89,7 @@ export function registerStatusTools(
         log.info(
           {
             duration: Date.now() - start,
+            messageId: result.messageId,
             recipientCount: result.recipientCount,
             omittedRecipientCount: result.omittedRecipientCount,
           },
@@ -118,6 +122,7 @@ export function registerStatusTools(
         log.info(
           {
             duration: Date.now() - start,
+            messageId: result.messageId,
             recipientCount: result.recipientCount,
             omittedRecipientCount: result.omittedRecipientCount,
           },
@@ -126,6 +131,25 @@ export function registerStatusTools(
         return statusToolSuccess(result);
       } catch (err) {
         return handleToolError("wa_send_video_status", err, params.instanceId);
+      }
+    },
+  );
+
+  server.registerTool(
+    "wa_get_status_viewers",
+    {
+      description:
+        "List participants whose read or played receipts were stored for a sent status story. Baileys only; receipts are available only after this server observed them.",
+      inputSchema: GetStatusViewersSchema,
+    },
+    async (params) => {
+      try {
+        const viewers = await instanceManager
+          .getAdapter(params.instanceId)
+          .getStatusViewers(params.messageId);
+        return toolSuccess({ messageId: params.messageId, count: viewers.length, viewers });
+      } catch (err) {
+        return handleToolError("wa_get_status_viewers", err, params.instanceId);
       }
     },
   );

@@ -36,7 +36,7 @@
 
 **WA MCP** is a WhatsApp MCP server built with TypeScript that gives AI agents full access to WhatsApp through the [Model Context Protocol](https://modelcontextprotocol.io). It supports both **Baileys** (WhatsApp Web) and **Meta Cloud API** as dual-channel backends, deployable with **Docker** in a single command.
 
-Your agent connects once and auto-discovers **124 tools**, **10 resources**, and **13 real-time events** — zero configuration, zero REST wrappers, zero glue code.
+Your agent connects once and auto-discovers **133 tools**, **10 resources**, and **14 real-time events** — zero configuration, zero REST wrappers, zero glue code.
 
 ```
 Your AI Agent ←→ MCP Protocol ←→ WA MCP ←→ WhatsApp
@@ -82,7 +82,7 @@ from google.adk.tools.mcp_tool import McpToolset
 
 tools = McpToolset(url="http://localhost:3000/mcp")
 
-# Agent auto-discovers 124 WhatsApp tools
+# Agent auto-discovers 133 WhatsApp tools
 # wa_create_instance, wa_send_text, wa_send_image, ...
 ```
 
@@ -136,7 +136,7 @@ Add to your `claude_desktop_config.json`:
 | 🔊  | **Voice notes**         | Optional ElevenLabs text-to-speech voice notes through a provider interface.                                |
 | 👥  | **Groups**             | List groups, inspect participants, manage membership and settings, invite links, and group pictures. |
 | 👤  | **Contacts & Profile** | Number check, block/unblock, business profiles, privacy, status updates.                                  |
-| 📡  | **Real-time events**   | 12 notification types via SSE: messages, typing, groups, calls, connection status.                        |
+| 📡  | **Real-time events**   | 14 notification types via SSE: messages, typing, groups, calls, connection status.                       |
 | ⚡  | **Rate limiting**      | BullMQ queues prevent WhatsApp bans (20 msg/min Baileys, 80 msg/min Cloud).                               |
 | 🔁  | **Auto-reconnect**     | Automatic reconnection with exponential backoff.                                                          |
 | 🗃️  | **Persistent**         | SQLite storage for sessions, messages, contacts, groups.                                                  |
@@ -146,7 +146,7 @@ Add to your `claude_desktop_config.json`:
 
 ## 🛠️ Tools
 
-WA MCP exposes **124 tools** across 15 domains. All tools use the `wa_` prefix.
+WA MCP exposes **133 tools** across 15 domains. All tools use the `wa_` prefix.
 
 <details>
 <summary>📋 <strong>Instance Management</strong> (8 tools)</summary>
@@ -165,7 +165,7 @@ WA MCP exposes **124 tools** across 15 domains. All tools use the `wa_` prefix.
 </details>
 
 <details>
-<summary>💬 <strong>Messaging</strong> (23 tools)</summary>
+<summary>💬 <strong>Messaging</strong> (31 tools)</summary>
 
 | Tool                   | Description             |
 | ---------------------- | ----------------------- |
@@ -190,7 +190,15 @@ WA MCP exposes **124 tools** across 15 domains. All tools use the `wa_` prefix.
 | `wa_delete_message`    | Delete message          |
 | `wa_pin_message`       | Pin a message           |
 | `wa_send_view_once`    | Send view-once media    |
-| `wa_send_presence`     | Show typing / recording |
+| `wa_send_presence`     | Show typing / recording / paused |
+| `wa_subscribe_presence` | Subscribe to contact or group presence updates (Baileys) |
+| `wa_send_group_mention_all` | Mention every current group participant (Baileys) |
+| `wa_send_buttons`      | Send reply buttons (Cloud API) or a text fallback (Baileys) |
+| `wa_send_list`         | Send a selectable list (Cloud API) or a text fallback (Baileys) |
+| `wa_send_media_album`  | Send an image album (Baileys) |
+| `wa_reply_privately_to_group_message` | DM a stored group-message author (Baileys) |
+| `wa_get_message_receipts` | List locally observed per-participant receipts (Baileys) |
+| `wa_get_message_reactions` | List locally observed reactions (Baileys) |
 | `wa_mark_read`         | Mark messages as read   |
 
 </details>
@@ -337,13 +345,14 @@ this operation.
 </details>
 
 <details>
-<summary>📢 <strong>Status / Stories</strong> (3 tools)</summary>
+<summary>📢 <strong>Status / Stories</strong> (4 tools)</summary>
 
 | Tool                   | Description       |
 | ---------------------- | ----------------- |
 | `wa_send_text_status`  | Post text status  |
 | `wa_send_image_status` | Post image status |
 | `wa_send_video_status` | Post video status |
+| `wa_get_status_viewers` | List viewers observed from story read receipts (Baileys) |
 
 </details>
 
@@ -455,13 +464,13 @@ Events are pushed to connected agents via MCP notifications over SSE (Server-Sen
 | `whatsapp/message.deleted`            | Message deleted                                |
 | `whatsapp/message.reaction`           | Emoji reaction added/removed                   |
 | `whatsapp/message.edited`             | Message edited                                 |
-| `whatsapp/presence.updated`           | Typing / recording / online                    |
+| `whatsapp/presence.updated`           | Typing / recording / paused / online           |
 | `whatsapp/chat.updated`               | Chat metadata changed                          |
 | `whatsapp/group.updated`              | Group info changed                             |
 | `whatsapp/group.participants_changed` | Member add/remove/promote/demote               |
 | `whatsapp/contact.updated`            | Contact info changed                           |
 | `whatsapp/connection.changed`         | Instance status change (includes QR as base64) |
-| `whatsapp/call.received`              | Incoming call                                  |
+| `whatsapp/call.received`              | Call offer/status updates (`offer`, `reject`, `timeout`, etc.) |
 | `whatsapp/label.updated`              | Business label or association changed          |
 | `whatsapp/event.response`             | RSVP response to a WhatsApp event              |
 
@@ -542,6 +551,10 @@ The standard JSON body includes `event`, `instanceId`, `chat`, `sender`,
 also include `X-WA-Event-Timestamp` and `X-WA-Event-Signature`;
 `sha256=<hex HMAC-SHA256>` signs `<timestamp>.<exact JSON body>`.
 
+The default event filter is `message.received`. Add `call.received` to
+`WA_EVENT_WEBHOOK_EVENTS` to receive call offer and status updates; those payloads
+include `callId`, `callStatus`, `isVideo`, and `isGroup`.
+
 Baileys message events may also include `chatLabels` and `messageLabels`.
 Opt into the `label.updated` event to receive label edits and chat/message label
 association changes.
@@ -569,7 +582,7 @@ See [Outgoing event webhooks](docs/event-webhooks.md) for configuration details.
 │  │  Layer 1 — MCP Transport (HTTP/stdio) │ │
 │  ├────────────────────────────────────────┤ │
 │  │  Layer 2 — MCP Core                   │ │
-│  │ 124 Tools │ 10 Resources │ 13 Events  │ │
+│  │ 133 Tools │ 10 Resources │ 14 Events  │ │
 │  ├────────────────────────────────────────┤ │
 │  │  Layer 3 — Services                   │ │
 │  │  Instance Manager │ Queue │ Dedup     │ │
@@ -618,6 +631,7 @@ Copy `.env.example` to `.env` and configure:
 | `WA_AUTO_RECONNECT`         | `true`                   | Auto-reconnect on disconnect             |
 | `WA_APP_STATE_WRITES_ENABLED` | `false`                 | Enable gated Baileys account, server, and app-state changes; these changes can remove the linked device |
 | `WA_MARK_ONLINE_ON_CONNECT` | `false`                  | Mark the Baileys account online when its socket connects |
+| `WA_AUTO_REJECT_CALLS`      | `false`                  | Automatically reject incoming one-to-one Baileys call offers |
 | `WA_STATUS_MAX_RECIPIENTS`  | `256`                    | Maximum recipients per Baileys status; excess recipients are truncated and reported |
 | `WA_AUTO_READ`              | `false`                  | `on_fetch` marks incoming messages read when fetched; `on_receive` marks them read on arrival |
 | `WA_MEDIA_CACHE_MAX_MB`     | `500`                    | Media cache size limit                   |
@@ -722,7 +736,8 @@ Baileys status stories go to the account's own normalized JID and known individu
 default. Each status tool accepts an optional `statusJidList` of phone numbers or individual JIDs
 to restrict the audience; the account's own JID is always included. The default recipient cap is
 256. Larger audiences are truncated to the cap, and the tool response includes `recipientCount`,
-`omittedRecipientCount`, and a warning. Status stories are not supported by the Cloud API.
+`messageId`, `omittedRecipientCount`, and a warning. Pass `messageId` to `wa_get_status_viewers` to
+list read or played receipts observed by this server. Status stories are not supported by the Cloud API.
 Deleting a status reuses the recipients saved when it was posted; `wa_delete_message` also accepts
 an optional `statusJidList` for `status@broadcast`. For older statuses without a saved audience, it
 uses the account's own JID and known individual contacts.
@@ -778,9 +793,9 @@ src/
 ├── index.ts                     # Entry point (HTTP/stdio)
 ├── constants.ts                 # Defaults and limits
 ├── server/mcp.ts                # MCP server setup
-├── tools/                       # 🔧 124 MCP tools (15 files)
+├── tools/                       # 🔧 133 MCP tools (15 files)
 ├── resources/                   # 📖 10 MCP resources (8 files)
-├── notifications/events.ts      # 📡 12 event types
+├── notifications/events.ts      # 📡 14 event types
 ├── channels/
 │   ├── channel.interface.ts     # ChannelAdapter contract
 │   ├── baileys/                 # Baileys implementation

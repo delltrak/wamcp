@@ -19,11 +19,19 @@ import { getRedisConnectionOptions } from "./redis.js";
 
 const logger = createChildLogger({ service: "message-queue" });
 
-export interface OutboundJob {
-  instanceId: string;
-  to: string;
-  content: MessageContent;
-}
+export type OutboundJob =
+  | {
+      instanceId: string;
+      to: string;
+      content: MessageContent;
+      kind?: "message";
+    }
+  | {
+      kind: "album";
+      instanceId: string;
+      to: string;
+      images: Array<{ image: string; caption?: string }>;
+    };
 
 export interface EnqueueResult {
   status: "queued";
@@ -56,10 +64,21 @@ export class MessageQueue {
 
     const queueName = `outbound-${instanceId}`;
 
+    const defaultRateLimit =
+      channel === "baileys" ? DEFAULT_BAILEYS_RATE_LIMIT : DEFAULT_CLOUD_RATE_LIMIT;
+    const rateLimitVariable =
+      channel === "baileys" ? "WA_BAILEYS_RATE_LIMIT" : "WA_CLOUD_RATE_LIMIT";
+    const parsedRateLimit = Number(process.env[rateLimitVariable] ?? defaultRateLimit);
     const rateLimit =
-      channel === "baileys"
-        ? parseInt(process.env.WA_BAILEYS_RATE_LIMIT ?? String(DEFAULT_BAILEYS_RATE_LIMIT), 10)
-        : parseInt(process.env.WA_CLOUD_RATE_LIMIT ?? String(DEFAULT_CLOUD_RATE_LIMIT), 10);
+      Number.isSafeInteger(parsedRateLimit) && parsedRateLimit > 0
+        ? parsedRateLimit
+        : defaultRateLimit;
+    if (rateLimit !== parsedRateLimit) {
+      logger.warn(
+        { instanceId, variable: rateLimitVariable, value: process.env[rateLimitVariable] },
+        `Invalid ${rateLimitVariable}; using default rate limit ${defaultRateLimit}`,
+      );
+    }
 
     const queue = new Queue(queueName, {
       connection: this.redisOpts,
@@ -83,7 +102,11 @@ export class MessageQueue {
         const data = job.data as OutboundJob;
         const adapter = this.getAdapter(data.instanceId);
         try {
-          await adapter.sendMessage(data.to, data.content);
+          if (data.kind === "album") {
+            await adapter.sendMediaAlbum(data.to, data.images);
+          } else {
+            await adapter.sendMessage(data.to, data.content);
+          }
         } catch (err) {
           if (err instanceof QuotedMessageResolutionError) {
             throw new UnrecoverableError(err.message);
@@ -127,6 +150,22 @@ export class MessageQueue {
     const queue = this.getOrCreateQueue(instanceId, channel);
     const jobData: OutboundJob = { instanceId, to, content };
     const job = await queue.add("send", jobData);
+    return { status: "queued", jobId: job.id ?? "" };
+  }
+
+  /** Enqueue a bounded Baileys album through the same per-instance rate limiter as messages. */
+  async enqueueMediaAlbum(
+    instanceId: string,
+    to: string,
+    images: Array<{ image: string; caption?: string }>,
+  ): Promise<EnqueueResult> {
+    if (images.length < 2 || images.length > 10) {
+      throw new Error("A WhatsApp media album must contain between 2 and 10 images");
+    }
+    const queue = this.getOrCreateQueue(instanceId, "baileys");
+    const jobData: OutboundJob = { kind: "album", instanceId, to, images };
+    // A partial album cannot be safely retried without duplicating already-sent images.
+    const job = await queue.add("album", jobData, { attempts: 1 });
     return { status: "queued", jobId: job.id ?? "" };
   }
 

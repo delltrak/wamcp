@@ -74,6 +74,30 @@ function initializeDatabase(): void {
     CREATE INDEX IF NOT EXISTS idx_messages_chat ON messages(instance_id, chat_id, timestamp DESC);
     CREATE INDEX IF NOT EXISTS idx_messages_timestamp ON messages(instance_id, timestamp DESC);
 
+    CREATE TABLE IF NOT EXISTS message_receipts (
+      instance_id TEXT NOT NULL REFERENCES instances(id) ON DELETE CASCADE,
+      chat_id TEXT NOT NULL,
+      message_id TEXT NOT NULL,
+      participant TEXT NOT NULL,
+      status TEXT NOT NULL,
+      timestamp INTEGER NOT NULL,
+      PRIMARY KEY (instance_id, chat_id, message_id, participant)
+    );
+    CREATE INDEX IF NOT EXISTS idx_message_receipts_message
+      ON message_receipts(instance_id, chat_id, message_id);
+
+    CREATE TABLE IF NOT EXISTS message_reactions (
+      instance_id TEXT NOT NULL REFERENCES instances(id) ON DELETE CASCADE,
+      chat_id TEXT NOT NULL,
+      message_id TEXT NOT NULL,
+      participant TEXT NOT NULL,
+      emoji TEXT NOT NULL,
+      timestamp INTEGER NOT NULL,
+      PRIMARY KEY (instance_id, chat_id, message_id, participant)
+    );
+    CREATE INDEX IF NOT EXISTS idx_message_reactions_message
+      ON message_reactions(instance_id, chat_id, message_id);
+
     CREATE TABLE IF NOT EXISTS status_audiences (
       instance_id     TEXT NOT NULL REFERENCES instances(id) ON DELETE CASCADE,
       message_id      TEXT NOT NULL,

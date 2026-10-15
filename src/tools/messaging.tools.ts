@@ -33,7 +33,17 @@ import {
   SendViewOnceSchema,
   SendPresenceSchema,
   MarkReadSchema,
+  SubscribePresenceSchema,
+  SendButtonsSchema,
+  SendListSchema,
+  SendMediaAlbumSchema,
+  ReplyPrivatelyToGroupMessageSchema,
+  SendGroupMentionAllSchema,
+  GetMessageReceiptsSchema,
+  GetMessageReactionsSchema,
 } from "../schemas/messaging.schema.js";
+
+const MAX_GROUP_MENTION_PARTICIPANTS = 1_024;
 
 export function registerMessagingTools(
   server: McpServer,
@@ -62,7 +72,12 @@ Returns: { status: "queued", jobId }`,
         const result = await messageQueue.enqueueMessage(
           params.instanceId,
           params.to,
-          { type: "text", text: params.text, quotedMessageId: params.quotedMessageId },
+          {
+            type: "text",
+            text: params.text,
+            quotedMessageId: params.quotedMessageId,
+            mentions: params.mentions,
+          },
           channel,
         );
         log.info({ duration: Date.now() - start, to: params.to }, "Text message queued");
@@ -93,6 +108,7 @@ Returns: { status: "queued", jobId }`,
             image: params.image,
             caption: params.caption,
             quotedMessageId: params.quotedMessageId,
+            mentions: params.mentions,
           },
           channel,
         );
@@ -124,6 +140,7 @@ Returns: { status: "queued", jobId }`,
             video: params.video,
             caption: params.caption,
             quotedMessageId: params.quotedMessageId,
+            mentions: params.mentions,
           },
           channel,
         );
@@ -155,7 +172,13 @@ Returns: { status: "queued", jobId }`,
         const result = await messageQueue.enqueueMessage(
           params.instanceId,
           params.to,
-          { type: "video", video: params.video, caption: params.caption, ptv: true },
+          {
+            type: "video",
+            video: params.video,
+            caption: params.caption,
+            mentions: params.mentions,
+            ptv: true,
+          },
           channel,
         );
         log.info({ duration: Date.now() - start, to: params.to }, "PTV message queued");
@@ -228,6 +251,7 @@ Returns: { status: "queued", jobId }`,
             caption: params.caption,
             gifPlayback: true,
             quotedMessageId: params.quotedMessageId,
+            mentions: params.mentions,
           },
           channel,
         );
@@ -259,6 +283,7 @@ Returns: { status: "queued", jobId }`,
             audio: params.audio,
             ptt: params.ptt,
             quotedMessageId: params.quotedMessageId,
+            mentions: params.mentions,
           },
           channel,
         );
@@ -290,6 +315,7 @@ Returns: { status: "queued", jobId }`,
             document: params.document,
             fileName: params.fileName,
             mimeType: params.mimeType,
+            mentions: params.mentions,
           },
           channel,
         );
@@ -544,7 +570,11 @@ Returns: { status: "queued", jobId }`,
       const start = Date.now();
       try {
         const adapter = instanceManager.getAdapter(params.instanceId);
-        const result = await adapter.sendLinkPreview(params.to, params.text, params.url);
+        const result = await adapter.sendLinkPreview(params.to, params.text, params.url, {
+          title: params.title,
+          description: params.description,
+          thumbnail: params.thumbnail,
+        });
         log.info({ duration: Date.now() - start, to: params.to }, "Link preview sent");
         return toolSuccess(result);
       } catch (err) {
@@ -672,6 +702,214 @@ Returns: { status: "queued", jobId }`,
         return toolSuccess({ success: true });
       } catch (err) {
         return handleToolError("wa_send_presence", err, params.instanceId);
+      }
+    },
+  );
+
+  server.registerTool(
+    "wa_subscribe_presence",
+    {
+      description:
+        "Subscribe to presence updates for a contact or group. Later updates arrive as whatsapp/presence.updated notifications and configured event webhooks.",
+      inputSchema: SubscribePresenceSchema,
+    },
+    async (params) => {
+      try {
+        await instanceManager.getAdapter(params.instanceId).subscribePresence(params.chatId);
+        return toolSuccess({ success: true, chatId: params.chatId });
+      } catch (err) {
+        return handleToolError("wa_subscribe_presence", err, params.instanceId);
+      }
+    },
+  );
+
+  server.registerTool(
+    "wa_send_group_mention_all",
+    {
+      description:
+        "Send a group message with an @all mention. Baileys expands the current group participant list into mentioned JIDs; Cloud API does not support this helper.",
+      inputSchema: SendGroupMentionAllSchema,
+    },
+    async (params) => {
+      try {
+        if (instanceManager.getInstanceChannel(params.instanceId) === "cloud") {
+          throw new Error(
+            "Group @all mentions are not supported on Cloud API; use a Baileys instance",
+          );
+        }
+        const adapter = instanceManager.getAdapter(params.instanceId);
+        const group = await adapter.getGroupMetadata(params.groupId);
+        const mentions = [...new Set(group.participants.map((participant) => participant.jid))];
+        if (mentions.length === 0)
+          throw new Error("Cannot mention all: the group has no participants");
+        if (mentions.length > MAX_GROUP_MENTION_PARTICIPANTS) {
+          throw new Error(
+            `Cannot mention all: the group has more than ${MAX_GROUP_MENTION_PARTICIPANTS} participants`,
+          );
+        }
+        const result = await messageQueue.enqueueMessage(
+          params.instanceId,
+          group.jid,
+          {
+            type: "text",
+            text: `${params.text} @all`,
+            mentions,
+            mentionAll: true,
+          },
+          "baileys",
+        );
+        return toolSuccess({ ...result, mentionCount: mentions.length });
+      } catch (err) {
+        return handleToolError("wa_send_group_mention_all", err, params.instanceId);
+      }
+    },
+  );
+
+  server.registerTool(
+    "wa_send_buttons",
+    {
+      description:
+        "Send up to three reply buttons where supported. Baileys rc14 sends an explicit numbered text fallback; Cloud API sends an interactive button message.",
+      inputSchema: SendButtonsSchema,
+    },
+    async (params) => {
+      try {
+        const channel = instanceManager.getInstanceChannel(params.instanceId);
+        const result = await messageQueue.enqueueMessage(
+          params.instanceId,
+          params.to,
+          { type: "buttons", text: params.text, footer: params.footer, buttons: params.buttons },
+          channel,
+        );
+        return toolSuccess({
+          ...result,
+          mode: channel === "cloud" ? "interactive" : "text_fallback",
+        });
+      } catch (err) {
+        return handleToolError("wa_send_buttons", err, params.instanceId);
+      }
+    },
+  );
+
+  server.registerTool(
+    "wa_send_list",
+    {
+      description:
+        "Send a selectable list where supported. Baileys rc14 sends a readable text fallback; Cloud API sends an interactive list message.",
+      inputSchema: SendListSchema,
+    },
+    async (params) => {
+      try {
+        const channel = instanceManager.getInstanceChannel(params.instanceId);
+        const result = await messageQueue.enqueueMessage(
+          params.instanceId,
+          params.to,
+          {
+            type: "list",
+            text: params.text,
+            footer: params.footer,
+            buttonText: params.buttonText,
+            sections: params.sections,
+          },
+          channel,
+        );
+        return toolSuccess({
+          ...result,
+          mode: channel === "cloud" ? "interactive" : "text_fallback",
+        });
+      } catch (err) {
+        return handleToolError("wa_send_list", err, params.instanceId);
+      }
+    },
+  );
+
+  server.registerTool(
+    "wa_send_media_album",
+    {
+      description:
+        "Send 2 to 10 images as one Baileys media album. Cloud API does not support album grouping.",
+      inputSchema: SendMediaAlbumSchema,
+    },
+    async (params) => {
+      try {
+        if (instanceManager.getInstanceChannel(params.instanceId) === "cloud") {
+          throw new Error("Media albums are not supported on Cloud API; use a Baileys instance");
+        }
+        const result = await messageQueue.enqueueMediaAlbum(
+          params.instanceId,
+          params.to,
+          params.images,
+        );
+        return toolSuccess(result);
+      } catch (err) {
+        return handleToolError("wa_send_media_album", err, params.instanceId);
+      }
+    },
+  );
+
+  server.registerTool(
+    "wa_reply_privately_to_group_message",
+    {
+      description:
+        "Send a private direct message to the author of a stored group message. The original message must be available in local history.",
+      inputSchema: ReplyPrivatelyToGroupMessageSchema,
+    },
+    async (params) => {
+      try {
+        const result = await instanceManager
+          .getAdapter(params.instanceId)
+          .replyPrivatelyToGroupMessage(params.groupId, params.messageId, params.text);
+        return toolSuccess(result);
+      } catch (err) {
+        return handleToolError("wa_reply_privately_to_group_message", err, params.instanceId);
+      }
+    },
+  );
+
+  server.registerTool(
+    "wa_get_message_receipts",
+    {
+      description:
+        "List locally stored per-participant delivered, read, and played receipts for a message. Cloud API does not expose participant-level receipts here.",
+      inputSchema: GetMessageReceiptsSchema,
+    },
+    async (params) => {
+      try {
+        const receipts = await instanceManager
+          .getAdapter(params.instanceId)
+          .getMessageReceipts(params.chatId, params.messageId);
+        return toolSuccess({
+          chatId: params.chatId,
+          messageId: params.messageId,
+          count: receipts.length,
+          receipts,
+        });
+      } catch (err) {
+        return handleToolError("wa_get_message_receipts", err, params.instanceId);
+      }
+    },
+  );
+
+  server.registerTool(
+    "wa_get_message_reactions",
+    {
+      description:
+        "List the latest locally stored reaction from each participant for a message. Cloud API reaction listing is unavailable.",
+      inputSchema: GetMessageReactionsSchema,
+    },
+    async (params) => {
+      try {
+        const reactions = await instanceManager
+          .getAdapter(params.instanceId)
+          .getMessageReactions(params.chatId, params.messageId);
+        return toolSuccess({
+          chatId: params.chatId,
+          messageId: params.messageId,
+          count: reactions.length,
+          reactions,
+        });
+      } catch (err) {
+        return handleToolError("wa_get_message_reactions", err, params.instanceId);
       }
     },
   );
