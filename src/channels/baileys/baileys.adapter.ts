@@ -157,6 +157,8 @@ const DEFAULT_STATUS_MAX_RECIPIENTS = 256;
 const DEFAULT_APPEND_NOTIFY_WINDOW_HOURS = 24;
 const DEFAULT_APPEND_NOTIFY_MAX_PER_BATCH = 100;
 const DEFAULT_BAILEYS_HEALTH_WATCHDOG_MS = 180_000;
+const DEFAULT_BAILEYS_EVENT_BUFFER_STALL_MS = 60_000;
+const BAILEYS_EVENT_BUFFER_STALL_RECHECK_MS = 1_000;
 const BAILEYS_HEALTH_PROBE_TIMEOUT_MS = 20_000;
 const BAILEYS_HEALTH_PROBE_FAILURES_BEFORE_RECONNECT = 2;
 const APPEND_NOTIFY_CLOCK_SKEW_MS = 5 * 60_000;
@@ -787,6 +789,11 @@ export class BaileysAdapter implements ChannelAdapter {
   private readonly appendNotifyWindowMs: number;
   private readonly appendNotifyMaxPerBatch: number;
   private readonly healthWatchdogMs: number;
+  private readonly eventBufferStallMs: number;
+  private eventBufferStallTimer: ReturnType<typeof setTimeout> | null = null;
+  private eventBufferStallSocket: WASocket | null = null;
+  private eventBufferStallStartedAtMs: number | null = null;
+  private eventBufferFlushAttempted = false;
   private connectedAtMs: number | null = null;
   private disconnectedAtMs: number | null = null;
   private appendNotifyWatermarkMs: number | null = null;
@@ -834,6 +841,11 @@ export class BaileysAdapter implements ChannelAdapter {
       process.env.WA_BAILEYS_HEALTH_WATCHDOG_MS,
       "WA_BAILEYS_HEALTH_WATCHDOG_MS",
       DEFAULT_BAILEYS_HEALTH_WATCHDOG_MS,
+    );
+    this.eventBufferStallMs = parsePositiveIntegerEnv(
+      process.env.WA_BAILEYS_EVENT_BUFFER_STALL_MS,
+      "WA_BAILEYS_EVENT_BUFFER_STALL_MS",
+      DEFAULT_BAILEYS_EVENT_BUFFER_STALL_MS,
     );
     this.autoRejectCalls = parseBooleanEnv(
       process.env.WA_AUTO_REJECT_CALLS,
@@ -1173,6 +1185,7 @@ export class BaileysAdapter implements ChannelAdapter {
   async disconnect(): Promise<void> {
     this.clearReconnectTimer();
     this.clearHealthWatchdog();
+    this.clearEventBufferStallWatchdog();
     this.pendingCalls.clear();
     if (this.sock) {
       this.sock.end(undefined);
@@ -4967,6 +4980,7 @@ export class BaileysAdapter implements ChannelAdapter {
 
       if (connection === "close") {
         this.clearHealthWatchdog();
+        this.clearEventBufferStallWatchdog();
         this.appendNotifyWatermarkMs = null;
         this.status = "disconnected";
         const boom = (lastDisconnect?.error as Boom)?.output;
@@ -5666,9 +5680,105 @@ export class BaileysAdapter implements ChannelAdapter {
     }
   }
 
+  private clearEventBufferStallWatchdog(): void {
+    if (this.eventBufferStallTimer) {
+      clearTimeout(this.eventBufferStallTimer);
+      this.eventBufferStallTimer = null;
+    }
+    this.eventBufferStallSocket = null;
+    this.eventBufferStallStartedAtMs = null;
+    this.eventBufferFlushAttempted = false;
+  }
+
+  private scheduleEventBufferStallCheck(sock: WASocket, delayMs: number): void {
+    this.eventBufferStallTimer = setTimeout(() => {
+      this.eventBufferStallTimer = null;
+      this.checkEventBufferStall(sock);
+    }, delayMs);
+  }
+
+  private checkEventBufferStall(sock: WASocket): void {
+    if (this.status !== "connected" || this.sock !== sock) {
+      this.clearEventBufferStallWatchdog();
+      return;
+    }
+
+    if (this.eventBufferStallSocket !== sock) {
+      this.clearEventBufferStallWatchdog();
+      this.eventBufferStallSocket = sock;
+    }
+
+    if (!sock.ev.isBuffering?.()) {
+      this.clearEventBufferStallWatchdog();
+      return;
+    }
+
+    const now = Date.now();
+    if (this.eventBufferStallStartedAtMs === null) {
+      this.eventBufferStallStartedAtMs = now;
+    }
+
+    // An existing timer is either waiting for the stall bound or for the post-flush recheck.
+    if (this.eventBufferStallTimer) return;
+
+    const stalledForMs = Math.max(0, now - this.eventBufferStallStartedAtMs);
+    if (!this.eventBufferFlushAttempted && stalledForMs < this.eventBufferStallMs) {
+      this.scheduleEventBufferStallCheck(sock, this.eventBufferStallMs - stalledForMs);
+      return;
+    }
+
+    if (!this.eventBufferFlushAttempted) {
+      this.eventBufferFlushAttempted = true;
+      logger.warn(
+        {
+          instanceId: this.instanceId,
+          stalledForMs,
+          stallLimitMs: this.eventBufferStallMs,
+        },
+        "Baileys event buffer stalled; flushing held events",
+      );
+      // Schedule before flushing because flush() can synchronously dispatch buffered events.
+      this.scheduleEventBufferStallCheck(sock, BAILEYS_EVENT_BUFFER_STALL_RECHECK_MS);
+      try {
+        sock.ev.flush?.();
+      } catch (error) {
+        logger.warn(
+          { instanceId: this.instanceId, error },
+          "Failed to flush stalled Baileys event buffer",
+        );
+      }
+      return;
+    }
+
+    const error = new Error("Baileys event buffer remained stalled after flush");
+    logger.warn(
+      {
+        instanceId: this.instanceId,
+        stalledForMs,
+        stallLimitMs: this.eventBufferStallMs,
+      },
+      "Baileys event buffer remains stalled after flush; ending socket",
+    );
+    this.clearEventBufferStallWatchdog();
+    try {
+      void Promise.resolve(sock.end(error)).catch((endError: unknown) => {
+        logger.warn(
+          { err: endError, instanceId: this.instanceId },
+          "Failed to end Baileys socket with a stalled event buffer",
+        );
+      });
+    } catch (endError) {
+      logger.warn(
+        { err: endError, instanceId: this.instanceId },
+        "Failed to end Baileys socket with a stalled event buffer",
+      );
+    }
+  }
+
   private resetHealthWatchdog(sock: WASocket): void {
     this.clearHealthWatchdog();
     if (this.status !== "connected" || this.sock !== sock) return;
+    this.checkEventBufferStall(sock);
 
     this.watchdogTimer = setTimeout(() => {
       this.watchdogTimer = null;
@@ -5680,6 +5790,7 @@ export class BaileysAdapter implements ChannelAdapter {
 
   private async probeSocketHealth(sock: WASocket): Promise<void> {
     if (this.status !== "connected" || this.sock !== sock) return;
+    this.checkEventBufferStall(sock);
 
     const activityGeneration = this.healthActivityGeneration;
     try {

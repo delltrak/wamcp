@@ -632,6 +632,7 @@ Copy `.env.example` to `.env` and configure:
 | `WA_BAILEYS_APPEND_NOTIFY_WINDOW_HOURS` | `24` | Fallback eligibility window for offline append messages when no watermark exists |
 | `WA_BAILEYS_APPEND_NOTIFY_MAX_PER_BATCH` | `100` | Maximum offline append `message.received` events emitted per Baileys batch |
 | `WA_BAILEYS_HEALTH_WATCHDOG_MS` | `180000` | Interval between Baileys application health probes; two consecutive failures end the socket for normal reconnect |
+| `WA_BAILEYS_EVENT_BUFFER_STALL_MS` | `60000` | Time a Baileys event buffer may remain active after connect before the watchdog flushes it |
 | `WA_APP_STATE_WRITES_ENABLED` | `false`                 | Enable gated Baileys account, server, and app-state changes; these changes can remove the linked device |
 | `WA_MARK_ONLINE_ON_CONNECT` | `false`                  | Mark the Baileys account online when its socket connects |
 | `WA_AUTO_REJECT_CALLS`      | `false`                  | Automatically reject incoming one-to-one Baileys call offers |
@@ -686,11 +687,13 @@ Baileys may emit an incoming offline message delivered as an `append` once when 
 after the instance's last disconnect (or last connect) or latest stored message. When those timestamps
 are unavailable, `WA_BAILEYS_APPEND_NOTIFY_WINDOW_HOURS` provides the fallback window. History-sync
 messages, messages sent by this account, status broadcasts, protocol updates, and duplicate message IDs
-are not emitted. While connected, the health watchdog sends a Baileys application-level IQ ping at
-the configured interval. Successful probes and inbound message, receipt, or presence events count as
-healthy; raw websocket frames do not. Two consecutive failed probes end the socket and let automatic
-reconnect handle the connection. Connection close and reconnect logs include the disconnect reason,
-status code, and offline duration.
+are not emitted. While connected, the health watchdog sends a Baileys `fetchStatus` USync probe at
+the configured interval. Successful probes and inbound message, receipt, or presence events count
+as healthy; raw websocket frames do not. Two consecutive failed probes end the socket and let automatic
+reconnect handle the connection. If Baileys' event buffer stays active longer than
+`WA_BAILEYS_EVENT_BUFFER_STALL_MS`, the watchdog flushes it to release held events; if it remains
+active at the next check, the socket ends and follows the normal reconnect flow. Connection close
+and reconnect logs include the disconnect reason, status code, and offline duration.
 
 `wa_send_sticker` accepts PNG, JPG, GIF, and WebP URLs or base64. PNG/JPG and GIF inputs are
 converted to 512x512 WebP with transparent padding. Static stickers are limited to 100 KB and

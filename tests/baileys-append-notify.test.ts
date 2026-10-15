@@ -39,15 +39,27 @@ interface InstanceManagerInternals {
   bindAdapterEvents: (instanceId: string, adapter: BaileysAdapter) => void;
 }
 
+function createTestEventBuffer() {
+  return {
+    isBuffering: vi.fn(() => false),
+    flush: vi.fn(() => false),
+  };
+}
+
+type TestEventBuffer = ReturnType<typeof createTestEventBuffer>;
+
 function createFixture(options: { lastConnected?: number; lastDisconnected?: number } = {}): {
   instanceId: string;
   adapter: BaileysAdapter;
+  socket: WASocket;
+  eventBuffer: TestEventBuffer;
   dispatchBatch: (events: Partial<BaileysEventMap>) => Promise<void>;
   dispatch: (type: "append" | "notify", messages: WAMessage[]) => Promise<void>;
   dispatchConnectionUpdate: (update: BaileysEventMap["connection.update"]) => void;
 } {
   const instanceId = `append_notify_${randomUUID()}`;
   const now = Date.now();
+  const eventBuffer = createTestEventBuffer();
   db.insert(instances)
     .values({
       id: instanceId,
@@ -71,6 +83,7 @@ function createFixture(options: { lastConnected?: number; lastDisconnected?: num
       process: vi.fn((handler: (events: Partial<BaileysEventMap>) => Promise<void> | void) => {
         processEvents = handler;
       }),
+      ...eventBuffer,
     },
     end: vi.fn(),
   } as unknown as WASocket;
@@ -88,6 +101,8 @@ function createFixture(options: { lastConnected?: number; lastDisconnected?: num
   return {
     instanceId,
     adapter,
+    socket,
+    eventBuffer,
     dispatchBatch,
     dispatch: async (type, messages) => {
       await dispatchBatch({ "messages.upsert": { type, messages } } as Partial<BaileysEventMap>);
@@ -495,6 +510,8 @@ describe("Baileys offline append notifications", () => {
         process: vi.fn((handler: (events: Partial<BaileysEventMap>) => Promise<void> | void) => {
           processEvents = handler;
         }),
+        isBuffering: vi.fn(() => false),
+        flush: vi.fn(() => false),
       },
       ws: {
         on: vi.fn((event: string, handler: (...args: unknown[]) => void) => {
@@ -597,6 +614,8 @@ describe("Baileys offline append notifications", () => {
         process: vi.fn((handler: (events: Partial<BaileysEventMap>) => Promise<void> | void) => {
           processEvents = handler;
         }),
+        isBuffering: vi.fn(() => false),
+        flush: vi.fn(() => false),
       },
       fetchStatus,
       query,
@@ -627,6 +646,126 @@ describe("Baileys offline append notifications", () => {
       vi.clearAllTimers();
       if (oldWatchdog === undefined) delete process.env.WA_BAILEYS_HEALTH_WATCHDOG_MS;
       else process.env.WA_BAILEYS_HEALTH_WATCHDOG_MS = oldWatchdog;
+    }
+  });
+
+  it("flushes a stalled event buffer and delivers its held append notification", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-10-15T12:00:00.000Z"));
+    const oldWatchdog = process.env.WA_BAILEYS_HEALTH_WATCHDOG_MS;
+    const oldBufferStall = process.env.WA_BAILEYS_EVENT_BUFFER_STALL_MS;
+    process.env.WA_BAILEYS_HEALTH_WATCHDOG_MS = "10000";
+    process.env.WA_BAILEYS_EVENT_BUFFER_STALL_MS = "1000";
+    const { instanceId, adapter, socket, eventBuffer, dispatch, dispatchConnectionUpdate } =
+      createFixture({ lastConnected: Date.now() - 10_000 });
+    const internals = adapter as unknown as AdapterInternals;
+    internals.sock = socket;
+    eventBuffer.isBuffering.mockReturnValue(true);
+    const message = fixtureMessage("stalled-buffer-append", {
+      timestampMs: Date.now() - 5_000,
+    });
+    let heldEventProcessing: Promise<void> | undefined;
+    eventBuffer.flush.mockImplementation(() => {
+      eventBuffer.isBuffering.mockReturnValue(false);
+      heldEventProcessing = dispatch("append", [message]);
+      return true;
+    });
+    const received = vi.fn();
+    adapter.on("message.received", received);
+
+    try {
+      dispatchConnectionUpdate({ connection: "open" });
+      await vi.advanceTimersByTimeAsync(999);
+      expect(eventBuffer.flush).not.toHaveBeenCalled();
+
+      await vi.advanceTimersByTimeAsync(1);
+      await heldEventProcessing;
+
+      expect(eventBuffer.flush).toHaveBeenCalledTimes(1);
+      expect(received).toHaveBeenCalledTimes(1);
+      expect(received).toHaveBeenCalledWith(
+        expect.objectContaining({
+          message: expect.objectContaining({ id: "stalled-buffer-append" }),
+        }),
+      );
+      expect(socket.end).not.toHaveBeenCalled();
+    } finally {
+      deleteInstance(instanceId);
+      vi.clearAllTimers();
+      if (oldWatchdog === undefined) delete process.env.WA_BAILEYS_HEALTH_WATCHDOG_MS;
+      else process.env.WA_BAILEYS_HEALTH_WATCHDOG_MS = oldWatchdog;
+      if (oldBufferStall === undefined) delete process.env.WA_BAILEYS_EVENT_BUFFER_STALL_MS;
+      else process.env.WA_BAILEYS_EVENT_BUFFER_STALL_MS = oldBufferStall;
+    }
+  });
+
+  it("ends a socket when its event buffer remains stalled after flushing", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-10-15T12:00:00.000Z"));
+    const oldWatchdog = process.env.WA_BAILEYS_HEALTH_WATCHDOG_MS;
+    const oldBufferStall = process.env.WA_BAILEYS_EVENT_BUFFER_STALL_MS;
+    process.env.WA_BAILEYS_HEALTH_WATCHDOG_MS = "10000";
+    process.env.WA_BAILEYS_EVENT_BUFFER_STALL_MS = "1000";
+    const { instanceId, adapter, socket, eventBuffer, dispatchConnectionUpdate } = createFixture();
+    const internals = adapter as unknown as AdapterInternals;
+    internals.sock = socket;
+    eventBuffer.isBuffering.mockReturnValue(true);
+
+    try {
+      dispatchConnectionUpdate({ connection: "open" });
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(eventBuffer.flush).toHaveBeenCalledTimes(1);
+      expect(socket.end).not.toHaveBeenCalled();
+
+      await vi.advanceTimersByTimeAsync(1000);
+
+      expect(socket.end).toHaveBeenCalledTimes(1);
+      expect(socket.end).toHaveBeenCalledWith(expect.any(Error));
+      expect(
+        (socket.end as unknown as ReturnType<typeof vi.fn>).mock.calls[0]?.[0]?.message,
+      ).toContain("event buffer remained stalled");
+
+      dispatchConnectionUpdate({
+        connection: "close",
+        lastDisconnect: { error: new Error("stalled buffer fixture"), date: new Date() },
+      });
+      expect(internals.reconnectAttempt).toBe(1);
+    } finally {
+      deleteInstance(instanceId);
+      vi.clearAllTimers();
+      if (oldWatchdog === undefined) delete process.env.WA_BAILEYS_HEALTH_WATCHDOG_MS;
+      else process.env.WA_BAILEYS_HEALTH_WATCHDOG_MS = oldWatchdog;
+      if (oldBufferStall === undefined) delete process.env.WA_BAILEYS_EVENT_BUFFER_STALL_MS;
+      else process.env.WA_BAILEYS_EVENT_BUFFER_STALL_MS = oldBufferStall;
+    }
+  });
+
+  it("does nothing when the event buffer ends before the stall limit", async () => {
+    vi.useFakeTimers();
+    const oldWatchdog = process.env.WA_BAILEYS_HEALTH_WATCHDOG_MS;
+    const oldBufferStall = process.env.WA_BAILEYS_EVENT_BUFFER_STALL_MS;
+    process.env.WA_BAILEYS_HEALTH_WATCHDOG_MS = "10000";
+    process.env.WA_BAILEYS_EVENT_BUFFER_STALL_MS = "1000";
+    const { instanceId, adapter, socket, eventBuffer, dispatchConnectionUpdate } = createFixture();
+    const internals = adapter as unknown as AdapterInternals;
+    internals.sock = socket;
+    eventBuffer.isBuffering.mockReturnValue(true);
+
+    try {
+      dispatchConnectionUpdate({ connection: "open" });
+      await vi.advanceTimersByTimeAsync(500);
+      eventBuffer.isBuffering.mockReturnValue(false);
+      await vi.advanceTimersByTimeAsync(1000);
+
+      expect(eventBuffer.flush).not.toHaveBeenCalled();
+      expect(socket.end).not.toHaveBeenCalled();
+    } finally {
+      deleteInstance(instanceId);
+      vi.clearAllTimers();
+      if (oldWatchdog === undefined) delete process.env.WA_BAILEYS_HEALTH_WATCHDOG_MS;
+      else process.env.WA_BAILEYS_HEALTH_WATCHDOG_MS = oldWatchdog;
+      if (oldBufferStall === undefined) delete process.env.WA_BAILEYS_EVENT_BUFFER_STALL_MS;
+      else process.env.WA_BAILEYS_EVENT_BUFFER_STALL_MS = oldBufferStall;
     }
   });
 });

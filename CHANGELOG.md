@@ -29,9 +29,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Incoming offline messages delivered through Baileys `append` upserts now emit one `message.received`
   event and webhook, with timestamp filtering, persistent deduplication, and a per-batch cap. Baileys
-  also logs every connection close and reconnect attempt. Its health watchdog now sends application-
-  level IQ pings instead of counting raw websocket frames; two consecutive failed probes end the
-  socket so the existing reconnect flow can recover silent drops.
+  also logs every connection close and reconnect attempt. Its health watchdog uses `fetchStatus`
+  USync probes instead of counting raw websocket frames; two consecutive failed probes end the
+  socket so the existing reconnect flow can recover silent drops. A Baileys event buffer that stalls
+  past `WA_BAILEYS_EVENT_BUFFER_STALL_MS` is flushed once, and the socket ends if buffering persists
+  at the next check.
 - Poll votes on polls sent by this account now decrypt across LID/PN identity variants, including
   wrapped updates. Unresolved votes retry after poll storage and when results are read.
 - Event messages sent by this account now retain their binary protobuf message secret in local
