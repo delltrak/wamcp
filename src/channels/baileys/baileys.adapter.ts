@@ -9,8 +9,6 @@ import makeWASocket, {
   BufferJSON,
   downloadMediaMessage,
   makeCacheableSignalKeyStore,
-  generateForwardMessageContent,
-  generateWAMessageFromContent,
   type WASocket,
   type GroupParticipant as BaileysGroupParticipant,
   type WAMessage,
@@ -174,6 +172,89 @@ function serializeIncomingMessage(message?: WAMessage): string | null {
       messageTimestamp: message.messageTimestamp,
     } as WAMessage,
     BufferJSON.replacer,
+  );
+}
+
+function serializeWAMessage(message?: WAMessage): string | null {
+  if (!message) return null;
+  return JSON.stringify(message, BufferJSON.replacer);
+}
+
+function hasMeaningfulValue(value: unknown): boolean {
+  if (typeof value === "string") return value.trim().length > 0;
+  if (typeof value === "number") return Number.isFinite(value);
+  if (typeof value === "boolean") return value;
+  if (value instanceof Uint8Array) return value.byteLength > 0;
+  if (Array.isArray(value)) return value.some(hasMeaningfulValue);
+  if (typeof value !== "object" || value === null) return false;
+
+  return Object.entries(value).some(
+    ([key, nested]) =>
+      key !== "contextInfo" && key !== "senderKeyDistributionMessage" && hasMeaningfulValue(nested),
+  );
+}
+
+function findNestedField(value: unknown, field: string): Record<string, unknown> | undefined {
+  if (typeof value !== "object" || value === null || value instanceof Uint8Array) return undefined;
+  if (Array.isArray(value)) {
+    for (const nested of value) {
+      const match = findNestedField(nested, field);
+      if (match) return match;
+    }
+    return undefined;
+  }
+
+  const record = value as Record<string, unknown>;
+  const candidate = record[field];
+  if (typeof candidate === "object" && candidate !== null && !Array.isArray(candidate)) {
+    return candidate as Record<string, unknown>;
+  }
+
+  for (const [key, nested] of Object.entries(record)) {
+    if (key === "contextInfo" || key === "senderKeyDistributionMessage") continue;
+    const match = findNestedField(nested, field);
+    if (match) return match;
+  }
+  return undefined;
+}
+
+function hasForwardableContent(message: WAMessage): boolean {
+  const content = unwrapMessageContent(message.message);
+  if (!content) return false;
+
+  const mediaFields: Record<string, string> = {
+    image: "imageMessage",
+    video: "videoMessage",
+    audio: "audioMessage",
+    document: "documentMessage",
+    sticker: "stickerMessage",
+  };
+  const mediaField = mediaFields[extractMessageDetails(message).type];
+  if (mediaField) {
+    const media = findNestedField(content, mediaField);
+    const mediaKey = media?.mediaKey;
+    const hasMediaKey =
+      (typeof mediaKey === "string" && mediaKey.trim().length > 0) ||
+      (mediaKey instanceof Uint8Array && mediaKey.byteLength > 0);
+    const hasMediaReference = [media?.url, media?.directPath, media?.handle].some(
+      (value) => typeof value === "string" && value.trim().length > 0,
+    );
+    return hasMediaKey && hasMediaReference;
+  }
+
+  if (typeof content.conversation === "string" && content.conversation.trim()) return true;
+  if ("extendedTextMessage" in content) {
+    const extendedText = content.extendedTextMessage;
+    return (
+      typeof extendedText === "object" &&
+      extendedText !== null &&
+      typeof (extendedText as { text?: unknown }).text === "string" &&
+      (extendedText as { text: string }).text.trim().length > 0
+    );
+  }
+
+  return Object.entries(content).some(
+    ([key, value]) => key !== "senderKeyDistributionMessage" && hasMeaningfulValue(value),
   );
 }
 
@@ -673,6 +754,40 @@ export class BaileysAdapter implements ChannelAdapter {
     }
 
     const result = await sock.sendMessage(jid, msg, opts);
+    const outgoingId = result?.key.id;
+    if (result?.message && outgoingId) {
+      const outgoing: WAMessage = {
+        ...result,
+        key: {
+          ...result.key,
+          remoteJid: result.key.remoteJid ?? jid,
+          fromMe: true,
+        },
+      };
+      const details = extractMessageDetails(outgoing);
+      this.persistMessage(
+        {
+          instanceId: this.instanceId,
+          chatId: outgoing.key.remoteJid ?? jid,
+          message: {
+            id: outgoingId,
+            sender: "me",
+            timestamp:
+              typeof outgoing.messageTimestamp === "number"
+                ? outgoing.messageTimestamp
+                : Number(outgoing.messageTimestamp ?? Date.now()),
+            type: details.type,
+            content: details.content,
+            mediaUrl: details.mediaUrl,
+            ...(details.mediaMimetype ? { mediaMimetype: details.mediaMimetype } : {}),
+            quotedMessageId: extractQuotedMessageId(outgoing),
+            isFromMe: true,
+          },
+        },
+        outgoing,
+        true,
+      );
+    }
     return { messageId: result?.key.id ?? "", timestamp: Date.now(), status: "sent" };
   }
 
@@ -725,22 +840,77 @@ export class BaileysAdapter implements ChannelAdapter {
     const sock = this.getSock();
     const toJid = this.normalizeJid(to);
     const fromJid = this.normalizeJid(fromChat);
+    const row = db
+      .select({
+        id: messagesTable.id,
+        chatId: messagesTable.chatId,
+        type: messagesTable.type,
+        content: messagesTable.content,
+        isFromMe: messagesTable.isFromMe,
+        timestamp: messagesTable.timestamp,
+        rawData: messagesTable.rawData,
+      })
+      .from(messagesTable)
+      .where(
+        and(
+          eq(messagesTable.instanceId, this.instanceId),
+          eq(messagesTable.chatId, fromJid),
+          eq(messagesTable.id, msgId),
+        ),
+      )
+      .get();
 
-    // Use the store or load message; for now forward with minimal message stub
-    const stubMsg: WAMessage = {
-      key: { remoteJid: fromJid, id: msgId, fromMe: false },
-      message: { conversation: "" },
+    if (!row) {
+      throw new Error(`Message '${msgId}' was not found in chat '${fromJid}'`);
+    }
+
+    let sourceMessage: WAMessage | undefined;
+    if (row.rawData) {
+      try {
+        sourceMessage = JSON.parse(row.rawData, BufferJSON.reviver) as WAMessage;
+      } catch {
+        // Older or malformed rows can still use the normalized text fallback below.
+      }
+    }
+
+    if (!hasForwardableContent(sourceMessage ?? ({} as WAMessage))) {
+      if (row.type === "text" && typeof row.content === "string" && row.content.trim()) {
+        sourceMessage = {
+          ...sourceMessage,
+          key: {
+            ...sourceMessage?.key,
+            remoteJid: row.chatId,
+            id: row.id,
+            fromMe: row.isFromMe === 1,
+          },
+          message: { conversation: row.content },
+          messageTimestamp: row.timestamp,
+        } as WAMessage;
+      } else {
+        throw new Error(
+          `Message '${msgId}' cannot be forwarded because its full content is unavailable`,
+        );
+      }
+    }
+
+    const fullMessage: WAMessage = {
+      ...sourceMessage,
+      key: {
+        ...sourceMessage?.key,
+        remoteJid: row.chatId,
+        id: row.id,
+        fromMe: row.isFromMe === 1,
+      },
     } as WAMessage;
 
-    const forwardContent = generateForwardMessageContent(stubMsg, false);
-    const meJid = this.getMeJid();
-    const generatedMsg = generateWAMessageFromContent(toJid, forwardContent, { userJid: meJid });
+    if (!hasForwardableContent(fullMessage)) {
+      throw new Error(
+        `Message '${msgId}' cannot be forwarded because its full content is unavailable`,
+      );
+    }
 
-    await sock.relayMessage(toJid, generatedMsg.message!, {
-      messageId: generatedMsg.key.id!,
-    });
-
-    return { messageId: generatedMsg.key.id ?? "", timestamp: Date.now(), status: "sent" };
+    const result = await sock.sendMessage(toJid, { forward: fullMessage });
+    return { messageId: result?.key.id ?? "", timestamp: Date.now(), status: "sent" };
   }
 
   async sendReaction(chatId: string, msgId: string, emoji: string): Promise<void> {
@@ -1602,7 +1772,11 @@ export class BaileysAdapter implements ChannelAdapter {
 
   // ---- Message Persistence ----
 
-  private persistMessage(event: NormalizedMessageEvent, source?: WAMessage): void {
+  private persistMessage(
+    event: NormalizedMessageEvent,
+    source?: WAMessage,
+    persistFullMessage = false,
+  ): void {
     try {
       const { message, chatId, instanceId } = event;
       const needsRawData =
@@ -1613,7 +1787,11 @@ export class BaileysAdapter implements ChannelAdapter {
         message.type === "sticker" ||
         !!message.buttons?.length ||
         !!message.rawType;
-      const rawData = needsRawData ? serializeIncomingMessage(source) : null;
+      const rawData = persistFullMessage
+        ? serializeWAMessage(source)
+        : needsRawData
+          ? serializeIncomingMessage(source)
+          : null;
       db.insert(messagesTable)
         .values({
           id: message.id,

@@ -612,7 +612,8 @@ Send a text message with a rich link preview.
 
 #### `wa_forward_message`
 
-Forward an existing message to another chat.
+Forward an existing message with its original content to another chat. Baileys forwards stored
+media content when available; older media messages without stored content return an error.
 
 | Parameter    | Type   | Required | Description                                       |
 | ------------ | ------ | -------- | ------------------------------------------------- |
