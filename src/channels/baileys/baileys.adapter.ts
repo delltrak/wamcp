@@ -1826,6 +1826,7 @@ export class BaileysAdapter implements ChannelAdapter {
     chatId: string,
     duration: 0 | 86400 | 604800 | 7776000,
   ): Promise<void> {
+    this.requireAppStateWritesEnabled();
     const sock = this.getSock();
     const jid = this.normalizeStatusRecipient(chatId);
     if (!jid) {
@@ -1841,6 +1842,7 @@ export class BaileysAdapter implements ChannelAdapter {
   // ---- Groups ----
 
   async createGroup(name: string, participants: string[]): Promise<GroupResponse> {
+    this.requireAppStateWritesEnabled();
     const sock = this.getSock();
     const jids = participants.map((p) => this.normalizeJid(p));
     const result = await sock.groupCreate(name, jids);
@@ -1848,6 +1850,7 @@ export class BaileysAdapter implements ChannelAdapter {
   }
 
   async modifyGroup(groupId: string, modification: GroupModification): Promise<void> {
+    this.requireAppStateWritesEnabled();
     const sock = this.getSock();
     const jid = this.normalizeJid(groupId);
 
@@ -1883,6 +1886,7 @@ export class BaileysAdapter implements ChannelAdapter {
     participants: string[],
     action: ParticipantAction,
   ): Promise<void> {
+    this.requireAppStateWritesEnabled();
     const sock = this.getSock();
     const jid = this.normalizeJid(groupId);
     const jids = participants.map((p) => this.normalizeJid(p));
@@ -1970,6 +1974,7 @@ export class BaileysAdapter implements ChannelAdapter {
   }
 
   async updateGroupPicture(groupId: string, image: string): Promise<void> {
+    this.requireAppStateWritesEnabled();
     const sock = this.getSock();
     const jid = normalizeGroupJid(groupId);
     await this.requireGroupPictureAdmin(sock, jid, "update");
@@ -1982,6 +1987,7 @@ export class BaileysAdapter implements ChannelAdapter {
   }
 
   async removeGroupPicture(groupId: string): Promise<void> {
+    this.requireAppStateWritesEnabled();
     const sock = this.getSock();
     const jid = normalizeGroupJid(groupId);
     await this.requireGroupPictureAdmin(sock, jid, "remove");
@@ -2073,6 +2079,7 @@ export class BaileysAdapter implements ChannelAdapter {
   }
 
   async joinGroup(inviteCode: string): Promise<string> {
+    this.requireAppStateWritesEnabled();
     const sock = this.getSock();
     const groupId = await sock.groupAcceptInvite(inviteCode);
     return groupId ?? "";
@@ -2083,6 +2090,7 @@ export class BaileysAdapter implements ChannelAdapter {
     participantJid: string,
     action: "approve" | "reject",
   ): Promise<void> {
+    this.requireAppStateWritesEnabled();
     const sock = this.getSock();
     const jid = this.normalizeJid(groupId);
     const participant = this.normalizeJid(participantJid);

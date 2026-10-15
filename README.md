@@ -686,18 +686,25 @@ Baileys blocks `wa_archive_chat`, `wa_pin_chat`, `wa_mute_chat`, `wa_delete_chat
 `wa_create_newsletter`, `wa_newsletter_update_name`, `wa_newsletter_update_description`,
 `wa_newsletter_update_picture`, `wa_newsletter_react`, `wa_create_catalog_product`,
 `wa_update_catalog_product`, `wa_delete_catalog_products`, `wa_group_join_approval_mode`, and
-`wa_group_member_add_mode` before they reach the socket. The flag covers account and server changes
-even when Baileys sends them through IQ or MEX queries instead of an app-state patch. Quick reply
-writes call Baileys `addOrEditQuickReply` or `removeQuickReply`, which use `chatModify` and
-`appPatch`; those changes can get the linked device removed. Set the variable to `true` only if you
-accept that risk. Read-only metadata, catalog, collection, order, blocklist, and About calls remain
-available. Normal message sends, including PTV, and private disappearing timers sent through
-`sendMessage` are not gated. Read receipts and app-state reads/resyncs are also unaffected.
+`wa_group_member_add_mode`, `wa_set_disappearing_messages`, `wa_create_group`,
+`wa_group_update_subject`, `wa_group_update_description`, `wa_group_update_settings`,
+`wa_group_leave`, `wa_group_revoke_invite`, `wa_group_toggle_ephemeral`, `wa_group_join`,
+`wa_group_add_participants`, `wa_group_remove_participants`, `wa_group_promote`, `wa_group_demote`,
+`wa_group_update_picture`, `wa_group_remove_picture`, and `wa_group_handle_request` before they
+reach the socket. The flag covers account and server changes even when Baileys sends them through
+IQ or MEX queries instead of an app-state patch. Quick reply writes call Baileys
+`addOrEditQuickReply` or `removeQuickReply`, which use `chatModify` and `appPatch`; those changes can
+get the linked device removed. Set the variable to `true` only if you accept that risk. Read-only
+metadata, catalog, collection, order, blocklist, and About calls remain available. Normal message
+sends, including PTV, remain available. Read receipts and app-state reads/resyncs are also unaffected.
 
 At the protocol level, issue #74 operations use non-app-state paths: private disappearing timers use
-`sendMessage` control messages; blocklist/About are read queries; community actions use `w:g2` IQs;
+`sendMessage` control messages but are gated because they change account state; blocklist/About are
+read queries; community actions use `w:g2` IQs;
 Channel metadata, posts, and reactions use newsletter/MEX queries or message nodes; group approval
 modes and catalog operations use IQ/MEX queries; PTV uses a regular video message with `ptv: true`.
+Group settings, membership, invite, and disappearing-message changes are also gated before
+`sendMessage` or group IQ methods run.
 
 Baileys status stories go to the account's own normalized JID and known individual contacts by
 default. Each status tool accepts an optional `statusJidList` of phone numbers or individual JIDs

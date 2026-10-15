@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type {
   GroupParticipant as BaileysGroupParticipant,
   WASocket,
@@ -27,10 +27,17 @@ type ToolResult = {
 const OWN_PN = "5511999990000@s.whatsapp.net";
 const OWN_LID = "1999990000@lid";
 const GROUP_JID = "120363000000000000@g.us";
+const initialAppStateWritesEnabled = process.env.WA_APP_STATE_WRITES_ENABLED;
+
+beforeEach(() => {
+  process.env.WA_APP_STATE_WRITES_ENABLED = "true";
+});
 
 afterEach(() => {
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
+  if (initialAppStateWritesEnabled === undefined) delete process.env.WA_APP_STATE_WRITES_ENABLED;
+  else process.env.WA_APP_STATE_WRITES_ENABLED = initialAppStateWritesEnabled;
 });
 
 function createAdapter(overrides: Record<string, unknown> = {}) {

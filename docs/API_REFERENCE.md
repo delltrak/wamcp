@@ -82,12 +82,17 @@ Tools marked **Baileys only** are not available on Cloud API instances.
   `wa_leave_community`, `wa_create_newsletter`, `wa_newsletter_update_name`,
   `wa_newsletter_update_description`, `wa_newsletter_update_picture`, `wa_newsletter_react`,
   `wa_create_catalog_product`, `wa_update_catalog_product`, `wa_delete_catalog_products`,
-  `wa_group_join_approval_mode`, and `wa_group_member_add_mode`. The flag covers account/server
-  changes even when Baileys uses IQ or MEX queries instead of an app-state patch. These changes can
-  get the linked device removed. Read-only calls, normal message sends, and disappearing-message
-  control messages sent through `sendMessage` are not gated.
+  `wa_group_join_approval_mode`, `wa_group_member_add_mode`, `wa_set_disappearing_messages`,
+  `wa_create_group`, `wa_group_update_subject`, `wa_group_update_description`,
+  `wa_group_update_settings`, `wa_group_leave`, `wa_group_revoke_invite`, `wa_group_toggle_ephemeral`,
+  `wa_group_join`, `wa_group_add_participants`, `wa_group_remove_participants`, `wa_group_promote`,
+  `wa_group_demote`, `wa_group_update_picture`, `wa_group_remove_picture`, and
+  `wa_group_handle_request`. The flag covers account/server changes even when Baileys uses IQ or MEX
+  queries instead of an app-state patch. These changes can get the linked device removed. Read-only
+  calls and normal message sends are not gated.
 - **Protocol classification for issue #74 operations** -- `wa_set_disappearing_messages` sends a
-  `sendMessage` protocol control message; blocklist/About are reads; communities use `w:g2` IQs;
+  `sendMessage` protocol control message and is gated because it changes account state;
+  blocklist/About are reads; communities use `w:g2` IQs;
   Channel metadata/posts/reactions use newsletter/MEX queries or message nodes; group modes use IQs;
   catalog operations use IQ/MEX queries; and PTV sends a video message with `ptv: true`. Only quick
   reply create/edit/delete use `chatModify` → `appPatch` and are gated above.
@@ -1056,7 +1061,8 @@ Request older messages from Baileys' on-demand history sync. The oldest stored m
 #### `wa_set_disappearing_messages`
 
 Set a disappearing-message duration in a private chat. Baileys sends the protocol control message
-through `sendMessage`; this does not call `chatModify` or write app state.
+through `sendMessage`; this does not call `chatModify` or write app state. The account/server change
+is blocked unless `WA_APP_STATE_WRITES_ENABLED=true`.
 
 | Parameter    | Type                              | Required | Description                                                     |
 | ------------ | --------------------------------- | -------- | --------------------------------------------------------------- |
@@ -1071,6 +1077,11 @@ through `sendMessage`; this does not call `chatModify` or write app state.
 ### 2.4 Group Management (20 tools)
 
 Tools for creating and managing WhatsApp groups.
+
+Group creation, changes, membership and join-request actions, picture updates, invite changes,
+group disappearing-message changes, and private disappearing-message changes are blocked unless
+`WA_APP_STATE_WRITES_ENABLED=true`. Group listing, metadata reads, and invite-code reads remain
+available while the flag is disabled.
 
 #### `wa_list_groups`
 

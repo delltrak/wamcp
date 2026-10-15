@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Gate private disappearing-message timers and all Baileys group creation, settings, membership,
+  picture, invite, join, and join-request changes behind `WA_APP_STATE_WRITES_ENABLED`.
 - Added `WA_MARK_ONLINE_ON_CONNECT` to control whether Baileys marks the linked account online
   when its socket connects. It defaults to `false`, preserving the current behavior.
 - Baileys status stories now report the recipient count and warn when the configured audience cap
@@ -20,9 +22,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and member-add modes, PTV video notes, community management, Channel management, and Business
   catalog/product/order tools. Quick reply writes and community, Channel, catalog-product, and group
   mode changes are gated by `WA_APP_STATE_WRITES_ENABLED`; list is unavailable because Baileys rc14
-  exposes no read method and quick reply sync actions are not stored locally. Read-only calls,
-  normal message sends, and disappearing-message control messages remain available when writes are
-  disabled.
+  exposes no read method and quick reply sync actions are not stored locally. Read-only calls and
+  normal message sends remain available when writes are disabled.
 - Added local `wa_search_messages` with case-insensitive substring matching, escaped SQL `LIKE`
   wildcards, date/sender/chat filters, and stable offset pagination.
 - Added Baileys WhatsApp Business label tools for listing, creation, edits, soft deletion, and
