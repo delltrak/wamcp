@@ -6,7 +6,7 @@
 
 import type { ChannelAdapter, ChannelEventHandler } from "../channel.interface.js";
 import { and, eq, sql } from "drizzle-orm";
-import { db } from "../../db/client.js";
+import { db, sqlite } from "../../db/client.js";
 import { messages as messagesTable } from "../../db/schema.js";
 import { getWebPInfo, mediaResponseToBuffer } from "../../services/media.js";
 import { MEDIA_LIMITS } from "../../constants.js";
@@ -34,7 +34,12 @@ import type {
   ChannelEvent,
   ChannelEventPayload,
   NormalizedMessageEvent,
+  BusinessLabel,
+  EventResponse,
+  MessageSearchOptions,
+  SendEventOptions,
 } from "../../types/channel.types.js";
+import { searchStoredMessages } from "../../services/message-search.js";
 import { createChildLogger } from "../../utils/logger.js";
 import { getAutoReadMode, scheduleIncomingMessageRead } from "../../services/auto-read.js";
 
@@ -410,6 +415,20 @@ export class CloudApiAdapter implements ChannelAdapter {
     }
   }
 
+  async sendEvent(_options: SendEventOptions): Promise<MessageResponse> {
+    throw new Error(
+      "WhatsApp event messages are not supported on Cloud API; use a Baileys instance",
+    );
+  }
+
+  async getEventResponses(_chatId: string, _eventMessageId: string): Promise<EventResponse[]> {
+    throw new Error("WhatsApp event responses are only available on Baileys instances");
+  }
+
+  async starMessage(_chatId: string, _messageId: string, _star: boolean): Promise<void> {
+    throw new Error("Starring messages is not supported on Cloud API; use a Baileys instance");
+  }
+
   async editMessage(_chatId: string, msgId: string, newText: string): Promise<void> {
     const phone = this.normalizePhone(_chatId);
     await this.sendRaw({
@@ -507,6 +526,39 @@ export class CloudApiAdapter implements ChannelAdapter {
 
   async modifyChat(_chatId: string, _modification: ChatModification): Promise<void> {
     throw new Error("Chat modifications (archive, pin, mute) are not supported on Cloud API");
+  }
+
+  async markChatUnread(_chatId: string): Promise<void> {
+    throw new Error("Marking a chat unread is not supported on Cloud API; use a Baileys instance");
+  }
+
+  async listLabels(_includeDeleted = false): Promise<BusinessLabel[]> {
+    throw new Error("WhatsApp Business labels are not supported on Cloud API by this server");
+  }
+
+  async createLabel(_name: string, _color: number): Promise<BusinessLabel> {
+    throw new Error("WhatsApp Business labels are not supported on Cloud API by this server");
+  }
+
+  async editLabel(_id: string, _update: { name?: string; color?: number }): Promise<void> {
+    throw new Error("WhatsApp Business labels are not supported on Cloud API by this server");
+  }
+
+  async deleteLabel(_id: string): Promise<void> {
+    throw new Error("WhatsApp Business labels are not supported on Cloud API by this server");
+  }
+
+  async setChatLabel(_chatId: string, _labelId: string, _add: boolean): Promise<void> {
+    throw new Error("WhatsApp Business labels are not supported on Cloud API by this server");
+  }
+
+  async setMessageLabel(
+    _chatId: string,
+    _messageId: string,
+    _labelId: string,
+    _add: boolean,
+  ): Promise<void> {
+    throw new Error("WhatsApp Business labels are not supported on Cloud API by this server");
   }
 
   // ---- Groups ----
@@ -714,6 +766,20 @@ export class CloudApiAdapter implements ChannelAdapter {
     throw new Error(
       "Message history is not available on Cloud API. Use webhooks to receive messages.",
     );
+  }
+
+  async searchMessages(
+    options: MessageSearchOptions,
+  ): Promise<{ messages: Message[]; hasMore: boolean; nextOffset: number | null }> {
+    return searchStoredMessages(sqlite, this.instanceId, options);
+  }
+
+  async fetchMessageHistory(
+    _chatId: string,
+    _count: number,
+    _timeoutMs?: number,
+  ): Promise<{ requested: number; stored: number; timedOut: boolean }> {
+    throw new Error("On-demand message history is only available on Baileys instances");
   }
 
   async getProfileInfo(): Promise<ProfileInfo> {

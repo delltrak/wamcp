@@ -78,6 +78,7 @@ export const messages = sqliteTable(
         "poll",
         "reaction",
         "sticker",
+        "event",
       ],
     }).notNull(),
     content: text("content"),
@@ -95,6 +96,7 @@ export const messages = sqliteTable(
     timestamp: integer("timestamp").notNull(),
     pushName: text("push_name"),
     rawData: text("raw_data"),
+    starred: integer("starred").notNull().default(0),
   },
   (table) => [
     primaryKey({ columns: [table.instanceId, table.id] }),
@@ -215,6 +217,71 @@ export const chats = sqliteTable(
   (table) => [
     primaryKey({ columns: [table.instanceId, table.jid] }),
     index("idx_chats_recent").on(table.instanceId, table.lastMessageAt),
+  ],
+);
+
+// ============================================================
+// BUSINESS LABELS
+// ============================================================
+export const labels = sqliteTable(
+  "labels",
+  {
+    instanceId: text("instance_id")
+      .notNull()
+      .references(() => instances.id, { onDelete: "cascade" }),
+    id: text("label_id").notNull(),
+    name: text("name").notNull(),
+    color: integer("color").notNull(),
+    deleted: integer("deleted").notNull().default(0),
+    predefinedId: text("predefined_id"),
+    updatedAt: integer("updated_at").notNull(),
+  },
+  (table) => [primaryKey({ columns: [table.instanceId, table.id] })],
+);
+
+export const labelAssociations = sqliteTable(
+  "label_associations",
+  {
+    instanceId: text("instance_id")
+      .notNull()
+      .references(() => instances.id, { onDelete: "cascade" }),
+    labelId: text("label_id").notNull(),
+    type: text("association_type", { enum: ["chat", "message"] }).notNull(),
+    chatId: text("chat_id").notNull(),
+    messageId: text("message_id").notNull().default(""),
+    updatedAt: integer("updated_at").notNull(),
+  },
+  (table) => [
+    primaryKey({
+      columns: [table.instanceId, table.labelId, table.type, table.chatId, table.messageId],
+    }),
+    index("idx_label_associations_chat").on(table.instanceId, table.chatId, table.type),
+    index("idx_label_associations_message").on(
+      table.instanceId,
+      table.chatId,
+      table.messageId,
+      table.type,
+    ),
+  ],
+);
+
+export const eventResponses = sqliteTable(
+  "event_responses",
+  {
+    instanceId: text("instance_id")
+      .notNull()
+      .references(() => instances.id, { onDelete: "cascade" }),
+    eventMessageId: text("event_message_id").notNull(),
+    chatId: text("chat_id").notNull(),
+    responder: text("responder").notNull(),
+    response: text("response").notNull(),
+    timestamp: integer("timestamp"),
+    responseMessageId: text("response_message_id"),
+    rawData: text("raw_data"),
+  },
+  (table) => [
+    primaryKey({ columns: [table.instanceId, table.eventMessageId, table.responder] }),
+    index("idx_event_responses_chat").on(table.instanceId, table.chatId, table.eventMessageId),
   ],
 );
 

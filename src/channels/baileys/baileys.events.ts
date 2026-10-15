@@ -423,6 +423,11 @@ function messageDetails(content: MessageRecord | undefined): BaileysMessageDetai
   pushText(parts, recordAt(content, "imageMessage")?.caption);
   pushText(parts, recordAt(content, "videoMessage")?.caption);
   pushText(parts, recordAt(content, "documentMessage")?.caption);
+  const eventMessage = recordAt(content, "eventMessage");
+  pushText(parts, eventMessage?.name);
+  pushText(parts, eventMessage?.description);
+  pushText(parts, recordAt(eventMessage, "location")?.name);
+  pushText(parts, recordAt(eventMessage, "location")?.address);
   media = collectMedia(content);
 
   const template = addTemplateContent(recordAt(content, "templateMessage"), parts, buttons);
@@ -558,6 +563,7 @@ function messageDetails(content: MessageRecord | undefined): BaileysMessageDetai
     pollCreationMessage: "poll",
     pollCreationMessageV2: "poll",
     pollCreationMessageV3: "poll",
+    eventMessage: "event",
     reactionMessage: "reaction",
     stickerMessage: "sticker",
     imageMessage: "image",

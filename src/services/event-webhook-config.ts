@@ -17,6 +17,7 @@ const CHANNEL_EVENTS: readonly ChannelEvent[] = [
   "contact.updated",
   "connection.changed",
   "call.received",
+  "label.updated",
 ];
 
 const DISALLOWED_HEADERS = new Set([

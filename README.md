@@ -36,7 +36,7 @@
 
 **WA MCP** is a WhatsApp MCP server built with TypeScript that gives AI agents full access to WhatsApp through the [Model Context Protocol](https://modelcontextprotocol.io). It supports both **Baileys** (WhatsApp Web) and **Meta Cloud API** as dual-channel backends, deployable with **Docker** in a single command.
 
-Your agent connects once and auto-discovers **75 tools**, **10 resources**, and **12 real-time events** — zero configuration, zero REST wrappers, zero glue code.
+Your agent connects once and auto-discovers **90 tools**, **10 resources**, and **13 real-time events** — zero configuration, zero REST wrappers, zero glue code.
 
 ```
 Your AI Agent ←→ MCP Protocol ←→ WA MCP ←→ WhatsApp
@@ -82,7 +82,7 @@ from google.adk.tools.mcp_tool import McpToolset
 
 tools = McpToolset(url="http://localhost:3000/mcp")
 
-# Agent auto-discovers 67 WhatsApp tools
+# Agent auto-discovers 90 WhatsApp tools
 # wa_create_instance, wa_send_text, wa_send_image, ...
 ```
 
@@ -146,7 +146,7 @@ Add to your `claude_desktop_config.json`:
 
 ## 🛠️ Tools
 
-WA MCP exposes **75 tools** across 11 domains. All tools use the `wa_` prefix.
+WA MCP exposes **90 tools** across 14 domains. All tools use the `wa_` prefix.
 
 <details>
 <summary>📋 <strong>Instance Management</strong> (8 tools)</summary>
@@ -213,16 +213,53 @@ WA MCP exposes **75 tools** across 11 domains. All tools use the `wa_` prefix.
 </details>
 
 <details>
-<summary>💭 <strong>Chat Management</strong> (6 tools)</summary>
+<summary>💭 <strong>Chat Management</strong> (10 tools)</summary>
 
 | Tool              | Description              |
 | ----------------- | ------------------------ |
 | `wa_get_messages` | Get chat message history |
+| `wa_list_chats` | List cached chats with assigned labels |
 | `wa_archive_chat` | Archive / unarchive      |
 | `wa_pin_chat`     | Pin / unpin chat         |
 | `wa_mute_chat`    | Mute / unmute            |
 | `wa_delete_chat`  | Delete chat              |
 | `wa_clear_chat`   | Clear chat history       |
+| `wa_mark_chat_unread` | Mark a chat unread (Baileys) |
+| `wa_star_message` | Star / unstar a message (Baileys) |
+| `wa_fetch_message_history` | Fetch older stored chat history (Baileys) |
+
+</details>
+
+<details>
+<summary>🔎 <strong>Message Search</strong> (1 tool)</summary>
+
+| Tool | Description |
+| ---- | ----------- |
+| `wa_search_messages` | Search local messages by text, dates, sender, and chat |
+
+</details>
+
+<details>
+<summary>🏷️ <strong>WhatsApp Business Labels</strong> (8 tools)</summary>
+
+| Tool | Description |
+| ---- | ----------- |
+| `wa_list_labels` | List locally stored labels |
+| `wa_create_label` | Create a label |
+| `wa_edit_label` | Rename or recolor a label |
+| `wa_delete_label` | Delete a label |
+| `wa_add_chat_label` / `wa_remove_chat_label` | Apply or remove a label on a chat |
+| `wa_add_message_label` / `wa_remove_message_label` | Apply or remove a label on a message |
+
+</details>
+
+<details>
+<summary>📅 <strong>WhatsApp Events</strong> (2 tools)</summary>
+
+| Tool | Description |
+| ---- | ----------- |
+| `wa_send_event` | Send a dated event with optional location or call link |
+| `wa_get_event_responses` | Read locally stored responses to an event |
 
 </details>
 
@@ -351,7 +388,7 @@ Resources expose read-only WhatsApp state via `whatsapp://` URIs:
 | `whatsapp://instances`                        | List all instances             |
 | `whatsapp://instances/{id}`                   | Instance details + queue stats |
 | `whatsapp://instances/{id}/contacts`          | All contacts                   |
-| `whatsapp://instances/{id}/chats`             | Active conversations           |
+| `whatsapp://instances/{id}/chats`             | Cached conversations and labels |
 | `whatsapp://instances/{id}/groups`            | All groups                     |
 | `whatsapp://instances/{id}/groups/{gid}`      | Group metadata                 |
 | `whatsapp://instances/{id}/messages/{chatId}` | Message history                |
@@ -379,6 +416,7 @@ Events are pushed to connected agents via MCP notifications over SSE (Server-Sen
 | `whatsapp/contact.updated`            | Contact info changed                           |
 | `whatsapp/connection.changed`         | Instance status change (includes QR as base64) |
 | `whatsapp/call.received`              | Incoming call                                  |
+| `whatsapp/label.updated`              | Business label or association changed          |
 
 ### Outgoing event webhooks
 
@@ -457,6 +495,10 @@ The standard JSON body includes `event`, `instanceId`, `chat`, `sender`,
 also include `X-WA-Event-Timestamp` and `X-WA-Event-Signature`;
 `sha256=<hex HMAC-SHA256>` signs `<timestamp>.<exact JSON body>`.
 
+Baileys message events may also include `chatLabels` and `messageLabels`.
+Opt into the `label.updated` event to receive label edits and chat/message label
+association changes.
+
 See [Outgoing event webhooks](docs/event-webhooks.md) for configuration details.
 
 ---
@@ -476,7 +518,7 @@ See [Outgoing event webhooks](docs/event-webhooks.md) for configuration details.
 │  │  Layer 1 — MCP Transport (HTTP/stdio) │ │
 │  ├────────────────────────────────────────┤ │
 │  │  Layer 2 — MCP Core                   │ │
-│  │  68 Tools │ 10 Resources │ 12 Events  │ │
+│  │  90 Tools │ 10 Resources │ 13 Events  │ │
 │  ├────────────────────────────────────────┤ │
 │  │  Layer 3 — Services                   │ │
 │  │  Instance Manager │ Queue │ Dedup     │ │
@@ -651,7 +693,7 @@ src/
 ├── index.ts                     # Entry point (HTTP/stdio)
 ├── constants.ts                 # Defaults and limits
 ├── server/mcp.ts                # MCP server setup
-├── tools/                       # 🔧 67 MCP tools (10 files)
+├── tools/                       # 🔧 90 MCP tools (13 files)
 ├── resources/                   # 📖 10 MCP resources (8 files)
 ├── notifications/events.ts      # 📡 12 event types
 ├── channels/

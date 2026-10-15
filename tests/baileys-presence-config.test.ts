@@ -1,4 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { randomUUID } from "node:crypto";
+import { sqlite } from "../src/db/client.js";
 
 const mocks = vi.hoisted(() => ({
   makeWASocket: vi.fn(),
@@ -34,19 +36,26 @@ describe("Baileys markOnlineOnConnect configuration", () => {
   let socket: {
     ev: { on: ReturnType<typeof vi.fn>; process: ReturnType<typeof vi.fn> };
     end: ReturnType<typeof vi.fn>;
+    sendMessage: ReturnType<typeof vi.fn>;
   };
+  let activeInstanceId: string | undefined;
 
   beforeEach(() => {
     vi.clearAllMocks();
     socket = {
       ev: { on: vi.fn(), process: vi.fn() },
       end: vi.fn(),
+      sendMessage: vi.fn(),
     };
     mocks.makeWASocket.mockReturnValue(socket);
   });
 
   afterEach(() => {
     vi.unstubAllEnvs();
+    if (activeInstanceId) {
+      sqlite.prepare("DELETE FROM instances WHERE id = ?").run(activeInstanceId);
+      activeInstanceId = undefined;
+    }
   });
 
   it("defaults to false when unset", async () => {
@@ -70,6 +79,58 @@ describe("Baileys markOnlineOnConnect configuration", () => {
     expect(mocks.makeWASocket).toHaveBeenCalledWith(
       expect.objectContaining({ markOnlineOnConnect: true }),
     );
+    await adapter.disconnect();
+  });
+
+  it("loads stored event content for Baileys retries and filters by remote JID", async () => {
+    const instanceId = `stored-message-${randomUUID()}`;
+    activeInstanceId = instanceId;
+    sqlite
+      .prepare(
+        "INSERT INTO instances (id, name, channel, status, created_at, updated_at) VALUES (?, ?, 'baileys', 'connected', 1, 1)",
+      )
+      .run(instanceId, "Stored message test");
+
+    const messageSecret = Buffer.from([1, 2, 3, 4]);
+    const outgoing = {
+      key: { id: "sent-event", remoteJid: "5500000000001@s.whatsapp.net", fromMe: true },
+      message: {
+        eventMessage: { name: "Planning", startTime: 1_800_000_000 },
+        messageContextInfo: { messageSecret },
+      },
+      messageTimestamp: 1_800_000_000,
+    };
+    socket.sendMessage.mockResolvedValue(outgoing);
+    const adapter = new BaileysAdapter(instanceId);
+    await adapter.connect();
+    (adapter as unknown as { status: "connected" }).status = "connected";
+    await adapter.sendEvent({
+      to: "5500000000001@s.whatsapp.net",
+      name: "Planning",
+      start: "2027-01-15T08:00:00.000Z",
+    });
+
+    const options = mocks.makeWASocket.mock.calls.at(-1)?.[0] as {
+      getMessage: (key: {
+        id: string;
+        remoteJid?: string;
+      }) => Promise<
+        | { messageContextInfo?: { messageSecret?: Uint8Array }; eventMessage?: { name?: string } }
+        | undefined
+      >;
+    };
+    const restored = await options.getMessage({
+      id: "sent-event",
+      remoteJid: "5500000000001@s.whatsapp.net",
+    });
+
+    expect(restored?.eventMessage?.name).toBe("Planning");
+    expect(restored?.messageContextInfo?.messageSecret).toEqual(messageSecret);
+    await expect(
+      options.getMessage({ id: "sent-event", remoteJid: "5500000000009@s.whatsapp.net" }),
+    ).resolves.toBeUndefined();
+    await expect(options.getMessage({ id: "missing-message" })).resolves.toBeUndefined();
+
     await adapter.disconnect();
   });
 

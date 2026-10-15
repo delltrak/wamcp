@@ -68,6 +68,7 @@ function initializeDatabase(): void {
       timestamp       INTEGER NOT NULL,
       push_name       TEXT,
       raw_data        TEXT,
+      starred         INTEGER NOT NULL DEFAULT 0,
       PRIMARY KEY (instance_id, id)
     );
     CREATE INDEX IF NOT EXISTS idx_messages_chat ON messages(instance_id, chat_id, timestamp DESC);
@@ -139,6 +140,45 @@ function initializeDatabase(): void {
     );
     CREATE INDEX IF NOT EXISTS idx_chats_recent ON chats(instance_id, last_message_at DESC);
 
+    CREATE TABLE IF NOT EXISTS labels (
+      instance_id   TEXT NOT NULL REFERENCES instances(id) ON DELETE CASCADE,
+      label_id      TEXT NOT NULL,
+      name          TEXT NOT NULL,
+      color         INTEGER NOT NULL,
+      deleted       INTEGER NOT NULL DEFAULT 0,
+      predefined_id TEXT,
+      updated_at    INTEGER NOT NULL,
+      PRIMARY KEY (instance_id, label_id)
+    );
+
+    CREATE TABLE IF NOT EXISTS label_associations (
+      instance_id      TEXT NOT NULL REFERENCES instances(id) ON DELETE CASCADE,
+      label_id         TEXT NOT NULL,
+      association_type TEXT NOT NULL,
+      chat_id          TEXT NOT NULL,
+      message_id       TEXT NOT NULL DEFAULT '',
+      updated_at       INTEGER NOT NULL,
+      PRIMARY KEY (instance_id, label_id, association_type, chat_id, message_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_label_associations_chat
+      ON label_associations(instance_id, chat_id, association_type);
+    CREATE INDEX IF NOT EXISTS idx_label_associations_message
+      ON label_associations(instance_id, chat_id, message_id, association_type);
+
+    CREATE TABLE IF NOT EXISTS event_responses (
+      instance_id       TEXT NOT NULL REFERENCES instances(id) ON DELETE CASCADE,
+      event_message_id  TEXT NOT NULL,
+      chat_id           TEXT NOT NULL,
+      responder         TEXT NOT NULL,
+      response          TEXT NOT NULL,
+      timestamp         INTEGER,
+      response_message_id TEXT,
+      raw_data          TEXT,
+      PRIMARY KEY (instance_id, event_message_id, responder)
+    );
+    CREATE INDEX IF NOT EXISTS idx_event_responses_chat
+      ON event_responses(instance_id, chat_id, event_message_id);
+
     CREATE TABLE IF NOT EXISTS wa_version_cache (
       id              INTEGER PRIMARY KEY DEFAULT 1,
       version_json    TEXT NOT NULL,
@@ -172,6 +212,12 @@ try {
 
 try {
   sqlite.exec(`ALTER TABLE messages ADD COLUMN push_name TEXT`);
+} catch {
+  // column already exists or table doesn't exist yet — ignore
+}
+
+try {
+  sqlite.exec(`ALTER TABLE messages ADD COLUMN starred INTEGER NOT NULL DEFAULT 0`);
 } catch {
   // column already exists or table doesn't exist yet — ignore
 }
