@@ -130,6 +130,25 @@ function messageContent(msg: WAMessage): MessageRecord | undefined {
   return unwrapMessageContent(msg.message);
 }
 
+/** Read WhatsApp's forwarded marker from the content field that carries contextInfo. */
+export function isMessageForwarded(msg: WAMessage | undefined): boolean {
+  if (!msg) return false;
+  const content = messageContent(msg);
+  if (!content) return false;
+
+  for (const value of Object.values(content)) {
+    const contextInfo = recordAt(asRecord(value), "contextInfo");
+    if (
+      contextInfo?.isForwarded === true ||
+      (typeof contextInfo?.forwardingScore === "number" && contextInfo.forwardingScore > 0)
+    ) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
 function typeName(content: MessageRecord | undefined): string | undefined {
   if (!content) return undefined;
   const baileysType = getContentType(content as WAMessageContent);
@@ -686,6 +705,7 @@ export function normalizeMessagesUpsert(
           ...(details.rawType ? { rawType: details.rawType } : {}),
           quotedMessageId: extractQuotedMessageId(msg),
           isFromMe: msg.key.fromMe ?? false,
+          isForwarded: isMessageForwarded(msg),
         },
       };
     });

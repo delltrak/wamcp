@@ -353,6 +353,7 @@ export interface NormalizedMessageEvent {
     transcription?: string;
     quotedMessageId: string | null;
     isFromMe: boolean;
+    isForwarded?: boolean;
   };
 }
 

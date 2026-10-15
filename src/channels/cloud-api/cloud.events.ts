@@ -25,6 +25,8 @@ interface WebhookContact {
 interface WebhookMessageContext {
   from?: string;
   id?: string;
+  forwarded?: boolean;
+  frequently_forwarded?: boolean;
 }
 
 interface WebhookMessage {
@@ -293,6 +295,8 @@ export function normalizeWebhookPayload(payload: MetaWebhookPayload): Normalized
               ...mediaInfo,
               quotedMessageId: msg.context?.id ?? null,
               isFromMe: false,
+              isForwarded:
+                msg.context?.forwarded === true || msg.context?.frequently_forwarded === true,
             },
           };
 
