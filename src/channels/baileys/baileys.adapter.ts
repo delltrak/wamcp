@@ -157,6 +157,8 @@ const DEFAULT_STATUS_MAX_RECIPIENTS = 256;
 const DEFAULT_APPEND_NOTIFY_WINDOW_HOURS = 24;
 const DEFAULT_APPEND_NOTIFY_MAX_PER_BATCH = 100;
 const DEFAULT_BAILEYS_HEALTH_WATCHDOG_MS = 180_000;
+const BAILEYS_HEALTH_PROBE_TIMEOUT_MS = 20_000;
+const BAILEYS_HEALTH_PROBE_FAILURES_BEFORE_RECONNECT = 2;
 const APPEND_NOTIFY_CLOCK_SKEW_MS = 5 * 60_000;
 const BAILEYS_KEEP_ALIVE_INTERVAL_MS = 25_000;
 const STATUS_BROADCAST_JID = "status@broadcast";
@@ -789,7 +791,7 @@ export class BaileysAdapter implements ChannelAdapter {
   private disconnectedAtMs: number | null = null;
   private lastDisconnectReason: string | null = null;
   private lastDisconnectStatusCode: number | null = null;
-  private lastInboundActivityAtMs = 0;
+  private consecutiveHealthProbeFailures = 0;
 
   constructor(
     private readonly instanceId: string,
@@ -4955,7 +4957,7 @@ export class BaileysAdapter implements ChannelAdapter {
         this.pairingCodeValue = null;
         this.pairingCodeResolver = null;
         this.reconnectAttempt = 0;
-        this.lastInboundActivityAtMs = Date.now();
+        this.consecutiveHealthProbeFailures = 0;
         this.resetHealthWatchdog(sock);
         logger.info({ instanceId: this.instanceId, offlineDurationMs }, "Connected to WhatsApp");
       }
@@ -5003,10 +5005,6 @@ export class BaileysAdapter implements ChannelAdapter {
     sock.ev.on("creds.update", async () => {
       await this.saveCreds?.();
     });
-
-    sock.ws?.on("message", () => this.noteInboundActivity(sock));
-    sock.ws?.on("ping", () => this.noteInboundActivity(sock));
-    sock.ws?.on("pong", () => this.noteInboundActivity(sock));
 
     const resolveLidToPn: ContactPnResolver = async (lid) => {
       try {
@@ -5557,7 +5555,14 @@ export class BaileysAdapter implements ChannelAdapter {
     };
 
     sock.ev.process((events) => {
-      this.noteInboundActivity(sock);
+      if (
+        events["messages.upsert"] ||
+        events["messages.update"] ||
+        events["message-receipt.update"] ||
+        events["presence.update"]
+      ) {
+        this.noteInboundApplicationActivity(sock);
+      }
       const processing = processEvents(events);
       const tracked = processing.catch((error: unknown) => {
         logger.error(
@@ -5646,28 +5651,82 @@ export class BaileysAdapter implements ChannelAdapter {
       this.watchdogTimer = null;
       if (this.status !== "connected" || this.sock !== sock) return;
 
-      const idleMs = Date.now() - this.lastInboundActivityAtMs;
-      if (idleMs < this.healthWatchdogMs) {
+      void this.probeSocketHealth(sock);
+    }, this.healthWatchdogMs);
+  }
+
+  private async probeSocketHealth(sock: WASocket): Promise<void> {
+    if (this.status !== "connected" || this.sock !== sock) return;
+
+    try {
+      const response = await sock.query(
+        {
+          tag: "iq",
+          attrs: {
+            to: "s.whatsapp.net",
+            type: "get",
+            xmlns: "w:p",
+          },
+          content: [{ tag: "ping", attrs: {} }],
+        },
+        BAILEYS_HEALTH_PROBE_TIMEOUT_MS,
+      );
+      if (!response) {
+        throw new Error(
+          `Baileys health probe timed out after ${BAILEYS_HEALTH_PROBE_TIMEOUT_MS}ms`,
+        );
+      }
+
+      if (this.status !== "connected" || this.sock !== sock) return;
+      this.consecutiveHealthProbeFailures = 0;
+      logger.debug({ instanceId: this.instanceId }, "Baileys application health probe succeeded");
+      this.resetHealthWatchdog(sock);
+    } catch (error) {
+      if (this.status !== "connected" || this.sock !== sock) return;
+
+      this.consecutiveHealthProbeFailures += 1;
+      const reason = error instanceof Error ? error.message : String(error);
+      const shouldReconnect =
+        this.consecutiveHealthProbeFailures >= BAILEYS_HEALTH_PROBE_FAILURES_BEFORE_RECONNECT;
+      logger.warn(
+        {
+          instanceId: this.instanceId,
+          reason,
+          consecutiveFailures: this.consecutiveHealthProbeFailures,
+          watchdogMs: this.healthWatchdogMs,
+          probeTimeoutMs: BAILEYS_HEALTH_PROBE_TIMEOUT_MS,
+        },
+        shouldReconnect
+          ? "Ending Baileys socket after consecutive application health probe failures"
+          : "Baileys application health probe failed; retrying",
+      );
+
+      if (!shouldReconnect) {
         this.resetHealthWatchdog(sock);
         return;
       }
 
-      logger.warn(
-        { instanceId: this.instanceId, idleMs, watchdogMs: this.healthWatchdogMs },
-        "Baileys websocket has no inbound activity; ending socket to reconnect",
-      );
       try {
-        sock.end(new Error(`Baileys websocket idle for ${idleMs}ms`));
-      } catch (err) {
-        logger.warn({ err, instanceId: this.instanceId }, "Failed to end idle Baileys socket");
+        void Promise.resolve(
+          sock.end(new Error(`Baileys application health probe failed: ${reason}`)),
+        ).catch((endError: unknown) => {
+          logger.warn(
+            { err: endError, instanceId: this.instanceId },
+            "Failed to end unhealthy Baileys socket",
+          );
+        });
+      } catch (endError) {
+        logger.warn(
+          { err: endError, instanceId: this.instanceId },
+          "Failed to end unhealthy Baileys socket",
+        );
       }
-    }, this.healthWatchdogMs);
+    }
   }
 
-  private noteInboundActivity(sock: WASocket): void {
+  private noteInboundApplicationActivity(sock: WASocket): void {
     if (this.status !== "connected" || this.sock !== sock) return;
-    this.lastInboundActivityAtMs = Date.now();
-    this.resetHealthWatchdog(sock);
+    this.consecutiveHealthProbeFailures = 0;
   }
 
   private getAppendNotifyWatermark(now: number): number {

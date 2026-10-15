@@ -208,7 +208,7 @@ describe("Baileys offline append notifications", () => {
     }
   });
 
-  it("ends an idle socket and enters normal reconnect scheduling without saving credentials", async () => {
+  it("ignores raw websocket frames and reconnects after consecutive failed application probes", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-10-15T12:00:00.000Z"));
     const oldWatchdog = process.env.WA_BAILEYS_HEALTH_WATCHDOG_MS;
@@ -216,8 +216,12 @@ describe("Baileys offline append notifications", () => {
     const { instanceId, adapter } = createFixture();
 
     const listeners = new Map<string, (value: unknown) => void>();
+    const websocketListeners = new Map<string, Array<(...args: unknown[]) => void>>();
     let processEvents: ((events: Partial<BaileysEventMap>) => Promise<void> | void) | undefined;
-    const socketEnd = vi.fn();
+    const query = vi.fn(async () => {
+      throw new Error("simulated IQ timeout");
+    });
+    const socketEnd = vi.fn(async () => {});
     const socket = {
       ev: {
         on: vi.fn((event: string, handler: (value: unknown) => void) => {
@@ -227,7 +231,16 @@ describe("Baileys offline append notifications", () => {
           processEvents = handler;
         }),
       },
+      ws: {
+        on: vi.fn((event: string, handler: (...args: unknown[]) => void) => {
+          websocketListeners.set(event, [...(websocketListeners.get(event) ?? []), handler]);
+        }),
+      },
+      query,
       end: socketEnd,
+      get authState() {
+        throw new Error("health monitoring must not access auth state");
+      },
     } as unknown as WASocket;
     const internals = adapter as unknown as AdapterInternals;
     internals.sock = socket;
@@ -240,14 +253,48 @@ describe("Baileys offline append notifications", () => {
 
     try {
       listeners.get("connection.update")?.({ connection: "open" });
-      await vi.advanceTimersByTimeAsync(800);
-      await processEvents?.({});
-      await vi.advanceTimersByTimeAsync(999);
+      for (let elapsed = 0; elapsed < 1000; elapsed += 100) {
+        for (const event of ["message", "ping", "pong"]) {
+          for (const handler of websocketListeners.get(event) ?? []) handler();
+        }
+        await vi.advanceTimersByTimeAsync(100);
+      }
+
+      expect(query).toHaveBeenCalledTimes(1);
+      expect(query).toHaveBeenCalledWith(
+        {
+          tag: "iq",
+          attrs: { to: "s.whatsapp.net", type: "get", xmlns: "w:p" },
+          content: [{ tag: "ping", attrs: {} }],
+        },
+        20_000,
+      );
       expect(socketEnd).not.toHaveBeenCalled();
 
-      await vi.advanceTimersByTimeAsync(1);
+      await processEvents?.({
+        "presence.update": { id: CHAT_JID, presences: {} },
+      } as Partial<BaileysEventMap>);
+      for (let elapsed = 0; elapsed < 1000; elapsed += 100) {
+        for (const event of ["message", "ping", "pong"]) {
+          for (const handler of websocketListeners.get(event) ?? []) handler();
+        }
+        await vi.advanceTimersByTimeAsync(100);
+      }
+
+      expect(query).toHaveBeenCalledTimes(2);
+      expect(socketEnd).not.toHaveBeenCalled();
+
+      for (let elapsed = 0; elapsed < 1000; elapsed += 100) {
+        for (const event of ["message", "ping", "pong"]) {
+          for (const handler of websocketListeners.get(event) ?? []) handler();
+        }
+        await vi.advanceTimersByTimeAsync(100);
+      }
+
+      expect(query).toHaveBeenCalledTimes(3);
       expect(socketEnd).toHaveBeenCalledTimes(1);
       expect(socketEnd.mock.calls[0]?.[0]).toBeInstanceOf(Error);
+      expect(socketEnd.mock.calls[0]?.[0]?.message).toContain("simulated IQ timeout");
 
       listeners.get("connection.update")?.({
         connection: "close",
@@ -258,6 +305,54 @@ describe("Baileys offline append notifications", () => {
         expect.objectContaining({ status: "close", instanceId }),
       );
       expect(saveCreds).not.toHaveBeenCalled();
+    } finally {
+      deleteInstance(instanceId);
+      vi.clearAllTimers();
+      if (oldWatchdog === undefined) delete process.env.WA_BAILEYS_HEALTH_WATCHDOG_MS;
+      else process.env.WA_BAILEYS_HEALTH_WATCHDOG_MS = oldWatchdog;
+    }
+  });
+
+  it("keeps a quiet socket connected when application probes succeed", async () => {
+    vi.useFakeTimers();
+    const oldWatchdog = process.env.WA_BAILEYS_HEALTH_WATCHDOG_MS;
+    process.env.WA_BAILEYS_HEALTH_WATCHDOG_MS = "1000";
+    const { instanceId, adapter } = createFixture();
+
+    const listeners = new Map<string, (value: unknown) => void>();
+    let processEvents: ((events: Partial<BaileysEventMap>) => Promise<void> | void) | undefined;
+    const query = vi.fn(async () => ({ tag: "iq", attrs: { type: "result" } }));
+    const socketEnd = vi.fn(async () => {});
+    const socket = {
+      ev: {
+        on: vi.fn((event: string, handler: (value: unknown) => void) => {
+          listeners.set(event, handler);
+        }),
+        process: vi.fn((handler: (events: Partial<BaileysEventMap>) => Promise<void> | void) => {
+          processEvents = handler;
+        }),
+      },
+      query,
+      end: socketEnd,
+      get authState() {
+        throw new Error("health monitoring must not access auth state");
+      },
+    } as unknown as WASocket;
+    const internals = adapter as unknown as AdapterInternals;
+    internals.sock = socket;
+    internals.status = "connected";
+    const saveCreds = vi.fn(async () => {});
+    internals.saveCreds = saveCreds;
+    internals.bindEvents(socket);
+
+    try {
+      listeners.get("connection.update")?.({ connection: "open" });
+      await vi.advanceTimersByTimeAsync(3000);
+
+      expect(query).toHaveBeenCalledTimes(3);
+      expect(socketEnd).not.toHaveBeenCalled();
+      expect(saveCreds).not.toHaveBeenCalled();
+      expect(processEvents).toBeDefined();
     } finally {
       deleteInstance(instanceId);
       vi.clearAllTimers();
