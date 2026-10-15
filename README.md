@@ -288,8 +288,8 @@ WA MCP exposes **118 tools** across 15 domains. All tools use the `wa_` prefix.
 | `wa_group_handle_request`      | Approve / reject join request |
 | `wa_group_update_picture`      | Set group picture (Baileys)   |
 | `wa_group_remove_picture`      | Remove group picture (Baileys) |
-| `wa_group_join_approval_mode`  | Set join-request approval mode (Baileys) |
-| `wa_group_member_add_mode`     | Set who can add members (Baileys) |
+| `wa_group_join_approval_mode`  | Set join-request approval mode (gated write) |
+| `wa_group_member_add_mode`     | Set who can add members (gated write) |
 
 </details>
 
@@ -349,12 +349,12 @@ this operation.
 | `wa_newsletter_follow`   | Follow a newsletter   |
 | `wa_newsletter_unfollow` | Unfollow a newsletter |
 | `wa_newsletter_send`     | Send to newsletter    |
-| `wa_create_newsletter` | Create a Channel (Baileys) |
+| `wa_create_newsletter` | Create a Channel (gated write) |
 | `wa_get_newsletter_metadata` | Read Channel metadata (Baileys) |
-| `wa_newsletter_update_name` | Update Channel name (Baileys) |
-| `wa_newsletter_update_description` | Update Channel description (Baileys) |
-| `wa_newsletter_update_picture` | Update Channel picture (Baileys) |
-| `wa_newsletter_react` | React to a Channel post (Baileys) |
+| `wa_newsletter_update_name` | Update Channel name (gated write) |
+| `wa_newsletter_update_description` | Update Channel description (gated write) |
+| `wa_newsletter_update_picture` | Update Channel picture (gated write) |
+| `wa_newsletter_react` | React to a Channel post (gated write) |
 | `wa_newsletter_list_posts` | List Channel posts (Baileys) |
 
 </details>
@@ -367,16 +367,16 @@ this operation.
 | `wa_create_quick_reply` | Create a Business quick reply (gated app-state write) |
 | `wa_edit_quick_reply` | Edit a Business quick reply (gated app-state write) |
 | `wa_delete_quick_reply` | Delete a Business quick reply (gated app-state write) |
-| `wa_create_community` | Create a community (Baileys) |
+| `wa_create_community` | Create a community (gated write) |
 | `wa_list_communities` | List communities (Baileys) |
 | `wa_get_community_details` | Get community metadata (Baileys) |
-| `wa_community_link_group` / `wa_community_unlink_group` | Link or unlink a group (Baileys) |
-| `wa_leave_community` | Leave a community (Baileys) |
+| `wa_community_link_group` / `wa_community_unlink_group` | Link or unlink a group (gated write) |
+| `wa_leave_community` | Leave a community (gated write) |
 | `wa_get_catalog` | List catalog products (Baileys) |
 | `wa_get_catalog_collections` | List catalog collections (Baileys) |
-| `wa_create_catalog_product` | Create a catalog product (Baileys) |
-| `wa_update_catalog_product` | Update a catalog product (Baileys) |
-| `wa_delete_catalog_products` | Delete catalog products (Baileys) |
+| `wa_create_catalog_product` | Create a catalog product (gated write) |
+| `wa_update_catalog_product` | Update a catalog product (gated write) |
+| `wa_delete_catalog_products` | Delete catalog products (gated write) |
 | `wa_get_order_details` | Read order details (Baileys) |
 
 </details>
@@ -607,7 +607,7 @@ Copy `.env.example` to `.env` and configure:
 | `WA_CLOUD_RATE_LIMIT`       | `80`                     | Messages/min per Cloud API instance      |
 | `WA_MESSAGE_RETENTION_DAYS` | `30`                     | Auto-delete old messages                 |
 | `WA_AUTO_RECONNECT`         | `true`                   | Auto-reconnect on disconnect             |
-| `WA_APP_STATE_WRITES_ENABLED` | `false`                 | Enable Baileys app-state writes; these changes can remove the linked device |
+| `WA_APP_STATE_WRITES_ENABLED` | `false`                 | Enable gated Baileys account, server, and app-state changes; these changes can remove the linked device |
 | `WA_MARK_ONLINE_ON_CONNECT` | `false`                  | Mark the Baileys account online when its socket connects |
 | `WA_STATUS_MAX_RECIPIENTS`  | `256`                    | Maximum recipients per Baileys status; excess recipients are truncated and reported |
 | `WA_AUTO_READ`              | `false`                  | `on_fetch` marks incoming messages read when fetched; `on_receive` marks them read on arrival |
@@ -679,17 +679,20 @@ responses; receipt failures are logged.
 `WA_APP_STATE_WRITES_ENABLED` accepts `true` or `false` and defaults to `false`. When disabled,
 Baileys blocks `wa_archive_chat`, `wa_pin_chat`, `wa_mute_chat`, `wa_delete_chat`, `wa_clear_chat`,
 `wa_mark_chat_unread`, `wa_star_message`, `wa_create_label`, `wa_edit_label`, `wa_delete_label`,
-`wa_add_chat_label`, `wa_remove_chat_label`, `wa_add_message_label`, `wa_remove_message_label`, and
-`wa_update_profile_name`, `wa_create_quick_reply`, `wa_edit_quick_reply`, and `wa_delete_quick_reply`
-before sending them to WhatsApp. Quick reply writes call Baileys `addOrEditQuickReply` or
-`removeQuickReply`, which use `chatModify` and `appPatch`; these app-state changes can get the linked
-device removed. Set the variable to `true` only if you accept that risk. This does not disable read
-receipts or app-state reads and resyncs.
-
-Other issue #74 operations use non-app-state protocol paths: private disappearing timers use
-`sendMessage` control messages; blocklist/About are read queries; community actions use `w:g2` IQs;
-Channel metadata, posts, and reactions use newsletter/MEX queries or message nodes; group approval
-modes and catalog operations use IQ/MEX queries; PTV uses a regular video message with `ptv: true`.
+`wa_add_chat_label`, `wa_remove_chat_label`, `wa_add_message_label`, `wa_remove_message_label`,
+`wa_update_profile_name`, `wa_create_quick_reply`, `wa_edit_quick_reply`, and
+`wa_delete_quick_reply`, plus
+`wa_create_community`, `wa_community_link_group`, `wa_community_unlink_group`, `wa_leave_community`,
+`wa_create_newsletter`, `wa_newsletter_update_name`, `wa_newsletter_update_description`,
+`wa_newsletter_update_picture`, `wa_newsletter_react`, `wa_create_catalog_product`,
+`wa_update_catalog_product`, `wa_delete_catalog_products`, `wa_group_join_approval_mode`, and
+`wa_group_member_add_mode` before they reach the socket. The flag covers account and server changes
+even when Baileys sends them through IQ or MEX queries instead of an app-state patch. Quick reply
+writes call Baileys `addOrEditQuickReply` or `removeQuickReply`, which use `chatModify` and
+`appPatch`; those changes can get the linked device removed. Set the variable to `true` only if you
+accept that risk. Read-only metadata, catalog, collection, order, blocklist, and About calls remain
+available. Normal message sends, including PTV, and private disappearing timers sent through
+`sendMessage` are not gated. Read receipts and app-state reads/resyncs are also unaffected.
 
 Baileys status stories go to the account's own normalized JID and known individual contacts by
 default. Each status tool accepts an optional `statusJidList` of phone numbers or individual JIDs

@@ -1,5 +1,5 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
-import type { WASocket } from "@whiskeysockets/baileys";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { proto, type BinaryNode, type WASocket } from "@whiskeysockets/baileys";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { BaileysAdapter } from "../src/channels/baileys/baileys.adapter.js";
@@ -26,9 +26,77 @@ const CONTACT_JID = "5511999990000@s.whatsapp.net";
 const COMMUNITY_JID = "120363000000000000@g.us";
 const GROUP_JID = "120363000000000001@g.us";
 const NEWSLETTER_JID = "123456789012345@newsletter";
+const initialAppStateWritesEnabled = process.env.WA_APP_STATE_WRITES_ENABLED;
+
+function makeNewsletterFetchResponse(): BinaryNode {
+  return {
+    tag: "iq",
+    attrs: { id: "newsletter-query-id", type: "result" },
+    content: [
+      {
+        tag: "messages",
+        attrs: {},
+        content: [
+          {
+            tag: "message",
+            attrs: {
+              id: "message-newest",
+              server_id: "102",
+              t: "1700000060",
+              type: "text",
+            },
+            content: [
+              {
+                tag: "plaintext",
+                attrs: {},
+                content: proto.Message.encode({
+                  extendedTextMessage: { text: "Newest channel update" },
+                }).finish(),
+              },
+              { tag: "views_count", attrs: { count: "42" } },
+              {
+                tag: "reactions",
+                attrs: {},
+                content: [
+                  { tag: "reaction", attrs: { code: "👍", count: "3" } },
+                  { tag: "reaction", attrs: { code: "❤️", count: "5" } },
+                ],
+              },
+            ],
+          },
+          {
+            tag: "message",
+            attrs: {
+              id: "message-oldest",
+              server_id: "101",
+              t: "1700000000",
+              type: "image",
+            },
+            content: [
+              {
+                tag: "plaintext",
+                attrs: {},
+                content: proto.Message.encode({
+                  imageMessage: { caption: "Older image caption" },
+                }).finish(),
+              },
+              { tag: "views_count", attrs: { count: "7" } },
+            ],
+          },
+        ],
+      },
+    ],
+  };
+}
 
 afterEach(() => {
   vi.restoreAllMocks();
+  if (initialAppStateWritesEnabled === undefined) delete process.env.WA_APP_STATE_WRITES_ENABLED;
+  else process.env.WA_APP_STATE_WRITES_ENABLED = initialAppStateWritesEnabled;
+});
+
+beforeEach(() => {
+  process.env.WA_APP_STATE_WRITES_ENABLED = "true";
 });
 
 function makeSocket(overrides: Record<string, unknown> = {}) {
@@ -59,7 +127,9 @@ function makeSocket(overrides: Record<string, unknown> = {}) {
     newsletterUpdateDescription: vi.fn(async () => undefined),
     newsletterUpdatePicture: vi.fn(async () => undefined),
     newsletterReactMessage: vi.fn(async () => undefined),
-    newsletterFetchMessages: vi.fn(async () => ({ messages: [{ id: "post-1" }] })),
+    newsletterFetchMessages: vi.fn(async () => makeNewsletterFetchResponse()),
+    generateMessageTag: vi.fn(() => "newsletter-query-id"),
+    query: vi.fn(async () => makeNewsletterFetchResponse()),
     getCatalog: vi.fn(async () => ({ products: [{ id: "product-1" }], nextPageCursor: "next" })),
     getCollections: vi.fn(async () => ({ collections: [{ id: "collection-1", name: "Set" }] })),
     productCreate: vi.fn(async () => ({ id: "product-created", name: "Item" })),
@@ -126,6 +196,104 @@ function resultData(result: ToolResult): unknown {
   return JSON.parse(result.content[0]?.text ?? "null");
 }
 
+const CATALOG_PRODUCT_INPUT = {
+  name: "Item",
+  retailerId: "item-1",
+  url: "https://shop.example/item-1",
+  description: "Generic item",
+  price: 10,
+  currency: "USD",
+  images: [Buffer.from("image").toString("base64")],
+};
+
+const GATED_WRITE_CASES = [
+  {
+    toolName: "wa_create_community",
+    params: { name: "Community", description: "About" },
+    run: (adapter: BaileysAdapter) => adapter.createCommunity("Community", "About"),
+    socketMethod: "communityCreate",
+  },
+  {
+    toolName: "wa_community_link_group",
+    params: { groupId: GROUP_JID, communityId: COMMUNITY_JID },
+    run: (adapter: BaileysAdapter) => adapter.linkGroupToCommunity(GROUP_JID, COMMUNITY_JID),
+    socketMethod: "communityLinkGroup",
+  },
+  {
+    toolName: "wa_community_unlink_group",
+    params: { groupId: GROUP_JID, communityId: COMMUNITY_JID },
+    run: (adapter: BaileysAdapter) => adapter.unlinkGroupFromCommunity(GROUP_JID, COMMUNITY_JID),
+    socketMethod: "communityUnlinkGroup",
+  },
+  {
+    toolName: "wa_leave_community",
+    params: { communityId: COMMUNITY_JID },
+    run: (adapter: BaileysAdapter) => adapter.leaveCommunity(COMMUNITY_JID),
+    socketMethod: "communityLeave",
+  },
+  {
+    toolName: "wa_create_newsletter",
+    params: { name: "Channel", description: "Bio" },
+    run: (adapter: BaileysAdapter) => adapter.createNewsletter("Channel", "Bio"),
+    socketMethod: "newsletterCreate",
+  },
+  {
+    toolName: "wa_newsletter_update_name",
+    params: { jid: NEWSLETTER_JID, name: "Updated" },
+    run: (adapter: BaileysAdapter) => adapter.updateNewsletterName(NEWSLETTER_JID, "Updated"),
+    socketMethod: "newsletterUpdateName",
+  },
+  {
+    toolName: "wa_newsletter_update_description",
+    params: { jid: NEWSLETTER_JID, description: "Updated description" },
+    run: (adapter: BaileysAdapter) =>
+      adapter.updateNewsletterDescription(NEWSLETTER_JID, "Updated description"),
+    socketMethod: "newsletterUpdateDescription",
+  },
+  {
+    toolName: "wa_newsletter_update_picture",
+    params: { jid: NEWSLETTER_JID, image: "aW1hZ2U=" },
+    run: (adapter: BaileysAdapter) => adapter.updateNewsletterPicture(NEWSLETTER_JID, "aW1hZ2U="),
+    socketMethod: "newsletterUpdatePicture",
+  },
+  {
+    toolName: "wa_newsletter_react",
+    params: { jid: NEWSLETTER_JID, serverId: "102", reaction: "👍" },
+    run: (adapter: BaileysAdapter) => adapter.reactToNewsletterMessage(NEWSLETTER_JID, "102", "👍"),
+    socketMethod: "newsletterReactMessage",
+  },
+  {
+    toolName: "wa_create_catalog_product",
+    params: CATALOG_PRODUCT_INPUT,
+    run: (adapter: BaileysAdapter) => adapter.createProduct(CATALOG_PRODUCT_INPUT),
+    socketMethod: "productCreate",
+  },
+  {
+    toolName: "wa_update_catalog_product",
+    params: { productId: "product-1", ...CATALOG_PRODUCT_INPUT },
+    run: (adapter: BaileysAdapter) => adapter.updateProduct("product-1", CATALOG_PRODUCT_INPUT),
+    socketMethod: "productUpdate",
+  },
+  {
+    toolName: "wa_delete_catalog_products",
+    params: { productIds: ["product-1"] },
+    run: (adapter: BaileysAdapter) => adapter.deleteProducts(["product-1"]),
+    socketMethod: "productDelete",
+  },
+  {
+    toolName: "wa_group_join_approval_mode",
+    params: { groupId: GROUP_JID, mode: "on" },
+    run: (adapter: BaileysAdapter) => adapter.setGroupJoinApprovalMode(GROUP_JID, "on"),
+    socketMethod: "groupJoinApprovalMode",
+  },
+  {
+    toolName: "wa_group_member_add_mode",
+    params: { groupId: GROUP_JID, mode: "admin_add" },
+    run: (adapter: BaileysAdapter) => adapter.setGroupMemberAddMode(GROUP_JID, "admin_add"),
+    socketMethod: "groupMemberAddMode",
+  },
+] as const;
+
 describe("issue #74 tools", () => {
   it("sets private disappearing-message durations with sendMessage protocol updates", async () => {
     const socket = makeSocket();
@@ -162,6 +330,36 @@ describe("issue #74 tools", () => {
     });
     expect(socket.fetchBlocklist).toHaveBeenCalledOnce();
     expect(socket.fetchStatus).toHaveBeenCalledWith(CONTACT_JID);
+  });
+
+  it("rejects malformed business identifiers and tokens before socket access", async () => {
+    const socket = makeSocket();
+    const tools = registerTools(makeAdapter(socket));
+
+    expect(
+      (await invoke(tools, "wa_get_newsletter_metadata", { type: "jid", key: "bad" })).isError,
+    ).toBe(true);
+    await expect(
+      invoke(tools, "wa_newsletter_react", {
+        jid: NEWSLETTER_JID,
+        serverId: "post-1",
+        reaction: "👍",
+      }),
+    ).rejects.toThrow();
+    await expect(
+      invoke(tools, "wa_newsletter_list_posts", { jid: NEWSLETTER_JID, after: 2.5 }),
+    ).rejects.toThrow();
+    await expect(invoke(tools, "wa_get_catalog", { jid: "not-a-jid" })).rejects.toThrow();
+    await expect(
+      invoke(tools, "wa_get_order_details", { orderId: "order-1", tokenBase64: "not a token" }),
+    ).rejects.toThrow();
+
+    expect(socket.newsletterMetadata).not.toHaveBeenCalled();
+    expect(socket.newsletterReactMessage).not.toHaveBeenCalled();
+    expect(socket.newsletterFetchMessages).not.toHaveBeenCalled();
+    expect(socket.query).not.toHaveBeenCalled();
+    expect(socket.getCatalog).not.toHaveBeenCalled();
+    expect(socket.getOrderDetails).not.toHaveBeenCalled();
   });
 
   it("creates, lists, details, links, unlinks, and leaves communities", async () => {
@@ -223,12 +421,18 @@ describe("issue #74 tools", () => {
     });
     await invoke(tools, "wa_newsletter_react", {
       jid: NEWSLETTER_JID,
-      serverId: "post-1",
+      serverId: "102",
       reaction: "👍",
     });
     expect(
       resultData(await invoke(tools, "wa_newsletter_list_posts", { jid: NEWSLETTER_JID })),
-    ).toMatchObject({ messages: [{ id: "post-1" }] });
+    ).toMatchObject({
+      posts: [
+        { id: "message-newest", serverId: "102", text: "Newest channel update" },
+        { id: "message-oldest", serverId: "101", text: "Older image caption" },
+      ],
+      pagination: { after: 102 },
+    });
 
     expect(socket.newsletterCreate).toHaveBeenCalledWith("Channel", "Bio");
     expect(socket.newsletterMetadata).toHaveBeenCalledWith("jid", NEWSLETTER_JID);
@@ -241,8 +445,61 @@ describe("issue #74 tools", () => {
       NEWSLETTER_JID,
       Buffer.from("jpeg"),
     );
-    expect(socket.newsletterReactMessage).toHaveBeenCalledWith(NEWSLETTER_JID, "post-1", "👍");
+    expect(socket.newsletterReactMessage).toHaveBeenCalledWith(NEWSLETTER_JID, "102", "👍");
     expect(socket.newsletterFetchMessages).toHaveBeenCalledWith(NEWSLETTER_JID, 20, 0, 0);
+  });
+
+  it("parses Channel posts from a BinaryNode IQ into JSON-safe content and cursors", async () => {
+    const socket = makeSocket();
+    const tools = registerTools(makeAdapter(socket));
+
+    const postsPage = resultData(
+      await invoke(tools, "wa_newsletter_list_posts", {
+        jid: NEWSLETTER_JID,
+        since: 1_699_999_000,
+        after: 101,
+      }),
+    ) as {
+      posts: Array<Record<string, unknown>>;
+      pagination: Record<string, unknown>;
+    };
+
+    expect(postsPage.posts).toEqual([
+      {
+        id: "message-newest",
+        serverId: "102",
+        timestamp: 1_700_000_060,
+        type: "text",
+        text: "Newest channel update",
+        views: 42,
+        reactions: [
+          { code: "👍", count: 3 },
+          { code: "❤️", count: 5 },
+        ],
+      },
+      {
+        id: "message-oldest",
+        serverId: "101",
+        timestamp: 1_700_000_000,
+        type: "image",
+        text: "Older image caption",
+        views: 7,
+        reactions: [],
+      },
+    ]);
+    expect(postsPage.pagination).toEqual({
+      oldestServerId: "101",
+      newestServerId: "102",
+      after: 102,
+    });
+    expect(JSON.stringify(postsPage)).not.toContain('"tag":"iq"');
+    expect(JSON.stringify(postsPage)).not.toContain('"type":"Buffer"');
+    expect(socket.newsletterFetchMessages).toHaveBeenCalledWith(
+      NEWSLETTER_JID,
+      20,
+      1_699_999_000,
+      101,
+    );
   });
 
   it("sets group join approval and member-add modes", async () => {
@@ -281,7 +538,10 @@ describe("issue #74 tools", () => {
     ).toEqual({ deleted: 1 });
     expect(
       resultData(
-        await invoke(tools, "wa_get_order_details", { orderId: "order-1", tokenBase64: "token" }),
+        await invoke(tools, "wa_get_order_details", {
+          orderId: "order-1",
+          tokenBase64: "dG9rZW4=",
+        }),
       ),
     ).toMatchObject({ price: { total: 10 } });
 
@@ -299,7 +559,7 @@ describe("issue #74 tools", () => {
       expect.objectContaining({ images: [Buffer.from("image")] }),
     );
     expect(socket.productDelete).toHaveBeenCalledWith(["product-1"]);
-    expect(socket.getOrderDetails).toHaveBeenCalledWith("order-1", "token");
+    expect(socket.getOrderDetails).toHaveBeenCalledWith("order-1", "dG9rZW4=");
   });
 
   it("creates, edits, and deletes quick replies when app-state writes are enabled", async () => {
@@ -332,6 +592,62 @@ describe("issue #74 tools", () => {
     }
   });
 
+  it.each(GATED_WRITE_CASES)(
+    "blocks $toolName before socket access when account/server writes are disabled",
+    async ({ toolName, params, run, socketMethod }) => {
+      const previous = process.env.WA_APP_STATE_WRITES_ENABLED;
+      delete process.env.WA_APP_STATE_WRITES_ENABLED;
+      try {
+        vi.spyOn(MediaService.prototype, "prepareGroupProfilePicture").mockResolvedValue(
+          Buffer.from("jpeg"),
+        );
+        vi.spyOn(MediaService.prototype, "getMediaBuffer").mockResolvedValue(Buffer.from("image"));
+
+        const socket = makeSocket();
+        const adapter = makeAdapter(socket);
+        await expect(run(adapter)).rejects.toThrow(
+          "WhatsApp account, server, and app-state writes are disabled",
+        );
+        expect(socket[socketMethod]).not.toHaveBeenCalled();
+
+        const result = await invoke(registerTools(adapter), toolName, params);
+        expect(result.isError).toBe(true);
+        expect(socket[socketMethod]).not.toHaveBeenCalled();
+        if (toolName === "wa_newsletter_update_picture") {
+          expect(MediaService.prototype.prepareGroupProfilePicture).not.toHaveBeenCalled();
+        }
+        if (toolName === "wa_create_catalog_product" || toolName === "wa_update_catalog_product") {
+          expect(MediaService.prototype.getMediaBuffer).not.toHaveBeenCalled();
+        }
+      } finally {
+        if (previous === undefined) delete process.env.WA_APP_STATE_WRITES_ENABLED;
+        else process.env.WA_APP_STATE_WRITES_ENABLED = previous;
+      }
+    },
+  );
+
+  it("allows all new account/server writes through when enabled", async () => {
+    const previous = process.env.WA_APP_STATE_WRITES_ENABLED;
+    process.env.WA_APP_STATE_WRITES_ENABLED = "true";
+    try {
+      vi.spyOn(MediaService.prototype, "prepareGroupProfilePicture").mockResolvedValue(
+        Buffer.from("jpeg"),
+      );
+      vi.spyOn(MediaService.prototype, "getMediaBuffer").mockResolvedValue(Buffer.from("image"));
+      const socket = makeSocket();
+      const tools = registerTools(makeAdapter(socket));
+
+      for (const { toolName, params, socketMethod } of GATED_WRITE_CASES) {
+        const result = await invoke(tools, toolName, params);
+        expect(result.isError).toBeUndefined();
+        expect(socket[socketMethod]).toHaveBeenCalled();
+      }
+    } finally {
+      if (previous === undefined) delete process.env.WA_APP_STATE_WRITES_ENABLED;
+      else process.env.WA_APP_STATE_WRITES_ENABLED = previous;
+    }
+  });
+
   it.each([
     ["wa_create_quick_reply", "createQuickReply", { shortcut: "hours", message: "Open" }],
     [
@@ -349,7 +665,7 @@ describe("issue #74 tools", () => {
         const socket = makeSocket();
         const adapter = makeAdapter(socket);
         await expect(adapter[method](params as never)).rejects.toThrow(
-          "WhatsApp app-state changes are disabled",
+          "WhatsApp account, server, and app-state writes are disabled",
         );
         expect(socket.addOrEditQuickReply).not.toHaveBeenCalled();
         expect(socket.removeQuickReply).not.toHaveBeenCalled();

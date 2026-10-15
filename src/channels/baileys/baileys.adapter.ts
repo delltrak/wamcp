@@ -28,6 +28,7 @@ import makeWASocket, {
   type Product,
   type ProductCreate,
   type ProductUpdate,
+  type BinaryNode,
   jidNormalizedUser,
   ALL_WA_PATCH_NAMES,
 } from "@whiskeysockets/baileys";
@@ -68,6 +69,8 @@ import type {
   NormalizedLabelUpdateEvent,
   CatalogProductCreateInput,
   CatalogProductUpdateInput,
+  NewsletterPost,
+  NewsletterPostsPage,
 } from "../../types/channel.types.js";
 import { useSqliteAuthState, clearAuthState } from "./baileys.auth.js";
 import { normalizePrivacySettings } from "./privacy.js";
@@ -132,7 +135,175 @@ const mediaService = new MediaService();
 const DEFAULT_STATUS_MAX_RECIPIENTS = 256;
 const STATUS_BROADCAST_JID = "status@broadcast";
 const APP_STATE_WRITES_DISABLED_ERROR =
-  "WhatsApp app-state changes are disabled because they can get this linked device removed (see issue #71). Set WA_APP_STATE_WRITES_ENABLED=true to enable at your own risk.";
+  "WhatsApp account, server, and app-state writes are disabled because changes can get this linked device removed (see issue #71). Set WA_APP_STATE_WRITES_ENABLED=true to enable at your own risk.";
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
+}
+
+function isBinaryNode(value: unknown): value is BinaryNode {
+  if (!isRecord(value) || typeof value.tag !== "string" || !isRecord(value.attrs)) return false;
+  const content = value.content;
+  return (
+    content === undefined ||
+    typeof content === "string" ||
+    content instanceof Uint8Array ||
+    Array.isArray(content)
+  );
+}
+
+function binaryNodeChildren(node: BinaryNode, tag?: string): BinaryNode[] {
+  if (!Array.isArray(node.content)) return [];
+  return node.content.filter(
+    (child): child is BinaryNode => isBinaryNode(child) && (tag === undefined || child.tag === tag),
+  );
+}
+
+function findBinaryNode(node: BinaryNode, tag: string): BinaryNode | undefined {
+  if (node.tag === tag) return node;
+  for (const child of binaryNodeChildren(node)) {
+    const match = findBinaryNode(child, tag);
+    if (match) return match;
+  }
+  return undefined;
+}
+
+function findBinaryNodes(node: BinaryNode, tag: string): BinaryNode[] {
+  const matches: BinaryNode[] = node.tag === tag ? [node] : [];
+  for (const child of binaryNodeChildren(node)) matches.push(...findBinaryNodes(child, tag));
+  return matches;
+}
+
+function parseNodeInteger(value: string | undefined): number | null {
+  if (!value || !/^\d+$/.test(value)) return null;
+  const parsed = Number(value);
+  return Number.isSafeInteger(parsed) ? parsed : null;
+}
+
+function decodedNewsletterMessage(content: string | Uint8Array | undefined): {
+  type: string | null;
+  text: string | null;
+} {
+  if (content === undefined) return { type: null, text: null };
+  try {
+    const bytes =
+      typeof content === "string" ? Buffer.from(content, "binary") : Buffer.from(content);
+    let message = proto.Message.decode(bytes).toJSON() as Record<string, unknown>;
+    const wrappers = [
+      "ephemeralMessage",
+      "viewOnceMessage",
+      "viewOnceMessageV2",
+      "viewOnceMessageV2Extension",
+      "documentWithCaptionMessage",
+      "editedMessage",
+      "deviceSentMessage",
+    ];
+    for (let depth = 0; depth < 6; depth++) {
+      const wrapper = wrappers.find((key) => isRecord(message[key]));
+      if (!wrapper) break;
+      const wrapped = message[wrapper] as Record<string, unknown>;
+      if (!isRecord(wrapped.message)) break;
+      message = wrapped.message;
+    }
+
+    const messageKey = Object.keys(message).find((key) => key !== "messageContextInfo");
+    if (!messageKey) return { type: null, text: null };
+
+    const messageValue = message[messageKey];
+    const typeByProtoField: Record<string, string> = {
+      conversation: "text",
+      extendedTextMessage: "text",
+      imageMessage: "image",
+      videoMessage: "video",
+      audioMessage: "audio",
+      documentMessage: "document",
+      stickerMessage: "sticker",
+      locationMessage: "location",
+      liveLocationMessage: "location",
+      contactMessage: "contact",
+      contactsArrayMessage: "contact",
+      pollCreationMessage: "poll",
+      pollCreationMessageV2: "poll",
+      pollCreationMessageV3: "poll",
+      reactionMessage: "reaction",
+      eventMessage: "event",
+    };
+    const type = typeByProtoField[messageKey] ?? messageKey;
+    if (typeof messageValue === "string") return { type, text: messageValue };
+    if (isRecord(messageValue)) {
+      const text =
+        typeof messageValue.text === "string"
+          ? messageValue.text
+          : typeof messageValue.caption === "string"
+            ? messageValue.caption
+            : null;
+      return { type, text };
+    }
+    return { type, text: null };
+  } catch {
+    return { type: null, text: null };
+  }
+}
+
+function parseNewsletterPost(node: BinaryNode): NewsletterPost | null {
+  const serverId = node.attrs.server_id ?? node.attrs.message_id ?? node.attrs.id;
+  if (!serverId) return null;
+
+  const plaintext = findBinaryNode(node, "plaintext");
+  const decoded = decodedNewsletterMessage(
+    typeof plaintext?.content === "string" || plaintext?.content instanceof Uint8Array
+      ? plaintext.content
+      : undefined,
+  );
+  const viewsNode = binaryNodeChildren(node, "views_count")[0];
+  const reactionsNode = binaryNodeChildren(node, "reactions")[0];
+  const reactions = reactionsNode
+    ? binaryNodeChildren(reactionsNode, "reaction").map((reaction) => ({
+        code: reaction.attrs.code ?? "",
+        count: parseNodeInteger(reaction.attrs.count) ?? 0,
+      }))
+    : [];
+
+  return {
+    id: node.attrs.id ?? node.attrs.message_id ?? serverId,
+    serverId,
+    timestamp: parseNodeInteger(node.attrs.t ?? node.attrs.timestamp),
+    type: decoded.type ?? node.attrs.type ?? null,
+    text: decoded.text,
+    views: parseNodeInteger(viewsNode?.attrs.count ?? node.attrs.views),
+    reactions,
+  };
+}
+
+function parseNewsletterMessagesResponse(response: BinaryNode): NewsletterPostsPage {
+  const messagesNode = findBinaryNode(response, "messages");
+  const messages = messagesNode ? findBinaryNodes(messagesNode, "message") : [];
+  const posts = messages.flatMap((node) => {
+    const post = parseNewsletterPost(node);
+    return post ? [post] : [];
+  });
+  const postsWithTimestamp = posts.filter((post) => post.timestamp !== null);
+  const oldest = postsWithTimestamp.length
+    ? postsWithTimestamp.reduce((candidate, post) =>
+        post.timestamp! < candidate.timestamp! ? post : candidate,
+      )
+    : posts[0];
+  const newest = postsWithTimestamp.length
+    ? postsWithTimestamp.reduce((candidate, post) =>
+        post.timestamp! > candidate.timestamp! ? post : candidate,
+      )
+    : posts.at(-1);
+  const after = newest ? parseNodeInteger(newest.serverId) : null;
+
+  return {
+    posts,
+    pagination: {
+      oldestServerId: oldest?.serverId ?? null,
+      newestServerId: newest?.serverId ?? null,
+      after,
+    },
+  };
+}
 
 function sizeLabel(maxBytes: number): string {
   return maxBytes < 1024 * 1024 ? `${maxBytes} bytes` : `${Math.round(maxBytes / 1024 / 1024)} MB`;
@@ -1919,6 +2090,7 @@ export class BaileysAdapter implements ChannelAdapter {
   }
 
   async setGroupJoinApprovalMode(groupId: string, mode: "on" | "off"): Promise<void> {
+    this.requireAppStateWritesEnabled();
     const sock = this.getSock();
     await sock.groupJoinApprovalMode(normalizeGroupJid(groupId), mode);
   }
@@ -1927,6 +2099,7 @@ export class BaileysAdapter implements ChannelAdapter {
     groupId: string,
     mode: "admin_add" | "all_member_add",
   ): Promise<void> {
+    this.requireAppStateWritesEnabled();
     const sock = this.getSock();
     await sock.groupMemberAddMode(normalizeGroupJid(groupId), mode);
   }
@@ -1934,6 +2107,7 @@ export class BaileysAdapter implements ChannelAdapter {
   // ---- Communities ----
 
   async createCommunity(subject: string, description = ""): Promise<GroupMetadata | null> {
+    this.requireAppStateWritesEnabled();
     const sock = this.getSock();
     const community = await sock.communityCreate(subject, description);
     return community ? this.normalizeGroupMetadata(community) : null;
@@ -1957,16 +2131,19 @@ export class BaileysAdapter implements ChannelAdapter {
   }
 
   async linkGroupToCommunity(groupId: string, communityId: string): Promise<void> {
+    this.requireAppStateWritesEnabled();
     const sock = this.getSock();
     await sock.communityLinkGroup(normalizeGroupJid(groupId), normalizeGroupJid(communityId));
   }
 
   async unlinkGroupFromCommunity(groupId: string, communityId: string): Promise<void> {
+    this.requireAppStateWritesEnabled();
     const sock = this.getSock();
     await sock.communityUnlinkGroup(normalizeGroupJid(groupId), normalizeGroupJid(communityId));
   }
 
   async leaveCommunity(communityId: string): Promise<void> {
+    this.requireAppStateWritesEnabled();
     const sock = this.getSock();
     await sock.communityLeave(normalizeGroupJid(communityId));
   }
@@ -2175,6 +2352,7 @@ export class BaileysAdapter implements ChannelAdapter {
   }
 
   async createNewsletter(name: string, description?: string): Promise<NewsletterMetadata> {
+    this.requireAppStateWritesEnabled();
     const sock = this.getSock();
     return sock.newsletterCreate(name, description);
   }
@@ -2183,27 +2361,34 @@ export class BaileysAdapter implements ChannelAdapter {
     type: "invite" | "jid",
     key: string,
   ): Promise<NewsletterMetadata | null> {
+    if (type === "jid" && !/^\d{5,20}@newsletter$/.test(key)) {
+      throw new Error("Invalid Channel JID; expected a JID ending in @newsletter");
+    }
     const sock = this.getSock();
     return sock.newsletterMetadata(type, key);
   }
 
   async updateNewsletterName(jid: string, name: string): Promise<void> {
+    this.requireAppStateWritesEnabled();
     const sock = this.getSock();
     await sock.newsletterUpdateName(jid, name);
   }
 
   async updateNewsletterDescription(jid: string, description: string): Promise<void> {
+    this.requireAppStateWritesEnabled();
     const sock = this.getSock();
     await sock.newsletterUpdateDescription(jid, description);
   }
 
   async updateNewsletterPicture(jid: string, image: string): Promise<void> {
+    this.requireAppStateWritesEnabled();
     const sock = this.getSock();
     const jpeg = await mediaService.prepareGroupProfilePicture(image);
     await sock.newsletterUpdatePicture(jid, jpeg);
   }
 
   async reactToNewsletterMessage(jid: string, serverId: string, reaction?: string): Promise<void> {
+    this.requireAppStateWritesEnabled();
     const sock = this.getSock();
     await sock.newsletterReactMessage(jid, serverId, reaction);
   }
@@ -2213,9 +2398,21 @@ export class BaileysAdapter implements ChannelAdapter {
     count: number,
     since: number,
     after: number,
-  ): Promise<unknown> {
+  ): Promise<NewsletterPostsPage> {
+    if (!Number.isInteger(count) || count < 1 || count > 100) {
+      throw new Error("Invalid count; expected an integer from 1 to 100");
+    }
+    if (!Number.isSafeInteger(since) || since < 0) {
+      throw new Error("Invalid since value; expected a non-negative Unix timestamp");
+    }
+    if (!Number.isSafeInteger(after) || after < 0) {
+      throw new Error("Invalid after cursor; expected a non-negative numeric Channel server ID");
+    }
     const sock = this.getSock();
-    return sock.newsletterFetchMessages(jid, count, since, after);
+    const response: unknown = await sock.newsletterFetchMessages(jid, count, since, after);
+    return isBinaryNode(response)
+      ? parseNewsletterMessagesResponse(response)
+      : { posts: [], pagination: { oldestServerId: null, newestServerId: null, after: null } };
   }
 
   // ---- Business catalog ----
@@ -2242,6 +2439,7 @@ export class BaileysAdapter implements ChannelAdapter {
   }
 
   async createProduct(input: CatalogProductCreateInput): Promise<Product> {
+    this.requireAppStateWritesEnabled();
     const sock = this.getSock();
     const create: ProductCreate = {
       ...input,
@@ -2252,6 +2450,7 @@ export class BaileysAdapter implements ChannelAdapter {
   }
 
   async updateProduct(productId: string, input: CatalogProductUpdateInput): Promise<Product> {
+    this.requireAppStateWritesEnabled();
     const sock = this.getSock();
     const update: ProductUpdate = {
       ...input,
@@ -2261,6 +2460,7 @@ export class BaileysAdapter implements ChannelAdapter {
   }
 
   async deleteProducts(productIds: string[]): Promise<{ deleted: number }> {
+    this.requireAppStateWritesEnabled();
     const sock = this.getSock();
     return sock.productDelete(productIds);
   }

@@ -426,7 +426,7 @@ export function registerGroupTools(
     "wa_group_join_approval_mode",
     {
       description:
-        "Turn WhatsApp group join approval on or off. Baileys updates the group through an IQ query; this is not an app-state patch.",
+        "Turn WhatsApp group join approval on or off. This account/server change is blocked unless WA_APP_STATE_WRITES_ENABLED=true.",
       inputSchema: GroupJoinApprovalModeSchema,
     },
     async (params) => {
@@ -445,7 +445,7 @@ export function registerGroupTools(
     "wa_group_member_add_mode",
     {
       description:
-        "Set whether group admins only or all members can add members. Baileys updates the group through an IQ query; this is not an app-state patch.",
+        "Set whether group admins only or all members can add members. This account/server change is blocked unless WA_APP_STATE_WRITES_ENABLED=true.",
       inputSchema: GroupMemberAddModeSchema,
     },
     async (params) => {

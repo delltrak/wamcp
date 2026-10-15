@@ -72,13 +72,20 @@ Tools marked **Baileys only** are not available on Cloud API instances.
 - **Automatic read receipts** -- `WA_AUTO_READ=false` (default), `on_fetch` to mark incoming
   messages read when a tool or resource returns them, or `on_receive` to mark them read when they
   arrive. Invalid values disable the feature and log a warning.
-- **Baileys app-state writes** -- `WA_APP_STATE_WRITES_ENABLED=false` by default. Set it to `true`
-  to enable `wa_archive_chat`, `wa_pin_chat`, `wa_mute_chat`, `wa_delete_chat`, `wa_clear_chat`,
-  `wa_mark_chat_unread`, `wa_star_message`, `wa_create_label`, `wa_edit_label`, `wa_delete_label`,
-  `wa_add_chat_label`, `wa_remove_chat_label`, `wa_add_message_label`, `wa_remove_message_label`,
-  `wa_update_profile_name`, `wa_create_quick_reply`, `wa_edit_quick_reply`, and
-  `wa_delete_quick_reply`. These changes can get the linked device removed, so enable them at your
-  own risk. Read receipts and app-state reads/resyncs are not gated.
+- **Baileys account, server, and app-state writes** -- `WA_APP_STATE_WRITES_ENABLED=false` by
+  default. Set it to `true` to enable `wa_archive_chat`, `wa_pin_chat`, `wa_mute_chat`,
+  `wa_delete_chat`, `wa_clear_chat`, `wa_mark_chat_unread`, `wa_star_message`, `wa_create_label`,
+  `wa_edit_label`, `wa_delete_label`, `wa_add_chat_label`, `wa_remove_chat_label`,
+  `wa_add_message_label`, `wa_remove_message_label`, `wa_update_profile_name`,
+  `wa_create_quick_reply`, `wa_edit_quick_reply`, `wa_delete_quick_reply`,
+  `wa_create_community`, `wa_community_link_group`, `wa_community_unlink_group`,
+  `wa_leave_community`, `wa_create_newsletter`, `wa_newsletter_update_name`,
+  `wa_newsletter_update_description`, `wa_newsletter_update_picture`, `wa_newsletter_react`,
+  `wa_create_catalog_product`, `wa_update_catalog_product`, `wa_delete_catalog_products`,
+  `wa_group_join_approval_mode`, and `wa_group_member_add_mode`. The flag covers account/server
+  changes even when Baileys uses IQ or MEX queries instead of an app-state patch. These changes can
+  get the linked device removed. Read-only calls, normal message sends, and disappearing-message
+  control messages sent through `sendMessage` are not gated.
 - **Protocol classification for issue #74 operations** -- `wa_set_disappearing_messages` sends a
   `sendMessage` protocol control message; blocklist/About are reads; communities use `w:g2` IQs;
   Channel metadata/posts/reactions use newsletter/MEX queries or message nodes; group modes use IQs;
@@ -1494,8 +1501,8 @@ Approve or reject a pending join request for a WhatsApp group.
 
 #### `wa_group_join_approval_mode`
 
-Enable or disable admin approval for group join requests. Baileys updates the setting through an IQ
-query, not an app-state patch.
+Enable or disable admin approval for group join requests. This account/server change is blocked
+unless `WA_APP_STATE_WRITES_ENABLED=true`, even though Baileys sends it through an IQ query.
 
 | Parameter    | Type          | Required | Description                 |
 | ------------ | ------------- | -------- | --------------------------- |
@@ -1509,8 +1516,8 @@ query, not an app-state patch.
 
 #### `wa_group_member_add_mode`
 
-Set who can add members to a group. Baileys updates the setting through an IQ query, not an
-app-state patch.
+Set who can add members to a group. This account/server change is blocked unless
+`WA_APP_STATE_WRITES_ENABLED=true`, even though Baileys sends it through an IQ query.
 
 | Parameter    | Type                            | Required | Description                |
 | ------------ | ------------------------------- | -------- | -------------------------- |
@@ -2042,21 +2049,29 @@ Send a message to a WhatsApp Channel/Newsletter (must be admin).
 }
 ```
 
-Additional Channel operations use Baileys newsletter/MEX queries or message nodes, not app-state
-patches. Cloud API returns a clear unsupported-operation error.
+Channel create/update, post-reaction, community, catalog-write, and group-mode operations change
+account or server state and are blocked unless `WA_APP_STATE_WRITES_ENABLED=true`, regardless of
+whether Baileys sends them through newsletter/MEX queries, IQs, or message nodes. Cloud API returns
+a clear unsupported-operation error. Metadata and post-fetch calls are read-only.
 
 | Tool                               | Inputs                                             | Description                                      |
 | ---------------------------------- | -------------------------------------------------- | ------------------------------------------------ |
-| `wa_create_newsletter`             | `instanceId`, `name`, optional `description`       | Create a Channel.                                |
+| `wa_create_newsletter`             | `instanceId`, `name`, optional `description`       | Create a Channel. Gated account/server write.    |
 | `wa_get_newsletter_metadata`       | `instanceId`, `type`, `key`                        | Read metadata by JID or invite code.             |
-| `wa_newsletter_update_name`        | `instanceId`, `jid`, `name`                        | Update the Channel name.                         |
-| `wa_newsletter_update_description` | `instanceId`, `jid`, `description`                 | Update the Channel description.                  |
-| `wa_newsletter_update_picture`     | `instanceId`, `jid`, `image`                       | Update picture from a safe URL or base64 image.  |
-| `wa_newsletter_react`              | `instanceId`, `jid`, `serverId`, `reaction`        | Add or remove a post reaction.                   |
-| `wa_newsletter_list_posts`         | `instanceId`, `jid`, optional `count`, `since`, `after` | Fetch Channel posts with pagination bounds. |
+| `wa_newsletter_update_name`        | `instanceId`, `jid`, `name`                        | Update the Channel name. Gated write.            |
+| `wa_newsletter_update_description` | `instanceId`, `jid`, `description`                 | Update the Channel description. Gated write.     |
+| `wa_newsletter_update_picture`     | `instanceId`, `jid`, `image`                       | Update picture. Gated write.                     |
+| `wa_newsletter_react`              | `instanceId`, `jid`, `serverId`, `reaction`        | Add or remove a post reaction. Gated write.       |
+| `wa_newsletter_list_posts`         | `instanceId`, `jid`, optional `count`, `since`, `after` | Fetch parsed posts with timestamp and server-ID cursors. |
 
 Channel picture URLs use the existing public-HTTPS validation and media size limits, then are
 converted to JPEG before upload.
+
+Post results contain JSON-safe `posts` with `id`, `serverId`, Unix-seconds `timestamp`, message
+`type`, extracted `text` or caption, `views`, and reaction counts. `pagination.oldestServerId` and
+`pagination.newestServerId` identify the page bounds. `pagination.after` is the newest numeric server
+ID; pass it as `after` on the next call to continue through newer posts. `since` accepts a Unix
+timestamp lower bound.
 
 ---
 
@@ -2193,25 +2208,26 @@ response is stored but its event secret or author mapping is not available yet.
 
 ### 2.13 Business, Communities, and Catalog (15 tools)
 
-These operations require Baileys. Cloud API calls return unsupported-operation errors. Communities
-use `w:g2` IQ queries; catalog actions use business IQ/MEX queries. Neither path writes app state.
+These operations require Baileys. Cloud API calls return unsupported-operation errors. Community
+changes and catalog product writes change account/server state and are blocked unless
+`WA_APP_STATE_WRITES_ENABLED=true`; read-only listing and order tools remain available.
 
 | Tool                         | Inputs                                                                                                       | Description                                           |
 | ---------------------------- | ------------------------------------------------------------------------------------------------------------ | ----------------------------------------------------- |
 | `wa_create_quick_reply`      | `instanceId`, `shortcut`, `message`                                                                          | Create a quick reply. Gated app-state write.          |
 | `wa_edit_quick_reply`        | `instanceId`, `timestamp`, `shortcut`, `message`                                                             | Edit by sync timestamp. Gated app-state write.        |
 | `wa_delete_quick_reply`      | `instanceId`, `timestamp`                                                                                    | Delete by sync timestamp. Gated app-state write.      |
-| `wa_create_community`        | `instanceId`, `name`, optional `description`                                                                 | Create a community.                                   |
+| `wa_create_community`        | `instanceId`, `name`, optional `description`                                                                 | Create a community. Gated account/server write.       |
 | `wa_list_communities`        | `instanceId`                                                                                                | List participating communities.                       |
 | `wa_get_community_details`   | `instanceId`, `communityId`                                                                                 | Read community metadata.                              |
-| `wa_community_link_group`    | `instanceId`, `communityId`, `groupId`                                                                       | Link an existing group.                               |
-| `wa_community_unlink_group`  | `instanceId`, `communityId`, `groupId`                                                                       | Unlink a group.                                       |
-| `wa_leave_community`         | `instanceId`, `communityId`                                                                                 | Leave a community.                                    |
+| `wa_community_link_group`    | `instanceId`, `communityId`, `groupId`                                                                       | Link an existing group. Gated write.                 |
+| `wa_community_unlink_group`  | `instanceId`, `communityId`, `groupId`                                                                       | Unlink a group. Gated write.                          |
+| `wa_leave_community`         | `instanceId`, `communityId`                                                                                 | Leave a community. Gated write.                       |
 | `wa_get_catalog`             | `instanceId`, optional `jid`, `limit`, `cursor`                                                              | List products with cursor pagination.                 |
 | `wa_get_catalog_collections` | `instanceId`, optional `jid`, `limit`                                                                        | List catalog collections.                             |
-| `wa_create_catalog_product`  | `instanceId`, product fields and `images`; optional `originCountryCode`                                     | Create a product.                                     |
-| `wa_update_catalog_product`  | `instanceId`, `productId`, product fields and `images`                                                       | Replace product fields and images.                   |
-| `wa_delete_catalog_products` | `instanceId`, `productIds`                                                                                  | Delete one or more products.                          |
+| `wa_create_catalog_product`  | `instanceId`, product fields and `images`; optional `originCountryCode`                                     | Create a product. Gated account/server write.        |
+| `wa_update_catalog_product`  | `instanceId`, `productId`, product fields and `images`                                                       | Replace fields/images. Gated write.                  |
+| `wa_delete_catalog_products` | `instanceId`, `productIds`                                                                                  | Delete products. Gated account/server write.        |
 | `wa_get_order_details`       | `instanceId`, `orderId`, `tokenBase64`                                                                       | Read details using the token from the order message. |
 
 Quick reply create/edit/delete call Baileys `addOrEditQuickReply` or `removeQuickReply`, which use

@@ -4,6 +4,7 @@
 
 import { z } from "zod";
 import { isValidGroupId } from "../utils/group-jid.js";
+import { isValidStatusRecipient } from "../utils/validation.js";
 
 const InstanceIdSchema = z.string().min(1).describe("The instance ID");
 
@@ -17,6 +18,19 @@ const NewsletterJidSchema = z
   .string()
   .trim()
   .regex(/^\d{5,20}@newsletter$/, "Expected a WhatsApp Channel JID ending in @newsletter");
+
+const BusinessJidSchema = z
+  .string()
+  .trim()
+  .refine(isValidStatusRecipient, "Expected a WhatsApp individual phone number or JID");
+
+function isHttpsUrl(value: string): boolean {
+  try {
+    return new URL(value).protocol === "https:";
+  } catch {
+    return false;
+  }
+}
 
 const CatalogImagesSchema = z
   .array(z.string().min(1))
@@ -85,7 +99,7 @@ export const GetNewsletterMetadataSchema = z
   .object({
     instanceId: InstanceIdSchema,
     type: z.enum(["jid", "invite"]).describe("Look up by Channel JID or invite code"),
-    key: z.string().trim().min(1).describe("Channel JID or invite code"),
+    key: z.string().trim().min(1).max(100).describe("Channel JID or invite code"),
   })
   .strict();
 
@@ -117,7 +131,10 @@ export const ReactToNewsletterMessageSchema = z
   .object({
     instanceId: InstanceIdSchema,
     jid: NewsletterJidSchema,
-    serverId: z.string().min(1).describe("Channel post server ID"),
+    serverId: z
+      .string()
+      .regex(/^\d{1,20}$/)
+      .describe("Channel post server ID"),
     reaction: z.string().max(16).describe("Emoji reaction; empty string removes the reaction"),
   })
   .strict();
@@ -128,23 +145,28 @@ export const ListNewsletterMessagesSchema = z
     jid: NewsletterJidSchema,
     count: z.number().int().min(1).max(100).default(20),
     since: z.number().int().min(0).default(0).describe("Unix timestamp lower bound"),
-    after: z.number().int().min(0).default(0).describe("Pagination cursor"),
+    after: z.number().int().min(0).default(0).describe("Channel server-ID pagination cursor"),
   })
   .strict();
 
 export const GetCatalogSchema = z
   .object({
     instanceId: InstanceIdSchema,
-    jid: z.string().min(1).optional().describe("Business JID; defaults to the connected account"),
+    jid: BusinessJidSchema.optional().describe("Business JID; defaults to the connected account"),
     limit: z.number().int().min(1).max(100).default(10),
-    cursor: z.string().min(1).optional().describe("Next-page cursor returned by the previous call"),
+    cursor: z
+      .string()
+      .min(1)
+      .max(2048)
+      .optional()
+      .describe("Next-page cursor returned by the previous call"),
   })
   .strict();
 
 export const GetCollectionsSchema = z
   .object({
     instanceId: InstanceIdSchema,
-    jid: z.string().min(1).optional().describe("Business JID; defaults to the connected account"),
+    jid: BusinessJidSchema.optional().describe("Business JID; defaults to the connected account"),
     limit: z.number().int().min(1).max(100).default(51),
   })
   .strict();
@@ -152,7 +174,7 @@ export const GetCollectionsSchema = z
 const ProductFields = {
   name: z.string().trim().min(1).max(100),
   retailerId: z.string().max(100).optional(),
-  url: z.string().url().optional(),
+  url: z.string().url().refine(isHttpsUrl, "Product URLs must use HTTPS").optional(),
   description: z.string().max(2048),
   price: z.number().finite().nonnegative(),
   currency: z.string().regex(/^[A-Z]{3}$/),
@@ -182,14 +204,23 @@ export const UpdateProductSchema = z
 export const DeleteProductsSchema = z
   .object({
     instanceId: InstanceIdSchema,
-    productIds: z.array(z.string().min(1)).min(1).max(100),
+    productIds: z.array(z.string().trim().min(1).max(100)).min(1).max(100),
   })
   .strict();
+
+const Base64OrderTokenSchema = z
+  .string()
+  .min(1)
+  .max(4096)
+  .regex(/^[A-Za-z0-9+/_-]+={0,2}$/)
+  .refine((value) => value.length % 4 !== 1, "Invalid base64 order token");
 
 export const GetOrderDetailsSchema = z
   .object({
     instanceId: InstanceIdSchema,
-    orderId: z.string().min(1),
-    tokenBase64: z.string().min(1).describe("Order token supplied by the order message"),
+    orderId: z.string().trim().min(1).max(128),
+    tokenBase64: Base64OrderTokenSchema.describe(
+      "Base64 order token supplied by the order message",
+    ),
   })
   .strict();

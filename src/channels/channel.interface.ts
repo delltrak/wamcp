@@ -34,6 +34,7 @@ import type {
   SendEventOptions,
   CatalogProductCreateInput,
   CatalogProductUpdateInput,
+  NewsletterPostsPage,
 } from "../types/channel.types.js";
 import type {
   CatalogCollection,
@@ -166,7 +167,7 @@ export interface ChannelAdapter {
     count: number,
     since: number,
     after: number,
-  ): Promise<unknown>;
+  ): Promise<NewsletterPostsPage>;
 
   // ---- Business catalog ----
   getCatalog(

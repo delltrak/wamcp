@@ -858,7 +858,7 @@ export class CloudApiAdapter implements ChannelAdapter {
     _count: number,
     _since: number,
     _after: number,
-  ): Promise<unknown> {
+  ): Promise<never> {
     throw new Error("Channel post history is only available on Baileys instances");
   }
 
