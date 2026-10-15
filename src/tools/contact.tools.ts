@@ -15,6 +15,8 @@ import {
   GetBusinessProfileSchema,
   SearchContactSchema,
   ResyncContactsSchema,
+  ListBlockedContactsSchema,
+  GetContactAboutSchema,
 } from "../schemas/contact.schema.js";
 
 export function registerContactTools(
@@ -156,6 +158,42 @@ export function registerContactTools(
         return toolSuccess(result);
       } catch (err) {
         return handleToolError("wa_resync_contacts", err, params.instanceId);
+      }
+    },
+  );
+
+  server.registerTool(
+    "wa_list_blocked_contacts",
+    {
+      description:
+        "List contact JIDs in the WhatsApp blocklist. Baileys reads the blocklist through an IQ query; Cloud API does not expose it.",
+      inputSchema: ListBlockedContactsSchema,
+    },
+    async (params) => {
+      try {
+        const blocked = await instanceManager.getAdapter(params.instanceId).getBlocklist();
+        return toolSuccess({ count: blocked.length, blocked });
+      } catch (err) {
+        return handleToolError("wa_list_blocked_contacts", err, params.instanceId);
+      }
+    },
+  );
+
+  server.registerTool(
+    "wa_get_contact_about",
+    {
+      description:
+        "Read a contact's About text with Baileys fetchStatus. This is a USync read; Cloud API does not support it.",
+      inputSchema: GetContactAboutSchema,
+    },
+    async (params) => {
+      try {
+        const about = await instanceManager
+          .getAdapter(params.instanceId)
+          .getContactAbout(params.jid);
+        return toolSuccess({ jid: params.jid, about });
+      } catch (err) {
+        return handleToolError("wa_get_contact_about", err, params.instanceId);
       }
     },
   );

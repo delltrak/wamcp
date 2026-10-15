@@ -339,7 +339,7 @@ describe("Baileys business and message features", () => {
       addStoredMessage(id, "starred-message");
       const { socket } = installSocket(adapter);
       const disabledError =
-        "WhatsApp app-state changes are disabled because they can get this linked device removed (see issue #71). Set WA_APP_STATE_WRITES_ENABLED=true to enable at your own risk.";
+        "WhatsApp account, server, and app-state writes are disabled because changes can get this linked device removed (see issue #71). Set WA_APP_STATE_WRITES_ENABLED=true to enable at your own risk.";
 
       await expect(adapter.starMessage(CHAT_ID, "starred-message", true)).rejects.toThrow(
         disabledError,

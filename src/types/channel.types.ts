@@ -33,6 +33,47 @@ export interface BusinessLabel {
   predefinedId?: string;
 }
 
+export interface CatalogProductFields {
+  name: string;
+  retailerId?: string;
+  url?: string;
+  description: string;
+  price: number;
+  currency: string;
+  isHidden?: boolean;
+  images: string[];
+}
+
+export interface NewsletterReactionCount {
+  code: string;
+  count: number;
+}
+
+export interface NewsletterPost {
+  id: string;
+  serverId: string;
+  timestamp: number | null;
+  type: string | null;
+  text: string | null;
+  views: number | null;
+  reactions: NewsletterReactionCount[];
+}
+
+export interface NewsletterPostsPage {
+  posts: NewsletterPost[];
+  pagination: {
+    oldestServerId: string | null;
+    newestServerId: string | null;
+    after: number | null;
+  };
+}
+
+export interface CatalogProductCreateInput extends CatalogProductFields {
+  originCountryCode?: string;
+}
+
+export type CatalogProductUpdateInput = CatalogProductFields;
+
 export interface MessageSearchOptions {
   query: string;
   from?: number;
@@ -121,6 +162,7 @@ export interface VideoContent {
   video: string; // URL or base64
   caption?: string;
   gifPlayback?: boolean;
+  ptv?: boolean;
   quotedMessageId?: string;
 }
 

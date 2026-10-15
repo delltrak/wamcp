@@ -27,6 +27,8 @@ import {
   JoinGroupSchema,
   ToggleEphemeralSchema,
   HandleJoinRequestSchema,
+  GroupJoinApprovalModeSchema,
+  GroupMemberAddModeSchema,
 } from "../schemas/group.schema.js";
 
 export function registerGroupTools(
@@ -416,6 +418,44 @@ export function registerGroupTools(
         return toolSuccess({ success: true, action: params.action });
       } catch (err) {
         return handleToolError("wa_group_handle_request", err, params.instanceId);
+      }
+    },
+  );
+
+  server.registerTool(
+    "wa_group_join_approval_mode",
+    {
+      description:
+        "Turn WhatsApp group join approval on or off. This account/server change is blocked unless WA_APP_STATE_WRITES_ENABLED=true.",
+      inputSchema: GroupJoinApprovalModeSchema,
+    },
+    async (params) => {
+      try {
+        await instanceManager
+          .getAdapter(params.instanceId)
+          .setGroupJoinApprovalMode(params.groupId, params.mode);
+        return toolSuccess({ success: true, groupId: params.groupId, mode: params.mode });
+      } catch (err) {
+        return handleToolError("wa_group_join_approval_mode", err, params.instanceId);
+      }
+    },
+  );
+
+  server.registerTool(
+    "wa_group_member_add_mode",
+    {
+      description:
+        "Set whether group admins only or all members can add members. This account/server change is blocked unless WA_APP_STATE_WRITES_ENABLED=true.",
+      inputSchema: GroupMemberAddModeSchema,
+    },
+    async (params) => {
+      try {
+        await instanceManager
+          .getAdapter(params.instanceId)
+          .setGroupMemberAddMode(params.groupId, params.mode);
+        return toolSuccess({ success: true, groupId: params.groupId, mode: params.mode });
+      } catch (err) {
+        return handleToolError("wa_group_member_add_mode", err, params.instanceId);
       }
     },
   );

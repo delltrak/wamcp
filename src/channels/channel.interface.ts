@@ -32,7 +32,23 @@ import type {
   EventResponse,
   MessageSearchOptions,
   SendEventOptions,
+  CatalogProductCreateInput,
+  CatalogProductUpdateInput,
+  NewsletterPostsPage,
 } from "../types/channel.types.js";
+import type {
+  CatalogCollection,
+  GetCatalogOptions,
+  NewsletterMetadata,
+  OrderDetails,
+  Product,
+} from "@whiskeysockets/baileys";
+
+export interface QuickReplyInput {
+  shortcut: string;
+  message: string;
+  timestamp?: string;
+}
 
 // Typed event handler
 export type ChannelEventHandler<E extends ChannelEvent = ChannelEvent> = (
@@ -80,6 +96,10 @@ export interface ChannelAdapter {
   deleteLabel(id: string): Promise<void>;
   setChatLabel(chatId: string, labelId: string, add: boolean): Promise<void>;
   setMessageLabel(chatId: string, messageId: string, labelId: string, add: boolean): Promise<void>;
+  setDisappearingMessages(chatId: string, duration: 0 | 86400 | 604800 | 7776000): Promise<void>;
+  createQuickReply(input: QuickReplyInput): Promise<void>;
+  editQuickReply(input: QuickReplyInput & { timestamp: string }): Promise<void>;
+  deleteQuickReply(timestamp: string): Promise<void>;
 
   // ---- Groups ----
   listGroups(): Promise<GroupSummary[]>;
@@ -100,12 +120,23 @@ export interface ChannelAdapter {
     participantJid: string,
     action: "approve" | "reject",
   ): Promise<void>;
+  setGroupJoinApprovalMode(groupId: string, mode: "on" | "off"): Promise<void>;
+  setGroupMemberAddMode(groupId: string, mode: "admin_add" | "all_member_add"): Promise<void>;
+
+  // ---- Communities ----
+  createCommunity(subject: string, description?: string): Promise<GroupMetadata | null>;
+  listCommunities(): Promise<Record<string, GroupMetadata>>;
+  getCommunityMetadata(communityId: string): Promise<GroupMetadata>;
+  linkGroupToCommunity(groupId: string, communityId: string): Promise<void>;
+  unlinkGroupFromCommunity(groupId: string, communityId: string): Promise<void>;
+  leaveCommunity(communityId: string): Promise<void>;
 
   // ---- Contacts ----
   checkNumberExists(phone: string): Promise<NumberExistsResponse>;
   blockContact(jid: string): Promise<void>;
   unblockContact(jid: string): Promise<void>;
   getBlocklist(): Promise<string[]>;
+  getContactAbout(jid: string): Promise<string | null>;
   getBusinessProfile(jid: string): Promise<BusinessProfile | null>;
   resyncContacts(): Promise<ContactResyncResult>;
 
@@ -125,6 +156,28 @@ export interface ChannelAdapter {
   newsletterFollow(jid: string): Promise<void>;
   newsletterUnfollow(jid: string): Promise<void>;
   newsletterSend(jid: string, text: string): Promise<MessageResponse>;
+  createNewsletter(name: string, description?: string): Promise<NewsletterMetadata>;
+  getNewsletterMetadata(type: "invite" | "jid", key: string): Promise<NewsletterMetadata | null>;
+  updateNewsletterName(jid: string, name: string): Promise<void>;
+  updateNewsletterDescription(jid: string, description: string): Promise<void>;
+  updateNewsletterPicture(jid: string, image: string): Promise<void>;
+  reactToNewsletterMessage(jid: string, serverId: string, reaction?: string): Promise<void>;
+  fetchNewsletterMessages(
+    jid: string,
+    count: number,
+    since: number,
+    after: number,
+  ): Promise<NewsletterPostsPage>;
+
+  // ---- Business catalog ----
+  getCatalog(
+    options: GetCatalogOptions,
+  ): Promise<{ products: Product[]; nextPageCursor: string | undefined }>;
+  getCollections(jid?: string, limit?: number): Promise<{ collections: CatalogCollection[] }>;
+  createProduct(input: CatalogProductCreateInput): Promise<Product>;
+  updateProduct(productId: string, input: CatalogProductUpdateInput): Promise<Product>;
+  deleteProducts(productIds: string[]): Promise<{ deleted: number }>;
+  getOrderDetails(orderId: string, tokenBase64: string): Promise<OrderDetails>;
 
   // ---- Calls ----
   rejectCall(callId: string): Promise<void>;

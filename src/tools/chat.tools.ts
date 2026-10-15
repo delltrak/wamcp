@@ -20,6 +20,7 @@ import {
   MarkChatUnreadSchema,
   StarMessageSchema,
   FetchMessageHistorySchema,
+  SetDisappearingMessagesSchema,
 } from "../schemas/chat.schema.js";
 
 export function registerChatTools(
@@ -228,6 +229,29 @@ export function registerChatTools(
         return toolSuccess({ chatId: params.chatId, ...result });
       } catch (err) {
         return handleToolError("wa_fetch_message_history", err, params.instanceId);
+      }
+    },
+  );
+
+  server.registerTool(
+    "wa_set_disappearing_messages",
+    {
+      description:
+        "Set disappearing messages for a private chat: off, 24 hours, 7 days, or 90 days. Baileys sends the protocol control message; Cloud API does not support this operation.",
+      inputSchema: SetDisappearingMessagesSchema,
+    },
+    async (params) => {
+      try {
+        await instanceManager
+          .getAdapter(params.instanceId)
+          .setDisappearingMessages(params.chatId, params.duration);
+        return toolSuccess({
+          success: true,
+          chatId: params.chatId,
+          duration: params.duration,
+        });
+      } catch (err) {
+        return handleToolError("wa_set_disappearing_messages", err, params.instanceId);
       }
     },
   );

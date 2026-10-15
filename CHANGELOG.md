@@ -16,6 +16,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Added private disappearing-message timers, blocked-contact and About reads, group join approval
+  and member-add modes, PTV video notes, community management, Channel management, and Business
+  catalog/product/order tools. Quick reply writes and community, Channel, catalog-product, and group
+  mode changes are gated by `WA_APP_STATE_WRITES_ENABLED`; list is unavailable because Baileys rc14
+  exposes no read method and quick reply sync actions are not stored locally. Read-only calls,
+  normal message sends, and disappearing-message control messages remain available when writes are
+  disabled.
 - Added local `wa_search_messages` with case-insensitive substring matching, escaped SQL `LIKE`
   wildcards, date/sender/chat filters, and stable offset pagination.
 - Added Baileys WhatsApp Business label tools for listing, creation, edits, soft deletion, and

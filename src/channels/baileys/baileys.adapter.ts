@@ -13,6 +13,7 @@ import makeWASocket, {
   makeCacheableSignalKeyStore,
   type WASocket,
   type GroupParticipant as BaileysGroupParticipant,
+  type GroupMetadata as BaileysGroupMetadata,
   type WAMessage,
   type BaileysEventMap,
   type AnyMessageContent,
@@ -20,6 +21,14 @@ import makeWASocket, {
   type EventMessageOptions,
   type MinimalMessage,
   type WAMessageKey,
+  type CatalogCollection,
+  type GetCatalogOptions,
+  type NewsletterMetadata,
+  type OrderDetails,
+  type Product,
+  type ProductCreate,
+  type ProductUpdate,
+  type BinaryNode,
   jidNormalizedUser,
   ALL_WA_PATCH_NAMES,
 } from "@whiskeysockets/baileys";
@@ -58,6 +67,10 @@ import type {
   MessageSearchOptions,
   SendEventOptions,
   NormalizedLabelUpdateEvent,
+  CatalogProductCreateInput,
+  CatalogProductUpdateInput,
+  NewsletterPost,
+  NewsletterPostsPage,
 } from "../../types/channel.types.js";
 import { useSqliteAuthState, clearAuthState } from "./baileys.auth.js";
 import { normalizePrivacySettings } from "./privacy.js";
@@ -101,6 +114,7 @@ import {
   RECONNECT_MAX_DELAY_MS,
   RECONNECT_MAX_ATTEMPTS,
   MAX_BASE64_MEDIA_BYTES,
+  MEDIA_LIMITS,
 } from "../../constants.js";
 import { createChildLogger } from "../../utils/logger.js";
 import { scheduleBaileysMessagesRead } from "../../services/auto-read.js";
@@ -121,7 +135,175 @@ const mediaService = new MediaService();
 const DEFAULT_STATUS_MAX_RECIPIENTS = 256;
 const STATUS_BROADCAST_JID = "status@broadcast";
 const APP_STATE_WRITES_DISABLED_ERROR =
-  "WhatsApp app-state changes are disabled because they can get this linked device removed (see issue #71). Set WA_APP_STATE_WRITES_ENABLED=true to enable at your own risk.";
+  "WhatsApp account, server, and app-state writes are disabled because changes can get this linked device removed (see issue #71). Set WA_APP_STATE_WRITES_ENABLED=true to enable at your own risk.";
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
+}
+
+function isBinaryNode(value: unknown): value is BinaryNode {
+  if (!isRecord(value) || typeof value.tag !== "string" || !isRecord(value.attrs)) return false;
+  const content = value.content;
+  return (
+    content === undefined ||
+    typeof content === "string" ||
+    content instanceof Uint8Array ||
+    Array.isArray(content)
+  );
+}
+
+function binaryNodeChildren(node: BinaryNode, tag?: string): BinaryNode[] {
+  if (!Array.isArray(node.content)) return [];
+  return node.content.filter(
+    (child): child is BinaryNode => isBinaryNode(child) && (tag === undefined || child.tag === tag),
+  );
+}
+
+function findBinaryNode(node: BinaryNode, tag: string): BinaryNode | undefined {
+  if (node.tag === tag) return node;
+  for (const child of binaryNodeChildren(node)) {
+    const match = findBinaryNode(child, tag);
+    if (match) return match;
+  }
+  return undefined;
+}
+
+function findBinaryNodes(node: BinaryNode, tag: string): BinaryNode[] {
+  const matches: BinaryNode[] = node.tag === tag ? [node] : [];
+  for (const child of binaryNodeChildren(node)) matches.push(...findBinaryNodes(child, tag));
+  return matches;
+}
+
+function parseNodeInteger(value: string | undefined): number | null {
+  if (!value || !/^\d+$/.test(value)) return null;
+  const parsed = Number(value);
+  return Number.isSafeInteger(parsed) ? parsed : null;
+}
+
+function decodedNewsletterMessage(content: string | Uint8Array | undefined): {
+  type: string | null;
+  text: string | null;
+} {
+  if (content === undefined) return { type: null, text: null };
+  try {
+    const bytes =
+      typeof content === "string" ? Buffer.from(content, "binary") : Buffer.from(content);
+    let message = proto.Message.decode(bytes).toJSON() as Record<string, unknown>;
+    const wrappers = [
+      "ephemeralMessage",
+      "viewOnceMessage",
+      "viewOnceMessageV2",
+      "viewOnceMessageV2Extension",
+      "documentWithCaptionMessage",
+      "editedMessage",
+      "deviceSentMessage",
+    ];
+    for (let depth = 0; depth < 6; depth++) {
+      const wrapper = wrappers.find((key) => isRecord(message[key]));
+      if (!wrapper) break;
+      const wrapped = message[wrapper] as Record<string, unknown>;
+      if (!isRecord(wrapped.message)) break;
+      message = wrapped.message;
+    }
+
+    const messageKey = Object.keys(message).find((key) => key !== "messageContextInfo");
+    if (!messageKey) return { type: null, text: null };
+
+    const messageValue = message[messageKey];
+    const typeByProtoField: Record<string, string> = {
+      conversation: "text",
+      extendedTextMessage: "text",
+      imageMessage: "image",
+      videoMessage: "video",
+      audioMessage: "audio",
+      documentMessage: "document",
+      stickerMessage: "sticker",
+      locationMessage: "location",
+      liveLocationMessage: "location",
+      contactMessage: "contact",
+      contactsArrayMessage: "contact",
+      pollCreationMessage: "poll",
+      pollCreationMessageV2: "poll",
+      pollCreationMessageV3: "poll",
+      reactionMessage: "reaction",
+      eventMessage: "event",
+    };
+    const type = typeByProtoField[messageKey] ?? messageKey;
+    if (typeof messageValue === "string") return { type, text: messageValue };
+    if (isRecord(messageValue)) {
+      const text =
+        typeof messageValue.text === "string"
+          ? messageValue.text
+          : typeof messageValue.caption === "string"
+            ? messageValue.caption
+            : null;
+      return { type, text };
+    }
+    return { type, text: null };
+  } catch {
+    return { type: null, text: null };
+  }
+}
+
+function parseNewsletterPost(node: BinaryNode): NewsletterPost | null {
+  const serverId = node.attrs.server_id ?? node.attrs.message_id ?? node.attrs.id;
+  if (!serverId) return null;
+
+  const plaintext = findBinaryNode(node, "plaintext");
+  const decoded = decodedNewsletterMessage(
+    typeof plaintext?.content === "string" || plaintext?.content instanceof Uint8Array
+      ? plaintext.content
+      : undefined,
+  );
+  const viewsNode = binaryNodeChildren(node, "views_count")[0];
+  const reactionsNode = binaryNodeChildren(node, "reactions")[0];
+  const reactions = reactionsNode
+    ? binaryNodeChildren(reactionsNode, "reaction").map((reaction) => ({
+        code: reaction.attrs.code ?? "",
+        count: parseNodeInteger(reaction.attrs.count) ?? 0,
+      }))
+    : [];
+
+  return {
+    id: node.attrs.id ?? node.attrs.message_id ?? serverId,
+    serverId,
+    timestamp: parseNodeInteger(node.attrs.t ?? node.attrs.timestamp),
+    type: decoded.type ?? node.attrs.type ?? null,
+    text: decoded.text,
+    views: parseNodeInteger(viewsNode?.attrs.count ?? node.attrs.views),
+    reactions,
+  };
+}
+
+function parseNewsletterMessagesResponse(response: BinaryNode): NewsletterPostsPage {
+  const messagesNode = findBinaryNode(response, "messages");
+  const messages = messagesNode ? findBinaryNodes(messagesNode, "message") : [];
+  const posts = messages.flatMap((node) => {
+    const post = parseNewsletterPost(node);
+    return post ? [post] : [];
+  });
+  const postsWithTimestamp = posts.filter((post) => post.timestamp !== null);
+  const oldest = postsWithTimestamp.length
+    ? postsWithTimestamp.reduce((candidate, post) =>
+        post.timestamp! < candidate.timestamp! ? post : candidate,
+      )
+    : posts[0];
+  const newest = postsWithTimestamp.length
+    ? postsWithTimestamp.reduce((candidate, post) =>
+        post.timestamp! > candidate.timestamp! ? post : candidate,
+      )
+    : posts.at(-1);
+  const after = newest ? parseNodeInteger(newest.serverId) : null;
+
+  return {
+    posts,
+    pagination: {
+      oldestServerId: oldest?.serverId ?? null,
+      newestServerId: newest?.serverId ?? null,
+      after,
+    },
+  };
+}
 
 function sizeLabel(maxBytes: number): string {
   return maxBytes < 1024 * 1024 ? `${maxBytes} bytes` : `${Math.round(maxBytes / 1024 / 1024)} MB`;
@@ -784,6 +966,7 @@ export class BaileysAdapter implements ChannelAdapter {
           video: this.resolveMedia(content.video),
           caption: content.caption,
           ...(content.gifPlayback ? { gifPlayback: true } : {}),
+          ...(content.ptv ? { ptv: true } : {}),
         };
         if (content.quotedMessageId) {
           opts.quoted = this.getQuotedMessage(jid, content.quotedMessageId);
@@ -1613,6 +1796,48 @@ export class BaileysAdapter implements ChannelAdapter {
     this.persistLabelAssociation(labelId, "message", jid, messageId, add);
   }
 
+  async createQuickReply(input: { shortcut: string; message: string }): Promise<void> {
+    this.requireAppStateWritesEnabled();
+    const sock = this.getSock();
+    await sock.addOrEditQuickReply({ shortcut: input.shortcut, message: input.message });
+  }
+
+  async editQuickReply(input: {
+    shortcut: string;
+    message: string;
+    timestamp: string;
+  }): Promise<void> {
+    this.requireAppStateWritesEnabled();
+    const sock = this.getSock();
+    await sock.addOrEditQuickReply({
+      shortcut: input.shortcut,
+      message: input.message,
+      timestamp: input.timestamp,
+    });
+  }
+
+  async deleteQuickReply(timestamp: string): Promise<void> {
+    this.requireAppStateWritesEnabled();
+    const sock = this.getSock();
+    await sock.removeQuickReply(timestamp);
+  }
+
+  async setDisappearingMessages(
+    chatId: string,
+    duration: 0 | 86400 | 604800 | 7776000,
+  ): Promise<void> {
+    const sock = this.getSock();
+    const jid = this.normalizeStatusRecipient(chatId);
+    if (!jid) {
+      throw new Error(
+        "Invalid private chat ID; expected an individual WhatsApp phone number or JID",
+      );
+    }
+    await sock.sendMessage(jid, {
+      disappearingMessagesInChat: duration === 0 ? false : duration,
+    });
+  }
+
   // ---- Groups ----
 
   async createGroup(name: string, participants: string[]): Promise<GroupResponse> {
@@ -1693,6 +1918,10 @@ export class BaileysAdapter implements ChannelAdapter {
     const sock = this.getSock();
     const jid = normalizeGroupJid(groupId);
     const meta = await sock.groupMetadata(jid);
+    return this.normalizeGroupMetadata(meta);
+  }
+
+  private async normalizeGroupMetadata(meta: BaileysGroupMetadata): Promise<GroupMetadata> {
     const participants = await Promise.all(
       (meta.participants ?? []).map(async (participant) => {
         const role: "admin" | "superadmin" | "member" =
@@ -1860,6 +2089,65 @@ export class BaileysAdapter implements ChannelAdapter {
     await sock.groupRequestParticipantsUpdate(jid, [participant], action);
   }
 
+  async setGroupJoinApprovalMode(groupId: string, mode: "on" | "off"): Promise<void> {
+    this.requireAppStateWritesEnabled();
+    const sock = this.getSock();
+    await sock.groupJoinApprovalMode(normalizeGroupJid(groupId), mode);
+  }
+
+  async setGroupMemberAddMode(
+    groupId: string,
+    mode: "admin_add" | "all_member_add",
+  ): Promise<void> {
+    this.requireAppStateWritesEnabled();
+    const sock = this.getSock();
+    await sock.groupMemberAddMode(normalizeGroupJid(groupId), mode);
+  }
+
+  // ---- Communities ----
+
+  async createCommunity(subject: string, description = ""): Promise<GroupMetadata | null> {
+    this.requireAppStateWritesEnabled();
+    const sock = this.getSock();
+    const community = await sock.communityCreate(subject, description);
+    return community ? this.normalizeGroupMetadata(community) : null;
+  }
+
+  async listCommunities(): Promise<Record<string, GroupMetadata>> {
+    const sock = this.getSock();
+    const communities = await sock.communityFetchAllParticipating();
+    const entries = await Promise.all(
+      Object.entries(communities).map(
+        async ([jid, metadata]) => [jid, await this.normalizeGroupMetadata(metadata)] as const,
+      ),
+    );
+    return Object.fromEntries(entries);
+  }
+
+  async getCommunityMetadata(communityId: string): Promise<GroupMetadata> {
+    const sock = this.getSock();
+    const metadata = await sock.communityMetadata(normalizeGroupJid(communityId));
+    return this.normalizeGroupMetadata(metadata);
+  }
+
+  async linkGroupToCommunity(groupId: string, communityId: string): Promise<void> {
+    this.requireAppStateWritesEnabled();
+    const sock = this.getSock();
+    await sock.communityLinkGroup(normalizeGroupJid(groupId), normalizeGroupJid(communityId));
+  }
+
+  async unlinkGroupFromCommunity(groupId: string, communityId: string): Promise<void> {
+    this.requireAppStateWritesEnabled();
+    const sock = this.getSock();
+    await sock.communityUnlinkGroup(normalizeGroupJid(groupId), normalizeGroupJid(communityId));
+  }
+
+  async leaveCommunity(communityId: string): Promise<void> {
+    this.requireAppStateWritesEnabled();
+    const sock = this.getSock();
+    await sock.communityLeave(normalizeGroupJid(communityId));
+  }
+
   // ---- Contacts ----
 
   async checkNumberExists(phone: string): Promise<NumberExistsResponse> {
@@ -1884,6 +2172,17 @@ export class BaileysAdapter implements ChannelAdapter {
     const sock = this.getSock();
     const list = await sock.fetchBlocklist();
     return list.filter((jid): jid is string => jid !== undefined);
+  }
+
+  async getContactAbout(jid: string): Promise<string | null> {
+    const sock = this.getSock();
+    const normalizedJid = this.normalizeStatusRecipient(jid);
+    if (!normalizedJid) {
+      throw new Error("Invalid contact ID; expected an individual WhatsApp phone number or JID");
+    }
+    const status = await sock.fetchStatus(normalizedJid);
+    const result = status?.find((entry) => entry.id === normalizedJid);
+    return typeof result?.status === "string" ? result.status : null;
   }
 
   async getBusinessProfile(jid: string): Promise<BusinessProfile | null> {
@@ -2050,6 +2349,125 @@ export class BaileysAdapter implements ChannelAdapter {
     const sock = this.getSock();
     const result = await sock.sendMessage(jid, { text });
     return { messageId: result?.key.id ?? "", timestamp: Date.now(), status: "sent" };
+  }
+
+  async createNewsletter(name: string, description?: string): Promise<NewsletterMetadata> {
+    this.requireAppStateWritesEnabled();
+    const sock = this.getSock();
+    return sock.newsletterCreate(name, description);
+  }
+
+  async getNewsletterMetadata(
+    type: "invite" | "jid",
+    key: string,
+  ): Promise<NewsletterMetadata | null> {
+    if (type === "jid" && !/^\d{5,20}@newsletter$/.test(key)) {
+      throw new Error("Invalid Channel JID; expected a JID ending in @newsletter");
+    }
+    const sock = this.getSock();
+    return sock.newsletterMetadata(type, key);
+  }
+
+  async updateNewsletterName(jid: string, name: string): Promise<void> {
+    this.requireAppStateWritesEnabled();
+    const sock = this.getSock();
+    await sock.newsletterUpdateName(jid, name);
+  }
+
+  async updateNewsletterDescription(jid: string, description: string): Promise<void> {
+    this.requireAppStateWritesEnabled();
+    const sock = this.getSock();
+    await sock.newsletterUpdateDescription(jid, description);
+  }
+
+  async updateNewsletterPicture(jid: string, image: string): Promise<void> {
+    this.requireAppStateWritesEnabled();
+    const sock = this.getSock();
+    const jpeg = await mediaService.prepareGroupProfilePicture(image);
+    await sock.newsletterUpdatePicture(jid, jpeg);
+  }
+
+  async reactToNewsletterMessage(jid: string, serverId: string, reaction?: string): Promise<void> {
+    this.requireAppStateWritesEnabled();
+    const sock = this.getSock();
+    await sock.newsletterReactMessage(jid, serverId, reaction);
+  }
+
+  async fetchNewsletterMessages(
+    jid: string,
+    count: number,
+    since: number,
+    after: number,
+  ): Promise<NewsletterPostsPage> {
+    if (!Number.isInteger(count) || count < 1 || count > 100) {
+      throw new Error("Invalid count; expected an integer from 1 to 100");
+    }
+    if (!Number.isSafeInteger(since) || since < 0) {
+      throw new Error("Invalid since value; expected a non-negative Unix timestamp");
+    }
+    if (!Number.isSafeInteger(after) || after < 0) {
+      throw new Error("Invalid after cursor; expected a non-negative numeric Channel server ID");
+    }
+    const sock = this.getSock();
+    const response: unknown = await sock.newsletterFetchMessages(jid, count, since, after);
+    return isBinaryNode(response)
+      ? parseNewsletterMessagesResponse(response)
+      : { posts: [], pagination: { oldestServerId: null, newestServerId: null, after: null } };
+  }
+
+  // ---- Business catalog ----
+
+  private async prepareCatalogImages(images: string[]): Promise<Buffer[]> {
+    return Promise.all(
+      images.map((image) => mediaService.getMediaBuffer(image, { maxBytes: MEDIA_LIMITS.image })),
+    );
+  }
+
+  async getCatalog(
+    options: GetCatalogOptions,
+  ): Promise<{ products: Product[]; nextPageCursor: string | undefined }> {
+    const sock = this.getSock();
+    return sock.getCatalog(options);
+  }
+
+  async getCollections(
+    jid?: string,
+    limit?: number,
+  ): Promise<{ collections: CatalogCollection[] }> {
+    const sock = this.getSock();
+    return sock.getCollections(jid, limit);
+  }
+
+  async createProduct(input: CatalogProductCreateInput): Promise<Product> {
+    this.requireAppStateWritesEnabled();
+    const sock = this.getSock();
+    const create: ProductCreate = {
+      ...input,
+      originCountryCode: input.originCountryCode,
+      images: await this.prepareCatalogImages(input.images),
+    };
+    return sock.productCreate(create);
+  }
+
+  async updateProduct(productId: string, input: CatalogProductUpdateInput): Promise<Product> {
+    this.requireAppStateWritesEnabled();
+    const sock = this.getSock();
+    const update: ProductUpdate = {
+      ...input,
+      images: await this.prepareCatalogImages(input.images),
+    };
+    return sock.productUpdate(productId, update);
+  }
+
+  async deleteProducts(productIds: string[]): Promise<{ deleted: number }> {
+    this.requireAppStateWritesEnabled();
+    const sock = this.getSock();
+    return sock.productDelete(productIds);
+  }
+
+  async getOrderDetails(orderId: string, tokenBase64: string): Promise<OrderDetails> {
+    const sock = this.getSock();
+    return sock.getOrderDetails(orderId, tokenBase64);
   }
 
   // ---- Calls ----
