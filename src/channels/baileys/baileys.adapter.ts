@@ -598,7 +598,7 @@ function serializeWAMessage(message?: WAMessage): string | null {
 }
 
 /** Restore message secrets written by older versions as protobuf JSON base64 strings. */
-function normalizeStoredEventMessageSecret(message: WAMessage): Uint8Array | null {
+function normalizeStoredMessageSecret(message: WAMessage): Uint8Array | null {
   const messageContextInfo = message.message?.messageContextInfo as
     { messageSecret?: unknown } | null | undefined;
   const value = messageContextInfo?.messageSecret;
@@ -608,7 +608,11 @@ function normalizeStoredEventMessageSecret(message: WAMessage): Uint8Array | nul
     if (messageContextInfo) messageContextInfo.messageSecret = decoded;
     return decoded;
   }
-  return value instanceof Uint8Array && value.byteLength === 32 ? value : null;
+  if (!(value instanceof Uint8Array) || value.byteLength !== 32) return null;
+  if (!Buffer.isBuffer(value) && messageContextInfo) {
+    messageContextInfo.messageSecret = Buffer.from(value);
+  }
+  return Buffer.from(value);
 }
 
 function hasMeaningfulValue(value: unknown): boolean {
@@ -972,6 +976,7 @@ export class BaileysAdapter implements ChannelAdapter {
     if (row.rawData) {
       try {
         storedMessage = JSON.parse(row.rawData, BufferJSON.reviver) as WAMessage;
+        normalizeStoredMessageSecret(storedMessage);
       } catch {
         // The normalized fields below still provide a usable quote when raw data is malformed.
       }
@@ -1110,6 +1115,7 @@ export class BaileysAdapter implements ChannelAdapter {
 
         try {
           const stored = JSON.parse(row.rawData, BufferJSON.reviver) as WAMessage;
+          normalizeStoredMessageSecret(stored);
           return stored.message ?? undefined;
         } catch {
           return undefined;
@@ -3835,7 +3841,7 @@ export class BaileysAdapter implements ChannelAdapter {
         storedAliases.add(await this.resolveJidToPn(jid));
       }
       if (requestedChat && !storedAliases.has(requestedChat)) return null;
-      if (!normalizeStoredEventMessageSecret(stored)) return null;
+      if (!normalizeStoredMessageSecret(stored)) return null;
       return stored;
     } catch {
       return null;
@@ -4534,7 +4540,7 @@ export class BaileysAdapter implements ChannelAdapter {
 
     try {
       const poll = JSON.parse(row.rawData, BufferJSON.reviver) as WAMessage;
-      const pollSecret = poll.message?.messageContextInfo?.messageSecret;
+      const pollSecret = normalizeStoredMessageSecret(poll);
       if (!pollSecret) {
         this.queuePendingPollVote(pollMessageId, voteMessageId, message);
         return false;
