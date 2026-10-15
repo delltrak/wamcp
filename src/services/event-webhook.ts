@@ -905,8 +905,7 @@ export function createEventWebhookHeaders(
 
 function redactedWebhookEndpoint(value: string): string {
   try {
-    const url = new URL(value);
-    return `${url.origin}${url.pathname}`;
+    return new URL(value).origin;
   } catch {
     return "[invalid URL]";
   }
@@ -914,15 +913,35 @@ function redactedWebhookEndpoint(value: string): string {
 
 function safeWebhookErrorMessage(value: string, destination?: EventWebhookDestination): string {
   let message = value;
+  const destinationUrl = destination?.url;
+  if (destinationUrl) {
+    message = message.split(destinationUrl).join("[redacted URL]");
+    try {
+      const path = new URL(destinationUrl).pathname;
+      if (path.length > 1) {
+        message = message.split(path).join("[redacted path]");
+        try {
+          const decodedPath = decodeURIComponent(path);
+          if (decodedPath !== path && decodedPath.length > 1) {
+            message = message.split(decodedPath).join("[redacted path]");
+          }
+        } catch {
+          // Keep the encoded path redaction when it is not valid percent encoding.
+        }
+      }
+    } catch {
+      // Invalid destinations are rejected before delivery; continue scrubbing other secrets.
+    }
+  }
   const secrets = [
-    destination?.url,
+    destinationUrl,
     destination?.secret,
     ...Object.values(destination?.headers ?? {}),
   ]
     .filter((secret): secret is string => !!secret)
     .sort((left, right) => right.length - left.length);
   for (const secret of secrets) message = message.split(secret).join("[redacted]");
-  message = message.replace(/https?:\/\/[^\s"'<>]+/gi, (url) => redactedWebhookEndpoint(url));
+  message = message.replace(/https?:\/\/[^\s"'<>]+/gi, "[redacted URL]");
   message = message.replace(/([?&][^=\s]+)=([^&#\s]*)/g, "$1=[redacted]");
   message = message.replace(/\b(Bearer|Basic)\s+[^\s,;]+/gi, "$1 [redacted]");
   return message.trim().slice(0, 240) || "Event webhook delivery failed";
@@ -1011,7 +1030,9 @@ export function eventWebhookFailureLogData(
     ...(attempt !== undefined
       ? { attempt: Number.isFinite(attempt) ? Math.max(1, Math.floor(attempt)) : 1 }
       : {}),
-    ...(destination ? { endpoint: redactedWebhookEndpoint(destination.url) } : {}),
+    ...(destination
+      ? { destinationId: destination.id, endpoint: redactedWebhookEndpoint(destination.url) }
+      : {}),
     httpStatus: diagnostics.httpStatus ?? null,
     errorName: diagnostics.errorName ?? "Error",
     errorMessage: diagnostics.errorMessage ?? "Event webhook delivery failed",

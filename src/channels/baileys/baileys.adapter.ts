@@ -3698,6 +3698,7 @@ export class BaileysAdapter implements ChannelAdapter {
         message.type === "sticker" ||
         message.type === "poll" ||
         message.type === "event" ||
+        message.type === "album" ||
         !!message.buttons?.length ||
         !!message.rawType;
       const rawData = persistFullMessage

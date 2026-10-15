@@ -559,9 +559,12 @@ describe("issue 80 feature completion", () => {
       albumParentKey: expect.any(Object),
     });
     const albumRows = sqlite
-      .prepare("SELECT type FROM messages WHERE instance_id = ? ORDER BY rowid")
-      .all(instanceId) as Array<{ type: string }>;
+      .prepare(
+        "SELECT type, raw_data AS rawData FROM messages WHERE instance_id = ? ORDER BY rowid",
+      )
+      .all(instanceId) as Array<{ type: string; rawData: string | null }>;
     expect(albumRows.map((row) => row.type)).toEqual(["album", "image", "image"]);
+    expect(albumRows[0]?.rawData).toContain('"albumMessage"');
 
     sqlite
       .prepare(

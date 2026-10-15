@@ -1327,7 +1327,7 @@ describe("outgoing event webhook delivery", () => {
   it("keeps HTTP status and safe network diagnostics for failed-attempt logs", async () => {
     const destination = {
       id: "default",
-      url: "https://hooks.example.test/receive?token=query-secret",
+      url: "https://hooks.example.test:8443/receive/provider-path-secret?token=query-secret",
       headers: { authorization: "Bearer header-secret" },
       secret: "hmac-secret",
     };
@@ -1347,7 +1347,7 @@ describe("outgoing event webhook delivery", () => {
 
     const networkError = Object.assign(
       new Error(
-        `connect ECONNREFUSED ${destination.url} ${destination.headers.authorization} ${destination.secret}`,
+        `connect ECONNREFUSED ${destination.url} path=/receive/provider-path-secret ${destination.headers.authorization} ${destination.secret}`,
       ),
       { code: "ECONNREFUSED" },
     );
@@ -1369,7 +1369,8 @@ describe("outgoing event webhook delivery", () => {
     const logData = eventWebhookFailureLogData(2, failure, destination);
     expect(logData).toMatchObject({
       attempt: 2,
-      endpoint: "https://hooks.example.test/receive",
+      destinationId: "default",
+      endpoint: "https://hooks.example.test:8443",
       httpStatus: null,
       errorName: "Error",
       errorCode: "ECONNREFUSED",
@@ -1379,6 +1380,8 @@ describe("outgoing event webhook delivery", () => {
     expect(serialized).not.toContain("header-secret");
     expect(serialized).not.toContain("hmac-secret");
     expect(serialized).not.toContain("token=");
+    expect(serialized).not.toContain("/receive/provider-path-secret");
+    expect(serialized).not.toContain("provider-path-secret");
   });
 
   it("rejects a hostname that resolves to a private address before sending", async () => {
