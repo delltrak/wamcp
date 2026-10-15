@@ -676,7 +676,7 @@ export function normalizeMessagesUpsert(
   instanceId: string,
   data: BaileysEventMap["messages.upsert"],
 ): NormalizedMessageEvent[] {
-  if (data.type !== "notify") return [];
+  if (data.type !== "notify" && data.type !== "append") return [];
 
   return data.messages
     .filter((msg) => {
