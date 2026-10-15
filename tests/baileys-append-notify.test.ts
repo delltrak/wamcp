@@ -468,7 +468,7 @@ describe("Baileys offline append notifications", () => {
     }
   });
 
-  it("ignores raw websocket frames and reconnects after consecutive failed application probes", async () => {
+  it("ignores websocket keepalive frames and reconnects after consecutive failed USync probes", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-10-15T12:00:00.000Z"));
     const oldWatchdog = process.env.WA_BAILEYS_HEALTH_WATCHDOG_MS;
@@ -478,11 +478,16 @@ describe("Baileys offline append notifications", () => {
     const listeners = new Map<string, (value: unknown) => void>();
     const websocketListeners = new Map<string, Array<(...args: unknown[]) => void>>();
     let processEvents: ((events: Partial<BaileysEventMap>) => Promise<void> | void) | undefined;
-    const query = vi.fn(async () => {
-      throw new Error("simulated IQ timeout");
+    let probeCount = 0;
+    const fetchStatus = vi.fn(async () => {
+      probeCount += 1;
+      if (probeCount === 1) return await new Promise<never>(() => {});
+      throw new Error("simulated USync timeout");
     });
+    const query = vi.fn(async () => ({ tag: "iq", attrs: { type: "result" } }));
     const socketEnd = vi.fn(async () => {});
     const socket = {
+      user: { id: CHAT_JID },
       ev: {
         on: vi.fn((event: string, handler: (value: unknown) => void) => {
           listeners.set(event, handler);
@@ -496,6 +501,7 @@ describe("Baileys offline append notifications", () => {
           websocketListeners.set(event, [...(websocketListeners.get(event) ?? []), handler]);
         }),
       },
+      fetchStatus,
       query,
       end: socketEnd,
       get authState() {
@@ -520,15 +526,12 @@ describe("Baileys offline append notifications", () => {
         await vi.advanceTimersByTimeAsync(100);
       }
 
-      expect(query).toHaveBeenCalledTimes(1);
-      expect(query).toHaveBeenCalledWith(
-        {
-          tag: "iq",
-          attrs: { to: "s.whatsapp.net", type: "get", xmlns: "w:p" },
-          content: [{ tag: "ping", attrs: {} }],
-        },
-        20_000,
-      );
+      expect(fetchStatus).toHaveBeenCalledTimes(1);
+      expect(fetchStatus).toHaveBeenCalledWith(CHAT_JID);
+      expect(query).not.toHaveBeenCalled();
+      expect(socketEnd).not.toHaveBeenCalled();
+
+      await vi.advanceTimersByTimeAsync(20_000);
       expect(socketEnd).not.toHaveBeenCalled();
 
       await processEvents?.({
@@ -541,7 +544,7 @@ describe("Baileys offline append notifications", () => {
         await vi.advanceTimersByTimeAsync(100);
       }
 
-      expect(query).toHaveBeenCalledTimes(2);
+      expect(fetchStatus).toHaveBeenCalledTimes(2);
       expect(socketEnd).not.toHaveBeenCalled();
 
       for (let elapsed = 0; elapsed < 1000; elapsed += 100) {
@@ -551,10 +554,11 @@ describe("Baileys offline append notifications", () => {
         await vi.advanceTimersByTimeAsync(100);
       }
 
-      expect(query).toHaveBeenCalledTimes(3);
+      expect(fetchStatus).toHaveBeenCalledTimes(3);
+      expect(query).not.toHaveBeenCalled();
       expect(socketEnd).toHaveBeenCalledTimes(1);
       expect(socketEnd.mock.calls[0]?.[0]).toBeInstanceOf(Error);
-      expect(socketEnd.mock.calls[0]?.[0]?.message).toContain("simulated IQ timeout");
+      expect(socketEnd.mock.calls[0]?.[0]?.message).toContain("simulated USync timeout");
 
       listeners.get("connection.update")?.({
         connection: "close",
@@ -581,9 +585,11 @@ describe("Baileys offline append notifications", () => {
 
     const listeners = new Map<string, (value: unknown) => void>();
     let processEvents: ((events: Partial<BaileysEventMap>) => Promise<void> | void) | undefined;
+    const fetchStatus = vi.fn(async () => []);
     const query = vi.fn(async () => ({ tag: "iq", attrs: { type: "result" } }));
     const socketEnd = vi.fn(async () => {});
     const socket = {
+      user: { id: CHAT_JID },
       ev: {
         on: vi.fn((event: string, handler: (value: unknown) => void) => {
           listeners.set(event, handler);
@@ -592,6 +598,7 @@ describe("Baileys offline append notifications", () => {
           processEvents = handler;
         }),
       },
+      fetchStatus,
       query,
       end: socketEnd,
       get authState() {
@@ -609,7 +616,9 @@ describe("Baileys offline append notifications", () => {
       listeners.get("connection.update")?.({ connection: "open" });
       await vi.advanceTimersByTimeAsync(3000);
 
-      expect(query).toHaveBeenCalledTimes(3);
+      expect(fetchStatus).toHaveBeenCalledTimes(3);
+      expect(fetchStatus).toHaveBeenCalledWith(CHAT_JID);
+      expect(query).not.toHaveBeenCalled();
       expect(socketEnd).not.toHaveBeenCalled();
       expect(saveCreds).not.toHaveBeenCalled();
       expect(processEvents).toBeDefined();

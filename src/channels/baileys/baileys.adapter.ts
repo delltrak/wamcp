@@ -793,6 +793,7 @@ export class BaileysAdapter implements ChannelAdapter {
   private lastDisconnectReason: string | null = null;
   private lastDisconnectStatusCode: number | null = null;
   private consecutiveHealthProbeFailures = 0;
+  private healthActivityGeneration = 0;
 
   constructor(
     private readonly instanceId: string,
@@ -5680,23 +5681,30 @@ export class BaileysAdapter implements ChannelAdapter {
   private async probeSocketHealth(sock: WASocket): Promise<void> {
     if (this.status !== "connected" || this.sock !== sock) return;
 
+    const activityGeneration = this.healthActivityGeneration;
     try {
-      const response = await sock.query(
-        {
-          tag: "iq",
-          attrs: {
-            to: "s.whatsapp.net",
-            type: "get",
-            xmlns: "w:p",
-          },
-          content: [{ tag: "ping", attrs: {} }],
-        },
-        BAILEYS_HEALTH_PROBE_TIMEOUT_MS,
-      );
-      if (!response) {
-        throw new Error(
-          `Baileys health probe timed out after ${BAILEYS_HEALTH_PROBE_TIMEOUT_MS}ms`,
-        );
+      const ownJid = sock.user?.id;
+      if (!ownJid) throw new Error("Baileys health probe could not resolve the account JID");
+
+      // This read-only USync request checks the app layer; Baileys' keepalive ping only checks the websocket.
+      let timeout: ReturnType<typeof setTimeout> | undefined;
+      try {
+        await Promise.race([
+          sock.fetchStatus(ownJid),
+          new Promise<never>((_, reject) => {
+            timeout = setTimeout(
+              () =>
+                reject(
+                  new Error(
+                    `Baileys health probe timed out after ${BAILEYS_HEALTH_PROBE_TIMEOUT_MS}ms`,
+                  ),
+                ),
+              BAILEYS_HEALTH_PROBE_TIMEOUT_MS,
+            );
+          }),
+        ]);
+      } finally {
+        if (timeout) clearTimeout(timeout);
       }
 
       if (this.status !== "connected" || this.sock !== sock) return;
@@ -5705,6 +5713,11 @@ export class BaileysAdapter implements ChannelAdapter {
       this.resetHealthWatchdog(sock);
     } catch (error) {
       if (this.status !== "connected" || this.sock !== sock) return;
+      if (this.healthActivityGeneration !== activityGeneration) {
+        this.consecutiveHealthProbeFailures = 0;
+        this.resetHealthWatchdog(sock);
+        return;
+      }
 
       this.consecutiveHealthProbeFailures += 1;
       const reason = error instanceof Error ? error.message : String(error);
@@ -5748,7 +5761,9 @@ export class BaileysAdapter implements ChannelAdapter {
 
   private noteInboundApplicationActivity(sock: WASocket): void {
     if (this.status !== "connected" || this.sock !== sock) return;
+    this.healthActivityGeneration += 1;
     this.consecutiveHealthProbeFailures = 0;
+    this.resetHealthWatchdog(sock);
   }
 
   private getAppendNotifyWatermark(now: number): number {
