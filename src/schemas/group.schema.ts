@@ -159,3 +159,19 @@ export const HandleJoinRequestSchema = z
     action: z.enum(["approve", "reject"]).describe("Whether to approve or reject the join request"),
   })
   .strict();
+
+export const GroupJoinApprovalModeSchema = z
+  .object({
+    instanceId: z.string().min(1).describe("The instance ID"),
+    groupId: GroupIdSchema.describe("WhatsApp group JID or bare group ID"),
+    mode: z.enum(["on", "off"]).describe("Require admin approval for join requests"),
+  })
+  .strict();
+
+export const GroupMemberAddModeSchema = z
+  .object({
+    instanceId: z.string().min(1).describe("The instance ID"),
+    groupId: GroupIdSchema.describe("WhatsApp group JID or bare group ID"),
+    mode: z.enum(["admin_add", "all_member_add"]).describe("Who can add members"),
+  })
+  .strict();

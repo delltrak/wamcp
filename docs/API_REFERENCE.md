@@ -9,17 +9,18 @@
 1. [Overview](#1-overview)
 2. [Tools Reference](#2-tools-reference)
    - [Instance Management](#21-instance-management-8-tools)
-   - [Messaging](#22-messaging-20-tools)
-   - [Chat Management](#23-chat-management-10-tools)
-   - [Group Management](#24-group-management-18-tools)
-   - [Contact Management](#25-contact-management-6-tools)
+   - [Messaging](#22-messaging-21-tools)
+   - [Chat Management](#23-chat-management-11-tools)
+   - [Group Management](#24-group-management-20-tools)
+   - [Contact Management](#25-contact-management-8-tools)
    - [Profile Management](#26-profile-management-6-tools)
    - [Status / Stories](#27-status--stories-3-tools)
-   - [Newsletter / Channels](#28-newsletter--channels-3-tools)
+   - [Newsletter / Channels](#28-newsletter--channels-10-tools)
    - [Call Management](#29-call-management-1-tool)
    - [Message Search](#210-message-search-1-tool)
    - [WhatsApp Business Labels](#211-whatsapp-business-labels-8-tools)
    - [WhatsApp Events](#212-whatsapp-events-2-tools)
+   - [Business, Communities, and Catalog](#213-business-communities-and-catalog-15-tools)
 3. [Resources Reference](#3-resources-reference)
 4. [Notifications Reference](#4-notifications-reference)
 5. [Error Handling](#5-error-handling)
@@ -75,14 +76,22 @@ Tools marked **Baileys only** are not available on Cloud API instances.
   to enable `wa_archive_chat`, `wa_pin_chat`, `wa_mute_chat`, `wa_delete_chat`, `wa_clear_chat`,
   `wa_mark_chat_unread`, `wa_star_message`, `wa_create_label`, `wa_edit_label`, `wa_delete_label`,
   `wa_add_chat_label`, `wa_remove_chat_label`, `wa_add_message_label`, `wa_remove_message_label`,
-  and `wa_update_profile_name`. These changes can get the linked device removed, so enable them at
-  your own risk. Read receipts and app-state reads/resyncs are not gated.
+  `wa_update_profile_name`, `wa_create_quick_reply`, `wa_edit_quick_reply`, and
+  `wa_delete_quick_reply`. These changes can get the linked device removed, so enable them at your
+  own risk. Read receipts and app-state reads/resyncs are not gated.
+- **Protocol classification for issue #74 operations** -- `wa_set_disappearing_messages` sends a
+  `sendMessage` protocol control message; blocklist/About are reads; communities use `w:g2` IQs;
+  Channel metadata/posts/reactions use newsletter/MEX queries or message nodes; group modes use IQs;
+  catalog operations use IQ/MEX queries; and PTV sends a video message with `ptv: true`. Only quick
+  reply create/edit/delete use `chatModify` → `appPatch` and are gated above.
+- **Real WhatsApp checks** -- Run real integration tests only with a throwaway number. Automated
+  tests use mocked sockets and do not connect to WhatsApp.
 
 ---
 
 ## 2. Tools Reference
 
-WA MCP exposes **90 tools** grouped by domain. All tools return MCP-standard responses.
+WA MCP exposes **118 tools** grouped by domain. All tools return MCP-standard responses.
 
 ### Success Response Format
 
@@ -303,7 +312,7 @@ Configure Meta Cloud API credentials for a Cloud API instance. Required before c
 
 ---
 
-### 2.2 Messaging (20 tools)
+### 2.2 Messaging (21 tools)
 
 Tools for sending messages, media, reactions, and managing message state.
 
@@ -378,6 +387,21 @@ Send a video to a WhatsApp contact or group.
   "jobId": "job_125"
 }
 ```
+
+---
+
+#### `wa_send_ptv`
+
+Send a round video note through the normal queued video path. Baileys sends it with `ptv: true`.
+
+| Parameter    | Type   | Required | Description                         |
+| ------------ | ------ | -------- | ----------------------------------- |
+| `instanceId` | string | Yes      | The instance to send from           |
+| `to`         | string | Yes      | Recipient phone number or group JID |
+| `video`      | string | Yes      | Video URL or base64-encoded data    |
+| `caption`    | string | No       | Optional video caption              |
+
+**Channel support:** Baileys only. Cloud API returns an unsupported-operation error.
 
 ---
 
@@ -792,7 +816,7 @@ Mark specific messages as read in a chat.
 
 ---
 
-### 2.3 Chat Management (10 tools)
+### 2.3 Chat Management (11 tools)
 
 Tools for organizing the chat list and retrieving message history.
 
@@ -1022,7 +1046,22 @@ Request older messages from Baileys' on-demand history sync. The oldest stored m
 
 ---
 
-### 2.4 Group Management (18 tools)
+#### `wa_set_disappearing_messages`
+
+Set a disappearing-message duration in a private chat. Baileys sends the protocol control message
+through `sendMessage`; this does not call `chatModify` or write app state.
+
+| Parameter    | Type                              | Required | Description                                                     |
+| ------------ | --------------------------------- | -------- | --------------------------------------------------------------- |
+| `instanceId` | string                            | Yes      | The instance ID                                                 |
+| `chatId`     | phone number or individual JID    | Yes      | Private contact; group, Channel, and broadcast IDs are rejected |
+| `duration`   | `0`, `86400`, `604800`, `7776000` | Yes      | Off, 24 hours, 7 days, or 90 days                               |
+
+**Channel support:** Baileys only. Cloud API does not support this operation.
+
+---
+
+### 2.4 Group Management (20 tools)
 
 Tools for creating and managing WhatsApp groups.
 
@@ -1453,7 +1492,37 @@ Approve or reject a pending join request for a WhatsApp group.
 
 ---
 
-### 2.5 Contact Management (6 tools)
+#### `wa_group_join_approval_mode`
+
+Enable or disable admin approval for group join requests. Baileys updates the setting through an IQ
+query, not an app-state patch.
+
+| Parameter    | Type          | Required | Description                 |
+| ------------ | ------------- | -------- | --------------------------- |
+| `instanceId` | string        | Yes      | The instance ID             |
+| `groupId`    | string        | Yes      | Group JID or bare group ID  |
+| `mode`       | `on` or `off` | Yes      | Whether join approval is on |
+
+**Channel support:** Baileys only.
+
+---
+
+#### `wa_group_member_add_mode`
+
+Set who can add members to a group. Baileys updates the setting through an IQ query, not an
+app-state patch.
+
+| Parameter    | Type                            | Required | Description                |
+| ------------ | ------------------------------- | -------- | -------------------------- |
+| `instanceId` | string                          | Yes      | The instance ID            |
+| `groupId`    | string                          | Yes      | Group JID or bare group ID |
+| `mode`       | `admin_add` or `all_member_add` | Yes      | Who may add members        |
+
+**Channel support:** Baileys only.
+
+---
+
+### 2.5 Contact Management (8 tools)
 
 Tools for refreshing and searching contacts, checking phone numbers, blocking/unblocking contacts, and fetching business profiles.
 
@@ -1639,6 +1708,31 @@ Fetch the business profile information for a WhatsApp Business contact.
   "address": "123 Main St"
 }
 ```
+
+---
+
+#### `wa_list_blocked_contacts`
+
+List blocked contact JIDs with Baileys `fetchBlocklist`, an IQ read.
+
+| Parameter    | Type   | Required | Description     |
+| ------------ | ------ | -------- | --------------- |
+| `instanceId` | string | Yes      | The instance ID |
+
+**Channel support:** Baileys only. Cloud API does not expose the account blocklist.
+
+---
+
+#### `wa_get_contact_about`
+
+Read a contact's About text with Baileys `fetchStatus`, a USync read.
+
+| Parameter    | Type   | Required | Description                        |
+| ------------ | ------ | -------- | ---------------------------------- |
+| `instanceId` | string | Yes      | The instance ID                    |
+| `jid`        | string | Yes      | Contact phone number or individual JID |
+
+**Channel support:** Baileys only. Cloud API does not support this lookup.
 
 ---
 
@@ -1881,7 +1975,7 @@ Post a video status/story update visible to contacts.
 
 ---
 
-### 2.8 Newsletter / Channels (3 tools)
+### 2.8 Newsletter / Channels (10 tools)
 
 Tools for interacting with WhatsApp Channels (Newsletters). **Baileys only.**
 
@@ -1947,6 +2041,22 @@ Send a message to a WhatsApp Channel/Newsletter (must be admin).
   "timestamp": 1709136000
 }
 ```
+
+Additional Channel operations use Baileys newsletter/MEX queries or message nodes, not app-state
+patches. Cloud API returns a clear unsupported-operation error.
+
+| Tool                               | Inputs                                             | Description                                      |
+| ---------------------------------- | -------------------------------------------------- | ------------------------------------------------ |
+| `wa_create_newsletter`             | `instanceId`, `name`, optional `description`       | Create a Channel.                                |
+| `wa_get_newsletter_metadata`       | `instanceId`, `type`, `key`                        | Read metadata by JID or invite code.             |
+| `wa_newsletter_update_name`        | `instanceId`, `jid`, `name`                        | Update the Channel name.                         |
+| `wa_newsletter_update_description` | `instanceId`, `jid`, `description`                 | Update the Channel description.                  |
+| `wa_newsletter_update_picture`     | `instanceId`, `jid`, `image`                       | Update picture from a safe URL or base64 image.  |
+| `wa_newsletter_react`              | `instanceId`, `jid`, `serverId`, `reaction`        | Add or remove a post reaction.                   |
+| `wa_newsletter_list_posts`         | `instanceId`, `jid`, optional `count`, `since`, `after` | Fetch Channel posts with pagination bounds. |
+
+Channel picture URLs use the existing public-HTTPS validation and media size limits, then are
+converted to JPEG before upload.
 
 ---
 
@@ -2049,6 +2159,40 @@ Read event responses persisted from Baileys message updates.
 | `eventMessageId` | string | Yes | Event message ID |
 
 **Channel support:** Baileys only. Baileys decrypts and emits response updates when it can associate the reply with the event message. Responses that Baileys cannot decrypt or associate are unavailable to this tool.
+
+---
+
+### 2.13 Business, Communities, and Catalog (15 tools)
+
+These operations require Baileys. Cloud API calls return unsupported-operation errors. Communities
+use `w:g2` IQ queries; catalog actions use business IQ/MEX queries. Neither path writes app state.
+
+| Tool                         | Inputs                                                                                                       | Description                                           |
+| ---------------------------- | ------------------------------------------------------------------------------------------------------------ | ----------------------------------------------------- |
+| `wa_create_quick_reply`      | `instanceId`, `shortcut`, `message`                                                                          | Create a quick reply. Gated app-state write.          |
+| `wa_edit_quick_reply`        | `instanceId`, `timestamp`, `shortcut`, `message`                                                             | Edit by sync timestamp. Gated app-state write.        |
+| `wa_delete_quick_reply`      | `instanceId`, `timestamp`                                                                                    | Delete by sync timestamp. Gated app-state write.      |
+| `wa_create_community`        | `instanceId`, `name`, optional `description`                                                                 | Create a community.                                   |
+| `wa_list_communities`        | `instanceId`                                                                                                | List participating communities.                       |
+| `wa_get_community_details`   | `instanceId`, `communityId`                                                                                 | Read community metadata.                              |
+| `wa_community_link_group`    | `instanceId`, `communityId`, `groupId`                                                                       | Link an existing group.                               |
+| `wa_community_unlink_group`  | `instanceId`, `communityId`, `groupId`                                                                       | Unlink a group.                                       |
+| `wa_leave_community`         | `instanceId`, `communityId`                                                                                 | Leave a community.                                    |
+| `wa_get_catalog`             | `instanceId`, optional `jid`, `limit`, `cursor`                                                              | List products with cursor pagination.                 |
+| `wa_get_catalog_collections` | `instanceId`, optional `jid`, `limit`                                                                        | List catalog collections.                             |
+| `wa_create_catalog_product`  | `instanceId`, product fields and `images`; optional `originCountryCode`                                     | Create a product.                                     |
+| `wa_update_catalog_product`  | `instanceId`, `productId`, product fields and `images`                                                       | Replace product fields and images.                   |
+| `wa_delete_catalog_products` | `instanceId`, `productIds`                                                                                  | Delete one or more products.                          |
+| `wa_get_order_details`       | `instanceId`, `orderId`, `tokenBase64`                                                                       | Read details using the token from the order message. |
+
+Quick reply create/edit/delete call Baileys `addOrEditQuickReply` or `removeQuickReply`, which use
+`chatModify` → `appPatch`. They fail before the socket is touched unless
+`WA_APP_STATE_WRITES_ENABLED=true`. Baileys rc14 has no quick-reply read method, and the server does
+not store quick reply sync actions locally, so there is no list tool. Use the WhatsApp Business app
+to find an existing reply's timestamp before editing or deleting it.
+
+Catalog image URLs are fetched only from public HTTPS hosts; the media helper enforces input-size
+limits before upload.
 
 ---
 
@@ -2740,7 +2884,7 @@ Add to your Claude Desktop MCP configuration:
 }
 ```
 
-Once configured, Claude will auto-discover all 60 WA MCP tools and can interact with WhatsApp directly.
+Once configured, Claude will auto-discover all 118 WA MCP tools and can interact with WhatsApp directly.
 
 ### 6.3 LangChain (Python)
 
@@ -2753,26 +2897,32 @@ toolkit = MCPToolkit(
 )
 
 tools = toolkit.get_tools()
-# tools now contains all 60 WA MCP tools, ready for any LangChain agent
+# tools now contains all 118 WA MCP tools, ready for any LangChain agent
 ```
 
 ---
 
 ## Appendix: Tool Count Summary
 
-| Domain                | Tools  | Channel                             |
-| --------------------- | ------ | ----------------------------------- |
-| Instance Management   | 8      | Both (2 Baileys only, 1 Cloud only) |
-| Messaging             | 17     | Both                                |
-| Chat Management       | 6      | Both                                |
-| Group Management      | 18     | Baileys                             |
-| Contact Management    | 5      | Both                                |
-| Profile Management    | 5      | Both                                |
-| Status / Stories      | 3      | Baileys only                        |
-| Newsletter / Channels | 3      | Baileys only                        |
-| Call Management       | 1      | Baileys only                        |
-| **Total**             | **60** |                                     |
+| Domain                            | Tools | Channel                              |
+| --------------------------------- | ----- | ------------------------------------ |
+| Instance Management              | 8     | Both (2 Baileys only, 1 Cloud only)  |
+| Messaging                         | 21    | Both                                 |
+| Audio Transcription               | 1     | Both                                 |
+| Text-to-speech                    | 3     | Provider-dependent                   |
+| Chat Management                   | 11    | Both                                 |
+| Message Search                    | 1     | Both                                 |
+| WhatsApp Business Labels          | 8     | Baileys                              |
+| WhatsApp Events                   | 2     | Baileys                              |
+| Group Management                  | 20    | Baileys                              |
+| Contact Management                | 8     | Both                                 |
+| Profile Management                | 6     | Both                                 |
+| Status / Stories                  | 3     | Baileys only                         |
+| Newsletter / Channels             | 10    | Baileys only                         |
+| Business, Communities, and Catalog| 15    | Baileys only                         |
+| Call Management                   | 1     | Baileys only                         |
+| **Total**                         | **118** |                                    |
 
 | Resources     | 10  |
 | ------------- | --- |
-| Notifications | 12  |
+| Notifications | 13  |

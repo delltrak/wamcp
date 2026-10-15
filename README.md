@@ -36,7 +36,7 @@
 
 **WA MCP** is a WhatsApp MCP server built with TypeScript that gives AI agents full access to WhatsApp through the [Model Context Protocol](https://modelcontextprotocol.io). It supports both **Baileys** (WhatsApp Web) and **Meta Cloud API** as dual-channel backends, deployable with **Docker** in a single command.
 
-Your agent connects once and auto-discovers **90 tools**, **10 resources**, and **13 real-time events** — zero configuration, zero REST wrappers, zero glue code.
+Your agent connects once and auto-discovers **118 tools**, **10 resources**, and **13 real-time events** — zero configuration, zero REST wrappers, zero glue code.
 
 ```
 Your AI Agent ←→ MCP Protocol ←→ WA MCP ←→ WhatsApp
@@ -146,7 +146,7 @@ Add to your `claude_desktop_config.json`:
 
 ## 🛠️ Tools
 
-WA MCP exposes **90 tools** across 14 domains. All tools use the `wa_` prefix.
+WA MCP exposes **118 tools** across 15 domains. All tools use the `wa_` prefix.
 
 <details>
 <summary>📋 <strong>Instance Management</strong> (8 tools)</summary>
@@ -165,13 +165,14 @@ WA MCP exposes **90 tools** across 14 domains. All tools use the `wa_` prefix.
 </details>
 
 <details>
-<summary>💬 <strong>Messaging</strong> (20 tools)</summary>
+<summary>💬 <strong>Messaging</strong> (21 tools)</summary>
 
 | Tool                   | Description             |
 | ---------------------- | ----------------------- |
 | `wa_send_text`         | Send text message       |
 | `wa_send_image`        | Send image with caption |
 | `wa_send_video`        | Send video with caption |
+| `wa_send_ptv`          | Send a round video note (Baileys) |
 | `wa_send_sticker`      | Send a static or animated sticker |
 | `wa_send_gif`          | Send a GIF as a looping MP4 (Baileys) |
 | `wa_send_audio`        | Send audio; Baileys `ptt=true` adds waveform and duration when available |
@@ -213,7 +214,7 @@ WA MCP exposes **90 tools** across 14 domains. All tools use the `wa_` prefix.
 </details>
 
 <details>
-<summary>💭 <strong>Chat Management</strong> (10 tools)</summary>
+<summary>💭 <strong>Chat Management</strong> (11 tools)</summary>
 
 | Tool              | Description              |
 | ----------------- | ------------------------ |
@@ -227,6 +228,7 @@ WA MCP exposes **90 tools** across 14 domains. All tools use the `wa_` prefix.
 | `wa_mark_chat_unread` | Mark a chat unread (Baileys) |
 | `wa_star_message` | Star / unstar a message (Baileys) |
 | `wa_fetch_message_history` | Fetch older stored chat history (Baileys) |
+| `wa_set_disappearing_messages` | Set a private-chat timer: off, 24h, 7d, or 90d |
 
 </details>
 
@@ -264,7 +266,7 @@ WA MCP exposes **90 tools** across 14 domains. All tools use the `wa_` prefix.
 </details>
 
 <details>
-<summary>👥 <strong>Groups</strong> (18 tools)</summary>
+<summary>👥 <strong>Groups</strong> (20 tools)</summary>
 
 | Tool                           | Description                   |
 | ------------------------------ | ----------------------------- |
@@ -286,11 +288,13 @@ WA MCP exposes **90 tools** across 14 domains. All tools use the `wa_` prefix.
 | `wa_group_handle_request`      | Approve / reject join request |
 | `wa_group_update_picture`      | Set group picture (Baileys)   |
 | `wa_group_remove_picture`      | Remove group picture (Baileys) |
+| `wa_group_join_approval_mode`  | Set join-request approval mode (Baileys) |
+| `wa_group_member_add_mode`     | Set who can add members (Baileys) |
 
 </details>
 
 <details>
-<summary>📇 <strong>Contacts</strong> (6 tools)</summary>
+<summary>📇 <strong>Contacts</strong> (8 tools)</summary>
 
 | Tool                      | Description                      |
 | ------------------------- | -------------------------------- |
@@ -300,6 +304,8 @@ WA MCP exposes **90 tools** across 14 domains. All tools use the `wa_` prefix.
 | `wa_block_contact`        | Block contact                    |
 | `wa_unblock_contact`      | Unblock contact                  |
 | `wa_get_business_profile` | Get business profile             |
+| `wa_list_blocked_contacts` | List blocked contact JIDs (Baileys) |
+| `wa_get_contact_about` | Read a contact's About text (Baileys) |
 
 </details>
 
@@ -336,15 +342,46 @@ this operation.
 </details>
 
 <details>
-<summary>📰 <strong>Newsletter</strong> (3 tools)</summary>
+<summary>📰 <strong>Newsletter / Channels</strong> (10 tools)</summary>
 
 | Tool                     | Description           |
 | ------------------------ | --------------------- |
 | `wa_newsletter_follow`   | Follow a newsletter   |
 | `wa_newsletter_unfollow` | Unfollow a newsletter |
 | `wa_newsletter_send`     | Send to newsletter    |
+| `wa_create_newsletter` | Create a Channel (Baileys) |
+| `wa_get_newsletter_metadata` | Read Channel metadata (Baileys) |
+| `wa_newsletter_update_name` | Update Channel name (Baileys) |
+| `wa_newsletter_update_description` | Update Channel description (Baileys) |
+| `wa_newsletter_update_picture` | Update Channel picture (Baileys) |
+| `wa_newsletter_react` | React to a Channel post (Baileys) |
+| `wa_newsletter_list_posts` | List Channel posts (Baileys) |
 
 </details>
+
+<details>
+<summary>🏘️ <strong>Business &amp; Communities</strong> (15 tools)</summary>
+
+| Tool | Description |
+| ---- | ----------- |
+| `wa_create_quick_reply` | Create a Business quick reply (gated app-state write) |
+| `wa_edit_quick_reply` | Edit a Business quick reply (gated app-state write) |
+| `wa_delete_quick_reply` | Delete a Business quick reply (gated app-state write) |
+| `wa_create_community` | Create a community (Baileys) |
+| `wa_list_communities` | List communities (Baileys) |
+| `wa_get_community_details` | Get community metadata (Baileys) |
+| `wa_community_link_group` / `wa_community_unlink_group` | Link or unlink a group (Baileys) |
+| `wa_leave_community` | Leave a community (Baileys) |
+| `wa_get_catalog` | List catalog products (Baileys) |
+| `wa_get_catalog_collections` | List catalog collections (Baileys) |
+| `wa_create_catalog_product` | Create a catalog product (Baileys) |
+| `wa_update_catalog_product` | Update a catalog product (Baileys) |
+| `wa_delete_catalog_products` | Delete catalog products (Baileys) |
+| `wa_get_order_details` | Read order details (Baileys) |
+
+</details>
+
+Baileys rc14 has no quick-reply list API, and this server does not store quick-reply sync actions locally. Use the WhatsApp Business app to find an existing reply's timestamp before editing or deleting it.
 
 <details>
 <summary>📞 <strong>Calls</strong> (1 tool)</summary>
@@ -638,9 +675,16 @@ responses; receipt failures are logged.
 Baileys blocks `wa_archive_chat`, `wa_pin_chat`, `wa_mute_chat`, `wa_delete_chat`, `wa_clear_chat`,
 `wa_mark_chat_unread`, `wa_star_message`, `wa_create_label`, `wa_edit_label`, `wa_delete_label`,
 `wa_add_chat_label`, `wa_remove_chat_label`, `wa_add_message_label`, `wa_remove_message_label`, and
-`wa_update_profile_name` before sending them to WhatsApp. These app-state changes can get the linked
+`wa_update_profile_name`, `wa_create_quick_reply`, `wa_edit_quick_reply`, and `wa_delete_quick_reply`
+before sending them to WhatsApp. Quick reply writes call Baileys `addOrEditQuickReply` or
+`removeQuickReply`, which use `chatModify` and `appPatch`; these app-state changes can get the linked
 device removed. Set the variable to `true` only if you accept that risk. This does not disable read
 receipts or app-state reads and resyncs.
+
+Other issue #74 operations use non-app-state protocol paths: private disappearing timers use
+`sendMessage` control messages; blocklist/About are read queries; community actions use `w:g2` IQs;
+Channel metadata, posts, and reactions use newsletter/MEX queries or message nodes; group approval
+modes and catalog operations use IQ/MEX queries; PTV uses a regular video message with `ptv: true`.
 
 Baileys status stories go to the account's own normalized JID and known individual contacts by
 default. Each status tool accepts an optional `statusJidList` of phone numbers or individual JIDs
