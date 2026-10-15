@@ -12,7 +12,6 @@ import makeWASocket, {
   decryptEventResponse,
   decryptPollVote,
   getAggregateVotesInPollMessage,
-  getKeyAuthor,
   updateMessageWithPollUpdate,
   makeCacheableSignalKeyStore,
   getUrlInfo,
@@ -159,6 +158,7 @@ const MAX_PRESENCE_SUBSCRIPTIONS = 100;
 const PRESENCE_UPDATE_MIN_INTERVAL_MS = 2_000;
 const MAX_TRACKED_PRESENCE_CHATS = 1_000;
 const MAX_EVENT_RESPONSE_DECRYPT_ATTEMPTS = 16;
+const MAX_POLL_VOTE_DECRYPT_ATTEMPTS = 16;
 const MAX_LINK_PREVIEW_THUMBNAIL_BYTES = 512 * 1024;
 const APP_STATE_WRITES_DISABLED_ERROR =
   "WhatsApp account, server, and app-state writes are disabled because changes can get this linked device removed (see issue #71). Set WA_APP_STATE_WRITES_ENABLED=true to enable at your own risk.";
@@ -1357,7 +1357,7 @@ export class BaileysAdapter implements ChannelAdapter {
     }
 
     const result = await sock.sendMessage(jid, msg, opts);
-    this.persistOutgoingMessage(result, jid);
+    await this.persistOutgoingMessage(result, jid);
     return { messageId: result?.key.id ?? "", timestamp: Date.now(), status: "sent" };
   }
 
@@ -1379,7 +1379,7 @@ export class BaileysAdapter implements ChannelAdapter {
     }
     const parent = await sock.sendMessage(jid, { album: { expectedImageCount: images.length } });
     if (!parent?.key.id) throw new Error("Baileys did not return an album parent message ID");
-    this.persistOutgoingMessage(parent, jid);
+    await this.persistOutgoingMessage(parent, jid);
 
     let sent = 0;
     try {
@@ -1389,7 +1389,7 @@ export class BaileysAdapter implements ChannelAdapter {
           ...(item.caption ? { caption: item.caption } : {}),
           albumParentKey: parent.key,
         });
-        this.persistOutgoingMessage(result, jid);
+        await this.persistOutgoingMessage(result, jid);
         sent += 1;
       }
     } catch (error) {
@@ -1428,7 +1428,7 @@ export class BaileysAdapter implements ChannelAdapter {
     const sock = this.getSock();
     const target = this.normalizeJid(row.senderId);
     const result = await sock.sendMessage(target, { text });
-    this.persistOutgoingMessage(result, target);
+    await this.persistOutgoingMessage(result, target);
     return { messageId: result?.key.id ?? "", timestamp: Date.now(), status: "sent" };
   }
 
@@ -1558,7 +1558,7 @@ export class BaileysAdapter implements ChannelAdapter {
 
   async getPollResults(chatId: string, pollMessageId: string): Promise<PollResults> {
     const requestedChat = jidNormalizedUser(this.normalizeJid(chatId));
-    const row = db
+    let row = db
       .select({
         chatId: messagesTable.chatId,
         type: messagesTable.type,
@@ -1575,6 +1575,23 @@ export class BaileysAdapter implements ChannelAdapter {
     }
     if (jidNormalizedUser(row.chatId) !== requestedChat) {
       throw new Error(`Poll '${pollMessageId}' was not found in chat '${requestedChat}'`);
+    }
+
+    await this.retryPendingPollVotes(pollMessageId);
+    row = db
+      .select({
+        chatId: messagesTable.chatId,
+        type: messagesTable.type,
+        content: messagesTable.content,
+        rawData: messagesTable.rawData,
+      })
+      .from(messagesTable)
+      .where(
+        and(eq(messagesTable.instanceId, this.instanceId), eq(messagesTable.id, pollMessageId)),
+      )
+      .get();
+    if (!row || row.type !== "poll") {
+      throw new Error(`Poll '${pollMessageId}' was not found`);
     }
     if (!row.rawData) {
       throw new Error(`Poll '${pollMessageId}' has no stored poll data`);
@@ -1602,7 +1619,8 @@ export class BaileysAdapter implements ChannelAdapter {
       });
     }
 
-    const meId = this.sock?.user?.id ? jidNormalizedUser(this.sock.user.id) : undefined;
+    const ownJids = await this.pollVoteJidCandidates([], true);
+    const meId = ownJids.find((jid) => jid.endsWith("@s.whatsapp.net")) ?? ownJids[0];
     const options = getAggregateVotesInPollMessage(poll, meId).map(({ name, voters }) => ({
       name,
       count: voters.length,
@@ -1652,7 +1670,7 @@ export class BaileysAdapter implements ChannelAdapter {
       .run();
   }
 
-  private persistOutgoingMessage(result: WAMessage | undefined, jid: string): void {
+  private async persistOutgoingMessage(result: WAMessage | undefined, jid: string): Promise<void> {
     const outgoingId = result?.key.id;
     if (!result?.message || !outgoingId) return;
 
@@ -1688,6 +1706,7 @@ export class BaileysAdapter implements ChannelAdapter {
       outgoing,
       true,
     );
+    if (details.type === "poll") await this.retryPendingPollVotes(outgoingId);
   }
 
   private persistReceipt(
@@ -1849,7 +1868,7 @@ export class BaileysAdapter implements ChannelAdapter {
     }
 
     const result = await sock.sendMessage(toJid, { forward: fullMessage });
-    this.persistOutgoingMessage(result, toJid);
+    await this.persistOutgoingMessage(result, toJid);
     return { messageId: result?.key.id ?? "", timestamp: Date.now(), status: "sent" };
   }
 
@@ -1895,7 +1914,7 @@ export class BaileysAdapter implements ChannelAdapter {
     }
 
     const result = await sock.sendMessage(jid, msg);
-    this.persistOutgoingMessage(result, jid);
+    await this.persistOutgoingMessage(result, jid);
     return { messageId: result?.key.id ?? "", timestamp: Date.now(), status: "sent" };
   }
 
@@ -1968,7 +1987,7 @@ export class BaileysAdapter implements ChannelAdapter {
       text: messageText,
       ...(linkPreview ? { linkPreview } : {}),
     });
-    this.persistOutgoingMessage(result, jid);
+    await this.persistOutgoingMessage(result, jid);
     return { messageId: result?.key.id ?? "", timestamp: Date.now(), status: "sent" };
   }
 
@@ -2766,7 +2785,7 @@ export class BaileysAdapter implements ChannelAdapter {
         subject: metadata.subject ?? "",
       },
     });
-    this.persistOutgoingMessage(result, this.normalizeJid(to));
+    await this.persistOutgoingMessage(result, this.normalizeJid(to));
     return { messageId: result?.key.id ?? "", timestamp: Date.now(), status: "sent" };
   }
 
@@ -4474,12 +4493,6 @@ export class BaileysAdapter implements ChannelAdapter {
 
   private persistDecryptedPollUpdates(pollKey: WAMessageKey, updates: proto.IPollUpdate[]): void {
     if (!pollKey.id) return;
-    const conditions = [
-      eq(messagesTable.instanceId, this.instanceId),
-      eq(messagesTable.id, pollKey.id),
-    ];
-    const requestedChat = pollKey.remoteJid ? jidNormalizedUser(pollKey.remoteJid) : undefined;
-    if (requestedChat) conditions.push(eq(messagesTable.chatId, requestedChat));
     const row = db
       .select({
         chatId: messagesTable.chatId,
@@ -4487,7 +4500,7 @@ export class BaileysAdapter implements ChannelAdapter {
         rawData: messagesTable.rawData,
       })
       .from(messagesTable)
-      .where(and(...conditions))
+      .where(and(eq(messagesTable.instanceId, this.instanceId), eq(messagesTable.id, pollKey.id)))
       .get();
     if (!row || row.type !== "poll" || !row.rawData) return;
 
@@ -4512,75 +4525,208 @@ export class BaileysAdapter implements ChannelAdapter {
     }
   }
 
-  private persistPollVote(
+  private async persistPollVote(
     message: WAMessage,
     update: NonNullable<proto.Message.IPollUpdateMessage>,
-  ): boolean {
+  ): Promise<boolean> {
     const pollKey = update.pollCreationMessageKey;
     const pollMessageId = typeof pollKey?.id === "string" ? pollKey.id : undefined;
     const encryptedVote = update.vote;
     const voteMessageId = typeof message.key.id === "string" ? message.key.id : undefined;
     if (!pollKey || !pollMessageId || !voteMessageId || !encryptedVote) return false;
 
-    const messageSecret = this.sock?.user?.id;
     const row = db
       .select({
         chatId: messagesTable.chatId,
         type: messagesTable.type,
         rawData: messagesTable.rawData,
+        isFromMe: messagesTable.isFromMe,
       })
       .from(messagesTable)
       .where(
         and(eq(messagesTable.instanceId, this.instanceId), eq(messagesTable.id, pollMessageId)),
       )
       .get();
-    if (!row || row.type !== "poll" || !row.rawData || !messageSecret) {
+    if (!row || row.type !== "poll" || !row.rawData) {
       this.queuePendingPollVote(pollMessageId, voteMessageId, message);
       return false;
     }
 
+    let poll: WAMessage;
     try {
-      const poll = JSON.parse(row.rawData, BufferJSON.reviver) as WAMessage;
-      const pollSecret = normalizeStoredMessageSecret(poll);
-      if (!pollSecret) {
-        this.queuePendingPollVote(pollMessageId, voteMessageId, message);
-        return false;
-      }
-      const normalizedMeId = jidNormalizedUser(messageSecret);
-      const pollCreatorJid = getKeyAuthor(pollKey, normalizedMeId);
-      const voterJid = getKeyAuthor(message.key, normalizedMeId);
-      const vote = decryptPollVote(encryptedVote, {
-        pollCreatorJid,
-        pollMsgId: pollMessageId,
-        pollEncKey: pollSecret,
-        voterJid,
-      });
-      this.persistDecryptedPollUpdates(pollKey, [
-        {
-          pollUpdateMessageKey: message.key,
-          vote,
-          ...(update.senderTimestampMs !== undefined
-            ? { senderTimestampMs: update.senderTimestampMs }
-            : {}),
-        },
-      ]);
-      db.delete(pendingPollVotesTable)
-        .where(
-          and(
-            eq(pendingPollVotesTable.instanceId, this.instanceId),
-            eq(pendingPollVotesTable.pollMessageId, pollMessageId),
-            eq(pendingPollVotesTable.voteMessageId, voteMessageId),
-          ),
-        )
-        .run();
-      return true;
-    } catch (error) {
-      logger.debug(
-        { instanceId: this.instanceId, pollMessageId, error },
-        "Unable to decrypt poll vote",
+      poll = JSON.parse(row.rawData, BufferJSON.reviver) as WAMessage;
+    } catch {
+      this.queuePendingPollVote(pollMessageId, voteMessageId, message);
+      logger.warn(
+        { instanceId: this.instanceId, pollMessageId, voteMessageId, attempts: 0 },
+        "Unable to read stored poll data for vote decryption",
       );
       return false;
     }
+
+    const pollSecret = normalizeStoredMessageSecret(poll);
+    if (!pollSecret) {
+      this.queuePendingPollVote(pollMessageId, voteMessageId, message);
+      return false;
+    }
+
+    const creatorKeys = [pollKey, poll.key].filter((key): key is WAMessageKey => !!key);
+    const pollWasCreatedByUs =
+      row.isFromMe === 1 || (await this.pollVoteKeyPointsToOwnAccount(creatorKeys));
+    const creatorCandidates = await this.pollVoteJidCandidates(creatorKeys, pollWasCreatedByUs);
+    const voterCandidates = await this.pollVoteJidCandidates(
+      [message.key],
+      message.key.fromMe === true,
+    );
+    let attemptedCombinations = 0;
+    let decryptedVote: proto.Message.IPollVoteMessage | undefined;
+    for (const pollCreatorJid of creatorCandidates) {
+      for (const voterJid of voterCandidates) {
+        if (attemptedCombinations >= MAX_POLL_VOTE_DECRYPT_ATTEMPTS) break;
+        attemptedCombinations += 1;
+        try {
+          decryptedVote = decryptPollVote(encryptedVote, {
+            pollCreatorJid,
+            pollMsgId: pollMessageId,
+            pollEncKey: pollSecret,
+            voterJid,
+          });
+          break;
+        } catch {
+          // LID and PN aliases can be valid in different combinations for the same account.
+        }
+      }
+      if (decryptedVote || attemptedCombinations >= MAX_POLL_VOTE_DECRYPT_ATTEMPTS) break;
+    }
+
+    if (!decryptedVote) {
+      this.queuePendingPollVote(pollMessageId, voteMessageId, message);
+      logger.warn(
+        {
+          instanceId: this.instanceId,
+          pollMessageId,
+          voteMessageId,
+          attempts: attemptedCombinations,
+          candidateJids: { creator: creatorCandidates, voter: voterCandidates },
+        },
+        "Unable to decrypt poll vote after trying JID candidates",
+      );
+      return false;
+    }
+
+    const voterJid =
+      voterCandidates.find((candidate) => candidate.endsWith("@s.whatsapp.net")) ??
+      (voterCandidates[0] ? await this.resolveJidToPn(voterCandidates[0]) : "");
+    const voteKey = this.canonicalPollVoteKey(message.key, voterJid);
+    this.persistDecryptedPollUpdates(pollKey, [
+      {
+        pollUpdateMessageKey: voteKey,
+        vote: decryptedVote,
+        ...(update.senderTimestampMs !== undefined
+          ? { senderTimestampMs: update.senderTimestampMs }
+          : {}),
+      },
+    ]);
+    db.delete(pendingPollVotesTable)
+      .where(
+        and(
+          eq(pendingPollVotesTable.instanceId, this.instanceId),
+          eq(pendingPollVotesTable.pollMessageId, pollMessageId),
+          eq(pendingPollVotesTable.voteMessageId, voteMessageId),
+        ),
+      )
+      .run();
+    if (attemptedCombinations > 1) {
+      logger.debug(
+        {
+          instanceId: this.instanceId,
+          pollMessageId,
+          voteMessageId,
+          attempts: attemptedCombinations,
+        },
+        "Decrypted poll vote with an alternate JID combination",
+      );
+    }
+    return true;
+  }
+
+  private ownPollVoteJidSeeds(): string[] {
+    const user = this.sock?.user;
+    return [user?.phoneNumber, user?.id, this.authMeId, user?.lid, this.authMeLid].filter(
+      (jid): jid is string => typeof jid === "string" && jid.length > 0,
+    );
+  }
+
+  private async pollVoteJidCandidates(
+    keys: WAMessageKey[],
+    includeOwnAccount: boolean,
+  ): Promise<string[]> {
+    const candidates: string[] = [];
+    const seeds: string[] = [];
+    const seen = new Set<string>();
+    const add = (jid: string | null | undefined): void => {
+      if (!jid) return;
+      try {
+        const normalized = jidNormalizedUser(jid);
+        if (
+          !normalized ||
+          normalized.endsWith("@g.us") ||
+          normalized.endsWith("@broadcast") ||
+          seen.has(normalized)
+        ) {
+          return;
+        }
+        seen.add(normalized);
+        candidates.push(normalized);
+        seeds.push(normalized);
+      } catch {
+        // Ignore malformed JIDs; a valid LID/PN alias may still be available.
+      }
+    };
+
+    if (includeOwnAccount) {
+      const ownJids = this.ownPollVoteJidSeeds();
+      for (const jid of ownJids.filter((value) => value.endsWith("@s.whatsapp.net"))) add(jid);
+      for (const jid of ownJids.filter((value) => value.endsWith("@lid"))) add(jid);
+    }
+
+    for (const key of keys) {
+      const isGroup = key.remoteJid?.endsWith("@g.us") || key.remoteJidAlt?.endsWith("@g.us");
+      const fields = isGroup
+        ? [key.participant, key.participantAlt, key.remoteJid, key.remoteJidAlt]
+        : [key.remoteJid, key.remoteJidAlt, key.participant, key.participantAlt];
+      for (const jid of fields) add(jid);
+    }
+
+    const lidMapping = this.sock?.signalRepository?.lidMapping;
+    for (const jid of [...seeds]) {
+      try {
+        if (jid.endsWith("@lid") && lidMapping?.getPNForLID) {
+          add(await lidMapping.getPNForLID(jid));
+        } else if (jid.endsWith("@s.whatsapp.net") && lidMapping?.getLIDForPN) {
+          add(await lidMapping.getLIDForPN(jid));
+        }
+      } catch {
+        // Mapping is best effort; retain the explicit identity candidate.
+      }
+    }
+    return candidates;
+  }
+
+  private async pollVoteKeyPointsToOwnAccount(keys: WAMessageKey[]): Promise<boolean> {
+    if (keys.some((key) => key.fromMe)) return true;
+    const ownJids = new Set(await this.pollVoteJidCandidates([], true));
+    const keyJids = await this.pollVoteJidCandidates(keys, false);
+    return keyJids.some((jid) => ownJids.has(jid));
+  }
+
+  private canonicalPollVoteKey(key: WAMessageKey, voterJid: string): WAMessageKey {
+    if (!voterJid.endsWith("@s.whatsapp.net") || key.fromMe) return key;
+    const isGroup = key.remoteJid?.endsWith("@g.us") || key.remoteJidAlt?.endsWith("@g.us");
+    if (isGroup || key.participant || key.participantAlt) {
+      return { ...key, participantAlt: voterJid };
+    }
+    return { ...key, remoteJidAlt: voterJid };
   }
 
   private queuePendingPollVote(
@@ -4607,9 +4753,13 @@ export class BaileysAdapter implements ChannelAdapter {
         set: { rawData },
       })
       .run();
+    logger.debug(
+      { instanceId: this.instanceId, pollMessageId, voteMessageId },
+      "Queued poll vote for decryption retry",
+    );
   }
 
-  private retryPendingPollVotes(pollMessageId: string): void {
+  private async retryPendingPollVotes(pollMessageId: string): Promise<void> {
     const pending = db
       .select()
       .from(pendingPollVotesTable)
@@ -4626,7 +4776,7 @@ export class BaileysAdapter implements ChannelAdapter {
         const message = JSON.parse(row.rawData, BufferJSON.reviver) as WAMessage;
         const content = unwrapMessageContent(message.message, { unwrapProtocolEdits: false });
         if (content?.pollUpdateMessage) {
-          this.persistPollVote(message, content.pollUpdateMessage);
+          await this.persistPollVote(message, content.pollUpdateMessage);
         }
       } catch (error) {
         logger.debug(
@@ -4909,10 +5059,10 @@ export class BaileysAdapter implements ChannelAdapter {
               unwrapProtocolEdits: false,
             });
             if (content?.pollUpdateMessage) {
-              this.persistPollVote(message, content.pollUpdateMessage);
+              await this.persistPollVote(message, content.pollUpdateMessage);
             }
             if (extractMessageDetails(message).type === "poll" && message.key.id) {
-              this.retryPendingPollVotes(message.key.id);
+              await this.retryPendingPollVotes(message.key.id);
             }
             if (content?.encEventResponseMessage) {
               await this.persistEncryptedEventResponse(message, content.encEventResponseMessage);
@@ -4968,7 +5118,7 @@ export class BaileysAdapter implements ChannelAdapter {
             NonNullable<WAMessage["message"]>["protocolMessage"] | undefined;
 
           if (unwrappedContent?.pollUpdateMessage) {
-            this.persistPollVote(msg, unwrappedContent.pollUpdateMessage);
+            await this.persistPollVote(msg, unwrappedContent.pollUpdateMessage);
             continue;
           }
 
@@ -5008,7 +5158,7 @@ export class BaileysAdapter implements ChannelAdapter {
               },
             };
             this.persistMessage(normalized, msg);
-            if (details.type === "poll") this.retryPendingPollVotes(msg.key.id);
+            if (details.type === "poll") await this.retryPendingPollVotes(msg.key.id);
           }
 
           if (unwrappedContent?.encEventResponseMessage) {

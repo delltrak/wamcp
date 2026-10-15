@@ -108,6 +108,7 @@ export function unwrapMessageContent(
       "viewOnceMessageV2",
       "viewOnceMessageV2Extension",
       "documentWithCaptionMessage",
+      "deviceSentMessage",
       "editedMessage",
     ];
     let inner: MessageRecord | undefined;
