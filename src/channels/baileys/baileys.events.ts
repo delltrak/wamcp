@@ -729,9 +729,10 @@ export function normalizeMessagesUpdate(
       const statusMap: Record<number, MessageDeliveryStatus> = {
         0: "received",
         1: "sent",
-        2: "delivered",
-        3: "read",
-        4: "played",
+        2: "sent",
+        3: "delivered",
+        4: "read",
+        5: "played",
       };
 
       return {

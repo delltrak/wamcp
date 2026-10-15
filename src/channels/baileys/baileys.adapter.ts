@@ -154,6 +154,10 @@ const logger = createChildLogger({ service: "baileys-adapter" });
 const mediaService = new MediaService();
 const DEFAULT_STATUS_MAX_RECIPIENTS = 256;
 const STATUS_BROADCAST_JID = "status@broadcast";
+const MAX_MARK_READ_MESSAGE_IDS = 100;
+const MAX_PRESENCE_SUBSCRIPTIONS = 100;
+const PRESENCE_UPDATE_MIN_INTERVAL_MS = 2_000;
+const MAX_TRACKED_PRESENCE_CHATS = 1_000;
 const MAX_EVENT_RESPONSE_DECRYPT_ATTEMPTS = 16;
 const MAX_LINK_PREVIEW_THUMBNAIL_BYTES = 512 * 1024;
 const APP_STATE_WRITES_DISABLED_ERROR =
@@ -719,6 +723,8 @@ export class BaileysAdapter implements ChannelAdapter {
   private readonly maxStatusRecipients: number;
   private readonly autoRejectCalls: boolean;
   private readonly pendingCalls = new Map<string, { from: string; isVideo: boolean }>();
+  private readonly lastPresenceUpdateAt = new Map<string, number>();
+  private readonly presenceSubscriptions = new Set<string>();
   private readonly listeners = new Map<ChannelEvent, Set<ChannelEventHandler<ChannelEvent>>>();
   private pendingSocketEventProcessing: Promise<void> = Promise.resolve();
   private activeHistoryFetch: HistoryFetchWaiter | null = null;
@@ -1069,6 +1075,8 @@ export class BaileysAdapter implements ChannelAdapter {
     });
 
     this.sock = sock;
+    this.lastPresenceUpdateAt.clear();
+    this.presenceSubscriptions.clear();
     this.bindEvents(sock);
   }
 
@@ -1313,14 +1321,21 @@ export class BaileysAdapter implements ChannelAdapter {
     }
     const sock = this.getSock();
     const jid = this.normalizeJid(to);
+    const resolvedImages: Array<{ image: Buffer; caption?: string }> = [];
+    for (const item of images) {
+      resolvedImages.push({
+        image: await mediaService.getMediaBuffer(item.image, { maxBytes: MEDIA_LIMITS.image }),
+        ...(item.caption ? { caption: item.caption } : {}),
+      });
+    }
     const parent = await sock.sendMessage(jid, { album: { expectedImageCount: images.length } });
     if (!parent?.key.id) throw new Error("Baileys did not return an album parent message ID");
 
     let sent = 0;
     try {
-      for (const item of images) {
+      for (const item of resolvedImages) {
         const result = await sock.sendMessage(jid, {
-          image: this.resolveMedia(item.image),
+          image: item.image,
           ...(item.caption ? { caption: item.caption } : {}),
           albumParentKey: parent.key,
         });
@@ -1914,15 +1929,41 @@ export class BaileysAdapter implements ChannelAdapter {
     presenceStatus: "typing" | "composing" | "recording" | "paused" | "available" | "unavailable",
   ): Promise<void> {
     const sock = this.getSock();
-    await sock.sendPresenceUpdate(
-      presenceStatus === "typing" ? "composing" : presenceStatus,
-      this.normalizeJid(chatId),
-    );
+    const jid = jidNormalizedUser(this.normalizeJid(chatId));
+    const now = Date.now();
+    for (const [trackedJid, timestamp] of this.lastPresenceUpdateAt) {
+      if (now - timestamp >= PRESENCE_UPDATE_MIN_INTERVAL_MS) {
+        this.lastPresenceUpdateAt.delete(trackedJid);
+      }
+    }
+    const lastSentAt = this.lastPresenceUpdateAt.get(jid);
+    if (lastSentAt !== undefined && now - lastSentAt < PRESENCE_UPDATE_MIN_INTERVAL_MS) return;
+
+    if (this.lastPresenceUpdateAt.size >= MAX_TRACKED_PRESENCE_CHATS) {
+      const oldestJid = this.lastPresenceUpdateAt.keys().next().value;
+      if (oldestJid) this.lastPresenceUpdateAt.delete(oldestJid);
+    }
+    this.lastPresenceUpdateAt.set(jid, now);
+    try {
+      await sock.sendPresenceUpdate(
+        presenceStatus === "typing" ? "composing" : presenceStatus,
+        jid,
+      );
+    } catch (error) {
+      if (this.lastPresenceUpdateAt.get(jid) === now) this.lastPresenceUpdateAt.delete(jid);
+      throw error;
+    }
   }
 
   async subscribePresence(chatId: string): Promise<void> {
     const sock = this.getSock();
-    await sock.presenceSubscribe(this.normalizeJid(chatId));
+    const jid = jidNormalizedUser(this.normalizeJid(chatId));
+    if (this.presenceSubscriptions.has(jid)) return;
+    if (this.presenceSubscriptions.size >= MAX_PRESENCE_SUBSCRIPTIONS) {
+      throw new Error(`Presence subscriptions are limited to ${MAX_PRESENCE_SUBSCRIPTIONS} chats`);
+    }
+    await sock.presenceSubscribe(jid);
+    this.presenceSubscriptions.add(jid);
   }
 
   async getMessageReceipts(chatId: string, messageId: string): Promise<MessageReceipt[]> {
@@ -1983,10 +2024,15 @@ export class BaileysAdapter implements ChannelAdapter {
   }
 
   async markRead(chatId: string, messageIds: string[], participant?: string): Promise<void> {
+    if (messageIds.length > MAX_MARK_READ_MESSAGE_IDS) {
+      throw new Error(
+        `A mark-read request can contain at most ${MAX_MARK_READ_MESSAGE_IDS} message IDs`,
+      );
+    }
     const sock = this.getSock();
     const jid = this.normalizeJid(chatId);
     const isGroup = jid.endsWith("@g.us");
-    const keys = messageIds.flatMap((id) => {
+    const keys = [...new Set(messageIds)].flatMap((id) => {
       if (!isGroup) return [{ remoteJid: jid, id }];
 
       const storedMessage = db
@@ -2924,9 +2970,11 @@ export class BaileysAdapter implements ChannelAdapter {
         break;
     }
 
-    if (messageId) this.persistStatusAudience(messageId, audience.statusJidList);
+    if (!messageId) throw new Error("Baileys did not return a status message ID");
+    this.persistStatusAudience(messageId, audience.statusJidList);
 
     return {
+      messageId,
       recipientCount: audience.statusJidList.length,
       omittedRecipientCount: audience.omittedRecipientCount,
       ...(audience.warning ? { warning: audience.warning } : {}),
@@ -3696,6 +3744,26 @@ export class BaileysAdapter implements ChannelAdapter {
     const alternateAuthor = key.participant ? key.participantAlt : key.remoteJidAlt;
     const normalizedAlternate = alternateAuthor ? jidNormalizedUser(alternateAuthor) : "";
     return normalizedAlternate.endsWith("@s.whatsapp.net") ? normalizedAlternate : resolvedAuthor;
+  }
+
+  private async canonicalReactionAuthorJid(key: WAMessageKey): Promise<string> {
+    if (key.fromMe) {
+      const ownJid =
+        [this.sock?.user?.id, this.authMeId]
+          .filter((jid): jid is string => !!jid)
+          .map((jid) => jidNormalizedUser(jid))
+          .find((jid) => jid.endsWith("@s.whatsapp.net")) ??
+        this.sock?.user?.id ??
+        this.authMeId;
+      return ownJid ? this.resolveJidToPn(jidNormalizedUser(ownJid)) : "";
+    }
+
+    const isGroup = key.remoteJid?.endsWith("@g.us") ?? false;
+    const authorKey =
+      isGroup || !key.remoteJid
+        ? key
+        : { ...key, participant: undefined, participantAlt: undefined };
+    return this.canonicalEventAuthorJid(authorKey);
   }
 
   private async getStoredEventMessage(key: WAMessageKey): Promise<WAMessage | null> {
@@ -4916,9 +4984,9 @@ export class BaileysAdapter implements ChannelAdapter {
       if (events["messages.update"]) {
         for (const update of events["messages.update"]) {
           const receiptStatus: Record<number, MessageReceipt["status"]> = {
-            2: "delivered",
-            3: "read",
-            4: "played",
+            3: "delivered",
+            4: "read",
+            5: "played",
           };
           const status = update.update.status;
           const messageId = update.key.id;
@@ -4991,8 +5059,8 @@ export class BaileysAdapter implements ChannelAdapter {
         for (const reaction of events["messages.reaction"]) {
           const chatId = reaction.key.remoteJid;
           const messageId = reaction.key.id;
-          const participant =
-            reaction.reaction?.key?.participant ?? reaction.reaction?.key?.remoteJid;
+          const reactionKey = reaction.reaction?.key;
+          const participant = reactionKey ? await this.canonicalReactionAuthorJid(reactionKey) : "";
           if (!chatId || !messageId || !participant) continue;
           if (!reaction.reaction?.text) {
             db.delete(messageReactionsTable)
@@ -5037,6 +5105,12 @@ export class BaileysAdapter implements ChannelAdapter {
           }
         }
         const normalized = normalizeMessagesReaction(this.instanceId, events["messages.reaction"]);
+        for (let index = 0; index < normalized.length; index += 1) {
+          const reactionKey = events["messages.reaction"][index]?.reaction?.key;
+          if (reactionKey) {
+            normalized[index]!.reactedBy = await this.canonicalReactionAuthorJid(reactionKey);
+          }
+        }
         for (const event of normalized) this.emit("message.reaction", event);
       }
 

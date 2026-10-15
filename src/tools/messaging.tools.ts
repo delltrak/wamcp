@@ -43,6 +43,8 @@ import {
   GetMessageReactionsSchema,
 } from "../schemas/messaging.schema.js";
 
+const MAX_GROUP_MENTION_PARTICIPANTS = 1_024;
+
 export function registerMessagingTools(
   server: McpServer,
   instanceManager: InstanceManager,
@@ -740,6 +742,11 @@ Returns: { status: "queued", jobId }`,
         const mentions = [...new Set(group.participants.map((participant) => participant.jid))];
         if (mentions.length === 0)
           throw new Error("Cannot mention all: the group has no participants");
+        if (mentions.length > MAX_GROUP_MENTION_PARTICIPANTS) {
+          throw new Error(
+            `Cannot mention all: the group has more than ${MAX_GROUP_MENTION_PARTICIPANTS} participants`,
+          );
+        }
         const result = await messageQueue.enqueueMessage(
           params.instanceId,
           group.jid,
@@ -825,9 +832,14 @@ Returns: { status: "queued", jobId }`,
     },
     async (params) => {
       try {
-        const result = await instanceManager
-          .getAdapter(params.instanceId)
-          .sendMediaAlbum(params.to, params.images);
+        if (instanceManager.getInstanceChannel(params.instanceId) === "cloud") {
+          throw new Error("Media albums are not supported on Cloud API; use a Baileys instance");
+        }
+        const result = await messageQueue.enqueueMediaAlbum(
+          params.instanceId,
+          params.to,
+          params.images,
+        );
         return toolSuccess(result);
       } catch (err) {
         return handleToolError("wa_send_media_album", err, params.instanceId);

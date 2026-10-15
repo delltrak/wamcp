@@ -49,6 +49,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   when its socket connects. It defaults to `false`, preserving the current behavior.
 - Baileys status stories now report the recipient count and warn when the configured audience cap
   truncates a recipient list.
+- Baileys status tools now return the status message ID needed to list observed viewers.
 
 ### Added
 

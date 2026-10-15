@@ -641,6 +641,15 @@ describe("MarkReadSchema", () => {
     });
     expect(result.success).toBe(false);
   });
+
+  it("rejects more than 100 message IDs", () => {
+    const result = MarkReadSchema.safeParse({
+      instanceId: "inst_abc123",
+      chatId: "5511999999999@s.whatsapp.net",
+      messageIds: Array.from({ length: 101 }, (_, index) => `msg_${index}`),
+    });
+    expect(result.success).toBe(false);
+  });
 });
 
 // ============================================================

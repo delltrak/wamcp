@@ -91,6 +91,7 @@ describe("issue 80 feature completion", () => {
     const socket = {
       user: { id: ACCOUNT_ID },
       sendMessage: vi.fn(async (jid: string, content: unknown) => messageForSend(jid, content)),
+      readMessages: vi.fn(async () => undefined),
       sendPresenceUpdate: vi.fn(async () => undefined),
       presenceSubscribe: vi.fn(async () => undefined),
       groupMetadata: vi.fn(async () => ({
@@ -141,8 +142,13 @@ describe("issue 80 feature completion", () => {
       getInstanceChannel: () => "baileys",
     } as unknown as InstanceManager;
     const queue = {
-      enqueueMessage: async (_id: string, to: string, content: MessageContent) =>
+      enqueueMessage: vi.fn(async (_id: string, to: string, content: MessageContent) =>
         adapter.sendMessage(to, content),
+      ),
+      enqueueMediaAlbum: vi.fn(
+        async (_id: string, to: string, images: Array<{ image: string; caption?: string }>) =>
+          adapter.sendMediaAlbum(to, images),
+      ),
     } as unknown as MessageQueue;
     registerMessagingTools(server, instanceManager, queue);
     registerGroupTools(server, instanceManager, queue);
@@ -153,6 +159,7 @@ describe("issue 80 feature completion", () => {
       instanceId,
       adapter,
       socket,
+      queue,
       tools,
       processEvents: (events: Partial<BaileysEventMap>) => {
         if (!processEvents) throw new Error("Baileys event processor was not registered");
@@ -167,14 +174,18 @@ describe("issue 80 feature completion", () => {
     };
   }
 
-  it("subscribes per chat, sends presence, expands @all and supports send-time mentions", async () => {
-    const { adapter, socket, invoke } = createFixture();
+  it("subscribes per chat, throttles presence, expands @all and supports send-time mentions", async () => {
+    const { adapter, socket, queue, invoke } = createFixture();
     await invoke("wa_send_presence", { chatId: CONTACT_ID, status: "typing" });
+    await invoke("wa_send_presence", { chatId: CONTACT_ID, status: "paused" });
     await invoke("wa_send_presence", { chatId: GROUP_ID, status: "recording" });
+    await invoke("wa_subscribe_presence", { chatId: CONTACT_ID });
     await invoke("wa_subscribe_presence", { chatId: CONTACT_ID });
     expect(socket.sendPresenceUpdate).toHaveBeenNthCalledWith(1, "composing", CONTACT_ID);
     expect(socket.sendPresenceUpdate).toHaveBeenNthCalledWith(2, "recording", GROUP_ID);
+    expect(socket.sendPresenceUpdate).toHaveBeenCalledTimes(2);
     expect(socket.presenceSubscribe).toHaveBeenCalledWith(CONTACT_ID);
+    expect(socket.presenceSubscribe).toHaveBeenCalledTimes(1);
 
     await invoke("wa_send_text", { to: GROUP_ID, text: "Hi there", mentions: [CONTACT_ID] });
     expect(socket.sendMessage).toHaveBeenLastCalledWith(
@@ -182,8 +193,12 @@ describe("issue 80 feature completion", () => {
       { text: "Hi there", mentions: [CONTACT_ID] },
       {},
     );
+    vi.mocked(socket.sendMessage).mockClear();
+    vi.mocked(queue.enqueueMessage).mockClear();
     const all = await invoke("wa_send_group_mention_all", { groupId: GROUP_ID, text: "Update" });
     expect(all.isError).not.toBe(true);
+    expect(socket.sendMessage).toHaveBeenCalledTimes(1);
+    expect(queue.enqueueMessage).toHaveBeenCalledTimes(1);
     expect(socket.sendMessage).toHaveBeenLastCalledWith(
       GROUP_ID,
       {
@@ -323,8 +338,39 @@ describe("issue 80 feature completion", () => {
   });
 
   it("stores group receipts, status viewers, reactions and reaction removals", async () => {
-    const { adapter, processEvents } = createFixture();
+    const lid = "7700000000000@lid";
+    const { adapter, processEvents } = createFixture({
+      signalRepository: {
+        lidMapping: {
+          getPNForLID: vi.fn(async (value: string) =>
+            value === lid ? SECOND_CONTACT_ID : undefined,
+          ),
+        },
+      },
+    });
+    const updates: ChannelEventPayload["message.updated"][] = [];
+    const reactionEvents: ChannelEventPayload["message.reaction"][] = [];
+    adapter.on("message.updated", (event) => updates.push(event));
+    adapter.on("message.reaction", (event) => reactionEvents.push(event));
     await processEvents({
+      "messages.update": [
+        {
+          key: { remoteJid: GROUP_ID, id: "receipt-2", participant: CONTACT_ID },
+          update: { status: 2 },
+        },
+        {
+          key: { remoteJid: GROUP_ID, id: "receipt-3", participant: CONTACT_ID },
+          update: { status: 3 },
+        },
+        {
+          key: { remoteJid: GROUP_ID, id: "receipt-4", participant: CONTACT_ID },
+          update: { status: 4 },
+        },
+        {
+          key: { remoteJid: GROUP_ID, id: "receipt-5", participant: CONTACT_ID },
+          update: { status: 5 },
+        },
+      ],
       "message-receipt.update": [
         {
           key: { remoteJid: GROUP_ID, id: "group-message" },
@@ -348,8 +394,48 @@ describe("issue 80 feature completion", () => {
             senderTimestampMs: 1_700_000_010_000,
           },
         },
+        {
+          key: { remoteJid: GROUP_ID, id: "group-message" },
+          reaction: {
+            key: { remoteJid: GROUP_ID, fromMe: true },
+            text: "👀",
+            senderTimestampMs: 1_700_000_010_001,
+          },
+        },
+        {
+          key: { remoteJid: GROUP_ID, id: "group-message" },
+          reaction: {
+            key: { remoteJid: GROUP_ID, participant: lid },
+            text: "❤️",
+            senderTimestampMs: 1_700_000_010_002,
+          },
+        },
+        {
+          key: { remoteJid: CONTACT_ID, id: "direct-message" },
+          reaction: {
+            key: { remoteJid: SECOND_CONTACT_ID, participant: CONTACT_ID },
+            text: "✨",
+            senderTimestampMs: 1_700_000_010_003,
+          },
+        },
       ],
     });
+    expect(await adapter.getMessageReceipts(GROUP_ID, "receipt-2")).toEqual([]);
+    expect(await adapter.getMessageReceipts(GROUP_ID, "receipt-3")).toMatchObject([
+      { participant: CONTACT_ID, status: "delivered" },
+    ]);
+    expect(await adapter.getMessageReceipts(GROUP_ID, "receipt-4")).toMatchObject([
+      { participant: CONTACT_ID, status: "read" },
+    ]);
+    expect(await adapter.getMessageReceipts(GROUP_ID, "receipt-5")).toMatchObject([
+      { participant: CONTACT_ID, status: "played" },
+    ]);
+    expect(updates.map((event) => [event.messageId, event.status])).toEqual([
+      ["receipt-2", "sent"],
+      ["receipt-3", "delivered"],
+      ["receipt-4", "read"],
+      ["receipt-5", "played"],
+    ]);
     expect(await adapter.getMessageReceipts(GROUP_ID, "group-message")).toEqual([
       { participant: CONTACT_ID, status: "read", timestamp: 1_700_000_000_000 },
     ]);
@@ -358,7 +444,18 @@ describe("issue 80 feature completion", () => {
       SECOND_CONTACT_ID,
     ]);
     expect(await adapter.getMessageReactions(GROUP_ID, "group-message")).toEqual([
+      { participant: ACCOUNT_ID, emoji: "👀", timestamp: 1_700_000_010_001 },
       { participant: CONTACT_ID, emoji: "👍", timestamp: 1_700_000_010_000 },
+      { participant: SECOND_CONTACT_ID, emoji: "❤️", timestamp: 1_700_000_010_002 },
+    ]);
+    expect(reactionEvents.map((event) => event.reactedBy)).toEqual([
+      CONTACT_ID,
+      ACCOUNT_ID,
+      SECOND_CONTACT_ID,
+      SECOND_CONTACT_ID,
+    ]);
+    expect(await adapter.getMessageReactions(CONTACT_ID, "direct-message")).toEqual([
+      { participant: SECOND_CONTACT_ID, emoji: "✨", timestamp: 1_700_000_010_003 },
     ]);
 
     await processEvents({
@@ -373,7 +470,76 @@ describe("issue 80 feature completion", () => {
         },
       ],
     });
-    expect(await adapter.getMessageReactions(GROUP_ID, "group-message")).toEqual([]);
+    expect(await adapter.getMessageReactions(GROUP_ID, "group-message")).toEqual([
+      { participant: ACCOUNT_ID, emoji: "👀", timestamp: 1_700_000_010_001 },
+      { participant: SECOND_CONTACT_ID, emoji: "❤️", timestamp: 1_700_000_010_002 },
+    ]);
+  });
+
+  it("limits mark-read batches and debounces per-chat presence updates", async () => {
+    const { adapter, socket } = createFixture();
+    await expect(
+      adapter.markRead(
+        CONTACT_ID,
+        Array.from({ length: 101 }, (_, index) => `message-${index}`),
+      ),
+    ).rejects.toThrow("at most 100 message IDs");
+
+    await adapter.markRead(CONTACT_ID, ["same-message", "same-message"]);
+    expect(socket.readMessages).toHaveBeenCalledWith([
+      { remoteJid: CONTACT_ID, id: "same-message" },
+    ]);
+
+    const now = vi
+      .spyOn(Date, "now")
+      .mockReturnValueOnce(5_000)
+      .mockReturnValueOnce(6_000)
+      .mockReturnValueOnce(7_000);
+    await adapter.sendPresence(CONTACT_ID, "typing");
+    await adapter.sendPresence(CONTACT_ID, "paused");
+    await adapter.sendPresence(CONTACT_ID, "paused");
+    expect(socket.sendPresenceUpdate).toHaveBeenCalledTimes(2);
+    now.mockRestore();
+  });
+
+  it("caps unique presence subscriptions per adapter", async () => {
+    const { adapter, socket } = createFixture();
+    for (let index = 0; index < 100; index += 1) {
+      await adapter.subscribePresence(`${String(index).padStart(13, "0")}@s.whatsapp.net`);
+    }
+    await expect(adapter.subscribePresence("9999999999999@s.whatsapp.net")).rejects.toThrow(
+      "limited to 100 chats",
+    );
+    expect(socket.presenceSubscribe).toHaveBeenCalledTimes(100);
+  });
+
+  it("queues album sends and rejects an album larger than the bounded tool limit", async () => {
+    const { adapter, queue, socket, invoke } = createFixture();
+    const images = [
+      { image: Buffer.from("one").toString("base64") },
+      { image: Buffer.from("two").toString("base64") },
+    ];
+    await invoke("wa_send_media_album", { to: CONTACT_ID, images });
+    expect(queue.enqueueMediaAlbum).toHaveBeenCalledWith(expect.any(String), CONTACT_ID, images);
+    expect(socket.sendMessage).toHaveBeenCalledTimes(3);
+
+    await expect(
+      invoke("wa_send_media_album", {
+        to: CONTACT_ID,
+        images: Array.from({ length: 11 }, () => ({ image: "aW1hZ2U=" })),
+      }),
+    ).rejects.toThrow();
+  });
+
+  it("validates album media before sending the parent message", async () => {
+    const { adapter, socket } = createFixture();
+    await expect(
+      adapter.sendMediaAlbum(CONTACT_ID, [
+        { image: "https://127.0.0.1/private-image" },
+        { image: Buffer.from("image").toString("base64") },
+      ]),
+    ).rejects.toThrow();
+    expect(socket.sendMessage).not.toHaveBeenCalled();
   });
 
   it("sends albums and private replies using regular message sends", async () => {
@@ -402,7 +568,7 @@ describe("issue 80 feature completion", () => {
     expect(socket.appPatch).not.toHaveBeenCalled();
   });
 
-  it("auto-rejects direct call offers, keeps call status and detail in webhooks", async () => {
+  it("keeps automatic call rejection disabled when its setting is unset", async () => {
     vi.stubEnv("WA_AUTO_REJECT_CALLS", undefined);
     const defaultFixture = createFixture();
     await defaultFixture.processEvents({
@@ -420,7 +586,9 @@ describe("issue 80 feature completion", () => {
       ],
     });
     expect(defaultFixture.socket.rejectCall).not.toHaveBeenCalled();
+  });
 
+  it("auto-rejects direct call offers only when enabled and keeps call details in webhooks", async () => {
     vi.stubEnv("WA_AUTO_REJECT_CALLS", "true");
     const { adapter, socket, processEvents } = createFixture();
     const emitted: ChannelEventPayload["call.received"][] = [];

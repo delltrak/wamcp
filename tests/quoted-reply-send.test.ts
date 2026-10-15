@@ -3,6 +3,8 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 const queueHarness = vi.hoisted(() => ({
   job: undefined as { id: string; data: unknown } | undefined,
   processor: undefined as ((job: { id: string; data: unknown }) => Promise<void>) | undefined,
+  addOptions: undefined as Record<string, unknown> | undefined,
+  limiter: undefined as { max: number; duration: number } | undefined,
   quotedMessage: null as Record<string, unknown> | null,
 }));
 
@@ -33,9 +35,10 @@ vi.mock("bullmq", () => {
   class FakeQueue {
     constructor(_name: string, _options: unknown) {}
 
-    async add(_name: string, data: unknown) {
+    async add(_name: string, data: unknown, options?: Record<string, unknown>) {
       const job = { id: "quoted-reply-job", data: JSON.parse(JSON.stringify(data)) as unknown };
       queueHarness.job = job;
+      queueHarness.addOptions = options;
       return job;
     }
 
@@ -43,8 +46,13 @@ vi.mock("bullmq", () => {
   }
 
   class FakeWorker {
-    constructor(_name: string, processor: (job: { id: string; data: unknown }) => Promise<void>) {
+    constructor(
+      _name: string,
+      processor: (job: { id: string; data: unknown }) => Promise<void>,
+      options?: { limiter?: { max: number; duration: number } },
+    ) {
       queueHarness.processor = processor;
+      queueHarness.limiter = options?.limiter;
     }
 
     on() {
@@ -132,6 +140,8 @@ describe("quoted outbound messages", () => {
   beforeEach(() => {
     queueHarness.job = undefined;
     queueHarness.processor = undefined;
+    queueHarness.addOptions = undefined;
+    queueHarness.limiter = undefined;
     pttHarness.preparePttAudio.mockClear();
     queueHarness.quotedMessage = {
       id: "incoming-message-id",
@@ -178,6 +188,23 @@ describe("quoted outbound messages", () => {
         message: { conversation: "Original incoming message" },
       },
     });
+
+    await messageQueue.close();
+  });
+
+  it("runs bounded album jobs through the configured Baileys rate limiter", async () => {
+    vi.stubEnv("WA_BAILEYS_RATE_LIMIT", "3");
+    const { messageQueue, sent } = createTestRuntime();
+    await messageQueue.enqueueMediaAlbum("instance-1", "5511999999999", [
+      { image: Buffer.from("one").toString("base64") },
+      { image: Buffer.from("two").toString("base64") },
+    ]);
+
+    expect(queueHarness.limiter).toEqual({ max: 3, duration: 60_000 });
+    expect(queueHarness.addOptions).toEqual({ attempts: 1 });
+    expect(queueHarness.job?.data).toMatchObject({ kind: "album", images: expect.any(Array) });
+    await queueHarness.processor!(queueHarness.job!);
+    expect(sent).toHaveLength(3);
 
     await messageQueue.close();
   });

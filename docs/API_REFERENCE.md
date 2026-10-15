@@ -770,6 +770,9 @@ Send two to ten images as one Baileys album.
 
 **Channel support:** Baileys only. Cloud API does not group media into albums.
 
+**Response:** `{ "status": "queued", "jobId": "..." }`. Album sends use the per-instance
+`WA_BAILEYS_RATE_LIMIT` queue; each album is bounded to ten images.
+
 ---
 
 #### `wa_reply_privately_to_group_message`
@@ -2183,9 +2186,13 @@ Post a text status/story update visible to contacts.
 ```json
 {
   "success": true,
+  "messageId": "BAE5...",
   "recipientCount": 4
 }
 ```
+
+Use the returned `messageId` with `wa_get_status_viewers` to list viewers whose read or played
+receipts this server observes.
 
 If the audience exceeds the configured cap, the response also includes `omittedRecipientCount`
 and a `warning` describing the truncation.
@@ -2210,6 +2217,7 @@ Post an image status/story update visible to contacts.
 ```json
 {
   "success": true,
+  "messageId": "BAE5...",
   "recipientCount": 4
 }
 ```
@@ -2234,6 +2242,7 @@ Post a video status/story update visible to contacts.
 ```json
 {
   "success": true,
+  "messageId": "BAE5...",
   "recipientCount": 4
 }
 ```

@@ -405,7 +405,11 @@ export const MarkReadSchema = z
   .object({
     instanceId: z.string().min(1).describe("The instance ID"),
     chatId: z.string().min(5).describe("Chat JID containing the messages"),
-    messageIds: z.array(z.string().min(1)).min(1).describe("Message IDs to mark as read"),
+    messageIds: z
+      .array(z.string().min(1))
+      .min(1)
+      .max(100)
+      .describe("Message IDs to mark as read (1-100 per request)"),
     participant: z
       .string()
       .min(1)

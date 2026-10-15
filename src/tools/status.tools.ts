@@ -19,6 +19,7 @@ import {
 function statusToolSuccess(result: StatusSendResult) {
   return toolSuccess({
     success: true,
+    messageId: result.messageId,
     recipientCount: result.recipientCount,
     ...(result.omittedRecipientCount > 0
       ? {
@@ -55,6 +56,7 @@ export function registerStatusTools(
         log.info(
           {
             duration: Date.now() - start,
+            messageId: result.messageId,
             recipientCount: result.recipientCount,
             omittedRecipientCount: result.omittedRecipientCount,
           },
@@ -87,6 +89,7 @@ export function registerStatusTools(
         log.info(
           {
             duration: Date.now() - start,
+            messageId: result.messageId,
             recipientCount: result.recipientCount,
             omittedRecipientCount: result.omittedRecipientCount,
           },
@@ -119,6 +122,7 @@ export function registerStatusTools(
         log.info(
           {
             duration: Date.now() - start,
+            messageId: result.messageId,
             recipientCount: result.recipientCount,
             omittedRecipientCount: result.omittedRecipientCount,
           },

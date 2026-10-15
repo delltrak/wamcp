@@ -482,6 +482,8 @@ export interface StatusContent {
 }
 
 export interface StatusSendResult {
+  /** Baileys message ID; pass this to wa_get_status_viewers to list observed viewers. */
+  messageId: string;
   recipientCount: number;
   omittedRecipientCount: number;
   warning?: string;
