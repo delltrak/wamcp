@@ -10,6 +10,7 @@ import {
   EventWebhookRetryableError,
   eventWebhookBackoffStrategy,
   eventWebhookDestinationIdentity,
+  eventWebhookFailureLogData,
   eventWebhookJobOptions,
   normalizeGrokBotWebhookPayload,
   normalizeEventWebhookPayload,
@@ -1321,6 +1322,63 @@ describe("outgoing event webhook delivery", () => {
       expect(message).not.toContain(authValue);
       expect(message).not.toContain(hmacSecret);
     }
+  });
+
+  it("keeps HTTP status and safe network diagnostics for failed-attempt logs", async () => {
+    const destination = {
+      id: "default",
+      url: "https://hooks.example.test/receive?token=query-secret",
+      headers: { authorization: "Bearer header-secret" },
+      secret: "hmac-secret",
+    };
+    const resolveDns = vi.fn(async () => [{ address: "93.184.216.34", family: 4 }]);
+    const httpFailure = postEventWebhook(
+      destination,
+      {},
+      1_000,
+      vi.fn<typeof fetch>(() => Promise.resolve(new Response(null, { status: 503 }))),
+      resolveDns,
+    );
+    await expect(httpFailure).rejects.toMatchObject({
+      httpStatus: 503,
+      errorName: "HttpError",
+      errorMessage: "HTTP 503",
+    });
+
+    const networkError = Object.assign(
+      new Error(
+        `connect ECONNREFUSED ${destination.url} ${destination.headers.authorization} ${destination.secret}`,
+      ),
+      { code: "ECONNREFUSED" },
+    );
+    const networkFailure = postEventWebhook(
+      destination,
+      {},
+      1_000,
+      vi.fn<typeof fetch>(() =>
+        Promise.reject(new TypeError(`fetch failed ${destination.url}`, { cause: networkError })),
+      ),
+      resolveDns,
+    );
+    let failure: unknown;
+    try {
+      await networkFailure;
+    } catch (error) {
+      failure = error;
+    }
+    const logData = eventWebhookFailureLogData(2, failure, destination);
+    expect(logData).toMatchObject({
+      attempt: 2,
+      endpoint: "https://hooks.example.test/receive",
+      httpStatus: null,
+      errorName: "Error",
+      errorCode: "ECONNREFUSED",
+    });
+    const serialized = JSON.stringify(logData);
+    expect(serialized).not.toContain("query-secret");
+    expect(serialized).not.toContain("header-secret");
+    expect(serialized).not.toContain("hmac-secret");
+    expect(serialized).not.toContain("token=");
   });
 
   it("rejects a hostname that resolves to a private address before sending", async () => {

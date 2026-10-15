@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { createCipheriv, createHmac, randomBytes, randomUUID } from "node:crypto";
 import {
   BufferJSON,
+  generateWAMessage,
   proto,
   type BaileysEventMap,
   type WASocket,
@@ -108,7 +109,7 @@ describe("Baileys event responses", () => {
     vi.unstubAllEnvs();
   });
 
-  function createFixture() {
+  function createFixture(extraSocket: Record<string, unknown> = {}) {
     vi.stubEnv("WA_AUTO_READ", "false");
     const instanceId = `event-response-test-${randomUUID()}`;
     activeInstances.add(instanceId);
@@ -145,6 +146,7 @@ describe("Baileys event responses", () => {
           return vi.fn();
         }),
       },
+      ...extraSocket,
     } as unknown as WASocket;
     const adapterInternals = adapter as unknown as {
       sock: WASocket;
@@ -173,6 +175,112 @@ describe("Baileys event responses", () => {
       "messages.upsert": { type: "notify", messages: [message] },
     } as Partial<BaileysEventMap>);
   }
+
+  it("decrypts an RSVP to a newly sent event after Baileys own-message upserts", async () => {
+    const eventId = `sent-event-${randomUUID()}`;
+    let sentEvent: WAMessage | undefined;
+    const sendMessage = vi.fn(
+      async (jid: string, content: { event: { name: string; startDate: Date } }) => {
+        sentEvent = await generateWAMessage(jid, content, {
+          userJid: ACCOUNT_ID,
+          messageId: eventId,
+        });
+        return sentEvent;
+      },
+    );
+    const { adapter, processEvents } = createFixture({ sendMessage });
+
+    const sent = await adapter.sendEvent({
+      to: RESPONDER_ID,
+      name: "Planning",
+      start: "2027-01-15T08:00:00Z",
+    });
+    expect(sent.messageId).toBe(eventId);
+    expect(sentEvent?.message?.messageContextInfo?.messageSecret).toBeInstanceOf(Uint8Array);
+
+    // Baileys emits the locally generated message and may upsert the same event again later.
+    await processEvents({
+      "messages.upsert": { type: "append", messages: [sentEvent!] },
+    } as Partial<BaileysEventMap>);
+    await upsert(processEvents, sentEvent!);
+
+    const messageSecret = sentEvent!.message!.messageContextInfo!.messageSecret!;
+    const eventKey = sentEvent!.key;
+    const encrypted = encryptEventResponse(
+      messageSecret,
+      eventId,
+      ACCOUNT_ID,
+      RESPONDER_ID,
+      proto.Message.EventResponseMessage.create({
+        response: proto.Message.EventResponseMessage.EventResponseType.GOING,
+        timestampMs: 1_800_000_123_000,
+      }),
+      eventKey,
+    );
+    await upsert(
+      processEvents,
+      encryptedResponseMessage(
+        `sent-response-${randomUUID()}`,
+        RESPONDER_ID,
+        { remoteJid: RESPONDER_ID },
+        encrypted,
+      ),
+    );
+
+    await expect(adapter.getEventResponses(RESPONDER_ID, eventId)).resolves.toMatchObject([
+      { participant: RESPONDER_ID, status: "GOING", response: "GOING" },
+    ]);
+    const storedRawData = sqlite
+      .prepare("SELECT raw_data FROM messages WHERE id = ?")
+      .get(eventId) as { raw_data: string };
+    const storedEvent = JSON.parse(storedRawData.raw_data, BufferJSON.reviver) as WAMessage;
+    expect(storedEvent.message?.messageContextInfo?.messageSecret).toEqual(messageSecret);
+  });
+
+  it("restores event secrets stored by older versions as protobuf JSON base64", async () => {
+    const { instanceId, adapter, processEvents } = createFixture();
+    const eventId = `legacy-sent-event-${randomUUID()}`;
+    const messageSecret = Buffer.alloc(32, 0x63);
+    const eventKey: WAMessageKey = { id: eventId, remoteJid: RESPONDER_ID, fromMe: true };
+    await upsert(processEvents, eventMessage(eventId, RESPONDER_ID, eventKey, messageSecret));
+
+    sqlite.prepare("UPDATE messages SET raw_data = ? WHERE instance_id = ? AND id = ?").run(
+      JSON.stringify({
+        key: eventKey,
+        message: {
+          eventMessage: { name: "Planning", startTime: 1_800_000_000 },
+          messageContextInfo: { messageSecret: messageSecret.toString("base64") },
+        },
+        messageTimestamp: 1_800_000_000,
+      }),
+      instanceId,
+      eventId,
+    );
+
+    const encrypted = encryptEventResponse(
+      messageSecret,
+      eventId,
+      ACCOUNT_ID,
+      RESPONDER_ID,
+      proto.Message.EventResponseMessage.create({
+        response: proto.Message.EventResponseMessage.EventResponseType.MAYBE,
+      }),
+      eventKey,
+    );
+    await upsert(
+      processEvents,
+      encryptedResponseMessage(
+        `legacy-sent-response-${randomUUID()}`,
+        RESPONDER_ID,
+        { remoteJid: RESPONDER_ID },
+        encrypted,
+      ),
+    );
+
+    await expect(adapter.getEventResponses(RESPONDER_ID, eventId)).resolves.toMatchObject([
+      { participant: RESPONDER_ID, status: "MAYBE", response: "MAYBE" },
+    ]);
+  });
 
   it.each([
     { responseType: proto.Message.EventResponseMessage.EventResponseType.GOING, status: "GOING" },

@@ -552,13 +552,38 @@ function normalizeGroupInviteCode(input: string): string {
   return value;
 }
 
+function toJSONSafeMessageValue(value: unknown): unknown {
+  if (value === null || typeof value !== "object") return value;
+  if (Buffer.isBuffer(value) || value instanceof Uint8Array) return Buffer.from(value);
+  if (Array.isArray(value)) return value.map(toJSONSafeMessageValue);
+
+  const record = value as Record<string, unknown>;
+  if (
+    typeof record.toNumber === "function" &&
+    typeof record.toString === "function" &&
+    typeof record.low === "number" &&
+    typeof record.high === "number"
+  ) {
+    return record.toString();
+  }
+
+  const plain: Record<string, unknown> = {};
+  for (const [key, nested] of Object.entries(record)) {
+    plain[key] = toJSONSafeMessageValue(nested);
+  }
+  return plain;
+}
+
 function serializeIncomingMessage(message?: WAMessage): string | null {
   if (!message) return null;
   // Keep the complete proto message: event and poll decryption need messageContextInfo.messageSecret.
+  // Protobuf instances have a toJSON() method that turns bytes into base64 strings before
+  // BufferJSON.replacer sees them. Copy enumerable fields so unknown future fields survive too.
+  const plainMessage = toJSONSafeMessageValue(message.message);
   return JSON.stringify(
     {
       key: message.key,
-      message: message.message,
+      message: plainMessage,
       messageTimestamp: message.messageTimestamp,
     } as WAMessage,
     BufferJSON.replacer,
@@ -567,7 +592,23 @@ function serializeIncomingMessage(message?: WAMessage): string | null {
 
 function serializeWAMessage(message?: WAMessage): string | null {
   if (!message) return null;
-  return JSON.stringify(message, BufferJSON.replacer);
+  // See serializeIncomingMessage: generated protobuf toJSON() would stringify byte fields.
+  const plainMessage = toJSONSafeMessageValue(message.message);
+  return JSON.stringify({ ...message, message: plainMessage }, BufferJSON.replacer);
+}
+
+/** Restore message secrets written by older versions as protobuf JSON base64 strings. */
+function normalizeStoredEventMessageSecret(message: WAMessage): Uint8Array | null {
+  const messageContextInfo = message.message?.messageContextInfo as
+    { messageSecret?: unknown } | null | undefined;
+  const value = messageContextInfo?.messageSecret;
+  if (typeof value === "string") {
+    const decoded = Buffer.from(value, "base64");
+    if (decoded.byteLength !== 32 || decoded.toString("base64") !== value) return null;
+    if (messageContextInfo) messageContextInfo.messageSecret = decoded;
+    return decoded;
+  }
+  return value instanceof Uint8Array && value.byteLength === 32 ? value : null;
 }
 
 function hasMeaningfulValue(value: unknown): boolean {
@@ -1002,6 +1043,8 @@ export class BaileysAdapter implements ChannelAdapter {
         return { stickerMessage: {} };
       case "event":
         return { eventMessage: content === null ? {} : { name: content } };
+      case "album":
+        return { albumMessage: {} };
     }
   }
 
@@ -1330,6 +1373,7 @@ export class BaileysAdapter implements ChannelAdapter {
     }
     const parent = await sock.sendMessage(jid, { album: { expectedImageCount: images.length } });
     if (!parent?.key.id) throw new Error("Baileys did not return an album parent message ID");
+    this.persistOutgoingMessage(parent, jid);
 
     let sent = 0;
     try {
@@ -3791,7 +3835,7 @@ export class BaileysAdapter implements ChannelAdapter {
         storedAliases.add(await this.resolveJidToPn(jid));
       }
       if (requestedChat && !storedAliases.has(requestedChat)) return null;
-      if (!stored.message?.messageContextInfo?.messageSecret) return null;
+      if (!normalizeStoredEventMessageSecret(stored)) return null;
       return stored;
     } catch {
       return null;

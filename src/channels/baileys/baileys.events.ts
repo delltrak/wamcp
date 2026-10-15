@@ -564,6 +564,7 @@ function messageDetails(content: MessageRecord | undefined): BaileysMessageDetai
     pollCreationMessageV2: "poll",
     pollCreationMessageV3: "poll",
     eventMessage: "event",
+    albumMessage: "album",
     reactionMessage: "reaction",
     stickerMessage: "sticker",
     imageMessage: "image",
