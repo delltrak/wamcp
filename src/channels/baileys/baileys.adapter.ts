@@ -13,6 +13,7 @@ import makeWASocket, {
   makeCacheableSignalKeyStore,
   type WASocket,
   type GroupParticipant as BaileysGroupParticipant,
+  type GroupMetadata as BaileysGroupMetadata,
   type WAMessage,
   type BaileysEventMap,
   type AnyMessageContent,
@@ -20,6 +21,13 @@ import makeWASocket, {
   type EventMessageOptions,
   type MinimalMessage,
   type WAMessageKey,
+  type CatalogCollection,
+  type GetCatalogOptions,
+  type NewsletterMetadata,
+  type OrderDetails,
+  type Product,
+  type ProductCreate,
+  type ProductUpdate,
   jidNormalizedUser,
   ALL_WA_PATCH_NAMES,
 } from "@whiskeysockets/baileys";
@@ -58,6 +66,8 @@ import type {
   MessageSearchOptions,
   SendEventOptions,
   NormalizedLabelUpdateEvent,
+  CatalogProductCreateInput,
+  CatalogProductUpdateInput,
 } from "../../types/channel.types.js";
 import { useSqliteAuthState, clearAuthState } from "./baileys.auth.js";
 import { normalizePrivacySettings } from "./privacy.js";
@@ -101,6 +111,7 @@ import {
   RECONNECT_MAX_DELAY_MS,
   RECONNECT_MAX_ATTEMPTS,
   MAX_BASE64_MEDIA_BYTES,
+  MEDIA_LIMITS,
 } from "../../constants.js";
 import { createChildLogger } from "../../utils/logger.js";
 import { scheduleBaileysMessagesRead } from "../../services/auto-read.js";
@@ -784,6 +795,7 @@ export class BaileysAdapter implements ChannelAdapter {
           video: this.resolveMedia(content.video),
           caption: content.caption,
           ...(content.gifPlayback ? { gifPlayback: true } : {}),
+          ...(content.ptv ? { ptv: true } : {}),
         };
         if (content.quotedMessageId) {
           opts.quoted = this.getQuotedMessage(jid, content.quotedMessageId);
@@ -1613,6 +1625,48 @@ export class BaileysAdapter implements ChannelAdapter {
     this.persistLabelAssociation(labelId, "message", jid, messageId, add);
   }
 
+  async createQuickReply(input: { shortcut: string; message: string }): Promise<void> {
+    this.requireAppStateWritesEnabled();
+    const sock = this.getSock();
+    await sock.addOrEditQuickReply({ shortcut: input.shortcut, message: input.message });
+  }
+
+  async editQuickReply(input: {
+    shortcut: string;
+    message: string;
+    timestamp: string;
+  }): Promise<void> {
+    this.requireAppStateWritesEnabled();
+    const sock = this.getSock();
+    await sock.addOrEditQuickReply({
+      shortcut: input.shortcut,
+      message: input.message,
+      timestamp: input.timestamp,
+    });
+  }
+
+  async deleteQuickReply(timestamp: string): Promise<void> {
+    this.requireAppStateWritesEnabled();
+    const sock = this.getSock();
+    await sock.removeQuickReply(timestamp);
+  }
+
+  async setDisappearingMessages(
+    chatId: string,
+    duration: 0 | 86400 | 604800 | 7776000,
+  ): Promise<void> {
+    const sock = this.getSock();
+    const jid = this.normalizeStatusRecipient(chatId);
+    if (!jid) {
+      throw new Error(
+        "Invalid private chat ID; expected an individual WhatsApp phone number or JID",
+      );
+    }
+    await sock.sendMessage(jid, {
+      disappearingMessagesInChat: duration === 0 ? false : duration,
+    });
+  }
+
   // ---- Groups ----
 
   async createGroup(name: string, participants: string[]): Promise<GroupResponse> {
@@ -1693,6 +1747,10 @@ export class BaileysAdapter implements ChannelAdapter {
     const sock = this.getSock();
     const jid = normalizeGroupJid(groupId);
     const meta = await sock.groupMetadata(jid);
+    return this.normalizeGroupMetadata(meta);
+  }
+
+  private async normalizeGroupMetadata(meta: BaileysGroupMetadata): Promise<GroupMetadata> {
     const participants = await Promise.all(
       (meta.participants ?? []).map(async (participant) => {
         const role: "admin" | "superadmin" | "member" =
@@ -1860,6 +1918,59 @@ export class BaileysAdapter implements ChannelAdapter {
     await sock.groupRequestParticipantsUpdate(jid, [participant], action);
   }
 
+  async setGroupJoinApprovalMode(groupId: string, mode: "on" | "off"): Promise<void> {
+    const sock = this.getSock();
+    await sock.groupJoinApprovalMode(normalizeGroupJid(groupId), mode);
+  }
+
+  async setGroupMemberAddMode(
+    groupId: string,
+    mode: "admin_add" | "all_member_add",
+  ): Promise<void> {
+    const sock = this.getSock();
+    await sock.groupMemberAddMode(normalizeGroupJid(groupId), mode);
+  }
+
+  // ---- Communities ----
+
+  async createCommunity(subject: string, description = ""): Promise<GroupMetadata | null> {
+    const sock = this.getSock();
+    const community = await sock.communityCreate(subject, description);
+    return community ? this.normalizeGroupMetadata(community) : null;
+  }
+
+  async listCommunities(): Promise<Record<string, GroupMetadata>> {
+    const sock = this.getSock();
+    const communities = await sock.communityFetchAllParticipating();
+    const entries = await Promise.all(
+      Object.entries(communities).map(
+        async ([jid, metadata]) => [jid, await this.normalizeGroupMetadata(metadata)] as const,
+      ),
+    );
+    return Object.fromEntries(entries);
+  }
+
+  async getCommunityMetadata(communityId: string): Promise<GroupMetadata> {
+    const sock = this.getSock();
+    const metadata = await sock.communityMetadata(normalizeGroupJid(communityId));
+    return this.normalizeGroupMetadata(metadata);
+  }
+
+  async linkGroupToCommunity(groupId: string, communityId: string): Promise<void> {
+    const sock = this.getSock();
+    await sock.communityLinkGroup(normalizeGroupJid(groupId), normalizeGroupJid(communityId));
+  }
+
+  async unlinkGroupFromCommunity(groupId: string, communityId: string): Promise<void> {
+    const sock = this.getSock();
+    await sock.communityUnlinkGroup(normalizeGroupJid(groupId), normalizeGroupJid(communityId));
+  }
+
+  async leaveCommunity(communityId: string): Promise<void> {
+    const sock = this.getSock();
+    await sock.communityLeave(normalizeGroupJid(communityId));
+  }
+
   // ---- Contacts ----
 
   async checkNumberExists(phone: string): Promise<NumberExistsResponse> {
@@ -1884,6 +1995,17 @@ export class BaileysAdapter implements ChannelAdapter {
     const sock = this.getSock();
     const list = await sock.fetchBlocklist();
     return list.filter((jid): jid is string => jid !== undefined);
+  }
+
+  async getContactAbout(jid: string): Promise<string | null> {
+    const sock = this.getSock();
+    const normalizedJid = this.normalizeStatusRecipient(jid);
+    if (!normalizedJid) {
+      throw new Error("Invalid contact ID; expected an individual WhatsApp phone number or JID");
+    }
+    const status = await sock.fetchStatus(normalizedJid);
+    const result = status?.find((entry) => entry.id === normalizedJid);
+    return typeof result?.status === "string" ? result.status : null;
   }
 
   async getBusinessProfile(jid: string): Promise<BusinessProfile | null> {
@@ -2050,6 +2172,102 @@ export class BaileysAdapter implements ChannelAdapter {
     const sock = this.getSock();
     const result = await sock.sendMessage(jid, { text });
     return { messageId: result?.key.id ?? "", timestamp: Date.now(), status: "sent" };
+  }
+
+  async createNewsletter(name: string, description?: string): Promise<NewsletterMetadata> {
+    const sock = this.getSock();
+    return sock.newsletterCreate(name, description);
+  }
+
+  async getNewsletterMetadata(
+    type: "invite" | "jid",
+    key: string,
+  ): Promise<NewsletterMetadata | null> {
+    const sock = this.getSock();
+    return sock.newsletterMetadata(type, key);
+  }
+
+  async updateNewsletterName(jid: string, name: string): Promise<void> {
+    const sock = this.getSock();
+    await sock.newsletterUpdateName(jid, name);
+  }
+
+  async updateNewsletterDescription(jid: string, description: string): Promise<void> {
+    const sock = this.getSock();
+    await sock.newsletterUpdateDescription(jid, description);
+  }
+
+  async updateNewsletterPicture(jid: string, image: string): Promise<void> {
+    const sock = this.getSock();
+    const jpeg = await mediaService.prepareGroupProfilePicture(image);
+    await sock.newsletterUpdatePicture(jid, jpeg);
+  }
+
+  async reactToNewsletterMessage(jid: string, serverId: string, reaction?: string): Promise<void> {
+    const sock = this.getSock();
+    await sock.newsletterReactMessage(jid, serverId, reaction);
+  }
+
+  async fetchNewsletterMessages(
+    jid: string,
+    count: number,
+    since: number,
+    after: number,
+  ): Promise<unknown> {
+    const sock = this.getSock();
+    return sock.newsletterFetchMessages(jid, count, since, after);
+  }
+
+  // ---- Business catalog ----
+
+  private async prepareCatalogImages(images: string[]): Promise<Buffer[]> {
+    return Promise.all(
+      images.map((image) => mediaService.getMediaBuffer(image, { maxBytes: MEDIA_LIMITS.image })),
+    );
+  }
+
+  async getCatalog(
+    options: GetCatalogOptions,
+  ): Promise<{ products: Product[]; nextPageCursor: string | undefined }> {
+    const sock = this.getSock();
+    return sock.getCatalog(options);
+  }
+
+  async getCollections(
+    jid?: string,
+    limit?: number,
+  ): Promise<{ collections: CatalogCollection[] }> {
+    const sock = this.getSock();
+    return sock.getCollections(jid, limit);
+  }
+
+  async createProduct(input: CatalogProductCreateInput): Promise<Product> {
+    const sock = this.getSock();
+    const create: ProductCreate = {
+      ...input,
+      originCountryCode: input.originCountryCode,
+      images: await this.prepareCatalogImages(input.images),
+    };
+    return sock.productCreate(create);
+  }
+
+  async updateProduct(productId: string, input: CatalogProductUpdateInput): Promise<Product> {
+    const sock = this.getSock();
+    const update: ProductUpdate = {
+      ...input,
+      images: await this.prepareCatalogImages(input.images),
+    };
+    return sock.productUpdate(productId, update);
+  }
+
+  async deleteProducts(productIds: string[]): Promise<{ deleted: number }> {
+    const sock = this.getSock();
+    return sock.productDelete(productIds);
+  }
+
+  async getOrderDetails(orderId: string, tokenBase64: string): Promise<OrderDetails> {
+    const sock = this.getSock();
+    return sock.getOrderDetails(orderId, tokenBase64);
   }
 
   // ---- Calls ----

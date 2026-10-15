@@ -33,6 +33,23 @@ export interface BusinessLabel {
   predefinedId?: string;
 }
 
+export interface CatalogProductFields {
+  name: string;
+  retailerId?: string;
+  url?: string;
+  description: string;
+  price: number;
+  currency: string;
+  isHidden?: boolean;
+  images: string[];
+}
+
+export interface CatalogProductCreateInput extends CatalogProductFields {
+  originCountryCode?: string;
+}
+
+export type CatalogProductUpdateInput = CatalogProductFields;
+
 export interface MessageSearchOptions {
   query: string;
   from?: number;
@@ -121,6 +138,7 @@ export interface VideoContent {
   video: string; // URL or base64
   caption?: string;
   gifPlayback?: boolean;
+  ptv?: boolean;
   quotedMessageId?: string;
 }
 

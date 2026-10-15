@@ -19,6 +19,7 @@ import { registerProfileTools } from "../tools/profile.tools.js";
 import { registerStatusTools } from "../tools/status.tools.js";
 import { registerCallTools } from "../tools/call.tools.js";
 import { registerNewsletterTools } from "../tools/newsletter.tools.js";
+import { registerBusinessTools } from "../tools/business.tools.js";
 import { registerTranscriptionTools } from "../tools/transcription.tools.js";
 import { registerTtsTools } from "../tools/tts.tools.js";
 import { registerSearchTools } from "../tools/search.tools.js";
@@ -64,6 +65,7 @@ export function createMcpServer(
   registerStatusTools(server, instanceManager, messageQueue);
   registerCallTools(server, instanceManager, messageQueue);
   registerNewsletterTools(server, instanceManager, messageQueue);
+  registerBusinessTools(server, instanceManager);
   registerTranscriptionTools(server, instanceManager);
   registerTtsTools(server, instanceManager, messageQueue);
   registerSearchTools(server, instanceManager);

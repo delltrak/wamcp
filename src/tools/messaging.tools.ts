@@ -13,6 +13,7 @@ import {
   SendTextSchema,
   SendImageSchema,
   SendVideoSchema,
+  SendPtvSchema,
   SendStickerSchema,
   SendGifSchema,
   DownloadMediaSchema,
@@ -128,6 +129,37 @@ Returns: { status: "queued", jobId }`,
         return toolSuccess(result);
       } catch (err) {
         return handleToolError("wa_send_video", err, params.instanceId);
+      }
+    },
+  );
+
+  server.registerTool(
+    "wa_send_ptv",
+    {
+      description:
+        "Send a round video note (PTV) to a WhatsApp contact or group. Baileys only; Cloud API does not support video notes.",
+      inputSchema: SendPtvSchema,
+    },
+    async (params) => {
+      const log = createRequestLogger("wa_send_ptv", params.instanceId);
+      const start = Date.now();
+      try {
+        const channel = instanceManager.getInstanceChannel(params.instanceId);
+        if (channel === "cloud") {
+          throw new Error(
+            "Video notes (PTV) are not supported on Cloud API; use a Baileys instance",
+          );
+        }
+        const result = await messageQueue.enqueueMessage(
+          params.instanceId,
+          params.to,
+          { type: "video", video: params.video, caption: params.caption, ptv: true },
+          channel,
+        );
+        log.info({ duration: Date.now() - start, to: params.to }, "PTV message queued");
+        return toolSuccess(result);
+      } catch (err) {
+        return handleToolError("wa_send_ptv", err, params.instanceId);
       }
     },
   );

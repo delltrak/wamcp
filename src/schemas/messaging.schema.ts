@@ -34,6 +34,15 @@ export const SendVideoSchema = z
   })
   .strict();
 
+export const SendPtvSchema = z
+  .object({
+    instanceId: z.string().min(1).describe("The instance ID to send from"),
+    to: z.string().min(5).describe("Recipient phone number or group JID"),
+    video: z.string().min(1).describe("Video URL or base64-encoded data"),
+    caption: z.string().optional().describe("Optional video caption"),
+  })
+  .strict();
+
 export const SendStickerSchema = z
   .object({
     instanceId: z.string().min(1).describe("The instance ID to send from"),

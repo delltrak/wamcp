@@ -38,7 +38,16 @@ import type {
   EventResponse,
   MessageSearchOptions,
   SendEventOptions,
+  CatalogProductCreateInput,
+  CatalogProductUpdateInput,
 } from "../../types/channel.types.js";
+import type {
+  CatalogCollection,
+  GetCatalogOptions,
+  NewsletterMetadata,
+  OrderDetails,
+  Product,
+} from "@whiskeysockets/baileys";
 import { searchStoredMessages } from "../../services/message-search.js";
 import { createChildLogger } from "../../utils/logger.js";
 import { getAutoReadMode, scheduleIncomingMessageRead } from "../../services/auto-read.js";
@@ -285,6 +294,11 @@ export class CloudApiAdapter implements ChannelAdapter {
       }
 
       case "video": {
+        if (content.ptv) {
+          throw new Error(
+            "Video notes (PTV) are not supported on Cloud API; use a Baileys instance",
+          );
+        }
         if (content.gifPlayback) {
           throw new Error(
             "GIF playback sending is not supported on Cloud API; use a Baileys instance",
@@ -561,6 +575,29 @@ export class CloudApiAdapter implements ChannelAdapter {
     throw new Error("WhatsApp Business labels are not supported on Cloud API by this server");
   }
 
+  async setDisappearingMessages(
+    _chatId: string,
+    _duration: 0 | 86400 | 604800 | 7776000,
+  ): Promise<void> {
+    throw new Error("Disappearing-message settings are not supported on Cloud API");
+  }
+
+  async createQuickReply(_input: { shortcut: string; message: string }): Promise<void> {
+    throw new Error("Business quick replies are only available on Baileys instances");
+  }
+
+  async editQuickReply(_input: {
+    shortcut: string;
+    message: string;
+    timestamp: string;
+  }): Promise<void> {
+    throw new Error("Business quick replies are only available on Baileys instances");
+  }
+
+  async deleteQuickReply(_timestamp: string): Promise<void> {
+    throw new Error("Business quick replies are only available on Baileys instances");
+  }
+
   // ---- Groups ----
 
   async listGroups(): Promise<GroupSummary[]> {
@@ -611,6 +648,43 @@ export class CloudApiAdapter implements ChannelAdapter {
     throw new Error("Group management is not supported on Cloud API");
   }
 
+  async setGroupJoinApprovalMode(_groupId: string, _mode: "on" | "off"): Promise<void> {
+    throw new Error("Group join approval mode is only available on Baileys instances");
+  }
+
+  async setGroupMemberAddMode(
+    _groupId: string,
+    _mode: "admin_add" | "all_member_add",
+  ): Promise<void> {
+    throw new Error("Group member-add mode is only available on Baileys instances");
+  }
+
+  // ---- Communities ----
+
+  async createCommunity(_subject: string, _description?: string): Promise<GroupMetadata | null> {
+    throw new Error("Community management is only available on Baileys instances");
+  }
+
+  async listCommunities(): Promise<Record<string, GroupMetadata>> {
+    throw new Error("Community management is only available on Baileys instances");
+  }
+
+  async getCommunityMetadata(_communityId: string): Promise<GroupMetadata> {
+    throw new Error("Community management is only available on Baileys instances");
+  }
+
+  async linkGroupToCommunity(_groupId: string, _communityId: string): Promise<void> {
+    throw new Error("Community management is only available on Baileys instances");
+  }
+
+  async unlinkGroupFromCommunity(_groupId: string, _communityId: string): Promise<void> {
+    throw new Error("Community management is only available on Baileys instances");
+  }
+
+  async leaveCommunity(_communityId: string): Promise<void> {
+    throw new Error("Community management is only available on Baileys instances");
+  }
+
   // ---- Contacts ----
 
   async checkNumberExists(phone: string): Promise<NumberExistsResponse> {
@@ -637,6 +711,10 @@ export class CloudApiAdapter implements ChannelAdapter {
 
   async getBlocklist(): Promise<string[]> {
     throw new Error("Blocklist is not available on Cloud API");
+  }
+
+  async getContactAbout(_jid: string): Promise<string | null> {
+    throw new Error("Contact About lookup is only available on Baileys instances");
   }
 
   async getBusinessProfile(_jid: string): Promise<BusinessProfile | null> {
@@ -742,6 +820,77 @@ export class CloudApiAdapter implements ChannelAdapter {
 
   async newsletterSend(_jid: string, _text: string): Promise<MessageResponse> {
     throw new Error("Newsletters are only available for Baileys instances");
+  }
+
+  async createNewsletter(_name: string, _description?: string): Promise<NewsletterMetadata> {
+    throw new Error("Channel management is only available on Baileys instances");
+  }
+
+  async getNewsletterMetadata(
+    _type: "invite" | "jid",
+    _key: string,
+  ): Promise<NewsletterMetadata | null> {
+    throw new Error("Channel metadata is only available on Baileys instances");
+  }
+
+  async updateNewsletterName(_jid: string, _name: string): Promise<void> {
+    throw new Error("Channel updates are only available on Baileys instances");
+  }
+
+  async updateNewsletterDescription(_jid: string, _description: string): Promise<void> {
+    throw new Error("Channel updates are only available on Baileys instances");
+  }
+
+  async updateNewsletterPicture(_jid: string, _image: string): Promise<void> {
+    throw new Error("Channel picture updates are only available on Baileys instances");
+  }
+
+  async reactToNewsletterMessage(
+    _jid: string,
+    _serverId: string,
+    _reaction?: string,
+  ): Promise<void> {
+    throw new Error("Channel post reactions are only available on Baileys instances");
+  }
+
+  async fetchNewsletterMessages(
+    _jid: string,
+    _count: number,
+    _since: number,
+    _after: number,
+  ): Promise<unknown> {
+    throw new Error("Channel post history is only available on Baileys instances");
+  }
+
+  // ---- Business catalog ----
+
+  async getCatalog(
+    _options: GetCatalogOptions,
+  ): Promise<{ products: Product[]; nextPageCursor: string | undefined }> {
+    throw new Error("Business catalog tools are only available on Baileys instances");
+  }
+
+  async getCollections(
+    _jid?: string,
+    _limit?: number,
+  ): Promise<{ collections: CatalogCollection[] }> {
+    throw new Error("Business catalog tools are only available on Baileys instances");
+  }
+
+  async createProduct(_input: CatalogProductCreateInput): Promise<Product> {
+    throw new Error("Business catalog tools are only available on Baileys instances");
+  }
+
+  async updateProduct(_productId: string, _input: CatalogProductUpdateInput): Promise<Product> {
+    throw new Error("Business catalog tools are only available on Baileys instances");
+  }
+
+  async deleteProducts(_productIds: string[]): Promise<{ deleted: number }> {
+    throw new Error("Business catalog tools are only available on Baileys instances");
+  }
+
+  async getOrderDetails(_orderId: string, _tokenBase64: string): Promise<OrderDetails> {
+    throw new Error("Order details are only available on Baileys instances");
   }
 
   // ---- Calls ----
