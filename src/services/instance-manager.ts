@@ -9,7 +9,12 @@ import { instances, authKeys, queueStats } from "../db/schema.js";
 import { BaileysAdapter } from "../channels/baileys/baileys.adapter.js";
 import { CloudApiAdapter } from "../channels/cloud-api/cloud.adapter.js";
 import type { ChannelAdapter } from "../channels/channel.interface.js";
-import type { ChannelType, ChannelEvent, ChannelEventPayload } from "../types/channel.types.js";
+import {
+  CHANNEL_EVENTS,
+  type ChannelType,
+  type ChannelEvent,
+  type ChannelEventPayload,
+} from "../types/channel.types.js";
 import type { InstanceEntity } from "../types/db.types.js";
 import { INSTANCE_ID_PREFIX } from "../constants.js";
 import { createChildLogger } from "../utils/logger.js";
@@ -226,22 +231,7 @@ export class InstanceManager {
   }
 
   private bindAdapterEvents(instanceId: string, adapter: ChannelAdapter): void {
-    const events: ChannelEvent[] = [
-      "message.received",
-      "message.updated",
-      "message.deleted",
-      "message.reaction",
-      "message.edited",
-      "presence.updated",
-      "chat.updated",
-      "group.updated",
-      "group.participants_changed",
-      "contact.updated",
-      "connection.changed",
-      "call.received",
-    ];
-
-    for (const event of events) {
+    for (const event of CHANNEL_EVENTS) {
       adapter.on(event, (payload: ChannelEventPayload[typeof event]) => {
         // Update instance status on connection changes
         if (event === "connection.changed") {

@@ -44,11 +44,17 @@ export interface MessageSearchOptions {
 }
 
 export interface EventResponse {
+  participant: string;
   responder: string;
+  phone?: string;
+  status: EventResponseStatus;
   response: string;
   timestamp: number | null;
   messageId: string | null;
+  extraGuestCount?: number;
 }
+
+export type EventResponseStatus = "GOING" | "NOT_GOING" | "MAYBE" | "UNKNOWN";
 
 export interface SendEventOptions {
   to: string;
@@ -487,21 +493,36 @@ export interface NormalizedLabelUpdateEvent {
   };
 }
 
-// Channel event names
-export type ChannelEvent =
-  | "message.received"
-  | "message.updated"
-  | "message.deleted"
-  | "message.reaction"
-  | "message.edited"
-  | "presence.updated"
-  | "chat.updated"
-  | "group.updated"
-  | "group.participants_changed"
-  | "contact.updated"
-  | "connection.changed"
-  | "call.received"
-  | "label.updated";
+export interface NormalizedEventResponseEvent {
+  instanceId: string;
+  chatId: string;
+  eventMessageId: string;
+  participant: string;
+  responseMessageId: string | null;
+  status: EventResponseStatus;
+  timestamp: number | null;
+  extraGuestCount?: number;
+}
+
+// Keep the runtime event list and compile-time union together so subscribers do not drift.
+export const CHANNEL_EVENTS = [
+  "message.received",
+  "message.updated",
+  "message.deleted",
+  "message.reaction",
+  "message.edited",
+  "presence.updated",
+  "chat.updated",
+  "group.updated",
+  "group.participants_changed",
+  "contact.updated",
+  "connection.changed",
+  "call.received",
+  "label.updated",
+  "event.response",
+] as const;
+
+export type ChannelEvent = (typeof CHANNEL_EVENTS)[number];
 
 // Event payload map
 export type ChannelEventPayload = {
@@ -518,4 +539,5 @@ export type ChannelEventPayload = {
   "connection.changed": NormalizedConnectionEvent;
   "call.received": NormalizedCallEvent;
   "label.updated": NormalizedLabelUpdateEvent;
+  "event.response": NormalizedEventResponseEvent;
 };

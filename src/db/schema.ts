@@ -276,6 +276,7 @@ export const eventResponses = sqliteTable(
     responder: text("responder").notNull(),
     response: text("response").notNull(),
     timestamp: integer("timestamp"),
+    extraGuestCount: integer("extra_guest_count"),
     responseMessageId: text("response_message_id"),
     rawData: text("raw_data"),
   },

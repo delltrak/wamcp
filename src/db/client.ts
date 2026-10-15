@@ -172,6 +172,7 @@ function initializeDatabase(): void {
       responder         TEXT NOT NULL,
       response          TEXT NOT NULL,
       timestamp         INTEGER,
+      extra_guest_count INTEGER,
       response_message_id TEXT,
       raw_data          TEXT,
       PRIMARY KEY (instance_id, event_message_id, responder)
@@ -223,5 +224,11 @@ try {
 }
 
 initializeDatabase();
+
+try {
+  sqlite.exec(`ALTER TABLE event_responses ADD COLUMN extra_guest_count INTEGER`);
+} catch {
+  // The column already exists.
+}
 
 export { sqlite };

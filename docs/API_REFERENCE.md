@@ -2040,7 +2040,9 @@ Send a native Baileys event message. A location text or a voice/video call link 
 
 #### `wa_get_event_responses`
 
-Read event responses persisted from Baileys message updates.
+Read event responses persisted from Baileys. Encrypted responses are decrypted with the
+`messageSecret` on the original event message. Responses received before that message is
+available are retained and retried when the event arrives.
 
 | Parameter | Type | Required | Description |
 | --------- | ---- | -------- | ----------- |
@@ -2048,7 +2050,34 @@ Read event responses persisted from Baileys message updates.
 | `chatId` | string | Yes | Chat JID containing the event |
 | `eventMessageId` | string | Yes | Event message ID |
 
-**Channel support:** Baileys only. Baileys decrypts and emits response updates when it can associate the reply with the event message. Responses that Baileys cannot decrypt or associate are unavailable to this tool.
+**Channel support:** Baileys only.
+
+The result includes `count`, per-status `counts`, and `responses`. Each response contains
+`participant` (the responder JID), `status` (`GOING`, `NOT_GOING`, `MAYBE`, or `UNKNOWN`),
+`timestamp` in Unix milliseconds or `null`, `messageId`, and `extraGuestCount` when supplied.
+`phone` is included when a phone number can be resolved. `UNKNOWN` indicates that an encrypted
+response is stored but its event secret or author mapping is not available yet.
+
+```json
+{
+  "chatId": "5511888888888@g.us",
+  "eventMessageId": "event_123",
+  "count": 1,
+  "counts": { "GOING": 1, "NOT_GOING": 0, "MAYBE": 0, "UNKNOWN": 0 },
+  "responses": [
+    {
+      "participant": "5511777777777@s.whatsapp.net",
+      "responder": "5511777777777@s.whatsapp.net",
+      "phone": "5511777777777",
+      "status": "GOING",
+      "response": "GOING",
+      "timestamp": 1800000123000,
+      "messageId": "response_123",
+      "extraGuestCount": 1
+    }
+  ]
+}
+```
 
 ---
 
@@ -2629,6 +2658,17 @@ Fired when an incoming voice or video call is received. Use the `callId` with `w
 Fired when Baileys reports a label edit or a chat/message label association change.
 
 **Payload:** `instanceId`, `action` (`edited`, `associated`, or `disassociated`), and `label`. Association changes also include `chatId` and `association` (`type`, `chatId`, optional `messageId`).
+
+---
+
+### 4.14 `whatsapp/event.response`
+
+Fired when a Baileys event RSVP is decrypted and stored. A response recovered after its event
+message or LID mapping becomes available emits this event at that time.
+
+**Payload:** `instanceId`, `chatId`, `eventMessageId`, `participant`, `responseMessageId`,
+`status`, and `timestamp` in Unix milliseconds or `null`. `extraGuestCount` is included when
+WhatsApp provides it.
 
 ---
 

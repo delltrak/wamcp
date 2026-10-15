@@ -458,7 +458,10 @@ describe("Baileys business and message features", () => {
     );
     expect(await adapter.getEventResponses(CHAT_ID, "event-1")).toEqual([
       {
+        participant: "5500000000009@s.whatsapp.net",
         responder: "5500000000009@s.whatsapp.net",
+        phone: "5500000000009",
+        status: "GOING",
         response: "GOING",
         timestamp: 1_800_000_123,
         messageId: "response-1",

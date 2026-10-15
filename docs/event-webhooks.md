@@ -245,6 +245,28 @@ for association changes, `association` with `type`, `chatId`, and optional
 }
 ```
 
+Select `event.response` in `WA_EVENT_WEBHOOK_EVENTS` or a destination's `events`
+list to receive decrypted RSVPs. The payload includes `eventMessageId`,
+`participant`, `status`, and `timestamp`; `extraGuestCount` is included when
+WhatsApp provides it. A response received before its event message is available
+is stored and retried when the event arrives, and is emitted after decryption.
+
+```json
+{
+  "event": "event.response",
+  "instanceId": "inst_1234abcd",
+  "chat": "5511888888888@g.us",
+  "sender": "5511777777777@s.whatsapp.net",
+  "type": "event.response",
+  "timestamp": 1800000123000,
+  "eventMessageId": "event_123",
+  "responseMessageId": "response_123",
+  "participant": "5511777777777@s.whatsapp.net",
+  "status": "GOING",
+  "extraGuestCount": 1
+}
+```
+
 The `grok-bot` preset remains limited to `message.received`; it can include
 `chatLabels` and `messageLabels` on those message payloads when present.
 For the `grok-bot` preset, `mediaUrl`, `mediaMimetype`, `buttons`, and `rawType` are forwarded
