@@ -27,6 +27,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Baileys presence now defaults to appearing online only around outgoing messages and typing or
+  recording activity, then returning to unavailable after the configured idle timeout.
 - Incoming offline messages delivered through Baileys `append` upserts now emit one `message.received`
   event and webhook, with timestamp filtering, persistent deduplication, and a per-batch cap. Baileys
   also logs every connection close and reconnect attempt. Its health watchdog uses `fetchStatus`

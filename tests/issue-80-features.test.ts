@@ -183,9 +183,10 @@ describe("issue 80 feature completion", () => {
     await invoke("wa_send_presence", { chatId: GROUP_ID, status: "recording" });
     await invoke("wa_subscribe_presence", { chatId: CONTACT_ID });
     await invoke("wa_subscribe_presence", { chatId: CONTACT_ID });
-    expect(socket.sendPresenceUpdate).toHaveBeenNthCalledWith(1, "composing", CONTACT_ID);
-    expect(socket.sendPresenceUpdate).toHaveBeenNthCalledWith(2, "recording", GROUP_ID);
-    expect(socket.sendPresenceUpdate).toHaveBeenCalledTimes(2);
+    expect(socket.sendPresenceUpdate).toHaveBeenNthCalledWith(1, "available");
+    expect(socket.sendPresenceUpdate).toHaveBeenNthCalledWith(2, "composing", CONTACT_ID);
+    expect(socket.sendPresenceUpdate).toHaveBeenNthCalledWith(3, "recording", GROUP_ID);
+    expect(socket.sendPresenceUpdate).toHaveBeenCalledTimes(3);
     expect(socket.presenceSubscribe).toHaveBeenCalledWith(CONTACT_ID);
     expect(socket.presenceSubscribe).toHaveBeenCalledTimes(1);
 
@@ -500,7 +501,7 @@ describe("issue 80 feature completion", () => {
     await adapter.sendPresence(CONTACT_ID, "typing");
     await adapter.sendPresence(CONTACT_ID, "paused");
     await adapter.sendPresence(CONTACT_ID, "paused");
-    expect(socket.sendPresenceUpdate).toHaveBeenCalledTimes(2);
+    expect(socket.sendPresenceUpdate).toHaveBeenCalledTimes(3);
     now.mockRestore();
   });
 
