@@ -146,6 +146,78 @@ describe("Baileys markOnlineOnConnect configuration", () => {
     await adapter.disconnect();
   });
 
+  it("tracks explicit unavailable globally so the next send marks the account available", async () => {
+    vi.useFakeTimers();
+    vi.stubEnv("WA_PRESENCE_MODE", "on_activity");
+    vi.stubEnv("WA_PRESENCE_IDLE_SECONDS", "2");
+    const adapter = await connectOpenAdapter();
+    setSuccessfulMessageSend();
+
+    await adapter.sendMessage("5500000000001", { type: "text", text: "first" });
+    await adapter.sendPresence("5500000000001", "unavailable");
+
+    expect(socket.sendPresenceUpdate).toHaveBeenNthCalledWith(3, "unavailable");
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(socket.sendPresenceUpdate).toHaveBeenCalledTimes(3);
+
+    await adapter.sendMessage("5500000000001", { type: "text", text: "second" });
+    expect(socket.sendPresenceUpdate).toHaveBeenNthCalledWith(4, "available");
+    await adapter.disconnect();
+  });
+
+  it.each(["success", "failure"] as const)(
+    "waits for an in-flight send before starting the idle timeout (%s)",
+    async (outcome) => {
+      vi.useFakeTimers();
+      vi.stubEnv("WA_PRESENCE_MODE", "on_activity");
+      vi.stubEnv("WA_PRESENCE_IDLE_SECONDS", "2");
+      const adapter = await connectOpenAdapter();
+      let resolveSend: ((value: unknown) => void) | undefined;
+      let rejectSend: ((reason: Error) => void) | undefined;
+      socket.sendMessage.mockImplementation(
+        () =>
+          new Promise((resolve, reject) => {
+            resolveSend = resolve;
+            rejectSend = reject;
+          }),
+      );
+
+      const sending = adapter.sendMessage("5500000000001", {
+        type: "text",
+        text: "slow send",
+      });
+      for (let index = 0; index < 100 && !resolveSend; index += 1) {
+        await Promise.resolve();
+      }
+      if (!resolveSend || !rejectSend) throw new Error("Message send did not start");
+
+      await vi.advanceTimersByTimeAsync(2000);
+      expect(socket.sendPresenceUpdate).toHaveBeenCalledTimes(2);
+
+      if (outcome === "success") {
+        resolveSend({
+          key: {
+            id: "slow-message",
+            remoteJid: "5500000000001@s.whatsapp.net",
+            fromMe: true,
+          },
+          message: { conversation: "slow send" },
+          messageTimestamp: Math.floor(Date.now() / 1000),
+        });
+        await expect(sending).resolves.toMatchObject({ status: "sent" });
+      } else {
+        rejectSend(new Error("send failed"));
+        await expect(sending).rejects.toThrow("send failed");
+      }
+
+      await vi.advanceTimersByTimeAsync(1999);
+      expect(socket.sendPresenceUpdate).toHaveBeenCalledTimes(2);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(socket.sendPresenceUpdate).toHaveBeenNthCalledWith(3, "unavailable");
+      await adapter.disconnect();
+    },
+  );
+
   it("keeps one idle timer when sends overlap while availability is being set", async () => {
     vi.useFakeTimers();
     vi.stubEnv("WA_PRESENCE_MODE", "on_activity");
@@ -204,13 +276,9 @@ describe("Baileys markOnlineOnConnect configuration", () => {
 
     expect(socket.sendPresenceUpdate).toHaveBeenNthCalledWith(1, "unavailable");
     expect(socket.sendPresenceUpdate).toHaveBeenNthCalledWith(2, "available");
-    expect(socket.sendPresenceUpdate).toHaveBeenNthCalledWith(
-      3,
-      "available",
-      "5500000000001@s.whatsapp.net",
-    );
+    expect(socket.sendPresenceUpdate).toHaveBeenCalledTimes(2);
     await vi.advanceTimersByTimeAsync(2000);
-    expect(socket.sendPresenceUpdate).toHaveBeenNthCalledWith(4, "unavailable");
+    expect(socket.sendPresenceUpdate).toHaveBeenNthCalledWith(3, "unavailable");
     await adapter.disconnect();
   });
 

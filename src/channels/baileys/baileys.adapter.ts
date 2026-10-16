@@ -793,6 +793,7 @@ export class BaileysAdapter implements ChannelAdapter {
   private activityPresenceStatus: GlobalPresenceStatus | null = null;
   private activityPresenceTimer: ReturnType<typeof setTimeout> | null = null;
   private activityPresenceUpdate: Promise<void> | null = null;
+  private readonly activitySendsInFlight = new Map<WASocket, number>();
   private readonly maxStatusRecipients: number;
   private readonly autoRejectCalls: boolean;
   private readonly pendingCalls = new Map<string, { from: string; isVideo: boolean }>();
@@ -896,8 +897,23 @@ export class BaileysAdapter implements ChannelAdapter {
     sock: WASocket,
     ...args: Parameters<WASocket["sendMessage"]>
   ): Promise<Awaited<ReturnType<WASocket["sendMessage"]>>> {
-    await this.prepareActivityPresence(sock);
-    return sock.sendMessage(...args);
+    const trackActivity = this.presenceMode === "on_activity";
+    if (trackActivity) {
+      this.activitySendsInFlight.set(sock, (this.activitySendsInFlight.get(sock) ?? 0) + 1);
+      this.clearActivityPresenceTimer();
+    }
+
+    try {
+      await this.prepareActivityPresence(sock);
+      return await sock.sendMessage(...args);
+    } finally {
+      if (trackActivity) {
+        const sendsInFlight = (this.activitySendsInFlight.get(sock) ?? 1) - 1;
+        if (sendsInFlight > 0) this.activitySendsInFlight.set(sock, sendsInFlight);
+        else this.activitySendsInFlight.delete(sock);
+        this.armActivityPresenceTimer(sock);
+      }
+    }
   }
 
   private async prepareActivityPresence(sock: WASocket): Promise<void> {
@@ -910,17 +926,37 @@ export class BaileysAdapter implements ChannelAdapter {
       this.logGlobalPresenceFailure(error);
     }
 
-    if (this.sock !== sock || this.status !== "connected") return;
+    this.armActivityPresenceTimer(sock);
+  }
+
+  private armActivityPresenceTimer(sock: WASocket): void {
+    if (
+      this.presenceMode !== "on_activity" ||
+      this.sock !== sock ||
+      this.status !== "connected" ||
+      (this.activitySendsInFlight.get(sock) ?? 0) > 0
+    ) {
+      return;
+    }
+
     this.clearActivityPresenceTimer();
     this.activityPresenceTimer = setTimeout(() => {
       this.activityPresenceTimer = null;
-      void this.setGlobalPresence(sock, "unavailable").catch((error: unknown) => {
+      void this.setGlobalPresence(
+        sock,
+        "unavailable",
+        () => (this.activitySendsInFlight.get(sock) ?? 0) > 0,
+      ).catch((error: unknown) => {
         this.logGlobalPresenceFailure(error);
       });
     }, this.presenceIdleMs);
   }
 
-  private async setGlobalPresence(sock: WASocket, status: GlobalPresenceStatus): Promise<void> {
+  private async setGlobalPresence(
+    sock: WASocket,
+    status: GlobalPresenceStatus,
+    shouldSkip?: () => boolean,
+  ): Promise<void> {
     if (this.presenceMode !== "on_activity" || this.sock !== sock || this.status !== "connected") {
       return;
     }
@@ -932,14 +968,19 @@ export class BaileysAdapter implements ChannelAdapter {
         // A failed update leaves the cached state unchanged and can be retried below.
       }
       if (this.sock !== sock || this.status !== "connected") return;
+      if (shouldSkip?.()) return;
       if (this.activityPresenceStatus === status) return;
     }
 
+    if (shouldSkip?.()) return;
     if (this.activityPresenceStatus === status) return;
 
     const update = Promise.resolve()
-      .then(() => sock.sendPresenceUpdate(status))
-      .then(() => {
+      .then(async () => {
+        if (this.sock !== sock || this.status !== "connected" || shouldSkip?.()) {
+          return;
+        }
+        await sock.sendPresenceUpdate(status);
         if (this.sock === sock && this.status === "connected") {
           this.activityPresenceStatus = status;
         }
@@ -2160,6 +2201,17 @@ export class BaileysAdapter implements ChannelAdapter {
     presenceStatus: "typing" | "composing" | "recording" | "paused" | "available" | "unavailable",
   ): Promise<void> {
     const sock = this.getSock();
+    if (this.presenceMode === "on_activity" && presenceStatus === "unavailable") {
+      this.clearActivityPresenceTimer();
+      await this.setGlobalPresence(sock, "unavailable");
+      return;
+    }
+    if (this.presenceMode === "on_activity" && presenceStatus === "available") {
+      this.clearActivityPresenceTimer();
+      await this.setGlobalPresence(sock, "available");
+      this.armActivityPresenceTimer(sock);
+      return;
+    }
     if (
       presenceStatus === "typing" ||
       presenceStatus === "composing" ||

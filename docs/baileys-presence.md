@@ -17,9 +17,11 @@ and idle updates are disabled, and `WA_MARK_ONLINE_ON_CONNECT` retains its
 existing behavior. It defaults to `false`; if set, it must be `true` or
 `false` (case-insensitive), including when `on_activity` ignores its value.
 
-Explicit presence tool requests for `available` or `unavailable` continue to
-send the requested per-chat status. Presence updates are best-effort for
-outgoing messages: failures are logged and do not prevent a send. Incoming
-messages and webhook delivery do not alter presence.
+In `on_activity`, explicit presence tool requests for `available` or
+`unavailable` update global presence and the cached activity state. An explicit
+`available` request starts or resets the idle timer; `unavailable` cancels it.
+Presence updates are best-effort for outgoing messages: failures are logged and
+do not prevent a send. Incoming messages and webhook delivery do not alter
+presence.
 
 Invalid mode or idle values are rejected when a Baileys adapter is created.
