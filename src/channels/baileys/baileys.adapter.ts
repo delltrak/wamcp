@@ -158,6 +158,7 @@ const DEFAULT_APPEND_NOTIFY_WINDOW_HOURS = 24;
 const DEFAULT_APPEND_NOTIFY_MAX_PER_BATCH = 100;
 const DEFAULT_BAILEYS_HEALTH_WATCHDOG_MS = 180_000;
 const DEFAULT_BAILEYS_EVENT_BUFFER_STALL_MS = 60_000;
+const DEFAULT_PRESENCE_IDLE_SECONDS = 30;
 const BAILEYS_EVENT_BUFFER_STALL_RECHECK_MS = 1_000;
 const BAILEYS_HEALTH_PROBE_TIMEOUT_MS = 20_000;
 const BAILEYS_HEALTH_PROBE_FAILURES_BEFORE_RECONNECT = 2;
@@ -173,6 +174,9 @@ const MAX_POLL_VOTE_DECRYPT_ATTEMPTS = 16;
 const MAX_LINK_PREVIEW_THUMBNAIL_BYTES = 512 * 1024;
 const APP_STATE_WRITES_DISABLED_ERROR =
   "WhatsApp account, server, and app-state writes are disabled because changes can get this linked device removed (see issue #71). Set WA_APP_STATE_WRITES_ENABLED=true to enable at your own risk.";
+
+type PresenceMode = "on_activity" | "always";
+type GlobalPresenceStatus = "available" | "unavailable";
 
 interface ViewOnceAudio {
   audio: Buffer;
@@ -528,6 +532,13 @@ function parsePositiveIntegerEnv(value: string | undefined, key: string, fallbac
   return parsed;
 }
 
+function parsePresenceMode(value: string | undefined): PresenceMode {
+  const normalized = value?.trim().toLowerCase();
+  if (!normalized) return "on_activity";
+  if (normalized === "on_activity" || normalized === "always") return normalized;
+  throw new Error("Invalid WA_PRESENCE_MODE; expected on_activity or always");
+}
+
 function normalizeGroupInviteCode(input: string): string {
   const value = input.trim();
   if (!value) throw new Error("A group invite code or link is required");
@@ -776,7 +787,12 @@ export class BaileysAdapter implements ChannelAdapter {
 
   private readonly autoReconnect: boolean;
   private readonly appStateWritesEnabled: boolean;
+  private readonly presenceMode: PresenceMode;
+  private readonly presenceIdleMs: number;
   private readonly markOnlineOnConnect: boolean;
+  private activityPresenceStatus: GlobalPresenceStatus | null = null;
+  private activityPresenceTimer: ReturnType<typeof setTimeout> | null = null;
+  private activityPresenceUpdate: Promise<void> | null = null;
   private readonly maxStatusRecipients: number;
   private readonly autoRejectCalls: boolean;
   private readonly pendingCalls = new Map<string, { from: string; isVideo: boolean }>();
@@ -813,11 +829,20 @@ export class BaileysAdapter implements ChannelAdapter {
       "WA_APP_STATE_WRITES_ENABLED",
       false,
     );
-    this.markOnlineOnConnect = parseBooleanEnv(
+    this.presenceMode = parsePresenceMode(process.env.WA_PRESENCE_MODE);
+    this.presenceIdleMs =
+      parsePositiveIntegerEnv(
+        process.env.WA_PRESENCE_IDLE_SECONDS,
+        "WA_PRESENCE_IDLE_SECONDS",
+        DEFAULT_PRESENCE_IDLE_SECONDS,
+      ) * 1000;
+    const configuredMarkOnlineOnConnect = parseBooleanEnv(
       process.env.WA_MARK_ONLINE_ON_CONNECT,
       "WA_MARK_ONLINE_ON_CONNECT",
       false,
     );
+    this.markOnlineOnConnect =
+      this.presenceMode === "on_activity" ? false : configuredMarkOnlineOnConnect;
     this.maxStatusRecipients = parsePositiveIntegerEnv(
       process.env.WA_STATUS_MAX_RECIPIENTS,
       "WA_STATUS_MAX_RECIPIENTS",
@@ -865,6 +890,83 @@ export class BaileysAdapter implements ChannelAdapter {
       throw new Error("Instance not connected");
     }
     return this.sock;
+  }
+
+  private async sendMessageWithActivity(
+    sock: WASocket,
+    ...args: Parameters<WASocket["sendMessage"]>
+  ): Promise<Awaited<ReturnType<WASocket["sendMessage"]>>> {
+    await this.prepareActivityPresence(sock);
+    return sock.sendMessage(...args);
+  }
+
+  private async prepareActivityPresence(sock: WASocket): Promise<void> {
+    if (this.presenceMode !== "on_activity") return;
+    this.clearActivityPresenceTimer();
+
+    try {
+      await this.setGlobalPresence(sock, "available");
+    } catch (error) {
+      this.logGlobalPresenceFailure(error);
+    }
+
+    if (this.sock !== sock || this.status !== "connected") return;
+    this.clearActivityPresenceTimer();
+    this.activityPresenceTimer = setTimeout(() => {
+      this.activityPresenceTimer = null;
+      void this.setGlobalPresence(sock, "unavailable").catch((error: unknown) => {
+        this.logGlobalPresenceFailure(error);
+      });
+    }, this.presenceIdleMs);
+  }
+
+  private async setGlobalPresence(sock: WASocket, status: GlobalPresenceStatus): Promise<void> {
+    if (this.presenceMode !== "on_activity" || this.sock !== sock || this.status !== "connected") {
+      return;
+    }
+
+    while (this.activityPresenceUpdate) {
+      try {
+        await this.activityPresenceUpdate;
+      } catch {
+        // A failed update leaves the cached state unchanged and can be retried below.
+      }
+      if (this.sock !== sock || this.status !== "connected") return;
+      if (this.activityPresenceStatus === status) return;
+    }
+
+    if (this.activityPresenceStatus === status) return;
+
+    const update = Promise.resolve()
+      .then(() => sock.sendPresenceUpdate(status))
+      .then(() => {
+        if (this.sock === sock && this.status === "connected") {
+          this.activityPresenceStatus = status;
+        }
+      })
+      .finally(() => {
+        if (this.activityPresenceUpdate === update) this.activityPresenceUpdate = null;
+      });
+    this.activityPresenceUpdate = update;
+    await update;
+  }
+
+  private clearActivityPresenceTimer(): void {
+    if (this.activityPresenceTimer) clearTimeout(this.activityPresenceTimer);
+    this.activityPresenceTimer = null;
+  }
+
+  private resetActivityPresence(): void {
+    this.clearActivityPresenceTimer();
+    this.activityPresenceStatus = null;
+    this.activityPresenceUpdate = null;
+  }
+
+  private logGlobalPresenceFailure(error: unknown): void {
+    logger.warn(
+      { err: error instanceof Error ? error.message : String(error), instanceId: this.instanceId },
+      "Global presence update failed; continuing without blocking activity",
+    );
   }
 
   private normalizeJid(input: string): string {
@@ -1176,6 +1278,7 @@ export class BaileysAdapter implements ChannelAdapter {
       },
     });
 
+    this.resetActivityPresence();
     this.sock = sock;
     this.lastPresenceUpdateAt.clear();
     this.presenceSubscriptions.clear();
@@ -1186,6 +1289,7 @@ export class BaileysAdapter implements ChannelAdapter {
     this.clearReconnectTimer();
     this.clearHealthWatchdog();
     this.clearEventBufferStallWatchdog();
+    this.resetActivityPresence();
     this.pendingCalls.clear();
     if (this.sock) {
       this.sock.end(undefined);
@@ -1411,7 +1515,7 @@ export class BaileysAdapter implements ChannelAdapter {
       } as AnyMessageContent;
     }
 
-    const result = await sock.sendMessage(jid, msg, opts);
+    const result = await this.sendMessageWithActivity(sock, jid, msg, opts);
     await this.persistOutgoingMessage(result, jid);
     return { messageId: result?.key.id ?? "", timestamp: Date.now(), status: "sent" };
   }
@@ -1432,14 +1536,16 @@ export class BaileysAdapter implements ChannelAdapter {
         ...(item.caption ? { caption: item.caption } : {}),
       });
     }
-    const parent = await sock.sendMessage(jid, { album: { expectedImageCount: images.length } });
+    const parent = await this.sendMessageWithActivity(sock, jid, {
+      album: { expectedImageCount: images.length },
+    });
     if (!parent?.key.id) throw new Error("Baileys did not return an album parent message ID");
     await this.persistOutgoingMessage(parent, jid);
 
     let sent = 0;
     try {
       for (const item of resolvedImages) {
-        const result = await sock.sendMessage(jid, {
+        const result = await this.sendMessageWithActivity(sock, jid, {
           image: item.image,
           ...(item.caption ? { caption: item.caption } : {}),
           albumParentKey: parent.key,
@@ -1482,7 +1588,7 @@ export class BaileysAdapter implements ChannelAdapter {
 
     const sock = this.getSock();
     const target = this.normalizeJid(row.senderId);
-    const result = await sock.sendMessage(target, { text });
+    const result = await this.sendMessageWithActivity(sock, target, { text });
     await this.persistOutgoingMessage(result, target);
     return { messageId: result?.key.id ?? "", timestamp: Date.now(), status: "sent" };
   }
@@ -1511,7 +1617,7 @@ export class BaileysAdapter implements ChannelAdapter {
       sendOptions.quoted = this.getQuotedMessage(jid, options.quotedMessageId);
     }
 
-    const result = await sock.sendMessage(jid, { event }, sendOptions);
+    const result = await this.sendMessageWithActivity(sock, jid, { event }, sendOptions);
     if (result) {
       this.persistSourceMessage(result);
       if (result.key.id) await this.retryPendingEventResponses(result.key.id);
@@ -1803,7 +1909,7 @@ export class BaileysAdapter implements ChannelAdapter {
   async editMessage(chatId: string, msgId: string, newText: string): Promise<void> {
     const sock = this.getSock();
     const jid = this.normalizeJid(chatId);
-    await sock.sendMessage(jid, {
+    await this.sendMessageWithActivity(sock, jid, {
       text: newText,
       edit: { remoteJid: jid, id: msgId, fromMe: true },
     } as AnyMessageContent);
@@ -1832,13 +1938,14 @@ export class BaileysAdapter implements ChannelAdapter {
           : storedJids !== undefined
             ? this.reuseStoredStatusAudience(sock, storedJids)
             : this.resolveStatusAudience(sock).statusJidList;
-      await sock.sendMessage(
+      await this.sendMessageWithActivity(
+        sock,
         jid,
         { delete: { remoteJid: jid, id: msgId, fromMe: true } },
         { statusJidList },
       );
     } else {
-      await sock.sendMessage(jid, {
+      await this.sendMessageWithActivity(sock, jid, {
         delete: { remoteJid: jid, id: msgId, fromMe: true },
       });
     }
@@ -1922,7 +2029,7 @@ export class BaileysAdapter implements ChannelAdapter {
       );
     }
 
-    const result = await sock.sendMessage(toJid, { forward: fullMessage });
+    const result = await this.sendMessageWithActivity(sock, toJid, { forward: fullMessage });
     await this.persistOutgoingMessage(result, toJid);
     return { messageId: result?.key.id ?? "", timestamp: Date.now(), status: "sent" };
   }
@@ -1930,7 +2037,7 @@ export class BaileysAdapter implements ChannelAdapter {
   async sendReaction(chatId: string, msgId: string, emoji: string): Promise<void> {
     const sock = this.getSock();
     const jid = this.normalizeJid(chatId);
-    await sock.sendMessage(jid, {
+    await this.sendMessageWithActivity(sock, jid, {
       react: { text: emoji, key: { remoteJid: jid, id: msgId } },
     });
   }
@@ -1943,7 +2050,7 @@ export class BaileysAdapter implements ChannelAdapter {
       type: pin ? 1 : 0,
       time: pin ? 604800 : undefined,
     };
-    await sock.sendMessage(jid, pinMsg as unknown as AnyMessageContent);
+    await this.sendMessageWithActivity(sock, jid, pinMsg as unknown as AnyMessageContent);
   }
 
   async sendViewOnce(
@@ -1968,7 +2075,7 @@ export class BaileysAdapter implements ChannelAdapter {
       };
     }
 
-    const result = await sock.sendMessage(jid, msg);
+    const result = await this.sendMessageWithActivity(sock, jid, msg);
     await this.persistOutgoingMessage(result, jid);
     return { messageId: result?.key.id ?? "", timestamp: Date.now(), status: "sent" };
   }
@@ -2038,7 +2145,7 @@ export class BaileysAdapter implements ChannelAdapter {
           : {}),
       };
     }
-    const result = await sock.sendMessage(jid, {
+    const result = await this.sendMessageWithActivity(sock, jid, {
       text: messageText,
       ...(linkPreview ? { linkPreview } : {}),
     });
@@ -2053,6 +2160,14 @@ export class BaileysAdapter implements ChannelAdapter {
     presenceStatus: "typing" | "composing" | "recording" | "paused" | "available" | "unavailable",
   ): Promise<void> {
     const sock = this.getSock();
+    if (
+      presenceStatus === "typing" ||
+      presenceStatus === "composing" ||
+      presenceStatus === "recording" ||
+      presenceStatus === "available"
+    ) {
+      await this.prepareActivityPresence(sock);
+    }
     const jid = jidNormalizedUser(this.normalizeJid(chatId));
     const now = Date.now();
     for (const [trackedJid, timestamp] of this.lastPresenceUpdateAt) {
@@ -2548,7 +2663,7 @@ export class BaileysAdapter implements ChannelAdapter {
         "Invalid private chat ID; expected an individual WhatsApp phone number or JID",
       );
     }
-    await sock.sendMessage(jid, {
+    await this.sendMessageWithActivity(sock, jid, {
       disappearingMessagesInChat: duration === 0 ? false : duration,
     });
   }
@@ -2594,7 +2709,7 @@ export class BaileysAdapter implements ChannelAdapter {
         break;
       case "toggleEphemeral": {
         const duration = typeof modification.value === "number" ? modification.value : 0;
-        await sock.sendMessage(jid, { disappearingMessagesInChat: duration });
+        await this.sendMessageWithActivity(sock, jid, { disappearingMessagesInChat: duration });
         break;
       }
     }
@@ -2831,7 +2946,7 @@ export class BaileysAdapter implements ChannelAdapter {
       sock.groupMetadata(groupJid),
     ]);
     if (!inviteCode) throw new Error("WhatsApp did not return an invite code for this group");
-    const result = await sock.sendMessage(this.normalizeJid(to), {
+    const result = await this.sendMessageWithActivity(sock, this.normalizeJid(to), {
       groupInvite: {
         inviteCode,
         inviteExpiration: 0,
@@ -3059,7 +3174,8 @@ export class BaileysAdapter implements ChannelAdapter {
     switch (content.type) {
       case "text":
         messageId = (
-          await sock.sendMessage(
+          await this.sendMessageWithActivity(
+            sock,
             statusJid,
             {
               text: content.text ?? "",
@@ -3070,7 +3186,8 @@ export class BaileysAdapter implements ChannelAdapter {
         break;
       case "image":
         messageId = (
-          await sock.sendMessage(
+          await this.sendMessageWithActivity(
+            sock,
             statusJid,
             {
               image: this.resolveMedia(content.media ?? ""),
@@ -3082,7 +3199,8 @@ export class BaileysAdapter implements ChannelAdapter {
         break;
       case "video":
         messageId = (
-          await sock.sendMessage(
+          await this.sendMessageWithActivity(
+            sock,
             statusJid,
             {
               video: this.resolveMedia(content.media ?? ""),
@@ -3121,7 +3239,7 @@ export class BaileysAdapter implements ChannelAdapter {
 
   async newsletterSend(jid: string, text: string): Promise<MessageResponse> {
     const sock = this.getSock();
-    const result = await sock.sendMessage(jid, { text });
+    const result = await this.sendMessageWithActivity(sock, jid, { text });
     return { messageId: result?.key.id ?? "", timestamp: Date.now(), status: "sent" };
   }
 
@@ -4975,12 +5093,18 @@ export class BaileysAdapter implements ChannelAdapter {
         this.reconnectAttempt = 0;
         this.consecutiveHealthProbeFailures = 0;
         this.resetHealthWatchdog(sock);
+        if (this.presenceMode === "on_activity") {
+          void this.setGlobalPresence(sock, "unavailable").catch((error: unknown) => {
+            this.logGlobalPresenceFailure(error);
+          });
+        }
         logger.info({ instanceId: this.instanceId, offlineDurationMs }, "Connected to WhatsApp");
       }
 
       if (connection === "close") {
         this.clearHealthWatchdog();
         this.clearEventBufferStallWatchdog();
+        this.resetActivityPresence();
         this.appendNotifyWatermarkMs = null;
         this.status = "disconnected";
         const boom = (lastDisconnect?.error as Boom)?.output;
