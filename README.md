@@ -635,7 +635,7 @@ Copy `.env.example` to `.env` and configure:
 | `WA_BAILEYS_EVENT_BUFFER_STALL_MS` | `60000` | Time a Baileys event buffer may remain active after connect before the watchdog flushes it |
 | `WA_APP_STATE_WRITES_ENABLED` | `false`                 | Enable gated Baileys account, server, and app-state changes; these changes can remove the linked device |
 | `WA_PRESENCE_MODE` | `on_activity` | Baileys presence policy: `on_activity` marks online around sends and typing/recording indicators; `always` preserves the legacy behavior |
-| `WA_PRESENCE_IDLE_SECONDS` | `30` | Seconds after activity before Baileys presence returns to unavailable; must be a positive integer |
+| `WA_PRESENCE_IDLE_SECONDS` | `30` | Seconds after activity before Baileys presence returns to unavailable; must be a positive integer no greater than `2147483` |
 | `WA_MARK_ONLINE_ON_CONNECT` | `false` | In `always` mode, mark the Baileys account online when its socket connects; `on_activity` forces this off |
 | `WA_AUTO_REJECT_CALLS`      | `false`                  | Automatically reject incoming one-to-one Baileys call offers |
 | `WA_STATUS_MAX_RECIPIENTS`  | `256`                    | Maximum recipients per Baileys status; excess recipients are truncated and reported |
@@ -720,7 +720,9 @@ responses; receipt failures are logged.
 `WA_PRESENCE_MODE` accepts `on_activity` or `always`. In `on_activity`, Baileys sends one global
 `unavailable` update after each connection opens, switches to global `available` before an outgoing
 message or typing/recording indicator, and returns to unavailable after `WA_PRESENCE_IDLE_SECONDS`
-without activity. Explicit `available` presence requests use the same idle timeout. This mode takes
+without activity. The idle timeout must be a positive integer no greater than `2147483` seconds,
+the maximum whole-second timeout supported by Node.js timers. In-flight sends and composing or
+recording indicators pause the idle timer until they settle. Explicit `available` presence requests use the same idle timeout. This mode takes
 precedence over `WA_MARK_ONLINE_ON_CONNECT` and forces Baileys' `markOnlineOnConnect` socket option
 to `false`. In `always`, presence changes are left to Baileys and explicit presence tools, and
 `WA_MARK_ONLINE_ON_CONNECT` retains its existing behavior. Presence update failures are logged but

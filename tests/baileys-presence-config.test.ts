@@ -266,6 +266,43 @@ describe("Baileys markOnlineOnConnect configuration", () => {
     await adapter.disconnect();
   });
 
+  it.each([
+    { status: "typing" as const, sentStatus: "composing" },
+    { status: "recording" as const, sentStatus: "recording" },
+  ])(
+    "waits for an in-flight $status indicator before starting the idle timeout",
+    async ({ status, sentStatus }) => {
+      vi.useFakeTimers();
+      vi.stubEnv("WA_PRESENCE_MODE", "on_activity");
+      vi.stubEnv("WA_PRESENCE_IDLE_SECONDS", "2");
+      const adapter = await connectOpenAdapter();
+      let resolveIndicator: (() => void) | undefined;
+      socket.sendPresenceUpdate.mockImplementation((updateStatus: string) => {
+        if (updateStatus !== sentStatus) return Promise.resolve();
+        return new Promise<void>((resolve) => {
+          resolveIndicator = resolve;
+        });
+      });
+
+      const updating = adapter.sendPresence("5500000000001", status);
+      for (let index = 0; index < 100 && !resolveIndicator; index += 1) {
+        await Promise.resolve();
+      }
+      if (!resolveIndicator) throw new Error("Per-chat presence update did not start");
+
+      await vi.advanceTimersByTimeAsync(2000);
+      expect(socket.sendPresenceUpdate).toHaveBeenCalledTimes(3);
+
+      resolveIndicator();
+      await updating;
+      await vi.advanceTimersByTimeAsync(1999);
+      expect(socket.sendPresenceUpdate).toHaveBeenCalledTimes(3);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(socket.sendPresenceUpdate).toHaveBeenNthCalledWith(4, "unavailable");
+      await adapter.disconnect();
+    },
+  );
+
   it("applies the idle timeout to an explicit available presence request", async () => {
     vi.useFakeTimers();
     vi.stubEnv("WA_PRESENCE_MODE", "on_activity");
@@ -356,6 +393,14 @@ describe("Baileys markOnlineOnConnect configuration", () => {
     vi.stubEnv("WA_PRESENCE_IDLE_SECONDS", "0");
     expect(() => new BaileysAdapter("test_instance")).toThrow(
       "Invalid WA_PRESENCE_IDLE_SECONDS; expected a positive integer",
+    );
+
+    vi.stubEnv("WA_PRESENCE_IDLE_SECONDS", "2147483");
+    expect(() => new BaileysAdapter("test_instance")).not.toThrow();
+
+    vi.stubEnv("WA_PRESENCE_IDLE_SECONDS", "2147484");
+    expect(() => new BaileysAdapter("test_instance")).toThrow(
+      "Invalid WA_PRESENCE_IDLE_SECONDS; expected a positive integer no greater than 2147483",
     );
   });
 

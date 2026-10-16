@@ -159,6 +159,8 @@ const DEFAULT_APPEND_NOTIFY_MAX_PER_BATCH = 100;
 const DEFAULT_BAILEYS_HEALTH_WATCHDOG_MS = 180_000;
 const DEFAULT_BAILEYS_EVENT_BUFFER_STALL_MS = 60_000;
 const DEFAULT_PRESENCE_IDLE_SECONDS = 30;
+const MAX_NODE_TIMEOUT_MS = 2_147_483_647;
+const MAX_PRESENCE_IDLE_SECONDS = Math.floor(MAX_NODE_TIMEOUT_MS / 1000);
 const BAILEYS_EVENT_BUFFER_STALL_RECHECK_MS = 1_000;
 const BAILEYS_HEALTH_PROBE_TIMEOUT_MS = 20_000;
 const BAILEYS_HEALTH_PROBE_FAILURES_BEFORE_RECONNECT = 2;
@@ -520,14 +522,23 @@ function parseBooleanEnv(value: string | undefined, key: string, fallback: boole
   throw new Error(`Invalid ${key}; expected true or false`);
 }
 
-function parsePositiveIntegerEnv(value: string | undefined, key: string, fallback: number): number {
+function parsePositiveIntegerEnv(
+  value: string | undefined,
+  key: string,
+  fallback: number,
+  maximum?: number,
+): number {
   if (value === undefined || value.trim() === "") return fallback;
   if (!/^\d+$/.test(value.trim())) {
     throw new Error(`Invalid ${key}; expected a positive integer`);
   }
   const parsed = Number(value.trim());
-  if (!Number.isSafeInteger(parsed) || parsed < 1) {
-    throw new Error(`Invalid ${key}; expected a positive integer`);
+  if (!Number.isSafeInteger(parsed) || parsed < 1 || (maximum !== undefined && parsed > maximum)) {
+    const expectation =
+      maximum === undefined
+        ? "a positive integer"
+        : `a positive integer no greater than ${maximum}`;
+    throw new Error(`Invalid ${key}; expected ${expectation}`);
   }
   return parsed;
 }
@@ -793,7 +804,7 @@ export class BaileysAdapter implements ChannelAdapter {
   private activityPresenceStatus: GlobalPresenceStatus | null = null;
   private activityPresenceTimer: ReturnType<typeof setTimeout> | null = null;
   private activityPresenceUpdate: Promise<void> | null = null;
-  private readonly activitySendsInFlight = new Map<WASocket, number>();
+  private readonly activityInFlight = new Map<WASocket, number>();
   private readonly maxStatusRecipients: number;
   private readonly autoRejectCalls: boolean;
   private readonly pendingCalls = new Map<string, { from: string; isVideo: boolean }>();
@@ -836,6 +847,7 @@ export class BaileysAdapter implements ChannelAdapter {
         process.env.WA_PRESENCE_IDLE_SECONDS,
         "WA_PRESENCE_IDLE_SECONDS",
         DEFAULT_PRESENCE_IDLE_SECONDS,
+        MAX_PRESENCE_IDLE_SECONDS,
       ) * 1000;
     const configuredMarkOnlineOnConnect = parseBooleanEnv(
       process.env.WA_MARK_ONLINE_ON_CONNECT,
@@ -899,7 +911,7 @@ export class BaileysAdapter implements ChannelAdapter {
   ): Promise<Awaited<ReturnType<WASocket["sendMessage"]>>> {
     const trackActivity = this.presenceMode === "on_activity";
     if (trackActivity) {
-      this.activitySendsInFlight.set(sock, (this.activitySendsInFlight.get(sock) ?? 0) + 1);
+      this.activityInFlight.set(sock, (this.activityInFlight.get(sock) ?? 0) + 1);
       this.clearActivityPresenceTimer();
     }
 
@@ -908,9 +920,9 @@ export class BaileysAdapter implements ChannelAdapter {
       return await sock.sendMessage(...args);
     } finally {
       if (trackActivity) {
-        const sendsInFlight = (this.activitySendsInFlight.get(sock) ?? 1) - 1;
-        if (sendsInFlight > 0) this.activitySendsInFlight.set(sock, sendsInFlight);
-        else this.activitySendsInFlight.delete(sock);
+        const activitiesInFlight = (this.activityInFlight.get(sock) ?? 1) - 1;
+        if (activitiesInFlight > 0) this.activityInFlight.set(sock, activitiesInFlight);
+        else this.activityInFlight.delete(sock);
         this.armActivityPresenceTimer(sock);
       }
     }
@@ -934,7 +946,7 @@ export class BaileysAdapter implements ChannelAdapter {
       this.presenceMode !== "on_activity" ||
       this.sock !== sock ||
       this.status !== "connected" ||
-      (this.activitySendsInFlight.get(sock) ?? 0) > 0
+      (this.activityInFlight.get(sock) ?? 0) > 0
     ) {
       return;
     }
@@ -945,7 +957,7 @@ export class BaileysAdapter implements ChannelAdapter {
       void this.setGlobalPresence(
         sock,
         "unavailable",
-        () => (this.activitySendsInFlight.get(sock) ?? 0) > 0,
+        () => (this.activityInFlight.get(sock) ?? 0) > 0,
       ).catch((error: unknown) => {
         this.logGlobalPresenceFailure(error);
       });
@@ -2212,37 +2224,49 @@ export class BaileysAdapter implements ChannelAdapter {
       this.armActivityPresenceTimer(sock);
       return;
     }
-    if (
+    const isActivityIndicator =
       presenceStatus === "typing" ||
       presenceStatus === "composing" ||
-      presenceStatus === "recording" ||
-      presenceStatus === "available"
-    ) {
-      await this.prepareActivityPresence(sock);
+      presenceStatus === "recording";
+    const trackActivity = this.presenceMode === "on_activity" && isActivityIndicator;
+    if (trackActivity) {
+      this.activityInFlight.set(sock, (this.activityInFlight.get(sock) ?? 0) + 1);
+      this.clearActivityPresenceTimer();
     }
-    const jid = jidNormalizedUser(this.normalizeJid(chatId));
-    const now = Date.now();
-    for (const [trackedJid, timestamp] of this.lastPresenceUpdateAt) {
-      if (now - timestamp >= PRESENCE_UPDATE_MIN_INTERVAL_MS) {
-        this.lastPresenceUpdateAt.delete(trackedJid);
-      }
-    }
-    const lastSentAt = this.lastPresenceUpdateAt.get(jid);
-    if (lastSentAt !== undefined && now - lastSentAt < PRESENCE_UPDATE_MIN_INTERVAL_MS) return;
 
-    if (this.lastPresenceUpdateAt.size >= MAX_TRACKED_PRESENCE_CHATS) {
-      const oldestJid = this.lastPresenceUpdateAt.keys().next().value;
-      if (oldestJid) this.lastPresenceUpdateAt.delete(oldestJid);
-    }
-    this.lastPresenceUpdateAt.set(jid, now);
     try {
-      await sock.sendPresenceUpdate(
-        presenceStatus === "typing" ? "composing" : presenceStatus,
-        jid,
-      );
-    } catch (error) {
-      if (this.lastPresenceUpdateAt.get(jid) === now) this.lastPresenceUpdateAt.delete(jid);
-      throw error;
+      if (isActivityIndicator) await this.prepareActivityPresence(sock);
+      const jid = jidNormalizedUser(this.normalizeJid(chatId));
+      const now = Date.now();
+      for (const [trackedJid, timestamp] of this.lastPresenceUpdateAt) {
+        if (now - timestamp >= PRESENCE_UPDATE_MIN_INTERVAL_MS) {
+          this.lastPresenceUpdateAt.delete(trackedJid);
+        }
+      }
+      const lastSentAt = this.lastPresenceUpdateAt.get(jid);
+      if (lastSentAt !== undefined && now - lastSentAt < PRESENCE_UPDATE_MIN_INTERVAL_MS) return;
+
+      if (this.lastPresenceUpdateAt.size >= MAX_TRACKED_PRESENCE_CHATS) {
+        const oldestJid = this.lastPresenceUpdateAt.keys().next().value;
+        if (oldestJid) this.lastPresenceUpdateAt.delete(oldestJid);
+      }
+      this.lastPresenceUpdateAt.set(jid, now);
+      try {
+        await sock.sendPresenceUpdate(
+          presenceStatus === "typing" ? "composing" : presenceStatus,
+          jid,
+        );
+      } catch (error) {
+        if (this.lastPresenceUpdateAt.get(jid) === now) this.lastPresenceUpdateAt.delete(jid);
+        throw error;
+      }
+    } finally {
+      if (trackActivity) {
+        const activitiesInFlight = (this.activityInFlight.get(sock) ?? 1) - 1;
+        if (activitiesInFlight > 0) this.activityInFlight.set(sock, activitiesInFlight);
+        else this.activityInFlight.delete(sock);
+        this.armActivityPresenceTimer(sock);
+      }
     }
   }
 

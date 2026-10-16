@@ -7,8 +7,11 @@ In `on_activity`, Baileys sends global `unavailable` once after a socket opens.
 Before each outgoing message or typing/recording indicator, it sends global
 `available` if needed and resets the idle timer. When no activity occurs for
 `WA_PRESENCE_IDLE_SECONDS` (default `30`), it sends global `unavailable`. The
-idle value must be a positive integer. Explicit `available` presence requests
-also start or reset this timer.
+idle value must be a positive integer no greater than `2147483` seconds, the
+largest whole-second timeout supported by Node.js timers. In-flight sends and
+composing/recording indicators keep the idle timer paused; it restarts when the
+operation settles. Explicit `available` presence requests also start or reset
+this timer.
 
 In `on_activity`, this behavior takes precedence over
 `WA_MARK_ONLINE_ON_CONNECT`: Baileys' `markOnlineOnConnect` option is forced to
