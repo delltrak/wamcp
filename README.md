@@ -480,6 +480,11 @@ Set `WA_EVENT_WEBHOOK_URL` to POST normalized events to an automation endpoint.
 Delivery runs through BullMQ with exponential retries, so HTTP failures do not
 interrupt WhatsApp message processing. The default filter is
 `message.received`, and messages sent by this instance are ignored by default.
+If no destination is configured, startup logs a warning that no events will be
+delivered. `GET /health` includes the same redacted `webhook` state. Set
+`WA_REQUIRE_EVENT_WEBHOOK=true` to refuse startup when no destination is
+configured or the event set is empty.
+
 Webhook targets must use HTTPS and a public host. Set
 `WA_EVENT_WEBHOOK_ALLOW_HTTP=true` to permit the HTTP scheme; local and
 private-network targets remain blocked. Each delivery checks all DNS A and AAAA
@@ -683,6 +688,7 @@ Copy `.env.example` to `.env` and configure:
 | `WA_EVENT_WEBHOOK_TIMEOUT_MS` | `10000` | Per-request timeout in milliseconds |
 | `WA_EVENT_WEBHOOK_RETRY_ATTEMPTS` | `5` | BullMQ delivery attempts, including the first attempt |
 | `WA_EVENT_WEBHOOK_RETRY_DELAY_MS` | `1000` | Initial exponential retry delay in milliseconds |
+| `WA_REQUIRE_EVENT_WEBHOOK` | `false` | Exit on startup when no event webhook destination is configured or the event set is empty |
 | `WA_VERSION_CHECK`          | `true`                   | Daily WhatsApp Web version check         |
 
 Baileys may emit an incoming offline message delivered as an `append` once when its timestamp is
@@ -801,7 +807,14 @@ curl http://localhost:3000/health
   "status": "ok",
   "uptime": 3600,
   "instances": { "total": 3, "connected": 2, "disconnected": 1 },
-  "version": "1.0.0"
+  "version": "1.0.0",
+  "webhook": {
+    "configured": false,
+    "destinationCount": 0,
+    "eventCount": 1,
+    "authConfigured": false,
+    "warnings": ["not_configured"]
+  }
 }
 ```
 
@@ -812,6 +825,12 @@ curl http://localhost:3000/health
 | 1–5       | 256 MB | 0.5 vCPU | 1 GB  |
 | 5–20      | 512 MB | 1 vCPU   | 5 GB  |
 | 20–50     | 1 GB   | 2 vCPU   | 10 GB |
+
+## Upgrade / reinstall checklist
+
+1. Back up `.env`, the data directory, and Docker volumes before reinstalling.
+2. After bringing it up, verify with `docker exec wa-mcp env | grep WA_EVENT_WEBHOOK`.
+3. Trigger a test delivery and confirm it arrives.
 
 ---
 

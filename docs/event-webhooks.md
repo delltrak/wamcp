@@ -39,6 +39,13 @@ HTTP Host header.
 | `WA_EVENT_WEBHOOK_TIMEOUT_MS` | `10000` | Per-request timeout, from 1 to 300000 ms. |
 | `WA_EVENT_WEBHOOK_RETRY_ATTEMPTS` | `5` | Total BullMQ attempts per delivery, including the first. |
 | `WA_EVENT_WEBHOOK_RETRY_DELAY_MS` | `1000` | Initial exponential retry delay, from 1 to 300000 ms. Retries add 20% jitter and are capped at five minutes. |
+| `WA_REQUIRE_EVENT_WEBHOOK` | `false` | Refuse to start when no destination is configured or the resolved event set is empty. |
+
+Startup logs a warning when no destination is configured, when the single-destination
+auth header and value are not set together, or when the event set is empty. No events
+are delivered in those cases. `GET /health` reports the same state without URLs or
+secrets. `WA_REQUIRE_EVENT_WEBHOOK=true` exits before the server starts when no
+destination is configured or the event set is empty.
 
 For HTTP 429 and 5xx responses, a valid `Retry-After` header (seconds or an
 HTTP date) sets a minimum retry delay. Its value is capped at five minutes.

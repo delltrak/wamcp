@@ -24,6 +24,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Added Baileys group invite metadata lookup, pending join-request listing, group invitation cards,
   and contact/group profile-picture URL lookup. Group invite joining now accepts validated WhatsApp
   invite links.
+- Startup warns when no outgoing event webhook destination is configured, when webhook authentication
+  is only half set, or when the webhook event set is empty. `GET /health` reports that redacted
+  state. `WA_REQUIRE_EVENT_WEBHOOK=true` refuses to start when no destination is configured or the
+  event set is empty.
 
 ### Fixed
 

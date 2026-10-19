@@ -47,7 +47,28 @@ export interface EventWebhookConfig {
   retryDelayMs: number;
 }
 
+export type EventWebhookWarning = "not_configured" | "incomplete_auth" | "empty_event_set";
+
+/** Redacted webhook state. Never includes URLs, header names, header values, tokens, or secrets. */
+export interface EventWebhookStatus {
+  configured: boolean;
+  destinationCount: number;
+  eventCount: number;
+  authConfigured: boolean;
+  warnings: EventWebhookWarning[];
+}
+
 type Environment = Record<string, string | undefined>;
+
+const destinationsWithAuth = new WeakSet<EventWebhookDestination>();
+
+function trackDestinationAuth(
+  destination: EventWebhookDestination,
+  authConfigured: boolean,
+): EventWebhookDestination {
+  if (authConfigured) destinationsWithAuth.add(destination);
+  return destination;
+}
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -328,18 +349,83 @@ function parseDestination(
     "WA_EVENT_WEBHOOKS senderAllowlist",
   );
 
+  return trackDestinationAuth(
+    {
+      id,
+      url,
+      headers,
+      ...(typeof secret === "string" && secret ? { secret } : {}),
+      ...(preset ? { preset } : {}),
+      events,
+      ignoreFromMe,
+      ...(chatAllowlist !== undefined ? { chatAllowlist } : {}),
+      ...(senderAllowlist !== undefined ? { senderAllowlist } : {}),
+      debounceMs,
+    },
+    authHeader !== undefined,
+  );
+}
+
+interface SingleDestinationAuth {
+  header: string | undefined;
+  value: string | undefined;
+  incomplete: boolean;
+  configured: boolean;
+}
+
+/** Same pairing rules as single-destination loading, including the Grok Bot header default. */
+function resolveSingleDestinationAuth(
+  env: Environment,
+  preset: EventWebhookPreset | undefined,
+): SingleDestinationAuth {
+  const value = env.WA_EVENT_WEBHOOK_AUTH_VALUE;
+  let header = env.WA_EVENT_WEBHOOK_AUTH_HEADER;
+  if (header === undefined && value !== undefined && preset === "grok-bot") {
+    header = "X-Grok-Bot-Key";
+  }
+  const headerSet = header !== undefined;
+  const valueSet = value !== undefined;
   return {
-    id,
-    url,
-    headers,
-    ...(typeof secret === "string" && secret ? { secret } : {}),
-    ...(preset ? { preset } : {}),
-    events,
-    ignoreFromMe,
-    ...(chatAllowlist !== undefined ? { chatAllowlist } : {}),
-    ...(senderAllowlist !== undefined ? { senderAllowlist } : {}),
-    debounceMs,
+    header,
+    value,
+    incomplete: headerSet !== valueSet,
+    configured: headerSet && valueSet,
   };
+}
+
+function effectiveEvents(
+  events: readonly ChannelEvent[],
+  preset: EventWebhookPreset | undefined,
+): ChannelEvent[] {
+  // grok-bot delivery only forwards message.received; other names never leave the process.
+  if (preset === "grok-bot") return events.filter((event) => event === "message.received");
+  return [...events];
+}
+
+function countEffectiveEvents(
+  config: EventWebhookConfig,
+  fallbackPreset: EventWebhookPreset | undefined,
+): number {
+  const groups =
+    config.destinations.length > 0
+      ? config.destinations.map((destination) => ({
+          events: destination.events,
+          preset: destination.preset ?? fallbackPreset,
+        }))
+      : [{ events: config.events, preset: fallbackPreset }];
+  const names = new Set<string>();
+  for (const group of groups) {
+    for (const event of effectiveEvents(group.events, group.preset)) names.add(event);
+  }
+  return names.size;
+}
+
+function loadConfigForStatus(env: Environment, stripIncompleteAuth: boolean): EventWebhookConfig {
+  if (!stripIncompleteAuth) return loadEventWebhookConfig(env);
+  const sanitized: Environment = { ...env };
+  delete sanitized.WA_EVENT_WEBHOOK_AUTH_HEADER;
+  delete sanitized.WA_EVENT_WEBHOOK_AUTH_VALUE;
+  return loadEventWebhookConfig(sanitized);
 }
 
 /** Parse and validate webhook settings without exposing secrets in errors. */
@@ -410,19 +496,14 @@ export function loadEventWebhookConfig(env: Environment = process.env): EventWeb
 
   const headers = parseJsonHeaders(env.WA_EVENT_WEBHOOK_HEADERS);
   const url = env.WA_EVENT_WEBHOOK_URL?.trim();
-
-  const authValue = env.WA_EVENT_WEBHOOK_AUTH_VALUE;
-  let authHeader = env.WA_EVENT_WEBHOOK_AUTH_HEADER;
-  if (authHeader === undefined && authValue !== undefined && preset === "grok-bot") {
-    authHeader = "X-Grok-Bot-Key";
-  }
-  if ((authHeader === undefined) !== (authValue === undefined)) {
+  const auth = resolveSingleDestinationAuth(env, preset);
+  if (auth.incomplete) {
     throw new Error(
       "WA_EVENT_WEBHOOK_AUTH_HEADER and WA_EVENT_WEBHOOK_AUTH_VALUE must be configured together",
     );
   }
-  if (authHeader !== undefined && authValue !== undefined) {
-    setHeader(headers, authHeader, authValue, "WA_EVENT_WEBHOOK_AUTH");
+  if (auth.header !== undefined && auth.value !== undefined) {
+    setHeader(headers, auth.header, auth.value, "WA_EVENT_WEBHOOK_AUTH");
   }
 
   if (!url) {
@@ -440,16 +521,19 @@ export function loadEventWebhookConfig(env: Environment = process.env): EventWeb
 
   return {
     destinations: [
-      {
-        id: "default",
-        url: validateDestinationUrl(url, allowHttp, "WA_EVENT_WEBHOOK_URL"),
-        headers,
-        ...(env.WA_EVENT_WEBHOOK_SECRET ? { secret: env.WA_EVENT_WEBHOOK_SECRET } : {}),
-        ...(preset ? { preset } : {}),
-        events,
-        ignoreFromMe,
-        debounceMs,
-      },
+      trackDestinationAuth(
+        {
+          id: "default",
+          url: validateDestinationUrl(url, allowHttp, "WA_EVENT_WEBHOOK_URL"),
+          headers,
+          ...(env.WA_EVENT_WEBHOOK_SECRET ? { secret: env.WA_EVENT_WEBHOOK_SECRET } : {}),
+          ...(preset ? { preset } : {}),
+          events,
+          ignoreFromMe,
+          debounceMs,
+        },
+        auth.configured,
+      ),
     ],
     queuePrefix,
     ...messageDebounce,
@@ -459,4 +543,131 @@ export function loadEventWebhookConfig(env: Environment = process.env): EventWeb
     retryAttempts,
     retryDelayMs,
   };
+}
+
+function usesMultiDestinationConfig(env: Environment): boolean {
+  return Boolean(env.WA_EVENT_WEBHOOKS?.trim());
+}
+
+/**
+ * Redacted event-webhook state for boot logs, health, and status tools.
+ * Callers can pass a parsed config to avoid loading twice. Nothing returned
+ * includes a URL, header name, header value, token, or secret.
+ */
+export function getEventWebhookStatus(
+  env: Environment = process.env,
+  config?: EventWebhookConfig,
+): EventWebhookStatus {
+  const multi = usesMultiDestinationConfig(env);
+  const preset = parsePreset(env.WA_EVENT_WEBHOOK_PRESET, "WA_EVENT_WEBHOOK_PRESET");
+  const auth = resolveSingleDestinationAuth(env, preset);
+  const resolved = config ?? loadConfigForStatus(env, !multi && auth.incomplete);
+  const destinationCount = resolved.destinations.length;
+  const configured = destinationCount > 0;
+  const eventCount = countEffectiveEvents(resolved, preset);
+  const warnings: EventWebhookWarning[] = [];
+  if (!configured) warnings.push("not_configured");
+  if (!multi && auth.incomplete) warnings.push("incomplete_auth");
+  if (eventCount === 0) warnings.push("empty_event_set");
+
+  return {
+    configured,
+    destinationCount,
+    eventCount,
+    authConfigured:
+      (!multi && auth.configured) ||
+      resolved.destinations.some((destination) => destinationsWithAuth.has(destination)),
+    warnings,
+  };
+}
+
+/** Fields safe to expose from health and status responses. */
+export function eventWebhookHealth(status: EventWebhookStatus): {
+  configured: boolean;
+  destinationCount: number;
+  eventCount: number;
+  authConfigured: boolean;
+  warnings: EventWebhookWarning[];
+} {
+  return {
+    configured: status.configured,
+    destinationCount: status.destinationCount,
+    eventCount: status.eventCount,
+    authConfigured: status.authConfigured,
+    warnings: [...status.warnings],
+  };
+}
+
+function bootLogDetails(status: EventWebhookStatus, warning: EventWebhookWarning) {
+  return {
+    configured: status.configured,
+    destinationCount: status.destinationCount,
+    eventCount: status.eventCount,
+    authConfigured: status.authConfigured,
+    warning,
+  };
+}
+
+/** Log one warning per status code. A complete configuration logs nothing. */
+export function logEventWebhookBootStatus(
+  status: EventWebhookStatus,
+  log: Pick<typeof logger, "warn"> = logger,
+): void {
+  for (const warning of status.warnings) {
+    const details = bootLogDetails(status, warning);
+    switch (warning) {
+      case "not_configured":
+        log.warn(details, "Event webhook is not configured; no events will be delivered");
+        break;
+      case "incomplete_auth":
+        log.warn(
+          details,
+          "Event webhook authentication is incomplete; set both WA_EVENT_WEBHOOK_AUTH_HEADER and WA_EVENT_WEBHOOK_AUTH_VALUE",
+        );
+        break;
+      case "empty_event_set":
+        log.warn(details, "Event webhook event set is empty; no events will be delivered");
+        break;
+      default: {
+        const unreachable: never = warning;
+        throw new Error(`Unknown event webhook warning: ${String(unreachable)}`);
+      }
+    }
+  }
+}
+
+function requiredEventWebhookMessage(status: EventWebhookStatus): string {
+  const unconfigured = !status.configured;
+  const emptyEvents = status.warnings.includes("empty_event_set");
+  if (unconfigured && emptyEvents) {
+    return "WA_REQUIRE_EVENT_WEBHOOK=true but the event webhook is not configured and the event set is empty; no events will be delivered";
+  }
+  if (unconfigured) {
+    return "WA_REQUIRE_EVENT_WEBHOOK=true but the event webhook is not configured; no events will be delivered";
+  }
+  return "WA_REQUIRE_EVENT_WEBHOOK=true but the event webhook event set is empty; no events will be delivered";
+}
+
+/**
+ * Log webhook boot warnings and, when WA_REQUIRE_EVENT_WEBHOOK=true, stop
+ * startup if no destination is configured or the event set is empty.
+ */
+export function bootEventWebhook(
+  env: Environment = process.env,
+  exit: (code: number) => void = (code) => {
+    process.exit(code);
+  },
+): EventWebhookStatus {
+  const status = getEventWebhookStatus(env);
+  logEventWebhookBootStatus(status);
+  if (
+    parseBoolean(env, "WA_REQUIRE_EVENT_WEBHOOK", false) &&
+    (!status.configured || status.warnings.includes("empty_event_set"))
+  ) {
+    const message = requiredEventWebhookMessage(status);
+    logger.fatal(message);
+    exit(1);
+    throw new Error(message);
+  }
+  return status;
 }
