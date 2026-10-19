@@ -321,6 +321,12 @@ export interface GroupResponse {
   inviteCode?: string;
 }
 
+export interface CreateGroupFromGroupResponse {
+  groupId: string;
+  addedCount: number;
+  failedParticipants: string[];
+}
+
 export interface GroupSummary {
   jid: string;
   subject: string;

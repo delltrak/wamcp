@@ -36,7 +36,7 @@
 
 **WA MCP** is a WhatsApp MCP server built with TypeScript that gives AI agents full access to WhatsApp through the [Model Context Protocol](https://modelcontextprotocol.io). It supports both **Baileys** (WhatsApp Web) and **Meta Cloud API** as dual-channel backends, deployable with **Docker** in a single command.
 
-Your agent connects once and auto-discovers **133 tools**, **10 resources**, and **14 real-time events** — zero configuration, zero REST wrappers, zero glue code.
+Clients connect once and discover **134 tools**, **10 resources**, and **14 real-time events** — zero configuration, zero REST wrappers, zero glue code.
 
 ```
 Your AI Agent ←→ MCP Protocol ←→ WA MCP ←→ WhatsApp
@@ -82,7 +82,7 @@ from google.adk.tools.mcp_tool import McpToolset
 
 tools = McpToolset(url="http://localhost:3000/mcp")
 
-# Agent auto-discovers 133 WhatsApp tools
+# Client discovers 134 WhatsApp tools
 # wa_create_instance, wa_send_text, wa_send_image, ...
 ```
 
@@ -277,7 +277,7 @@ WA MCP exposes **134 tools** across 15 domains. All tools use the `wa_` prefix.
 </details>
 
 <details>
-<summary>👥 <strong>Groups</strong> (23 tools)</summary>
+<summary>👥 <strong>Groups</strong> (24 tools)</summary>
 
 | Tool                           | Description                   |
 | ------------------------------ | ----------------------------- |
@@ -285,6 +285,7 @@ WA MCP exposes **134 tools** across 15 domains. All tools use the `wa_` prefix.
 | `wa_get_group_info`            | Get group metadata and members |
 | `wa_get_group_invite_info`     | Read invite metadata before joining (Baileys) |
 | `wa_create_group`              | Create group                  |
+| `wa_create_group_from_group`   | Create a group from another group's members |
 | `wa_group_add_participants`    | Add members                   |
 | `wa_group_remove_participants` | Remove members                |
 | `wa_group_promote`             | Promote to admin              |
@@ -907,7 +908,7 @@ src/
 ├── index.ts                     # Entry point (HTTP/stdio)
 ├── constants.ts                 # Defaults and limits
 ├── server/mcp.ts                # MCP server setup
-├── tools/                       # 🔧 133 MCP tools (15 files)
+├── tools/                       # 🔧 134 MCP tools (15 files)
 ├── resources/                   # 📖 10 MCP resources (8 files)
 ├── notifications/events.ts      # 📡 14 event types
 ├── channels/

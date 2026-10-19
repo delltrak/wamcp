@@ -14,6 +14,7 @@ import {
   UpdateGroupPictureSchema,
   RemoveGroupPictureSchema,
   CreateGroupSchema,
+  CreateGroupFromGroupSchema,
   AddParticipantsSchema,
   RemoveParticipantsSchema,
   PromoteParticipantSchema,
@@ -159,6 +160,39 @@ export function registerGroupTools(
         return toolSuccess(result);
       } catch (err) {
         return handleToolError("wa_create_group", err, params.instanceId);
+      }
+    },
+  );
+
+  server.registerTool(
+    "wa_create_group_from_group",
+    {
+      description:
+        "Create a WhatsApp group using members from an existing group, with optional include and exclude filters. The connected account is added automatically. This server operation is blocked unless WA_GROUP_WRITES_ENABLED=true or WA_APP_STATE_WRITES_ENABLED=true.",
+      inputSchema: CreateGroupFromGroupSchema,
+    },
+    async (params) => {
+      const log = createRequestLogger("wa_create_group_from_group", params.instanceId);
+      const start = Date.now();
+      try {
+        const adapter = instanceManager.getAdapter(params.instanceId);
+        const result = await adapter.createGroupFromGroup(
+          params.sourceGroupId,
+          params.name,
+          params.includeParticipants,
+          params.excludeParticipants,
+        );
+        log.info(
+          {
+            duration: Date.now() - start,
+            addedCount: result.addedCount,
+            failedCount: result.failedParticipants.length,
+          },
+          "Group created from existing group",
+        );
+        return toolSuccess(result);
+      } catch (err) {
+        return handleToolError("wa_create_group_from_group", err, params.instanceId);
       }
     },
   );

@@ -9,6 +9,7 @@ import type {
   MessageContent,
   MessageResponse,
   GroupResponse,
+  CreateGroupFromGroupResponse,
   GroupSummary,
   NumberExistsResponse,
   BusinessProfile,
@@ -134,6 +135,12 @@ export interface ChannelAdapter {
   // ---- Groups ----
   listGroups(): Promise<GroupSummary[]>;
   createGroup(name: string, participants: string[]): Promise<GroupResponse>;
+  createGroupFromGroup(
+    sourceGroupId: string,
+    name: string,
+    includeParticipants?: string[],
+    excludeParticipants?: string[],
+  ): Promise<CreateGroupFromGroupResponse>;
   modifyGroup(groupId: string, modification: GroupModification): Promise<void>;
   modifyParticipants(
     groupId: string,
