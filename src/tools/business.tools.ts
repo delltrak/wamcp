@@ -88,7 +88,7 @@ export function registerBusinessTools(server: McpServer, instanceManager: Instan
     server,
     instanceManager,
     "wa_create_community",
-    "Create a WhatsApp community. This account/server change is blocked unless WA_APP_STATE_WRITES_ENABLED=true. Cloud API does not support communities.",
+    "Create a WhatsApp community. This server operation is blocked unless WA_GROUP_WRITES_ENABLED=true or WA_APP_STATE_WRITES_ENABLED=true. Cloud API does not support communities.",
     CreateCommunitySchema,
     async (adapter, params) => {
       const community = await adapter.createCommunity(params.name, params.description);
@@ -121,7 +121,7 @@ export function registerBusinessTools(server: McpServer, instanceManager: Instan
     server,
     instanceManager,
     "wa_community_link_group",
-    "Link an existing group to a community. This account/server change is blocked unless WA_APP_STATE_WRITES_ENABLED=true.",
+    "Link an existing group to a community. This server operation is blocked unless WA_GROUP_WRITES_ENABLED=true or WA_APP_STATE_WRITES_ENABLED=true.",
     LinkCommunityGroupSchema,
     async (adapter, params) => {
       await adapter.linkGroupToCommunity(params.groupId, params.communityId);
@@ -133,7 +133,7 @@ export function registerBusinessTools(server: McpServer, instanceManager: Instan
     server,
     instanceManager,
     "wa_community_unlink_group",
-    "Unlink a group from a community. This account/server change is blocked unless WA_APP_STATE_WRITES_ENABLED=true.",
+    "Unlink a group from a community. This server operation is blocked unless WA_GROUP_WRITES_ENABLED=true or WA_APP_STATE_WRITES_ENABLED=true.",
     UnlinkCommunityGroupSchema,
     async (adapter, params) => {
       await adapter.unlinkGroupFromCommunity(params.groupId, params.communityId);
@@ -145,7 +145,7 @@ export function registerBusinessTools(server: McpServer, instanceManager: Instan
     server,
     instanceManager,
     "wa_leave_community",
-    "Leave a WhatsApp community. This account/server change is blocked unless WA_APP_STATE_WRITES_ENABLED=true.",
+    "Leave a WhatsApp community. This server operation is blocked unless WA_GROUP_WRITES_ENABLED=true or WA_APP_STATE_WRITES_ENABLED=true.",
     LeaveCommunitySchema,
     async (adapter, params) => {
       await adapter.leaveCommunity(params.communityId);
@@ -157,7 +157,7 @@ export function registerBusinessTools(server: McpServer, instanceManager: Instan
     server,
     instanceManager,
     "wa_create_newsletter",
-    "Create a WhatsApp Channel. This account/server change is blocked unless WA_APP_STATE_WRITES_ENABLED=true.",
+    "Create a WhatsApp Channel. This server operation is blocked unless WA_GROUP_WRITES_ENABLED=true or WA_APP_STATE_WRITES_ENABLED=true.",
     CreateNewsletterSchema,
     (adapter, params) => adapter.createNewsletter(params.name, params.description),
   );
@@ -175,7 +175,7 @@ export function registerBusinessTools(server: McpServer, instanceManager: Instan
     server,
     instanceManager,
     "wa_newsletter_update_name",
-    "Update a WhatsApp Channel name. This account/server change is blocked unless WA_APP_STATE_WRITES_ENABLED=true.",
+    "Update a WhatsApp Channel name. This server operation is blocked unless WA_GROUP_WRITES_ENABLED=true or WA_APP_STATE_WRITES_ENABLED=true.",
     UpdateNewsletterNameSchema,
     async (adapter, params) => {
       await adapter.updateNewsletterName(params.jid, params.name);
@@ -187,7 +187,7 @@ export function registerBusinessTools(server: McpServer, instanceManager: Instan
     server,
     instanceManager,
     "wa_newsletter_update_description",
-    "Update a WhatsApp Channel description. This account/server change is blocked unless WA_APP_STATE_WRITES_ENABLED=true.",
+    "Update a WhatsApp Channel description. This server operation is blocked unless WA_GROUP_WRITES_ENABLED=true or WA_APP_STATE_WRITES_ENABLED=true.",
     UpdateNewsletterDescriptionSchema,
     async (adapter, params) => {
       await adapter.updateNewsletterDescription(params.jid, params.description);
@@ -199,7 +199,7 @@ export function registerBusinessTools(server: McpServer, instanceManager: Instan
     server,
     instanceManager,
     "wa_newsletter_update_picture",
-    "Update a WhatsApp Channel picture from an HTTPS URL or base64 image; input is size-limited, URL-validated, and converted to JPEG. This account/server change is blocked unless WA_APP_STATE_WRITES_ENABLED=true.",
+    "Update a WhatsApp Channel picture from an HTTPS URL or base64 image; input is size-limited, URL-validated, and converted to JPEG. This server operation is blocked unless WA_GROUP_WRITES_ENABLED=true or WA_APP_STATE_WRITES_ENABLED=true.",
     UpdateNewsletterPictureSchema,
     async (adapter, params) => {
       await adapter.updateNewsletterPicture(params.jid, params.image);
@@ -211,7 +211,7 @@ export function registerBusinessTools(server: McpServer, instanceManager: Instan
     server,
     instanceManager,
     "wa_newsletter_react",
-    "Add or remove a reaction on a WhatsApp Channel post. This account/server change is blocked unless WA_APP_STATE_WRITES_ENABLED=true.",
+    "Add or remove a reaction on a WhatsApp Channel post. This server operation is blocked unless WA_GROUP_WRITES_ENABLED=true or WA_APP_STATE_WRITES_ENABLED=true.",
     ReactToNewsletterMessageSchema,
     async (adapter, params) => {
       await adapter.reactToNewsletterMessage(params.jid, params.serverId, params.reaction);

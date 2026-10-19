@@ -146,6 +146,7 @@ describe("Baileys business and message features", () => {
 
   function enableAppStateWrites(): void {
     vi.stubEnv("WA_APP_STATE_WRITES_ENABLED", "true");
+    vi.stubEnv("WA_APP_STATE_MIN_INTERVAL_MS", "0");
   }
 
   function createFixture(): { instanceId: string; adapter: BaileysAdapter } {
@@ -195,6 +196,21 @@ describe("Baileys business and message features", () => {
       );
   }
 
+  function rawKeyMessage(
+    chatId: string,
+    id: string,
+    fromMe: boolean,
+    timestamp: number,
+    participant?: string,
+  ): string {
+    const message: WAMessage = {
+      key: { remoteJid: chatId, id, fromMe, ...(participant ? { participant } : {}) },
+      messageTimestamp: timestamp,
+      message: { conversation: `Stored ${id}` },
+    };
+    return JSON.stringify(message);
+  }
+
   function installSocket(
     adapter: BaileysAdapter,
     extra: Record<string, unknown> = {},
@@ -203,15 +219,35 @@ describe("Baileys business and message features", () => {
     processEvents: (events: Partial<BaileysEventMap>) => Promise<void> | void;
   } {
     let processEvents: ((events: Partial<BaileysEventMap>) => Promise<void> | void) | undefined;
+    const appStateVersion = {
+      version: 3,
+      hash: new Uint8Array(128),
+      indexValueMap: {},
+    };
+    const keyStore = {
+      get: vi.fn(async (type: string, ids: string[]) => {
+        if (type === "app-state-sync-key") {
+          return { [ids[0]!]: { keyData: new Uint8Array(32) } };
+        }
+        if (type === "app-state-sync-version") return { [ids[0]!]: appStateVersion };
+        return {};
+      }),
+      set: vi.fn(async () => {}),
+    };
     const socket = {
       user: { id: ACCOUNT_ID, name: "Synthetic Business" },
+      ws: { isOpen: true },
+      authState: { creds: { myAppStateKeyId: "synthetic-app-state-key" }, keys: keyStore },
+      resyncAppState: vi.fn().mockResolvedValue(undefined),
       getBusinessProfile: vi.fn().mockResolvedValue({ description: "Synthetic profile" }),
       addLabel: vi.fn().mockResolvedValue(undefined),
       addChatLabel: vi.fn().mockResolvedValue(undefined),
       removeChatLabel: vi.fn().mockResolvedValue(undefined),
       addMessageLabel: vi.fn().mockResolvedValue(undefined),
       removeMessageLabel: vi.fn().mockResolvedValue(undefined),
-      chatModify: vi.fn().mockResolvedValue(undefined),
+      chatModify: vi.fn(async () => {
+        appStateVersion.version += 1;
+      }),
       updateProfileName: vi.fn().mockResolvedValue(undefined),
       sendMessage: vi.fn(),
       fetchMessageHistory: vi.fn().mockResolvedValue("history-request"),
@@ -303,9 +339,21 @@ describe("Baileys business and message features", () => {
         "INSERT INTO chats (instance_id, jid, name, is_group, updated_at) VALUES (?, ?, 'Example group', 1, 1)",
       )
       .run(id, groupId);
-    addStoredMessage(id, "earlier", { chatId: groupId, timestamp: 90 });
-    addStoredMessage(id, "later", { chatId: groupId, timestamp: 100 });
-    addStoredMessage(id, "outgoing", { fromMe: true, timestamp: 110 });
+    addStoredMessage(id, "earlier", {
+      chatId: groupId,
+      timestamp: 90,
+      rawData: rawKeyMessage(groupId, "earlier", false, 90, ACCOUNT_ID),
+    });
+    addStoredMessage(id, "later", {
+      chatId: groupId,
+      timestamp: 100,
+      rawData: rawKeyMessage(groupId, "later", false, 100, ACCOUNT_ID),
+    });
+    addStoredMessage(id, "outgoing", {
+      fromMe: true,
+      timestamp: 110,
+      rawData: rawKeyMessage(CHAT_ID, "outgoing", true, 110),
+    });
     const { socket } = installSocket(adapter);
 
     await adapter.markChatUnread(groupId);
@@ -321,7 +369,12 @@ describe("Baileys business and message features", () => {
     });
     expect(call?.[1]).toBe(groupId);
     expect(socket.chatModify).toHaveBeenLastCalledWith(
-      { star: { messages: [{ id: "outgoing", fromMe: true }], star: true } },
+      {
+        star: {
+          messages: [{ remoteJid: CHAT_ID, id: "outgoing", fromMe: true }],
+          star: true,
+        },
+      },
       CHAT_ID,
     );
     expect(
@@ -339,7 +392,7 @@ describe("Baileys business and message features", () => {
       addStoredMessage(id, "starred-message");
       const { socket } = installSocket(adapter);
       const disabledError =
-        "WhatsApp account, server, and app-state writes are disabled because changes can get this linked device removed (see issue #71). Set WA_APP_STATE_WRITES_ENABLED=true to enable at your own risk.";
+        "WhatsApp account, server, and app-state writes are disabled. Set WA_APP_STATE_WRITES_ENABLED=true to enable them.";
 
       await expect(adapter.starMessage(CHAT_ID, "starred-message", true)).rejects.toThrow(
         disabledError,
@@ -390,13 +443,24 @@ describe("Baileys business and message features", () => {
 
   it("passes app-state writes through when explicitly enabled", async () => {
     enableAppStateWrites();
-    const { adapter } = createFixture();
+    const { instanceId: id, adapter } = createFixture();
+    addStoredMessage(id, "archive-row", {
+      rawData: rawKeyMessage(CHAT_ID, "archive-row", false, 110),
+    });
     const { socket } = installSocket(adapter);
 
     await adapter.modifyChat(CHAT_ID, { action: "archive" });
     await adapter.updateProfileName("Enabled name");
 
-    expect(socket.chatModify).toHaveBeenCalledWith({ archive: true, lastMessages: [] }, CHAT_ID);
+    expect(socket.chatModify).toHaveBeenCalledWith(
+      {
+        archive: true,
+        lastMessages: [
+          { key: { remoteJid: CHAT_ID, id: "archive-row", fromMe: false }, messageTimestamp: 100 },
+        ],
+      },
+      CHAT_ID,
+    );
     expect(socket.updateProfileName).toHaveBeenCalledWith("Enabled name");
   });
 

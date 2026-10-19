@@ -738,12 +738,13 @@ describe("issue 80 feature completion", () => {
 
   it("keeps group join approval and request changes gated with the flag unset", async () => {
     vi.stubEnv("WA_APP_STATE_WRITES_ENABLED", undefined);
+    vi.stubEnv("WA_GROUP_WRITES_ENABLED", undefined);
     const { adapter, socket } = createFixture();
     await expect(adapter.setGroupJoinApprovalMode(GROUP_ID, "on")).rejects.toThrow(
-      "WhatsApp account, server, and app-state writes are disabled",
+      "WhatsApp group, community, and Channel writes are disabled",
     );
     await expect(adapter.handleJoinRequest(GROUP_ID, CONTACT_ID, "approve")).rejects.toThrow(
-      "WhatsApp account, server, and app-state writes are disabled",
+      "WhatsApp group, community, and Channel writes are disabled",
     );
     expect(socket.groupJoinApprovalMode).not.toHaveBeenCalled();
     expect(socket.groupRequestParticipantsUpdate).not.toHaveBeenCalled();

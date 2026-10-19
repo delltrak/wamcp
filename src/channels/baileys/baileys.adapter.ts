@@ -26,6 +26,7 @@ import makeWASocket, {
   type MinimalMessage,
   type WAMessageKey,
   type WAUrlInfo,
+  type SignalDataTypeMap,
   type CatalogCollection,
   type GetCatalogOptions,
   type NewsletterMetadata,
@@ -36,6 +37,9 @@ import makeWASocket, {
   type BinaryNode,
   jidNormalizedUser,
   ALL_WA_PATCH_NAMES,
+  chatModificationToAppPatch,
+  type ChatModification as BaileysChatModification,
+  type WAPatchName,
 } from "@whiskeysockets/baileys";
 import { randomUUID } from "node:crypto";
 import { Boom } from "@hapi/boom";
@@ -150,6 +154,7 @@ import {
   type ContactPnResolver,
   type ContactSyncRecord,
 } from "../../services/contact-store.js";
+import { AppStateResyncLogObserver, observeAppStateResyncLogs } from "./app-state-write-safety.js";
 
 const logger = createChildLogger({ service: "baileys-adapter" });
 const mediaService = new MediaService();
@@ -159,6 +164,7 @@ const DEFAULT_APPEND_NOTIFY_MAX_PER_BATCH = 100;
 const DEFAULT_BAILEYS_HEALTH_WATCHDOG_MS = 180_000;
 const DEFAULT_BAILEYS_EVENT_BUFFER_STALL_MS = 60_000;
 const DEFAULT_PRESENCE_IDLE_SECONDS = 30;
+const DEFAULT_APP_STATE_MIN_INTERVAL_MS = 1_500;
 const MAX_NODE_TIMEOUT_MS = 2_147_483_647;
 const MAX_PRESENCE_IDLE_SECONDS = Math.floor(MAX_NODE_TIMEOUT_MS / 1000);
 const BAILEYS_EVENT_BUFFER_STALL_RECHECK_MS = 1_000;
@@ -168,6 +174,7 @@ const APPEND_NOTIFY_CLOCK_SKEW_MS = 5 * 60_000;
 const BAILEYS_KEEP_ALIVE_INTERVAL_MS = 25_000;
 const STATUS_BROADCAST_JID = "status@broadcast";
 const MAX_MARK_READ_MESSAGE_IDS = 100;
+const MAX_APP_STATE_LAST_MESSAGES = 3;
 const MAX_PRESENCE_SUBSCRIPTIONS = 100;
 const PRESENCE_UPDATE_MIN_INTERVAL_MS = 2_000;
 const MAX_TRACKED_PRESENCE_CHATS = 1_000;
@@ -175,7 +182,28 @@ const MAX_EVENT_RESPONSE_DECRYPT_ATTEMPTS = 16;
 const MAX_POLL_VOTE_DECRYPT_ATTEMPTS = 16;
 const MAX_LINK_PREVIEW_THUMBNAIL_BYTES = 512 * 1024;
 const APP_STATE_WRITES_DISABLED_ERROR =
-  "WhatsApp account, server, and app-state writes are disabled because changes can get this linked device removed (see issue #71). Set WA_APP_STATE_WRITES_ENABLED=true to enable at your own risk.";
+  "WhatsApp account, server, and app-state writes are disabled. Set WA_APP_STATE_WRITES_ENABLED=true to enable them.";
+const GROUP_WRITES_DISABLED_ERROR =
+  "WhatsApp group, community, and Channel writes are disabled. Set WA_GROUP_WRITES_ENABLED=true or WA_APP_STATE_WRITES_ENABLED=true to enable them.";
+
+interface AppStateWriteQueue {
+  tail: Promise<void>;
+  lastStartedAt: number | null;
+}
+
+const appStateWriteQueues = new Map<string, AppStateWriteQueue>();
+
+export class AppStateNotSyncedError extends Error {
+  readonly code = "app_state_not_synced";
+
+  constructor(
+    readonly collection: WAPatchName,
+    readonly reason: string,
+  ) {
+    super(`App-state collection '${collection}' is not verified in sync: ${reason}`);
+    this.name = "AppStateNotSyncedError";
+  }
+}
 
 type PresenceMode = "on_activity" | "always";
 type GlobalPresenceStatus = "available" | "unavailable";
@@ -184,6 +212,42 @@ interface ViewOnceAudio {
   audio: Buffer;
   mimeType: string;
   ptt: boolean;
+}
+
+interface StoredAppStateMessage {
+  key: WAMessageKey;
+  messageTimestamp: number;
+}
+
+function getStoredMessage(rawData: string | null, id: string): WAMessage | undefined {
+  if (!rawData) return undefined;
+  try {
+    const message = JSON.parse(rawData, BufferJSON.reviver) as WAMessage;
+    const key = message.key;
+    if (
+      key?.id !== id ||
+      typeof key.remoteJid !== "string" ||
+      key.remoteJid.trim().length === 0 ||
+      typeof key.fromMe !== "boolean" ||
+      (key.participant !== undefined && typeof key.participant !== "string")
+    ) {
+      return undefined;
+    }
+    return message;
+  } catch {
+    return undefined;
+  }
+}
+
+function storedMessageTimestampSeconds(
+  rowTimestamp: number,
+  rawMessageTimestamp: WAMessage["messageTimestamp"],
+): number | undefined {
+  for (const value of [rowTimestamp, rawMessageTimestamp]) {
+    const timestampMs = messageTimestampToMilliseconds(value, Number.NaN);
+    if (Number.isFinite(timestampMs) && timestampMs > 0) return Math.floor(timestampMs / 1000);
+  }
+  return undefined;
 }
 
 function parseAudioDataUri(input: string): { data: Buffer; contentType?: string } {
@@ -543,6 +607,23 @@ function parsePositiveIntegerEnv(
   return parsed;
 }
 
+function parseNonNegativeIntegerEnv(
+  value: string | undefined,
+  key: string,
+  fallback: number,
+  maximum = MAX_NODE_TIMEOUT_MS,
+): number {
+  if (value === undefined || value.trim() === "") return fallback;
+  if (!/^\d+$/.test(value.trim())) {
+    throw new Error(`Invalid ${key}; expected a non-negative integer`);
+  }
+  const parsed = Number(value.trim());
+  if (!Number.isSafeInteger(parsed) || parsed < 0 || parsed > maximum) {
+    throw new Error(`Invalid ${key}; expected a non-negative integer no greater than ${maximum}`);
+  }
+  return parsed;
+}
+
 function parsePresenceMode(value: string | undefined): PresenceMode {
   const normalized = value?.trim().toLowerCase();
   if (!normalized) return "on_activity";
@@ -798,6 +879,9 @@ export class BaileysAdapter implements ChannelAdapter {
 
   private readonly autoReconnect: boolean;
   private readonly appStateWritesEnabled: boolean;
+  private readonly groupWritesEnabled: boolean;
+  private readonly appStateWriteMinIntervalMs: number;
+  private readonly appStateResyncLogObserver = new AppStateResyncLogObserver();
   private readonly presenceMode: PresenceMode;
   private readonly presenceIdleMs: number;
   private readonly markOnlineOnConnect: boolean;
@@ -840,6 +924,16 @@ export class BaileysAdapter implements ChannelAdapter {
       process.env.WA_APP_STATE_WRITES_ENABLED,
       "WA_APP_STATE_WRITES_ENABLED",
       false,
+    );
+    this.groupWritesEnabled = parseBooleanEnv(
+      process.env.WA_GROUP_WRITES_ENABLED,
+      "WA_GROUP_WRITES_ENABLED",
+      false,
+    );
+    this.appStateWriteMinIntervalMs = parseNonNegativeIntegerEnv(
+      process.env.WA_APP_STATE_MIN_INTERVAL_MS,
+      "WA_APP_STATE_MIN_INTERVAL_MS",
+      DEFAULT_APP_STATE_MIN_INTERVAL_MS,
     );
     this.presenceMode = parsePresenceMode(process.env.WA_PRESENCE_MODE);
     this.presenceIdleMs =
@@ -896,6 +990,206 @@ export class BaileysAdapter implements ChannelAdapter {
 
   private requireAppStateWritesEnabled(): void {
     if (!this.appStateWritesEnabled) throw new Error(APP_STATE_WRITES_DISABLED_ERROR);
+  }
+
+  private requireGroupWritesEnabled(): void {
+    if (!this.appStateWritesEnabled && !this.groupWritesEnabled) {
+      throw new Error(GROUP_WRITES_DISABLED_ERROR);
+    }
+  }
+
+  private refuseAppStateWrite(collection: WAPatchName, reason: string): never {
+    logger.warn(
+      { instanceId: this.instanceId, collection, reason },
+      "Refusing app-state write because the collection is not verified in sync",
+    );
+    throw new AppStateNotSyncedError(collection, reason);
+  }
+
+  private async readAppStateVersion(
+    sock: WASocket,
+    collection: WAPatchName,
+  ): Promise<{ version: number; hashLength: number } | undefined> {
+    const states = await sock.authState.keys.get("app-state-sync-version", [collection]);
+    const state = states[collection];
+    if (!state || !Number.isSafeInteger(state.version)) return undefined;
+    return {
+      version: state.version,
+      hashLength: state.hash instanceof Uint8Array ? state.hash.byteLength : -1,
+    };
+  }
+
+  /**
+   * Serialize one Baileys app-state write per account and verify collection state before dispatch.
+   * WAMCP callers are modifyChat (archive/unarchive/pin/unpin/mute/unmute/delete/clear),
+   * markChatUnread, starMessage, updateProfileName, createQuickReply, editQuickReply,
+   * deleteQuickReply, createLabel, editLabel, deleteLabel, setChatLabel, and setMessageLabel.
+   * Baileys addOrEditContact is not currently called by WAMCP; any future use must go through this
+   * helper.
+   */
+  private async runSafeAppStateWrite<T>(
+    sock: WASocket,
+    collection: WAPatchName,
+    write: () => Promise<T>,
+  ): Promise<T> {
+    this.requireAppStateWritesEnabled();
+
+    let queue = appStateWriteQueues.get(this.instanceId);
+    if (!queue) {
+      queue = { tail: Promise.resolve(), lastStartedAt: null };
+      appStateWriteQueues.set(this.instanceId, queue);
+    }
+    const previous = queue.tail;
+    let release!: () => void;
+    queue.tail = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    await previous;
+
+    try {
+      if (queue.lastStartedAt !== null) {
+        const remainingMs = this.appStateWriteMinIntervalMs - (Date.now() - queue.lastStartedAt);
+        if (remainingMs > 0) {
+          await new Promise<void>((resolve) => setTimeout(resolve, remainingMs));
+        }
+      }
+      queue.lastStartedAt = Date.now();
+
+      if (this.sock !== sock || this.status !== "connected" || !sock.ws.isOpen) {
+        return this.refuseAppStateWrite(collection, "the socket is not open and connected");
+      }
+      if (!sock.user?.id || !sock.authState?.creds) {
+        return this.refuseAppStateWrite(collection, "the socket is not authenticated");
+      }
+
+      const appStateKeyId = sock.authState.creds.myAppStateKeyId;
+      if (typeof appStateKeyId !== "string" || appStateKeyId.length === 0) {
+        return this.refuseAppStateWrite(collection, "the current app-state key ID is missing");
+      }
+
+      let appStateSyncKey;
+      try {
+        const keys = await sock.authState.keys.get("app-state-sync-key", [appStateKeyId]);
+        appStateSyncKey = keys[appStateKeyId];
+      } catch {
+        return this.refuseAppStateWrite(collection, "the current app-state key could not be read");
+      }
+      if (!appStateSyncKey) {
+        return this.refuseAppStateWrite(collection, "the current app-state key is unavailable");
+      }
+
+      const resync = await this.appStateResyncLogObserver.capture(collection, () =>
+        sock.resyncAppState([collection], false),
+      );
+      if (!resync.ok) return this.refuseAppStateWrite(collection, resync.reason);
+
+      let before: { version: number; hashLength: number } | undefined;
+      try {
+        before = await this.readAppStateVersion(sock, collection);
+      } catch {
+        return this.refuseAppStateWrite(
+          collection,
+          "the collection sync version could not be read",
+        );
+      }
+      if (!before || before.version <= 0 || before.hashLength !== 128) {
+        return this.refuseAppStateWrite(
+          collection,
+          "the collection has no valid positive version and 128-byte hash",
+        );
+      }
+
+      if (this.sock !== sock || this.status !== "connected" || !sock.ws.isOpen) {
+        return this.refuseAppStateWrite(collection, "the socket closed during the sync preflight");
+      }
+
+      const observation = this.appStateResyncLogObserver.arm(collection, true);
+      const keyStore = sock.authState.keys;
+      const originalGet = keyStore.get;
+      let result: T;
+      try {
+        keyStore.get = async <T extends keyof SignalDataTypeMap>(type: T, ids: string[]) => {
+          const values = await originalGet(type, ids);
+          if (type === "app-state-sync-version" && ids.includes(collection)) {
+            const state = (values as Record<string, SignalDataTypeMap["app-state-sync-version"]>)[
+              collection
+            ];
+            const hashLength = state?.hash instanceof Uint8Array ? state.hash.byteLength : -1;
+            if (
+              !state ||
+              !Number.isSafeInteger(state.version) ||
+              state.version <= 0 ||
+              hashLength !== 128
+            ) {
+              this.refuseAppStateWrite(
+                collection,
+                "the collection has no valid positive version and 128-byte hash after its internal resync",
+              );
+            }
+          }
+          return values;
+        };
+        try {
+          result = await write();
+        } catch (error) {
+          const failureReason = observation.failureReason();
+          if (failureReason) return this.refuseAppStateWrite(collection, failureReason);
+          throw error;
+        }
+      } finally {
+        keyStore.get = originalGet;
+        observation.disarm();
+      }
+
+      const postResync = await this.appStateResyncLogObserver.capture(collection, () =>
+        sock.resyncAppState([collection], false),
+      );
+      let after: { version: number; hashLength: number } | undefined;
+      try {
+        after = await this.readAppStateVersion(sock, collection);
+      } catch {
+        // The patch already succeeded; report an unverifiable follow-up without retrying it.
+      }
+      if (!postResync.ok || !after || after.version <= before.version || after.hashLength !== 128) {
+        logger.warn(
+          {
+            instanceId: this.instanceId,
+            collection,
+            reason: !postResync.ok
+              ? postResync.reason
+              : !after
+                ? "collection version unavailable after the write"
+                : after.version <= before.version
+                  ? "collection version did not advance"
+                  : "collection hash is not 128 bytes after the write",
+          },
+          "App-state write succeeded but its post-write sync did not verify",
+        );
+      }
+      return result;
+    } finally {
+      release();
+    }
+  }
+
+  private async runSafeChatModification<T>(
+    sock: WASocket,
+    modification: BaileysChatModification,
+    jid: string,
+    write: () => Promise<T>,
+  ): Promise<T> {
+    const { type } = chatModificationToAppPatch(modification, jid);
+    return this.runSafeAppStateWrite(sock, type, write);
+  }
+
+  private async safeChatModify(
+    sock: WASocket,
+    modification: BaileysChatModification,
+    jid: string,
+  ): Promise<void> {
+    await this.runSafeChatModification(sock, modification, jid, () =>
+      sock.chatModify(modification, jid),
+    );
   }
 
   private getSock(): WASocket {
@@ -1026,6 +1320,84 @@ export class BaileysAdapter implements ChannelAdapter {
     if (input.includes("@")) return input;
     const cleaned = input.replace(/[^0-9]/g, "");
     return `${cleaned}@s.whatsapp.net`;
+  }
+
+  private async getChatJidAliases(input: string): Promise<string[]> {
+    const aliases = new Set<string>();
+    const add = (jid: string | null | undefined): void => {
+      if (!jid) return;
+      aliases.add(jid);
+      aliases.add(jidNormalizedUser(jid));
+    };
+    const jid = jidNormalizedUser(this.normalizeJid(input));
+    add(jid);
+
+    const lidMapping = this.sock?.signalRepository?.lidMapping;
+    try {
+      if (jid.endsWith("@lid") && lidMapping?.getPNForLID) {
+        add(await lidMapping.getPNForLID(jid));
+      } else if (jid.endsWith("@s.whatsapp.net") && lidMapping?.getLIDForPN) {
+        add(await lidMapping.getLIDForPN(jid));
+      }
+    } catch {
+      // Keep the supplied PN/LID identity when no mapping is available.
+    }
+    return [...aliases];
+  }
+
+  private async getAppStateLastMessages(
+    chatId: string,
+    operation: string,
+  ): Promise<{ jid: string; lastMessages: MinimalMessage[] }> {
+    const requestedJid = jidNormalizedUser(this.normalizeJid(chatId));
+    const chatAliases = await this.getChatJidAliases(requestedJid);
+    const rows = db
+      .select({
+        id: messagesTable.id,
+        chatId: messagesTable.chatId,
+        timestamp: messagesTable.timestamp,
+        rawData: messagesTable.rawData,
+      })
+      .from(messagesTable)
+      .where(
+        and(
+          eq(messagesTable.instanceId, this.instanceId),
+          inArray(messagesTable.chatId, chatAliases),
+        ),
+      )
+      .orderBy(desc(messagesTable.timestamp), desc(messagesTable.id))
+      .limit(50)
+      .all();
+
+    const validMessages: StoredAppStateMessage[] = [];
+    for (const row of rows) {
+      const stored = getStoredMessage(row.rawData, row.id);
+      if (!stored?.key) continue;
+      if (
+        stored.key.remoteJid!.endsWith("@g.us") &&
+        !stored.key.fromMe &&
+        !stored.key.participant
+      ) {
+        continue;
+      }
+      const timestamp = storedMessageTimestampSeconds(row.timestamp, stored.messageTimestamp);
+      if (timestamp === undefined) continue;
+      validMessages.push({ key: stored.key, messageTimestamp: timestamp });
+    }
+
+    const patchJid = validMessages[0]?.key.remoteJid;
+    if (!patchJid) {
+      throw new Error(
+        `Cannot ${operation} chat '${requestedJid}' because no valid stored message key and timestamp are available`,
+      );
+    }
+
+    // Keep the patch index and its message range on the same PN/LID address used by the latest
+    // stored WAMessage key. Older rows with a different address are omitted from this small range.
+    const lastMessages = validMessages
+      .filter((message) => message.key.remoteJid === patchJid)
+      .slice(0, MAX_APP_STATE_LAST_MESSAGES);
+    return { jid: patchJid, lastMessages };
   }
 
   private normalizeStatusRecipient(input: string): string | null {
@@ -1294,7 +1666,10 @@ export class BaileysAdapter implements ChannelAdapter {
         keys: makeCacheableSignalKeyStore(state.keys, logger),
       },
       printQRInTerminal: false,
-      logger: logger.child({ instanceId: this.instanceId }),
+      logger: observeAppStateResyncLogs(
+        logger.child({ instanceId: this.instanceId }),
+        this.appStateResyncLogObserver,
+      ),
       generateHighQualityLinkPreview: true,
       keepAliveIntervalMs: BAILEYS_KEEP_ALIVE_INTERVAL_MS,
       syncFullHistory: true,
@@ -1854,30 +2229,38 @@ export class BaileysAdapter implements ChannelAdapter {
   async starMessage(chatId: string, messageId: string, star: boolean): Promise<void> {
     this.requireAppStateWritesEnabled();
     const sock = this.getSock();
-    const jid = this.normalizeJid(chatId);
+    const chatAliases = await this.getChatJidAliases(chatId);
     const stored = db
-      .select({ fromMe: messagesTable.isFromMe })
+      .select({ chatId: messagesTable.chatId, rawData: messagesTable.rawData })
       .from(messagesTable)
       .where(
         and(
           eq(messagesTable.instanceId, this.instanceId),
-          eq(messagesTable.chatId, jid),
+          inArray(messagesTable.chatId, chatAliases),
           eq(messagesTable.id, messageId),
         ),
       )
       .get();
-    if (!stored) throw new Error(`Message '${messageId}' was not found in chat '${jid}'`);
-
-    await sock.chatModify(
-      { star: { messages: [{ id: messageId, fromMe: stored.fromMe === 1 }], star } },
-      jid,
-    );
+    if (!stored) {
+      throw new Error(
+        `Message '${messageId}' was not found in chat '${this.normalizeJid(chatId)}'`,
+      );
+    }
+    const message = getStoredMessage(stored.rawData, messageId);
+    const key = message?.key;
+    if (!key?.remoteJid || typeof key.fromMe !== "boolean") {
+      throw new Error(
+        `Cannot star message '${messageId}' because its stored raw message key is unavailable`,
+      );
+    }
+    const starMessageKey = { ...key, id: messageId, fromMe: key.fromMe };
+    await this.safeChatModify(sock, { star: { messages: [starMessageKey], star } }, key.remoteJid);
     db.update(messagesTable)
       .set({ starred: star ? 1 : 0 })
       .where(
         and(
           eq(messagesTable.instanceId, this.instanceId),
-          eq(messagesTable.chatId, jid),
+          eq(messagesTable.chatId, stored.chatId),
           eq(messagesTable.id, messageId),
         ),
       )
@@ -2346,21 +2729,30 @@ export class BaileysAdapter implements ChannelAdapter {
     }
     const sock = this.getSock();
     const jid = this.normalizeJid(chatId);
-    const isGroup = jid.endsWith("@g.us");
+    const chatAliases = await this.getChatJidAliases(jid);
     const keys = [...new Set(messageIds)].flatMap((id) => {
-      if (!isGroup) return [{ remoteJid: jid, id }];
-
       const storedMessage = db
-        .select({ senderId: messagesTable.senderId, isFromMe: messagesTable.isFromMe })
+        .select({
+          senderId: messagesTable.senderId,
+          isFromMe: messagesTable.isFromMe,
+          rawData: messagesTable.rawData,
+        })
         .from(messagesTable)
         .where(
           and(
             eq(messagesTable.instanceId, this.instanceId),
-            eq(messagesTable.chatId, jid),
+            inArray(messagesTable.chatId, chatAliases),
             eq(messagesTable.id, id),
           ),
         )
         .get();
+
+      const rawKey = getStoredMessage(storedMessage?.rawData ?? null, id)?.key;
+      if (rawKey?.remoteJid) {
+        return [rawKey];
+      }
+
+      if (!jid.endsWith("@g.us")) return [{ remoteJid: jid, id }];
       const messageParticipant = storedMessage?.senderId || participant;
 
       if (!messageParticipant || messageParticipant === "me") {
@@ -2390,86 +2782,59 @@ export class BaileysAdapter implements ChannelAdapter {
   async modifyChat(chatId: string, modification: ChatModification): Promise<void> {
     this.requireAppStateWritesEnabled();
     const sock = this.getSock();
-    const jid = this.normalizeJid(chatId);
+    let jid = this.normalizeJid(chatId);
+    let patch: BaileysChatModification;
 
     switch (modification.action) {
-      case "archive":
-        await sock.chatModify({ archive: true, lastMessages: [] }, jid);
+      case "archive": {
+        const range = await this.getAppStateLastMessages(chatId, "archive");
+        jid = range.jid;
+        patch = { archive: true, lastMessages: range.lastMessages };
         break;
-      case "unarchive":
-        await sock.chatModify({ archive: false, lastMessages: [] }, jid);
+      }
+      case "unarchive": {
+        const range = await this.getAppStateLastMessages(chatId, "unarchive");
+        jid = range.jid;
+        patch = { archive: false, lastMessages: range.lastMessages };
         break;
+      }
       case "pin":
-        await sock.chatModify({ pin: true }, jid);
+        patch = { pin: true };
         break;
       case "unpin":
-        await sock.chatModify({ pin: false }, jid);
+        patch = { pin: false };
         break;
       case "mute":
-        await sock.chatModify(
-          { mute: modification.muteUntil ?? Date.now() + 8 * 60 * 60 * 1000 },
-          jid,
-        );
+        patch = { mute: modification.muteUntil ?? Date.now() + 8 * 60 * 60 * 1000 };
         break;
       case "unmute":
-        await sock.chatModify({ mute: null }, jid);
+        patch = { mute: null };
         break;
-      case "delete":
-        await sock.chatModify({ delete: true, lastMessages: [] }, jid);
+      case "delete": {
+        const range = await this.getAppStateLastMessages(chatId, "delete");
+        jid = range.jid;
+        patch = { delete: true, lastMessages: range.lastMessages };
         break;
-      case "clear":
-        await sock.chatModify({ clear: true, lastMessages: [] }, jid);
+      }
+      case "clear": {
+        const range = await this.getAppStateLastMessages(chatId, "clear");
+        jid = range.jid;
+        patch = { clear: true, lastMessages: range.lastMessages };
         break;
+      }
     }
+    await this.safeChatModify(sock, patch, jid);
   }
 
   async markChatUnread(chatId: string): Promise<void> {
     this.requireAppStateWritesEnabled();
     const sock = this.getSock();
-    const jid = this.normalizeJid(chatId);
-    const rows = db
-      .select({
-        id: messagesTable.id,
-        chatId: messagesTable.chatId,
-        senderId: messagesTable.senderId,
-        isFromMe: messagesTable.isFromMe,
-        timestamp: messagesTable.timestamp,
-        rawData: messagesTable.rawData,
-      })
-      .from(messagesTable)
-      .where(and(eq(messagesTable.instanceId, this.instanceId), eq(messagesTable.chatId, jid)))
-      .orderBy(desc(messagesTable.timestamp), desc(messagesTable.id))
-      .limit(50)
-      .all();
-    if (rows.length === 0) {
-      throw new Error(`Cannot mark chat '${jid}' unread because it has no stored messages`);
-    }
-
-    const lastMessages: MinimalMessage[] = rows.map((row) => {
-      let raw: WAMessage | undefined;
-      if (row.rawData) {
-        try {
-          raw = JSON.parse(row.rawData, BufferJSON.reviver) as WAMessage;
-        } catch {
-          // Reconstruct the minimum Baileys key from the normalized row.
-        }
-      }
-      const key: WAMessageKey = {
-        ...(raw?.key ?? {}),
-        remoteJid: jid,
-        id: row.id,
-        fromMe: row.isFromMe === 1,
-      };
-      if (jid.endsWith("@g.us") && !key.fromMe && !key.participant) {
-        key.participant = row.senderId;
-      }
-      return {
-        key,
-        messageTimestamp: row.timestamp,
-      };
-    });
-
-    await sock.chatModify({ markRead: false, lastMessages }, jid);
+    const range = await this.getAppStateLastMessages(chatId, "mark unread");
+    await this.safeChatModify(
+      sock,
+      { markRead: false, lastMessages: range.lastMessages },
+      range.jid,
+    );
   }
 
   private async requireBusinessLabelSupport(sock: WASocket, methods: string[]): Promise<string> {
@@ -2606,13 +2971,16 @@ export class BaileysAdapter implements ChannelAdapter {
     const sock = this.getSock();
     const jid = await this.requireBusinessLabelSupport(sock, ["addLabel"]);
     const label: BusinessLabel = { id: randomUUID(), name, color, deleted: false };
+    const action = {
+      id: label.id,
+      name: label.name,
+      color: label.color,
+      deleted: false,
+    };
     try {
-      await sock.addLabel(jid, {
-        id: label.id,
-        name: label.name,
-        color: label.color,
-        deleted: false,
-      });
+      await this.runSafeChatModification(sock, { addLabel: action }, jid, () =>
+        sock.addLabel(jid, action),
+      );
     } catch (error) {
       throw labelOperationError(error);
     }
@@ -2624,8 +2992,11 @@ export class BaileysAdapter implements ChannelAdapter {
     this.requireAppStateWritesEnabled();
     const sock = this.getSock();
     const jid = await this.requireBusinessLabelSupport(sock, ["addLabel"]);
+    const action = { id, ...update, deleted: false };
     try {
-      await sock.addLabel(jid, { id, ...update, deleted: false });
+      await this.runSafeChatModification(sock, { addLabel: action }, jid, () =>
+        sock.addLabel(jid, action),
+      );
     } catch (error) {
       throw labelOperationError(error);
     }
@@ -2649,8 +3020,11 @@ export class BaileysAdapter implements ChannelAdapter {
     this.requireAppStateWritesEnabled();
     const sock = this.getSock();
     const jid = await this.requireBusinessLabelSupport(sock, ["addLabel"]);
+    const action = { id, deleted: true };
     try {
-      await sock.addLabel(jid, { id, deleted: true });
+      await this.runSafeChatModification(sock, { addLabel: action }, jid, () =>
+        sock.addLabel(jid, action),
+      );
     } catch (error) {
       throw labelOperationError(error);
     }
@@ -2673,9 +3047,13 @@ export class BaileysAdapter implements ChannelAdapter {
     const sock = this.getSock();
     const jid = this.normalizeJid(chatId);
     await this.requireBusinessLabelSupport(sock, [add ? "addChatLabel" : "removeChatLabel"]);
+    const modification: BaileysChatModification = add
+      ? { addChatLabel: { labelId } }
+      : { removeChatLabel: { labelId } };
     try {
-      if (add) await sock.addChatLabel(jid, labelId);
-      else await sock.removeChatLabel(jid, labelId);
+      await this.runSafeChatModification(sock, modification, jid, () =>
+        add ? sock.addChatLabel(jid, labelId) : sock.removeChatLabel(jid, labelId),
+      );
     } catch (error) {
       throw labelOperationError(error);
     }
@@ -2692,9 +3070,15 @@ export class BaileysAdapter implements ChannelAdapter {
     const sock = this.getSock();
     const jid = this.normalizeJid(chatId);
     await this.requireBusinessLabelSupport(sock, [add ? "addMessageLabel" : "removeMessageLabel"]);
+    const modification: BaileysChatModification = add
+      ? { addMessageLabel: { labelId, messageId } }
+      : { removeMessageLabel: { labelId, messageId } };
     try {
-      if (add) await sock.addMessageLabel(jid, messageId, labelId);
-      else await sock.removeMessageLabel(jid, messageId, labelId);
+      await this.runSafeChatModification(sock, modification, jid, () =>
+        add
+          ? sock.addMessageLabel(jid, messageId, labelId)
+          : sock.removeMessageLabel(jid, messageId, labelId),
+      );
     } catch (error) {
       throw labelOperationError(error);
     }
@@ -2704,7 +3088,10 @@ export class BaileysAdapter implements ChannelAdapter {
   async createQuickReply(input: { shortcut: string; message: string }): Promise<void> {
     this.requireAppStateWritesEnabled();
     const sock = this.getSock();
-    await sock.addOrEditQuickReply({ shortcut: input.shortcut, message: input.message });
+    const quickReply = { shortcut: input.shortcut, message: input.message };
+    await this.runSafeChatModification(sock, { quickReply }, "", () =>
+      sock.addOrEditQuickReply(quickReply),
+    );
   }
 
   async editQuickReply(input: {
@@ -2714,17 +3101,23 @@ export class BaileysAdapter implements ChannelAdapter {
   }): Promise<void> {
     this.requireAppStateWritesEnabled();
     const sock = this.getSock();
-    await sock.addOrEditQuickReply({
+    const quickReply = {
       shortcut: input.shortcut,
       message: input.message,
       timestamp: input.timestamp,
-    });
+    };
+    await this.runSafeChatModification(sock, { quickReply }, "", () =>
+      sock.addOrEditQuickReply(quickReply),
+    );
   }
 
   async deleteQuickReply(timestamp: string): Promise<void> {
     this.requireAppStateWritesEnabled();
     const sock = this.getSock();
-    await sock.removeQuickReply(timestamp);
+    const quickReply = { timestamp, deleted: true };
+    await this.runSafeChatModification(sock, { quickReply }, "", () =>
+      sock.removeQuickReply(timestamp),
+    );
   }
 
   async setDisappearingMessages(
@@ -2747,7 +3140,7 @@ export class BaileysAdapter implements ChannelAdapter {
   // ---- Groups ----
 
   async createGroup(name: string, participants: string[]): Promise<GroupResponse> {
-    this.requireAppStateWritesEnabled();
+    this.requireGroupWritesEnabled();
     const sock = this.getSock();
     const jids = participants.map((p) => this.normalizeJid(p));
     const result = await sock.groupCreate(name, jids);
@@ -2755,7 +3148,7 @@ export class BaileysAdapter implements ChannelAdapter {
   }
 
   async modifyGroup(groupId: string, modification: GroupModification): Promise<void> {
-    this.requireAppStateWritesEnabled();
+    this.requireGroupWritesEnabled();
     const sock = this.getSock();
     const jid = normalizeGroupJid(groupId);
 
@@ -2796,7 +3189,7 @@ export class BaileysAdapter implements ChannelAdapter {
     participants: string[],
     action: ParticipantAction,
   ): Promise<void> {
-    this.requireAppStateWritesEnabled();
+    this.requireGroupWritesEnabled();
     const sock = this.getSock();
     const jid = normalizeGroupJid(groupId);
     const jids = participants.map((p) => this.normalizeJid(p));
@@ -2884,7 +3277,7 @@ export class BaileysAdapter implements ChannelAdapter {
   }
 
   async updateGroupPicture(groupId: string, image: string): Promise<void> {
-    this.requireAppStateWritesEnabled();
+    this.requireGroupWritesEnabled();
     const sock = this.getSock();
     const jid = normalizeGroupJid(groupId);
     await this.requireGroupPictureAdmin(sock, jid, "update");
@@ -2897,7 +3290,7 @@ export class BaileysAdapter implements ChannelAdapter {
   }
 
   async removeGroupPicture(groupId: string): Promise<void> {
-    this.requireAppStateWritesEnabled();
+    this.requireGroupWritesEnabled();
     const sock = this.getSock();
     const jid = normalizeGroupJid(groupId);
     await this.requireGroupPictureAdmin(sock, jid, "remove");
@@ -2995,7 +3388,7 @@ export class BaileysAdapter implements ChannelAdapter {
   }
 
   async joinGroup(inviteCode: string): Promise<string> {
-    this.requireAppStateWritesEnabled();
+    this.requireGroupWritesEnabled();
     const sock = this.getSock();
     const groupId = await sock.groupAcceptInvite(normalizeGroupInviteCode(inviteCode));
     return groupId ?? "";
@@ -3040,7 +3433,7 @@ export class BaileysAdapter implements ChannelAdapter {
     participantJid: string,
     action: "approve" | "reject",
   ): Promise<void> {
-    this.requireAppStateWritesEnabled();
+    this.requireGroupWritesEnabled();
     const sock = this.getSock();
     const jid = normalizeGroupJid(groupId);
     const participant = this.normalizeJid(participantJid);
@@ -3048,7 +3441,7 @@ export class BaileysAdapter implements ChannelAdapter {
   }
 
   async setGroupJoinApprovalMode(groupId: string, mode: "on" | "off"): Promise<void> {
-    this.requireAppStateWritesEnabled();
+    this.requireGroupWritesEnabled();
     const sock = this.getSock();
     await sock.groupJoinApprovalMode(normalizeGroupJid(groupId), mode);
   }
@@ -3057,7 +3450,7 @@ export class BaileysAdapter implements ChannelAdapter {
     groupId: string,
     mode: "admin_add" | "all_member_add",
   ): Promise<void> {
-    this.requireAppStateWritesEnabled();
+    this.requireGroupWritesEnabled();
     const sock = this.getSock();
     await sock.groupMemberAddMode(normalizeGroupJid(groupId), mode);
   }
@@ -3065,7 +3458,7 @@ export class BaileysAdapter implements ChannelAdapter {
   // ---- Communities ----
 
   async createCommunity(subject: string, description = ""): Promise<GroupMetadata | null> {
-    this.requireAppStateWritesEnabled();
+    this.requireGroupWritesEnabled();
     const sock = this.getSock();
     const community = await sock.communityCreate(subject, description);
     return community ? this.normalizeGroupMetadata(community) : null;
@@ -3089,19 +3482,19 @@ export class BaileysAdapter implements ChannelAdapter {
   }
 
   async linkGroupToCommunity(groupId: string, communityId: string): Promise<void> {
-    this.requireAppStateWritesEnabled();
+    this.requireGroupWritesEnabled();
     const sock = this.getSock();
     await sock.communityLinkGroup(normalizeGroupJid(groupId), normalizeGroupJid(communityId));
   }
 
   async unlinkGroupFromCommunity(groupId: string, communityId: string): Promise<void> {
-    this.requireAppStateWritesEnabled();
+    this.requireGroupWritesEnabled();
     const sock = this.getSock();
     await sock.communityUnlinkGroup(normalizeGroupJid(groupId), normalizeGroupJid(communityId));
   }
 
   async leaveCommunity(communityId: string): Promise<void> {
-    this.requireAppStateWritesEnabled();
+    this.requireGroupWritesEnabled();
     const sock = this.getSock();
     await sock.communityLeave(normalizeGroupJid(communityId));
   }
@@ -3173,7 +3566,9 @@ export class BaileysAdapter implements ChannelAdapter {
     // Baileys implements updateProfileName through chatModify/appPatch.
     this.requireAppStateWritesEnabled();
     const sock = this.getSock();
-    await sock.updateProfileName(name);
+    await this.runSafeChatModification(sock, { pushNameSetting: name }, "", () =>
+      sock.updateProfileName(name),
+    );
   }
 
   async updateProfileStatus(statusText: string): Promise<void> {
@@ -3302,13 +3697,13 @@ export class BaileysAdapter implements ChannelAdapter {
   // ---- Newsletter / Channels ----
 
   async newsletterFollow(jid: string): Promise<void> {
-    this.requireAppStateWritesEnabled();
+    this.requireGroupWritesEnabled();
     const sock = this.getSock();
     await sock.newsletterFollow(jid);
   }
 
   async newsletterUnfollow(jid: string): Promise<void> {
-    this.requireAppStateWritesEnabled();
+    this.requireGroupWritesEnabled();
     const sock = this.getSock();
     await sock.newsletterUnfollow(jid);
   }
@@ -3320,7 +3715,7 @@ export class BaileysAdapter implements ChannelAdapter {
   }
 
   async createNewsletter(name: string, description?: string): Promise<NewsletterMetadata> {
-    this.requireAppStateWritesEnabled();
+    this.requireGroupWritesEnabled();
     const sock = this.getSock();
     return sock.newsletterCreate(name, description);
   }
@@ -3337,26 +3732,26 @@ export class BaileysAdapter implements ChannelAdapter {
   }
 
   async updateNewsletterName(jid: string, name: string): Promise<void> {
-    this.requireAppStateWritesEnabled();
+    this.requireGroupWritesEnabled();
     const sock = this.getSock();
     await sock.newsletterUpdateName(jid, name);
   }
 
   async updateNewsletterDescription(jid: string, description: string): Promise<void> {
-    this.requireAppStateWritesEnabled();
+    this.requireGroupWritesEnabled();
     const sock = this.getSock();
     await sock.newsletterUpdateDescription(jid, description);
   }
 
   async updateNewsletterPicture(jid: string, image: string): Promise<void> {
-    this.requireAppStateWritesEnabled();
+    this.requireGroupWritesEnabled();
     const sock = this.getSock();
     const jpeg = await mediaService.prepareGroupProfilePicture(image);
     await sock.newsletterUpdatePicture(jid, jpeg);
   }
 
   async reactToNewsletterMessage(jid: string, serverId: string, reaction?: string): Promise<void> {
-    this.requireAppStateWritesEnabled();
+    this.requireGroupWritesEnabled();
     const sock = this.getSock();
     await sock.newsletterReactMessage(jid, serverId, reaction);
   }
