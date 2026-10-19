@@ -755,6 +755,14 @@ export class CloudApiAdapter implements ChannelAdapter {
     throw new Error("Group metadata is not supported on Cloud API");
   }
 
+  assertGroupMemberLabelWritesEnabled(): void {
+    throw new Error("Group member labels are not supported on Cloud API");
+  }
+
+  async updateGroupMemberLabel(_groupId: string, _memberLabel: string | null): Promise<void> {
+    throw new Error("Group member labels are not supported on Cloud API");
+  }
+
   async updateGroupPicture(_groupId: string, _image: string): Promise<void> {
     throw new Error("Updating a group picture is not supported on Cloud API");
   }
