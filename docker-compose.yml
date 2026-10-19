@@ -30,6 +30,7 @@ services:
       - WA_TTS_TIMEOUT_MS=${WA_TTS_TIMEOUT_MS:-60000}
       - TTS_CONCURRENCY=${TTS_CONCURRENCY:-2}
       - WA_TTS_FFMPEG_PATH=${WA_TTS_FFMPEG_PATH:-}
+      - WA_REQUIRE_EVENT_WEBHOOK=${WA_REQUIRE_EVENT_WEBHOOK:-false}
     volumes:
       - wa-data:/app/data
     depends_on:

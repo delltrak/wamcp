@@ -23,6 +23,8 @@ import type { MetaWebhookPayload } from "./channels/cloud-api/cloud.events.js";
 import { installShutdownHandlers, SHUTDOWN_TIMEOUT_MS } from "./utils/shutdown.js";
 import { logger } from "./utils/logger.js";
 import { getAutoReadMode } from "./services/auto-read.js";
+import { bootEventWebhook, type EventWebhookStatus } from "./services/event-webhook-config.js";
+import { buildHealthBody } from "./server/health.js";
 
 const CLOUD_WEBHOOK_PATH = "/cloud-webhook";
 
@@ -89,7 +91,7 @@ async function initServices() {
   return { instanceManager, messageQueue, eventWebhook, maintenance };
 }
 
-async function startHttp(): Promise<void> {
+async function startHttp(webhookStatus: EventWebhookStatus): Promise<void> {
   const { instanceManager, messageQueue, eventWebhook, maintenance } = await initServices();
   const mcpSessions = new McpHttpSessionManager(instanceManager, messageQueue);
   const startTime = Date.now();
@@ -101,16 +103,16 @@ async function startHttp(): Promise<void> {
     if (url.pathname === HEALTH_ENDPOINT && req.method === "GET") {
       const allInstances = instanceManager.getAllInstances();
       const connected = allInstances.filter((i) => i.status === "connected").length;
-      const health = {
-        status: "ok",
-        uptime: Math.floor((Date.now() - startTime) / 1000),
+      const health = buildHealthBody({
+        uptimeSeconds: Math.floor((Date.now() - startTime) / 1000),
         instances: {
           total: allInstances.length,
           connected,
           disconnected: allInstances.length - connected,
         },
         version: VERSION,
-      };
+        webhook: webhookStatus,
+      });
       res.writeHead(200, { "Content-Type": "application/json" });
       res.end(JSON.stringify(health));
       return;
@@ -285,11 +287,12 @@ async function startStdio(): Promise<void> {
 
 async function main(): Promise<void> {
   logger.info({ transport, version: VERSION }, "Starting WA MCP server");
+  const webhookStatus = bootEventWebhook();
 
   if (transport === "stdio") {
     await startStdio();
   } else {
-    await startHttp();
+    await startHttp(webhookStatus);
   }
 }
 
