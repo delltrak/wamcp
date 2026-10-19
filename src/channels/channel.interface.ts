@@ -67,6 +67,8 @@ export interface ChannelAdapter {
   connect(): Promise<void>;
   disconnect(): Promise<void>;
   getStatus(): ConnectionStatus;
+  /** True when this adapter owns a socket that can still reach WhatsApp. */
+  hasLiveSocket?(): boolean;
   getLifecycleStatus?(): InstanceRuntimeStatus;
 
   // ---- Authentication ----

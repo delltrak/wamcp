@@ -590,7 +590,11 @@ Baileys emits `instance.connected` and `instance.disconnected`; Cloud API emits
 them after successful credential verification and on an explicit disconnect.
 The pairing and QR events are Baileys-only. Disconnect events are coalesced to
 the first close after a connection opens, with a terminal `loggedOut` event
-allowed after a reconnecting close.
+allowed after a reconnecting close. When the exponential reconnect schedule
+reaches its cap, one more `instance.disconnected` event is emitted for that
+same outage with `willReconnect: true` and `reconnectInMs` set to 30000.
+Retries continue at that interval until the socket opens, `disconnect()` is
+called, or the session logs out.
 
 ```json
 {
@@ -852,8 +856,13 @@ the configured interval. Successful probes and inbound message, receipt, or pres
 as healthy; raw websocket frames do not. Two consecutive failed probes end the socket and let automatic
 reconnect handle the connection. If Baileys' event buffer stays active longer than
 `WA_BAILEYS_EVENT_BUFFER_STALL_MS`, the watchdog flushes it to release held events; if it remains
-active at the next check, the socket ends and follows the normal reconnect flow. Connection close
-and reconnect logs include the disconnect reason, status code, and offline duration.
+active at the next check, the socket ends and follows the normal reconnect flow. A non-logout
+close drops the dead socket immediately. Reconnect delays grow from 1s to 30s and then stay at 30s
+until the connection opens, `disconnect()` is called, or WhatsApp logs the session out. The stored
+status remains `disconnected` while no socket is live, and `connecting` only while one is. The
+maintenance health check still retries disconnected instances that have connected before, and it
+also recovers a `connecting` status older than 2 minutes when the adapter has no live socket.
+Connection close and reconnect logs include the disconnect reason, status code, and offline duration.
 
 `wa_send_sticker` accepts PNG, JPG, GIF, and WebP URLs or base64. PNG/JPG and GIF inputs are
 converted to 512x512 WebP with transparent padding. Static stickers are limited to 100 KB and

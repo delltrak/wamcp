@@ -34,6 +34,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Baileys keeps reconnecting after a non-logout close such as `unavailableService` (503). The
+  current socket is cleared, retries continue every 30s after the exponential cap, and only one
+  reconnect timer is pending. The stored status stays `disconnected` until a live socket exists, and
+  the health check recovers a `connecting` row older than 2 minutes with no live socket. When the
+  backoff cap is reached, one additional `instance.disconnected` event is sent with
+  `willReconnect: true` and `reconnectInMs: 30000`.
 - App-state writes now run through a per-instance queue with configurable spacing and a resync
   preflight that requires a retrievable current key, a positive collection version, a 128-byte hash,
   and no Baileys-reported sync, decode, missing-key, or hash-verification failure. Successful writes
