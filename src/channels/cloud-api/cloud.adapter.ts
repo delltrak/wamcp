@@ -45,6 +45,7 @@ import type {
   SendEventOptions,
   CatalogProductCreateInput,
   CatalogProductUpdateInput,
+  InstanceRuntimeStatus,
 } from "../../types/channel.types.js";
 import type {
   CatalogCollection,
@@ -121,6 +122,8 @@ export class CloudApiAdapter implements ChannelAdapter {
   private phoneNumberId: string | null = null;
   private businessId: string | null = null;
   private status: ConnectionStatus = "disconnected";
+  private displayPhoneNumber: string | null = null;
+  private lastDisconnectAt: number | null = null;
 
   private readonly listeners = new Map<ChannelEvent, Set<ChannelEventHandler<ChannelEvent>>>();
 
@@ -216,13 +219,22 @@ export class CloudApiAdapter implements ChannelAdapter {
     try {
       // Verify credentials by fetching phone number info
       const url = `${GRAPH_API_BASE}/${this.phoneNumberId}`;
-      await this.request<CloudApiPhoneNumberResponse>(url);
+      const phoneInfo = await this.request<CloudApiPhoneNumberResponse>(url);
       this.status = "connected";
+      this.displayPhoneNumber = phoneInfo.display_phone_number;
       logger.info({ instanceId: this.instanceId }, "Cloud API connected");
 
       this.emit("connection.changed", {
         instanceId: this.instanceId,
         status: "open",
+      });
+      this.emit("instance.connected", {
+        instanceId: this.instanceId,
+        phone: this.displayPhoneNumber,
+        lid: null,
+        pushName: null,
+        connectedAt: Date.now(),
+        wasPairing: false,
       });
     } catch (err) {
       this.status = "disconnected";
@@ -233,7 +245,17 @@ export class CloudApiAdapter implements ChannelAdapter {
 
   async disconnect(): Promise<void> {
     this.status = "disconnected";
+    this.lastDisconnectAt = Date.now();
     logger.info({ instanceId: this.instanceId }, "Cloud API disconnected");
+
+    this.emit("instance.disconnected", {
+      instanceId: this.instanceId,
+      reason: "Disconnected",
+      statusCode: null,
+      loggedOut: false,
+      willReconnect: false,
+      disconnectedAt: this.lastDisconnectAt,
+    });
 
     this.emit("connection.changed", {
       instanceId: this.instanceId,
@@ -243,6 +265,18 @@ export class CloudApiAdapter implements ChannelAdapter {
 
   getStatus(): ConnectionStatus {
     return this.status;
+  }
+
+  getLifecycleStatus(): InstanceRuntimeStatus {
+    return {
+      phone: this.status === "connected" ? this.displayPhoneNumber : null,
+      lid: null,
+      pushName: null,
+      disconnectReason: this.lastDisconnectAt === null ? null : "Disconnected",
+      disconnectStatusCode: null,
+      pendingChallenge: null,
+      presenceMode: null,
+    };
   }
 
   // ---- Authentication ----

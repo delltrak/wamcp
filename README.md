@@ -146,10 +146,10 @@ Add to your `claude_desktop_config.json`:
 
 ## 🛠️ Tools
 
-WA MCP exposes **133 tools** across 15 domains. All tools use the `wa_` prefix.
+WA MCP exposes **134 tools** across 15 domains. All tools use the `wa_` prefix.
 
 <details>
-<summary>📋 <strong>Instance Management</strong> (8 tools)</summary>
+<summary>📋 <strong>Instance Management</strong> (9 tools)</summary>
 
 | Tool                       | Description                      |
 | -------------------------- | -------------------------------- |
@@ -158,6 +158,7 @@ WA MCP exposes **133 tools** across 15 domains. All tools use the `wa_` prefix.
 | `wa_disconnect_instance`   | Gracefully disconnect            |
 | `wa_delete_instance`       | Permanently remove instance      |
 | `wa_restart_instance`      | Disconnect + reconnect           |
+| `wa_get_instance_status`   | Read lifecycle status for one or all instances |
 | `wa_get_qr_code`           | Get QR as base64 (Baileys)       |
 | `wa_get_pairing_code`      | Get pairing code (Baileys)       |
 | `wa_set_cloud_credentials` | Set Cloud API token              |
@@ -563,6 +564,63 @@ Opt into `event.response` to receive event RSVPs with `eventMessageId`,
 `participant`, `status`, and `timestamp`. The status is included after Baileys
 decrypts the response using the original event's message secret.
 
+Opt into lifecycle events by adding their names to `WA_EVENT_WEBHOOK_EVENTS` or
+the destination's `events` list. Lifecycle timestamps are Unix milliseconds.
+Baileys emits `instance.connected` and `instance.disconnected`; Cloud API emits
+them after successful credential verification and on an explicit disconnect.
+The pairing and QR events are Baileys-only. Disconnect events are coalesced to
+the first close after a connection opens, with a terminal `loggedOut` event
+allowed after a reconnecting close.
+
+```json
+{
+  "event": "instance.connected",
+  "instanceId": "inst_1234abcd",
+  "phone": "5511999999999@s.whatsapp.net",
+  "lid": "9000000000001@lid",
+  "pushName": "Support",
+  "connectedAt": 1792412345678,
+  "wasPairing": true
+}
+```
+
+```json
+{
+  "event": "instance.disconnected",
+  "instanceId": "inst_1234abcd",
+  "reason": "restartRequired",
+  "statusCode": 515,
+  "loggedOut": false,
+  "willReconnect": true,
+  "reconnectInMs": 1000,
+  "disconnectedAt": 1792412345678
+}
+```
+
+```json
+{
+  "event": "instance.pairing_code_generated",
+  "instanceId": "inst_1234abcd",
+  "method": "pairing_code",
+  "generatedAt": 1792412345678,
+  "expiresAt": 1792412405678
+}
+```
+
+`instance.qr_generated` uses the same generated payload with `method: "qr"`.
+`instance.pairing_expired` and `instance.qr_expired` carry `method`,
+`generatedAt`, and `expiredAt`. Pairing codes and QR strings are never included
+in lifecycle webhook payloads. Challenges expire after 60 seconds unless they
+are replaced, the connection closes, or the instance connects first.
+
+`wa_get_instance_status` returns `{ "instances": [...] }`. Pass `instanceId`
+to return one instance; omit it to list all instances. Each entry includes
+`connectionState`, connected phone/LID/push name, ISO `lastConnected` and
+`lastDisconnected` timestamps, the last disconnect reason and status code,
+`pendingPairing` (`none`, `pairing_code`, or `qr`) with ISO generation and expiry
+times, and `presenceMode` when the channel provides it. The tool does not return
+pairing codes, QR strings, tokens, keys, or credential data.
+
 See [Outgoing event webhooks](docs/event-webhooks.md) for configuration details.
 
 ---
@@ -582,7 +640,7 @@ See [Outgoing event webhooks](docs/event-webhooks.md) for configuration details.
 │  │  Layer 1 — MCP Transport (HTTP/stdio) │ │
 │  ├────────────────────────────────────────┤ │
 │  │  Layer 2 — MCP Core                   │ │
-│  │ 133 Tools │ 10 Resources │ 14 Events  │ │
+│  │ 134 Tools │ 10 Resources │ 20 Events  │ │
 │  ├────────────────────────────────────────┤ │
 │  │  Layer 3 — Services                   │ │
 │  │  Instance Manager │ Queue │ Dedup     │ │

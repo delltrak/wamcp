@@ -82,6 +82,8 @@ import type {
   CatalogProductUpdateInput,
   NewsletterPost,
   NewsletterPostsPage,
+  InstanceAuthMethod,
+  InstanceRuntimeStatus,
 } from "../../types/channel.types.js";
 import { useSqliteAuthState, clearAuthState } from "./baileys.auth.js";
 import { normalizePrivacySettings } from "./privacy.js";
@@ -178,6 +180,21 @@ const APP_STATE_WRITES_DISABLED_ERROR =
   "WhatsApp account, server, and app-state writes are disabled because changes can get this linked device removed (see issue #71). Set WA_APP_STATE_WRITES_ENABLED=true to enable at your own risk.";
 
 type PresenceMode = "on_activity" | "always";
+interface PendingAuthChallenge {
+  generatedAt: number;
+  expiresAt: number;
+  timer: ReturnType<typeof setTimeout>;
+}
+
+const AUTH_CHALLENGE_TTL_MS = 60_000;
+
+function disconnectReasonName(statusCode: number | undefined): string {
+  if (typeof statusCode !== "number") return "unknown";
+  const name = Object.entries(DisconnectReason).find(
+    ([key, value]) => !/^\d+$/.test(key) && value === statusCode,
+  )?.[0];
+  return name ?? `unknown (${statusCode})`;
+}
 type GlobalPresenceStatus = "available" | "unavailable";
 
 interface ViewOnceAudio {
@@ -827,6 +844,9 @@ export class BaileysAdapter implements ChannelAdapter {
   private appendNotifyWatermarkMs: number | null = null;
   private lastDisconnectReason: string | null = null;
   private lastDisconnectStatusCode: number | null = null;
+  private readonly pendingAuthChallenges = new Map<InstanceAuthMethod, PendingAuthChallenge>();
+  private disconnectEventEmittedSinceOpen = true;
+  private terminalDisconnectEventEmittedSinceOpen = false;
   private consecutiveHealthProbeFailures = 0;
   private healthActivityGeneration = 0;
 
@@ -1342,6 +1362,7 @@ export class BaileysAdapter implements ChannelAdapter {
     this.clearReconnectTimer();
     this.clearHealthWatchdog();
     this.clearEventBufferStallWatchdog();
+    this.clearAuthChallenges(Date.now());
     this.resetActivityPresence();
     this.pendingCalls.clear();
     if (this.sock) {
@@ -1353,6 +1374,117 @@ export class BaileysAdapter implements ChannelAdapter {
 
   getStatus(): ConnectionStatus {
     return this.status;
+  }
+
+  getLifecycleStatus(): InstanceRuntimeStatus {
+    const connected = this.status === "connected";
+    const sock = connected ? this.sock : null;
+    const user = sock?.user as { id?: string; lid?: string; name?: string } | undefined;
+    const pending = [...this.pendingAuthChallenges.entries()].sort(
+      ([, left], [, right]) => right.generatedAt - left.generatedAt,
+    )[0];
+
+    return {
+      phone: connected ? this.ownPhoneJid(sock) : null,
+      lid: connected ? this.ownLid(user) : null,
+      pushName: connected && typeof user?.name === "string" ? user.name : null,
+      disconnectReason: this.lastDisconnectReason,
+      disconnectStatusCode: this.lastDisconnectStatusCode,
+      pendingChallenge: pending
+        ? {
+            method: pending[0],
+            generatedAt: pending[1].generatedAt,
+            expiresAt: pending[1].expiresAt,
+          }
+        : null,
+      presenceMode: this.presenceMode,
+    };
+  }
+
+  private ownPhoneJid(sock: WASocket | null): string | null {
+    const user = sock?.user as { id?: string } | undefined;
+    const candidates = [this.authMeId, user?.id];
+    const phoneJid = candidates.find(
+      (value): value is string => typeof value === "string" && value.endsWith("@s.whatsapp.net"),
+    );
+    return phoneJid ? jidNormalizedUser(phoneJid) : null;
+  }
+
+  private ownLid(user: { lid?: string } | undefined): string | null {
+    const candidates = [this.authMeLid, user?.lid];
+    return (
+      candidates.find(
+        (value): value is string => typeof value === "string" && value.endsWith("@lid"),
+      ) ?? null
+    );
+  }
+
+  private emitAuthChallengeGenerated(method: InstanceAuthMethod): void {
+    const existing = this.pendingAuthChallenges.get(method);
+    const generatedAt = Date.now();
+    if (existing) this.expireAuthChallenge(method, existing.generatedAt, generatedAt);
+
+    const expiresAt = generatedAt + AUTH_CHALLENGE_TTL_MS;
+    const timer = setTimeout(() => {
+      this.expireAuthChallenge(method, generatedAt, Date.now());
+    }, AUTH_CHALLENGE_TTL_MS);
+    this.pendingAuthChallenges.set(method, { generatedAt, expiresAt, timer });
+
+    if (method === "pairing_code") {
+      this.emit("instance.pairing_code_generated", {
+        instanceId: this.instanceId,
+        method,
+        generatedAt,
+        expiresAt,
+      });
+    } else {
+      this.emit("instance.qr_generated", {
+        instanceId: this.instanceId,
+        method,
+        generatedAt,
+        expiresAt,
+      });
+    }
+  }
+
+  private expireAuthChallenge(
+    method: InstanceAuthMethod,
+    generatedAt: number,
+    expiredAt: number,
+  ): void {
+    const pending = this.pendingAuthChallenges.get(method);
+    if (!pending || pending.generatedAt !== generatedAt) return;
+
+    clearTimeout(pending.timer);
+    this.pendingAuthChallenges.delete(method);
+    if (method === "pairing_code") {
+      this.pairingCodeValue = null;
+      this.emit("instance.pairing_expired", {
+        instanceId: this.instanceId,
+        method,
+        generatedAt,
+        expiredAt,
+      });
+    } else {
+      this.qrCode = null;
+      this.emit("instance.qr_expired", {
+        instanceId: this.instanceId,
+        method,
+        generatedAt,
+        expiredAt,
+      });
+    }
+  }
+
+  private clearAuthChallenges(expiredAt?: number): void {
+    for (const [method, pending] of this.pendingAuthChallenges) {
+      if (expiredAt === undefined) {
+        clearTimeout(pending.timer);
+        this.pendingAuthChallenges.delete(method);
+      } else {
+        this.expireAuthChallenge(method, pending.generatedAt, expiredAt);
+      }
+    }
   }
 
   // ---- Authentication ----
@@ -1374,8 +1506,13 @@ export class BaileysAdapter implements ChannelAdapter {
     // QR event already fired before this call — request pairing code immediately
     if (this.qrCode && this.sock) {
       await new Promise((r) => setTimeout(r, 1000));
-      const code = await this.sock.requestPairingCode(phone);
-      this.pairingCodeValue = code ?? null;
+      const sock = this.sock;
+      if (!sock || this.status !== "qr_pending") return null;
+      const code = await sock.requestPairingCode(phone);
+      if (this.sock !== sock || this.status !== "qr_pending") return null;
+      const pairingCode = code ?? null;
+      if (pairingCode) this.emitAuthChallengeGenerated("pairing_code");
+      this.pairingCodeValue = pairingCode;
       return this.pairingCodeValue;
     }
 
@@ -5124,20 +5261,30 @@ export class BaileysAdapter implements ChannelAdapter {
       const { connection, lastDisconnect, qr } = update;
 
       if (qr) {
+        this.emitAuthChallengeGenerated("qr");
         this.qrCode = qr;
         this.status = "qr_pending";
 
         if (this.pairingPhone && sock) {
           // Evolution API pattern: call requestPairingCode inside the QR event, with a small delay
+          const pairingPhone = this.pairingPhone;
           setTimeout(async () => {
             try {
-              const code = await sock.requestPairingCode(this.pairingPhone!);
-              this.pairingCodeValue = code ?? null;
+              if (this.sock !== sock || this.status !== "qr_pending") {
+                this.pairingCodeResolver?.(null);
+                this.pairingCodeResolver = null;
+                return;
+              }
+              const code = await sock.requestPairingCode(pairingPhone);
+              if (this.sock !== sock || this.status !== "qr_pending") return;
+              const pairingCode = code ?? null;
+              if (pairingCode) this.emitAuthChallengeGenerated("pairing_code");
+              this.pairingCodeValue = pairingCode;
               if (this.pairingCodeResolver) {
                 this.pairingCodeResolver(this.pairingCodeValue);
                 this.pairingCodeResolver = null;
               }
-              logger.info({ instanceId: this.instanceId, code }, "Pairing code generated");
+              logger.info({ instanceId: this.instanceId }, "Pairing code generated");
             } catch (err) {
               logger.error({ instanceId: this.instanceId, err }, "Failed to generate pairing code");
               if (this.pairingCodeResolver) {
@@ -5150,7 +5297,9 @@ export class BaileysAdapter implements ChannelAdapter {
       }
 
       if (connection === "open") {
-        this.appendNotifyWatermarkMs = this.getAppendNotifyWatermark(Date.now());
+        const connectedAt = Date.now();
+        const wasPairing = this.pendingAuthChallenges.size > 0;
+        this.appendNotifyWatermarkMs = this.getAppendNotifyWatermark(connectedAt);
         this.status = "connected";
         const persistedDisconnect = db
           .select({ lastDisconnected: instancesTable.lastDisconnected })
@@ -5160,12 +5309,15 @@ export class BaileysAdapter implements ChannelAdapter {
         const offlineSince = this.disconnectedAtMs ?? persistedDisconnect ?? null;
         const offlineDurationMs =
           offlineSince !== null ? Math.max(0, Date.now() - offlineSince) : undefined;
-        this.connectedAtMs = Date.now();
+        this.connectedAtMs = connectedAt;
         this.disconnectedAtMs = null;
         this.qrCode = null;
         this.pairingPhone = null;
         this.pairingCodeValue = null;
         this.pairingCodeResolver = null;
+        this.clearAuthChallenges();
+        this.disconnectEventEmittedSinceOpen = false;
+        this.terminalDisconnectEventEmittedSinceOpen = false;
         this.reconnectAttempt = 0;
         this.consecutiveHealthProbeFailures = 0;
         this.resetHealthWatchdog(sock);
@@ -5174,6 +5326,15 @@ export class BaileysAdapter implements ChannelAdapter {
             this.logGlobalPresenceFailure(error);
           });
         }
+        const user = sock.user as { lid?: string; name?: string } | undefined;
+        this.emit("instance.connected", {
+          instanceId: this.instanceId,
+          phone: this.ownPhoneJid(sock),
+          lid: this.ownLid(user),
+          pushName: typeof user?.name === "string" ? user.name : null,
+          connectedAt,
+          wasPairing,
+        });
         logger.info({ instanceId: this.instanceId, offlineDurationMs }, "Connected to WhatsApp");
       }
 
@@ -5184,16 +5345,18 @@ export class BaileysAdapter implements ChannelAdapter {
         this.appendNotifyWatermarkMs = null;
         this.status = "disconnected";
         const boom = (lastDisconnect?.error as Boom)?.output;
-        const statusCode = boom?.statusCode;
-        const error = lastDisconnect?.error;
-        const reason = error instanceof Error ? error.message : error ? String(error) : "unknown";
+        const statusCode = typeof boom?.statusCode === "number" ? boom.statusCode : undefined;
+        const reason = disconnectReasonName(statusCode);
+        const loggedOut = statusCode === DisconnectReason.loggedOut;
         const closedAt = Date.now();
+        const priorDisconnectedAt = this.disconnectedAtMs;
         const connectedDurationMs =
           this.connectedAtMs !== null ? Math.max(0, closedAt - this.connectedAtMs) : undefined;
         this.connectedAtMs = null;
         if (this.disconnectedAtMs === null) this.disconnectedAtMs = closedAt;
         this.lastDisconnectReason = reason;
-        this.lastDisconnectStatusCode = typeof statusCode === "number" ? statusCode : null;
+        this.lastDisconnectStatusCode = statusCode ?? null;
+        this.clearAuthChallenges(closedAt);
         logger.warn(
           {
             instanceId: this.instanceId,
@@ -5204,12 +5367,33 @@ export class BaileysAdapter implements ChannelAdapter {
           "Baileys connection closed",
         );
 
-        if (statusCode === DisconnectReason.loggedOut) {
+        let reconnectInMs: number | null = null;
+        if (loggedOut) {
           logger.info({ instanceId: this.instanceId }, "Logged out, clearing auth");
           clearAuthState(this.instanceId);
           this.sock = null;
         } else if (this.autoReconnect) {
-          this.scheduleReconnect();
+          reconnectInMs = this.scheduleReconnect();
+        }
+
+        const shouldEmitDisconnected =
+          !this.disconnectEventEmittedSinceOpen ||
+          (loggedOut && !this.terminalDisconnectEventEmittedSinceOpen);
+        if (shouldEmitDisconnected) {
+          this.emit("instance.disconnected", {
+            instanceId: this.instanceId,
+            reason,
+            statusCode: statusCode ?? null,
+            loggedOut,
+            willReconnect: reconnectInMs !== null,
+            ...(reconnectInMs !== null ? { reconnectInMs } : {}),
+            disconnectedAt: closedAt,
+            ...(priorDisconnectedAt !== null
+              ? { offlineSinceMs: Math.max(0, closedAt - priorDisconnectedAt) }
+              : {}),
+          });
+          this.disconnectEventEmittedSinceOpen = true;
+          if (loggedOut) this.terminalDisconnectEventEmittedSinceOpen = true;
         }
       }
 
@@ -5827,7 +6011,7 @@ export class BaileysAdapter implements ChannelAdapter {
     });
   }
 
-  private scheduleReconnect(): void {
+  private scheduleReconnect(): number | null {
     if (this.reconnectAttempt >= RECONNECT_MAX_ATTEMPTS) {
       logger.error(
         {
@@ -5842,7 +6026,7 @@ export class BaileysAdapter implements ChannelAdapter {
         },
         "Max reconnect attempts reached",
       );
-      return;
+      return null;
     }
 
     const delay = Math.min(
@@ -5875,6 +6059,7 @@ export class BaileysAdapter implements ChannelAdapter {
         this.scheduleReconnect();
       }
     }, delay);
+    return delay;
   }
 
   private clearReconnectTimer(): void {

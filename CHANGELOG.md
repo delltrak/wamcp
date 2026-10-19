@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Added Baileys instance lifecycle webhooks for connection, disconnect, pairing-code, and QR events,
+  plus the read-only `wa_get_instance_status` tool. Pairing and QR challenge data is omitted from
+  webhook payloads and status output.
 - Added per-chat presence subscriptions, send-time participant mentions and group `@all`, native
   Cloud API buttons/lists with Baileys text fallbacks, custom link-preview metadata and generated
   thumbnails, and status-story viewer lookup from observed read receipts.
