@@ -4,6 +4,7 @@ import { buildHealthBody } from "../src/server/health.js";
 import {
   bootEventWebhook,
   eventWebhookHealth,
+  eventWebhookToolStatus,
   getEventWebhookStatus,
   type EventWebhookStatus,
 } from "../src/services/event-webhook-config.js";
@@ -84,6 +85,7 @@ describe("event webhook boot status", () => {
       eventCount: 1,
       authConfigured: false,
       warnings: ["not_configured"],
+      droppedEvents: [],
     });
     expect(healthFor(status).webhook).toEqual({
       configured: false,
@@ -206,15 +208,41 @@ describe("event webhook boot status", () => {
     expect(logs.warn.mock.calls[0]?.[0]).toMatchObject({ warning: "empty_event_set" });
   });
 
-  it("treats a Grok Bot preset that filters out every event as an empty set", () => {
+  it("reports configured events dropped by the Grok Bot preset", () => {
+    const logs = captureLogs();
+    const env = {
+      WA_EVENT_WEBHOOK_URL: "https://hooks.example.test/receive",
+      WA_EVENT_WEBHOOK_PRESET: "grok-bot",
+      WA_EVENT_WEBHOOK_EVENTS: "message.received,instance.connected,connection.changed",
+    };
+    const status = bootEventWebhook(env);
+
+    expect(status.eventCount).toBe(2);
+    expect(status.warnings).toEqual(["preset_dropped_events"]);
+    expect(status.warnings.every((warning) => typeof warning === "string")).toBe(true);
+    expect(status.droppedEvents).toEqual(["connection.changed"]);
+    expect(eventWebhookHealth(status).warnings).toEqual(["preset_dropped_events"]);
+    expect(healthFor(status).webhook).not.toHaveProperty("droppedEvents");
+    expect(JSON.stringify(healthFor(status).webhook)).not.toContain("connection.changed");
+    expect(logs.warn).toHaveBeenCalledOnce();
+    expect(logs.warn.mock.calls[0]?.[0]).toMatchObject({
+      warning: "preset_dropped_events",
+      droppedEvents: ["connection.changed"],
+    });
+  });
+
+  it("does not warn when all Grok Bot events are supported", () => {
+    const logs = captureLogs();
     const status = getEventWebhookStatus({
       WA_EVENT_WEBHOOK_URL: "https://hooks.example.test/receive",
       WA_EVENT_WEBHOOK_PRESET: "grok-bot",
-      WA_EVENT_WEBHOOK_EVENTS: "connection.changed",
+      WA_EVENT_WEBHOOK_EVENTS:
+        "message.received,instance.connected,instance.disconnected,instance.qr_generated",
     });
 
-    expect(status.eventCount).toBe(0);
-    expect(status.warnings).toEqual(["empty_event_set"]);
+    expect(status.eventCount).toBe(4);
+    expect(status.warnings).toEqual([]);
+    expect(logs.warn).not.toHaveBeenCalled();
   });
 
   it("logs one warning per code when several problems are present", () => {
@@ -253,6 +281,8 @@ describe("event webhook boot status", () => {
       WA_EVENT_WEBHOOK_URL: secretUrl,
       WA_EVENT_WEBHOOK_AUTH_HEADER: FIXTURE_HEADER_NAME,
       WA_EVENT_WEBHOOK_SECRET: FIXTURE_HMAC,
+      WA_EVENT_WEBHOOK_PRESET: "grok-bot",
+      WA_EVENT_WEBHOOK_EVENTS: "message.received,connection.changed",
       WA_EVENT_WEBHOOK_HEADERS: JSON.stringify({ [FIXTURE_HEADER_NAME]: FIXTURE_HEADER_VALUE }),
     });
     const missingHeader = getEventWebhookStatus({
@@ -276,10 +306,18 @@ describe("event webhook boot status", () => {
     const health = healthFor(missingValue);
     expect(configured.configured).toBe(true);
     expect(missingHeader.warnings).toContain("incomplete_auth");
+    expect(missingValue.droppedEvents).toEqual(["connection.changed"]);
+    expect(missingValue.warnings.every((warning) => typeof warning === "string")).toBe(true);
+    expect(Object.keys(health.webhook)).toHaveLength(5);
+    expect(health.webhook.warnings).toContain("preset_dropped_events");
+    expect(JSON.stringify(health)).not.toContain("connection.changed");
+    expect(JSON.stringify(health)).not.toContain("message.received");
+    expect(JSON.stringify(health)).not.toContain("instance.connected");
     expect(Object.keys(configured).sort()).toEqual([
       "authConfigured",
       "configured",
       "destinationCount",
+      "droppedEvents",
       "eventCount",
       "warnings",
     ]);
@@ -292,11 +330,11 @@ describe("event webhook boot status", () => {
     expect(exit).toHaveBeenCalledWith(1);
   });
 
-  it("adds the same redacted webhook object to wa_get_instance_status", async () => {
+  it("returns dropped event names through wa_get_instance_status only", async () => {
     const secretUrl = `${FIXTURE_URL}?token=${FIXTURE_TOKEN}`;
     vi.stubEnv("WA_EVENT_WEBHOOKS", "");
-    vi.stubEnv("WA_EVENT_WEBHOOK_PRESET", "");
-    vi.stubEnv("WA_EVENT_WEBHOOK_EVENTS", "message.received");
+    vi.stubEnv("WA_EVENT_WEBHOOK_PRESET", "grok-bot");
+    vi.stubEnv("WA_EVENT_WEBHOOK_EVENTS", "message.received,instance.connected,connection.changed");
     vi.stubEnv("WA_EVENT_WEBHOOK_URL", secretUrl);
     vi.stubEnv("WA_EVENT_WEBHOOK_AUTH_HEADER", FIXTURE_HEADER_NAME);
     vi.stubEnv("WA_EVENT_WEBHOOK_AUTH_VALUE", FIXTURE_HEADER_VALUE);
@@ -327,27 +365,46 @@ describe("event webhook boot status", () => {
     };
     const body = JSON.parse(response.content[0]!.text) as {
       instances: unknown[];
-      webhook: ReturnType<typeof eventWebhookHealth>;
+      webhook: ReturnType<typeof eventWebhookToolStatus>;
     };
-    const expected = eventWebhookHealth(getEventWebhookStatus());
+    const status = getEventWebhookStatus();
+    const expected = eventWebhookToolStatus(status);
+    const health = healthFor(status).webhook;
 
     expect(body.instances).toEqual([]);
     expect(body.webhook).toEqual(expected);
-    expect(body.webhook).toEqual(healthFor(getEventWebhookStatus()).webhook);
+    expect(body.webhook).not.toEqual(health);
+    expect(health).toEqual({
+      configured: true,
+      destinationCount: 1,
+      eventCount: 2,
+      authConfigured: true,
+      warnings: ["preset_dropped_events"],
+    });
     expect(body.webhook).toEqual({
       configured: true,
       destinationCount: 1,
-      eventCount: 1,
+      eventCount: 2,
       authConfigured: true,
-      warnings: [],
+      warnings: ["preset_dropped_events"],
+      droppedEvents: ["connection.changed"],
     });
     expect(Object.keys(body.webhook).sort()).toEqual([
+      "authConfigured",
+      "configured",
+      "destinationCount",
+      "droppedEvents",
+      "eventCount",
+      "warnings",
+    ]);
+    expect(Object.keys(health).sort()).toEqual([
       "authConfigured",
       "configured",
       "destinationCount",
       "eventCount",
       "warnings",
     ]);
+    expect(JSON.stringify(health)).not.toContain("connection.changed");
     assertRedacted(body);
     assertRedacted(body.webhook);
   });
