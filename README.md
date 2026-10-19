@@ -36,7 +36,7 @@
 
 **WA MCP** is a WhatsApp MCP server built with TypeScript that gives AI agents full access to WhatsApp through the [Model Context Protocol](https://modelcontextprotocol.io). It supports both **Baileys** (WhatsApp Web) and **Meta Cloud API** as dual-channel backends, deployable with **Docker** in a single command.
 
-Your agent connects once and auto-discovers **133 tools**, **10 resources**, and **14 real-time events** — zero configuration, zero REST wrappers, zero glue code.
+Your agent connects once and auto-discovers **135 tools**, **10 resources**, and **15 real-time events** — zero configuration, zero REST wrappers, zero glue code.
 
 ```
 Your AI Agent ←→ MCP Protocol ←→ WA MCP ←→ WhatsApp
@@ -82,7 +82,7 @@ from google.adk.tools.mcp_tool import McpToolset
 
 tools = McpToolset(url="http://localhost:3000/mcp")
 
-# Agent auto-discovers 133 WhatsApp tools
+# Agent auto-discovers 135 WhatsApp tools
 # wa_create_instance, wa_send_text, wa_send_image, ...
 ```
 
@@ -277,12 +277,14 @@ WA MCP exposes **134 tools** across 15 domains. All tools use the `wa_` prefix.
 </details>
 
 <details>
-<summary>👥 <strong>Groups</strong> (23 tools)</summary>
+<summary>👥 <strong>Groups</strong> (25 tools)</summary>
 
 | Tool                           | Description                   |
 | ------------------------------ | ----------------------------- |
 | `wa_list_groups`               | List groups and account role  |
 | `wa_get_group_info`            | Get group metadata and members |
+| `wa_group_set_member_label`     | Set this account's group member label (Baileys, gated, queued) |
+| `wa_group_remove_member_label`  | Remove this account's group member label (Baileys, gated, queued) |
 | `wa_get_group_invite_info`     | Read invite metadata before joining (Baileys) |
 | `wa_create_group`              | Create group                  |
 | `wa_group_add_participants`    | Add members                   |
@@ -469,6 +471,7 @@ Events are pushed to connected agents via MCP notifications over SSE (Server-Sen
 | `whatsapp/chat.updated`               | Chat metadata changed                          |
 | `whatsapp/group.updated`              | Group info changed                             |
 | `whatsapp/group.participants_changed` | Member add/remove/promote/demote               |
+| `whatsapp/group.member_label_changed` | A member's group label changed                 |
 | `whatsapp/contact.updated`            | Contact info changed                           |
 | `whatsapp/connection.changed`         | Instance status change (includes QR as base64) |
 | `whatsapp/call.received`              | Call offer/status updates (`offer`, `reject`, `timeout`, etc.) |
@@ -802,8 +805,8 @@ do not block outgoing messages. Incoming messages and webhook delivery do not ch
 `wa_add_chat_label`, `wa_remove_chat_label`, `wa_add_message_label`, `wa_remove_message_label`,
 `wa_update_profile_name`, `wa_create_quick_reply`, `wa_edit_quick_reply`, and
 `wa_delete_quick_reply`, along with catalog product changes, private disappearing timers, default
-disappearing-mode privacy changes, and the group/community/Channel operations below. App-state
-writes are serialized per instance and spaced by
+disappearing-mode privacy changes, and existing group/community/Channel operations that share the
+app-state write gate. App-state writes are serialized per instance and spaced by
 `WA_APP_STATE_MIN_INTERVAL_MS`. Before dispatch, the adapter checks the open authenticated socket,
 the current app-state key and stored key, then resyncs the target collection. A write is refused if
 Baileys reports a sync, decode, missing-key, or hash-verification problem, or if the collection does
@@ -811,12 +814,15 @@ not have a positive version and 128-byte hash. After a successful patch, the ada
 and warns if the local version did not advance. It does not retry a failed patch automatically.
 
 `WA_GROUP_WRITES_ENABLED` also defaults to `false`. Set it to `true` to enable group creation,
-membership/settings, invite and join-request operations, community changes, and Channel follow and
-management operations. Those operations use Baileys group/community IQs, newsletter MEX calls, or
-message queries rather than app-state patches. This flag does not enable chat, profile, label, quick
-reply, or catalog writes. `WA_APP_STATE_WRITES_ENABLED=true` continues to enable both app-state and
-group/server writes, preserving the previous opt-in behavior. Read-only metadata, invite details,
-pending-request listings, catalog reads, order reads, blocklist, and About calls remain available.
+membership/settings, invite and join-request operations, community changes, Channel follow and
+management operations, and group member-label changes. Member labels are self-assigned by the
+connected account; those protocol-message updates are queued and rate limited per instance. Other
+operations use Baileys group/community IQs, newsletter MEX calls, or message queries rather than
+app-state patches. This flag does not enable chat, profile, business-label, quick-reply, or catalog
+writes. `WA_APP_STATE_WRITES_ENABLED=true` continues to enable app-state and the existing
+group/server operations that share that gate; member-label tools specifically require
+`WA_GROUP_WRITES_ENABLED=true`. Read-only metadata, invite details, pending-request listings,
+catalog reads, order reads, blocklist, and About calls remain available.
 Normal message sends, read receipts, and app-state reads/resyncs remain available as well.
 
 For `wa_mark_chat_unread`, archive, delete, and clear ranges, the adapter uses up to three recent
@@ -907,9 +913,9 @@ src/
 ├── index.ts                     # Entry point (HTTP/stdio)
 ├── constants.ts                 # Defaults and limits
 ├── server/mcp.ts                # MCP server setup
-├── tools/                       # 🔧 133 MCP tools (15 files)
+├── tools/                       # 🔧 135 MCP tools (15 files)
 ├── resources/                   # 📖 10 MCP resources (8 files)
-├── notifications/events.ts      # 📡 14 event types
+├── notifications/events.ts      # 📡 15 documented event types
 ├── channels/
 │   ├── channel.interface.ts     # ChannelAdapter contract
 │   ├── baileys/                 # Baileys implementation

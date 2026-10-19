@@ -20,6 +20,7 @@ const EVENT_TO_METHOD: Record<ChannelEvent, string> = {
   "chat.updated": "whatsapp/chat.updated",
   "group.updated": "whatsapp/group.updated",
   "group.participants_changed": "whatsapp/group.participants_changed",
+  "group.member_label_changed": "whatsapp/group.member_label_changed",
   "contact.updated": "whatsapp/contact.updated",
   "connection.changed": "whatsapp/connection.changed",
   "instance.connected": "whatsapp/instance.connected",
