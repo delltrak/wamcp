@@ -149,6 +149,16 @@ function initializeDatabase(): void {
       PRIMARY KEY (instance_id, jid)
     );
 
+    CREATE TABLE IF NOT EXISTS group_member_labels (
+      instance_id     TEXT NOT NULL REFERENCES instances(id) ON DELETE CASCADE,
+      group_jid       TEXT NOT NULL,
+      participant_jid TEXT NOT NULL,
+      member_label    TEXT,
+      label_timestamp INTEGER NOT NULL,
+      updated_at      INTEGER NOT NULL,
+      PRIMARY KEY (instance_id, group_jid, participant_jid)
+    );
+
     CREATE TABLE IF NOT EXISTS chats (
       instance_id     TEXT NOT NULL REFERENCES instances(id) ON DELETE CASCADE,
       jid             TEXT NOT NULL,
