@@ -298,6 +298,10 @@ export class CloudApiAdapter implements ChannelAdapter {
 
   // ---- Messaging ----
 
+  async supportsNativeGroupMentionAll(): Promise<boolean> {
+    return false;
+  }
+
   async sendMessage(to: string, content: MessageContent): Promise<MessageResponse> {
     const phone = this.normalizePhone(to);
 

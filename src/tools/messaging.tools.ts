@@ -8,6 +8,7 @@ import type { MessageQueue } from "../services/message-queue.js";
 import { MediaService } from "../services/media.js";
 import { toolSuccess } from "../types/mcp.types.js";
 import { handleToolError } from "../utils/tool-handler.js";
+import { planGroupMentionAll } from "../utils/group-mention.js";
 import { createRequestLogger } from "../utils/logger.js";
 import {
   SendTextSchema,
@@ -42,8 +43,6 @@ import {
   GetMessageReceiptsSchema,
   GetMessageReactionsSchema,
 } from "../schemas/messaging.schema.js";
-
-const MAX_GROUP_MENTION_PARTICIPANTS = 1_024;
 
 export function registerMessagingTools(
   server: McpServer,
@@ -727,7 +726,7 @@ Returns: { status: "queued", jobId }`,
     "wa_send_group_mention_all",
     {
       description:
-        "Send a group message with an @all mention. Baileys expands the current group participant list into mentioned JIDs; Cloud API does not support this helper.",
+        "Send a group message with WhatsApp's native @all mention. Baileys sets mentionAll (contextInfo.nonJidMentions) and does not list every participant, so muted members are notified too. If that flag is unavailable, Baileys mentions each current participant instead. Cloud API does not support this helper.",
       inputSchema: SendGroupMentionAllSchema,
     },
     async (params) => {
@@ -739,26 +738,24 @@ Returns: { status: "queued", jobId }`,
         }
         const adapter = instanceManager.getAdapter(params.instanceId);
         const group = await adapter.getGroupMetadata(params.groupId);
-        const mentions = [...new Set(group.participants.map((participant) => participant.jid))];
-        if (mentions.length === 0)
-          throw new Error("Cannot mention all: the group has no participants");
-        if (mentions.length > MAX_GROUP_MENTION_PARTICIPANTS) {
-          throw new Error(
-            `Cannot mention all: the group has more than ${MAX_GROUP_MENTION_PARTICIPANTS} participants`,
-          );
-        }
+        const plan = planGroupMentionAll({
+          text: params.text,
+          nativeSupported: await adapter.supportsNativeGroupMentionAll(),
+          participants: group.participants.map((participant) => participant.jid),
+        });
         const result = await messageQueue.enqueueMessage(
           params.instanceId,
           group.jid,
-          {
-            type: "text",
-            text: `${params.text} @all`,
-            mentions,
-            mentionAll: true,
-          },
+          plan.mode === "native"
+            ? { type: "text", text: plan.text, mentionAll: true }
+            : { type: "text", text: plan.text, mentions: plan.mentions },
           "baileys",
         );
-        return toolSuccess({ ...result, mentionCount: mentions.length });
+        return toolSuccess(
+          plan.mode === "native"
+            ? { ...result, mode: "native" }
+            : { ...result, mode: "participants", mentionCount: plan.mentions.length },
+        );
       } catch (err) {
         return handleToolError("wa_send_group_mention_all", err, params.instanceId);
       }

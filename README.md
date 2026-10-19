@@ -193,7 +193,7 @@ WA MCP exposes **134 tools** across 15 domains. All tools use the `wa_` prefix.
 | `wa_send_view_once`    | Send view-once media    |
 | `wa_send_presence`     | Show typing / recording / paused |
 | `wa_subscribe_presence` | Subscribe to contact or group presence updates (Baileys) |
-| `wa_send_group_mention_all` | Mention every current group participant (Baileys) |
+| `wa_send_group_mention_all` | Native group @all (Baileys); participant list only if native @all is unavailable |
 | `wa_send_buttons`      | Send reply buttons (Cloud API) or a text fallback (Baileys) |
 | `wa_send_list`         | Send a selectable list (Cloud API) or a text fallback (Baileys) |
 | `wa_send_media_album`  | Send an image album (Baileys) |

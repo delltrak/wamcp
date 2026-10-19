@@ -158,6 +158,7 @@ import {
   type ContactSyncRecord,
 } from "../../services/contact-store.js";
 import { AppStateResyncLogObserver, observeAppStateResyncLogs } from "./app-state-write-safety.js";
+import { baileysSupportsNativeGroupMentionAll } from "./native-mention-all.js";
 import { GroupMemberLabelStore } from "../../services/group-member-label-store.js";
 
 const logger = createChildLogger({ service: "baileys-adapter" });
@@ -1913,6 +1914,10 @@ export class BaileysAdapter implements ChannelAdapter {
 
   // ---- Messaging ----
 
+  supportsNativeGroupMentionAll(): Promise<boolean> {
+    return baileysSupportsNativeGroupMentionAll();
+  }
+
   async sendMessage(to: string, content: MessageContent): Promise<MessageResponse> {
     const sock = this.getSock();
     const jid = this.normalizeJid(to);
@@ -2074,15 +2079,17 @@ export class BaileysAdapter implements ChannelAdapter {
         throw new Error(`Unsupported message type: ${(content as MessageContent).type}`);
     }
 
-    const mentions =
-      "mentions" in content ? content.mentions?.map((jid) => this.normalizeJid(jid)) : undefined;
     const mentionAll = content.type === "text" && content.mentionAll === true;
-    if ((mentions?.length ?? 0) > 0 || mentionAll) {
-      msg = {
-        ...msg,
-        ...(mentions?.length ? { mentions } : {}),
-        ...(mentionAll ? { mentionAll: true } : {}),
-      } as AnyMessageContent;
+    if (mentionAll) {
+      // Native @all is mentionAll -> contextInfo.nonJidMentions. Participant JIDs
+      // on the same payload are individual mentions, so they are not sent with it.
+      msg = { ...msg, mentionAll: true } as AnyMessageContent;
+    } else {
+      const mentions =
+        "mentions" in content ? content.mentions?.map((jid) => this.normalizeJid(jid)) : undefined;
+      if ((mentions?.length ?? 0) > 0) {
+        msg = { ...msg, mentions } as AnyMessageContent;
+      }
     }
 
     const result = await this.sendMessageWithActivity(sock, jid, msg, opts);
