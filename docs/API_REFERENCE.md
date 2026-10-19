@@ -8,10 +8,10 @@
 
 1. [Overview](#1-overview)
 2. [Tools Reference](#2-tools-reference)
-   - [Instance Management](#21-instance-management-8-tools)
+   - [Instance Management](#21-instance-management-9-tools)
    - [Messaging](#22-messaging-31-tools)
    - [Chat Management](#23-chat-management-11-tools)
-   - [Group Management](#24-group-management-25-tools)
+   - [Group Management](#24-group-management-26-tools)
    - [Contact Management](#25-contact-management-8-tools)
    - [Profile Management](#26-profile-management-7-tools)
    - [Status / Stories](#27-status--stories-4-tools)
@@ -110,7 +110,7 @@ Tools marked **Baileys only** are not available on Cloud API instances.
 
 ## 2. Tools Reference
 
-WA MCP exposes **135 tools** grouped by domain. All tools return MCP-standard responses.
+WA MCP exposes **137 tools** grouped by domain. All tools return MCP-standard responses.
 
 ### Success Response Format
 
@@ -141,7 +141,7 @@ WA MCP exposes **135 tools** grouped by domain. All tools return MCP-standard re
 
 ---
 
-### 2.1 Instance Management (8 tools)
+### 2.1 Instance Management (9 tools)
 
 Tools for creating, connecting, and managing WhatsApp instances.
 
@@ -1261,15 +1261,16 @@ is blocked unless `WA_APP_STATE_WRITES_ENABLED=true`.
 
 ---
 
-### 2.4 Group Management (25 tools)
+### 2.4 Group Management (26 tools)
 
 Tools for creating and managing WhatsApp groups.
 
 Group creation, settings, membership changes, join-request decisions, picture updates, invite-link
-revocations, and group joins are blocked unless `WA_GROUP_WRITES_ENABLED=true` or
-`WA_APP_STATE_WRITES_ENABLED=true`. Group changes use Baileys group IQ methods. Group listing,
-metadata and pending-request reads, and invite-code reads remain available while both flags are
-disabled. Private disappearing-message changes still require `WA_APP_STATE_WRITES_ENABLED=true`;
+revocations, group joins, and creating a group from another group's members are blocked unless
+`WA_GROUP_WRITES_ENABLED=true` or `WA_APP_STATE_WRITES_ENABLED=true`. Group changes use Baileys
+group IQ methods. Group listing, metadata, pending-request reads, and invite-code reads remain
+available while both flags are disabled. Private disappearing-message changes still require
+`WA_APP_STATE_WRITES_ENABLED=true`;
 group disappearing-message changes use the group write gate. Sending a group-invitation card uses
 the regular message-send path and remains available while both flags are disabled.
 
@@ -1462,6 +1463,38 @@ Create a new WhatsApp group with a name and initial participants.
 ```json
 {
   "groupId": "120363...@g.us"
+}
+```
+
+---
+
+#### `wa_create_group_from_group`
+
+Create a new WhatsApp group using members from a source group. If `includeParticipants` is supplied,
+only matching source members are kept; `excludeParticipants` removes matching members afterward.
+PN and LID identities are matched consistently, duplicate identities are collapsed, and the connected
+account is removed because WhatsApp adds the creator automatically. At least one other participant
+must remain. WhatsApp allows up to 1,024 members including the creator, so at most 1,023 source
+participants can be passed to group creation ([WhatsApp Help Center](https://faq.whatsapp.com/3242937609289432/?cms_platform=web&locale=pt_PT)).
+
+| Parameter              | Type     | Required | Description                                      |
+| ---------------------- | -------- | -------- | ------------------------------------------------ |
+| `instanceId`            | string   | Yes      | The instance ID                                  |
+| `sourceGroupId`         | string   | Yes      | Source group JID or bare numeric group ID        |
+| `name`                  | string   | Yes      | New group name (max 100 characters)              |
+| `includeParticipants`   | string[] | No       | Phone numbers or JIDs to keep from the source    |
+| `excludeParticipants`   | string[] | No       | Phone numbers or JIDs to omit from the new group |
+
+**Channel support:** Baileys only. Cloud API does not support group management.
+
+**Response:** The new group ID, the number of members added, and participant JIDs not present in
+Baileys' returned participant metadata when that metadata is available.
+
+```json
+{
+  "groupId": "120363000000000010@g.us",
+  "addedCount": 2,
+  "failedParticipants": []
 }
 ```
 
@@ -3328,7 +3361,7 @@ Add to your Claude Desktop MCP configuration:
 }
 ```
 
-Once configured, the client will auto-discover all 135 WA MCP tools and can interact with WhatsApp directly.
+Once configured, the client will auto-discover all 137 WA MCP tools and can interact with WhatsApp directly.
 
 ### 6.3 LangChain (Python)
 
@@ -3341,7 +3374,7 @@ toolkit = MCPToolkit(
 )
 
 tools = toolkit.get_tools()
-# tools now contains all 135 WA MCP tools, ready for any LangChain agent
+# tools now contains all 137 WA MCP tools, ready for any LangChain agent
 ```
 
 ---
@@ -3350,7 +3383,7 @@ tools = toolkit.get_tools()
 
 | Domain                            | Tools | Channel                              |
 | --------------------------------- | ----- | ------------------------------------ |
-| Instance Management              | 8     | Both (2 Baileys only, 1 Cloud only)  |
+| Instance Management              | 9     | Both (2 Baileys only, 1 Cloud only)  |
 | Messaging                         | 31    | Both                                 |
 | Audio Transcription               | 1     | Both                                 |
 | Text-to-speech                    | 3     | Provider-dependent                   |
@@ -3358,14 +3391,14 @@ tools = toolkit.get_tools()
 | Message Search                    | 1     | Both                                 |
 | WhatsApp Business Labels          | 8     | Baileys                              |
 | WhatsApp Events                   | 2     | Baileys                              |
-| Group Management                  | 25    | Baileys                              |
+| Group Management                  | 26    | Baileys                              |
 | Contact Management                | 8     | Both                                 |
 | Profile Management                | 7     | Both                                 |
 | Status / Stories                  | 4     | Baileys only                         |
 | Newsletter / Channels             | 10    | Baileys only                         |
 | Business, Communities, and Catalog| 15    | Baileys only                         |
 | Call Management                   | 1     | Baileys only                         |
-| **Total**                         | **135** |                                    |
+| **Total**                         | **137** |                                    |
 
 | Resources     | 10  |
 | ------------- | --- |

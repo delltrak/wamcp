@@ -63,6 +63,7 @@ export const INSTANCE_ID_PREFIX = "inst_";
 
 // Message limits
 export const MAX_TEXT_LENGTH = 65536;
+export const MAX_GROUP_PARTICIPANTS = 1024;
 
 // Media size limits (bytes)
 export const MEDIA_LIMITS = {

@@ -15,6 +15,7 @@ import type {
   MessageContent,
   MessageResponse,
   GroupResponse,
+  CreateGroupFromGroupResponse,
   GroupSummary,
   NumberExistsResponse,
   BusinessProfile,
@@ -737,6 +738,15 @@ export class CloudApiAdapter implements ChannelAdapter {
 
   async createGroup(_name: string, _participants: string[]): Promise<GroupResponse> {
     throw new Error("Group management is not supported on Cloud API");
+  }
+
+  async createGroupFromGroup(
+    _sourceGroupId: string,
+    _name: string,
+    _includeParticipants?: string[],
+    _excludeParticipants?: string[],
+  ): Promise<CreateGroupFromGroupResponse> {
+    throw new Error("Creating a group from another group is not supported on Cloud API");
   }
 
   async modifyGroup(_groupId: string, _modification: GroupModification): Promise<void> {

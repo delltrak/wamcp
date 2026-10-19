@@ -3,6 +3,7 @@
 // ============================================================
 
 import { z } from "zod";
+import { MAX_GROUP_PARTICIPANTS } from "../constants.js";
 import { isValidGroupId } from "../utils/group-jid.js";
 
 const GroupIdSchema = z
@@ -65,6 +66,26 @@ export const CreateGroupSchema = z
       .array(z.string().min(5))
       .min(1)
       .describe("Phone numbers or JIDs of initial participants"),
+  })
+  .strict();
+
+export const CreateGroupFromGroupSchema = z
+  .object({
+    instanceId: z.string().min(1).describe("The instance ID"),
+    sourceGroupId: GroupIdSchema.describe("WhatsApp group JID or bare ID to copy members from"),
+    name: z.string().trim().min(1).max(100).describe("Name of the new WhatsApp group"),
+    includeParticipants: z
+      .array(z.string().trim().min(1))
+      .min(1)
+      .max(MAX_GROUP_PARTICIPANTS)
+      .optional()
+      .describe("Optional phone numbers or JIDs to keep from the source group"),
+    excludeParticipants: z
+      .array(z.string().trim().min(1))
+      .min(1)
+      .max(MAX_GROUP_PARTICIPANTS)
+      .optional()
+      .describe("Optional phone numbers or JIDs to omit from the new group"),
   })
   .strict();
 
