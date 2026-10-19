@@ -533,6 +533,13 @@ lifecycle events use a compact body with `event`, `instanceId`, `text`, and
 `timestamp`, plus safe fields such as a disconnect reason or status code. Pairing
 codes, QR strings, credentials, and secrets are never included.
 
+With destination-wide debounce, a single event remains a compact object, a
+batch of lifecycle events is sent as `{ "events": [...] }`, and a batch of
+Grok Bot messages is sent as `{ "messages": [...] }`. Mixed message and
+lifecycle traffic is split into separate homogeneous requests. Per-chat
+`WA_WEBHOOK_DEBOUNCE_MS` batches messages with the last message's fields at the
+top level and a `messages` array.
+
 You can add `chatAllowlist` and/or `senderAllowlist` to a multi-destination
 entry to limit which chats or people wake that routine. If both are set, a
 message must match both lists. Set `WA_WEBHOOK_DEBOUNCE_MS` to batch incoming
@@ -629,8 +636,12 @@ entry includes `connectionState`, connected phone/LID/push name, ISO
 status code, `pendingPairing` (`none`, `pairing_code`, or `qr`) with ISO
 generation and expiry times, and `presenceMode` when the channel provides it.
 The tool does not return pairing codes, QR strings, tokens, keys, or credential
-data. `webhook` is the same redacted event-webhook state as `GET /health`:
-`configured`, `destinationCount`, `eventCount`, `authConfigured`, and `warnings`.
+data. `webhook` includes the five redacted fields also returned by `GET /health`:
+`configured`, `destinationCount`, `eventCount`, `authConfigured`, and
+`warnings`. `warnings` contains string codes only. The tool additionally returns
+`droppedEvents`, a list of configured event names excluded by the Grok Bot
+preset; the same list appears in the corresponding boot warning log line.
+`GET /health` omits this field and never includes event names.
 
 See [Outgoing event webhooks](docs/event-webhooks.md) for configuration details.
 

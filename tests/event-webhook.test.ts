@@ -717,6 +717,88 @@ describe("outgoing event webhook events", () => {
     await unsubscribe.flush();
   });
 
+  it("batches Grok Bot lifecycle events as events and splits mixed message/lifecycle batches", async () => {
+    vi.useFakeTimers();
+    let eventHandler: EventHandler | undefined;
+    const instanceManager = {
+      onAnyEvent: (handler: EventHandler) => {
+        eventHandler = handler;
+        return () => {
+          eventHandler = undefined;
+        };
+      },
+    } as unknown as InstanceManager;
+    const config = configuredWebhook({
+      WA_EVENT_WEBHOOK_PRESET: "grok-bot",
+      WA_EVENT_WEBHOOK_EVENTS: "message.received,instance.connected,instance.disconnected",
+      WA_EVENT_WEBHOOK_DEBOUNCE_MS: "1000",
+    });
+    const enqueue = vi.fn<(_: EventWebhookJob) => Promise<unknown>>(() => Promise.resolve());
+    const unsubscribe = registerEventWebhookHandler(instanceManager, config, enqueue);
+    const connected = {
+      instanceId: "inst_1234abcd",
+      phone: null,
+      lid: null,
+      pushName: null,
+      connectedAt: 1_800_000_000_000,
+      wasPairing: false,
+    };
+    const disconnected = {
+      instanceId: "inst_1234abcd",
+      reason: "loggedOut",
+      statusCode: 401,
+      loggedOut: true,
+      willReconnect: false,
+      disconnectedAt: 1_800_000_001_000,
+    };
+    const firstMessage = incomingMessage();
+    const secondMessage = {
+      ...incomingMessage(),
+      message: { ...incomingMessage().message, id: "wamid.second", content: "second" },
+    };
+
+    eventHandler?.("instance.connected", "inst_1234abcd", connected);
+    eventHandler?.("instance.disconnected", "inst_1234abcd", disconnected);
+    eventHandler?.("message.received", "inst_1234abcd", firstMessage);
+    eventHandler?.("message.received", "inst_1234abcd", secondMessage);
+    eventHandler?.("instance.connected", "inst_1234abcd", connected);
+    eventHandler?.("instance.disconnected", "inst_1234abcd", disconnected);
+    await vi.advanceTimersByTimeAsync(1000);
+
+    expect(enqueue).toHaveBeenCalledTimes(3);
+    expect(enqueue.mock.calls.map(([job]) => job.payload)).toEqual([
+      {
+        events: [
+          normalizeGrokBotInstanceWebhookPayload("instance.connected", "inst_1234abcd", connected),
+          normalizeGrokBotInstanceWebhookPayload(
+            "instance.disconnected",
+            "inst_1234abcd",
+            disconnected,
+          ),
+        ],
+      },
+      {
+        messages: [
+          normalizeGrokBotWebhookPayload("inst_1234abcd", firstMessage),
+          normalizeGrokBotWebhookPayload("inst_1234abcd", secondMessage),
+        ],
+      },
+      {
+        events: [
+          normalizeGrokBotInstanceWebhookPayload("instance.connected", "inst_1234abcd", connected),
+          normalizeGrokBotInstanceWebhookPayload(
+            "instance.disconnected",
+            "inst_1234abcd",
+            disconnected,
+          ),
+        ],
+      },
+    ]);
+
+    unsubscribe();
+    await unsubscribe.flush();
+  });
+
   it("does not let queue failures escape the channel event handler", async () => {
     let eventHandler: EventHandler | undefined;
     const instanceManager = {

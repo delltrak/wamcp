@@ -47,13 +47,8 @@ export interface EventWebhookConfig {
   retryDelayMs: number;
 }
 
-export type PresetDroppedEventsWarning = {
-  code: "preset_dropped_events";
-  events: ChannelEvent[];
-};
-
 export type EventWebhookWarning =
-  "not_configured" | "incomplete_auth" | "empty_event_set" | PresetDroppedEventsWarning;
+  "not_configured" | "incomplete_auth" | "empty_event_set" | "preset_dropped_events";
 
 /** Redacted webhook state. Never includes URLs, header names, header values, tokens, or secrets. */
 export interface EventWebhookStatus {
@@ -62,6 +57,7 @@ export interface EventWebhookStatus {
   eventCount: number;
   authConfigured: boolean;
   warnings: EventWebhookWarning[];
+  droppedEvents: ChannelEvent[];
 }
 
 type Environment = Record<string, string | undefined>;
@@ -576,9 +572,10 @@ function usesMultiDestinationConfig(env: Environment): boolean {
 }
 
 /**
- * Redacted event-webhook state for boot logs, health, and status tools.
- * Callers can pass a parsed config to avoid loading twice. Nothing returned
- * includes a URL, header name, header value, token, or secret.
+ * Internal redacted event-webhook state for boot logs and status projections.
+ * The health projection omits dropped event names; only the tool projection
+ * exposes them. Callers can pass a parsed config to avoid loading twice.
+ * Nothing returned includes a URL, header name, header value, token, or secret.
  */
 export function getEventWebhookStatus(
   env: Environment = process.env,
@@ -596,9 +593,7 @@ export function getEventWebhookStatus(
   if (!configured) warnings.push("not_configured");
   if (!multi && auth.incomplete) warnings.push("incomplete_auth");
   if (eventCount === 0) warnings.push("empty_event_set");
-  if (droppedEvents.length > 0) {
-    warnings.push({ code: "preset_dropped_events", events: droppedEvents });
-  }
+  if (droppedEvents.length > 0) warnings.push("preset_dropped_events");
 
   return {
     configured,
@@ -608,10 +603,11 @@ export function getEventWebhookStatus(
       (!multi && auth.configured) ||
       resolved.destinations.some((destination) => destinationsWithAuth.has(destination)),
     warnings,
+    droppedEvents,
   };
 }
 
-/** Fields safe to expose from health and status responses. */
+/** Fields safe to expose from the public health response. */
 export function eventWebhookHealth(status: EventWebhookStatus): {
   configured: boolean;
   destinationCount: number;
@@ -624,17 +620,23 @@ export function eventWebhookHealth(status: EventWebhookStatus): {
     destinationCount: status.destinationCount,
     eventCount: status.eventCount,
     authConfigured: status.authConfigured,
-    warnings: status.warnings.map((warning) =>
-      typeof warning === "string" ? warning : { ...warning, events: [...warning.events] },
-    ),
+    warnings: [...status.warnings],
   };
 }
 
-type EventWebhookWarningCode =
-  "not_configured" | "incomplete_auth" | "empty_event_set" | "preset_dropped_events";
-
-function warningCode(warning: EventWebhookWarning): EventWebhookWarningCode {
-  return typeof warning === "string" ? warning : warning.code;
+/** Fields safe to expose from wa_get_instance_status, including dropped event names. */
+export function eventWebhookToolStatus(status: EventWebhookStatus): {
+  configured: boolean;
+  destinationCount: number;
+  eventCount: number;
+  authConfigured: boolean;
+  warnings: EventWebhookWarning[];
+  droppedEvents: ChannelEvent[];
+} {
+  return {
+    ...eventWebhookHealth(status),
+    droppedEvents: [...status.droppedEvents],
+  };
 }
 
 function bootLogDetails(status: EventWebhookStatus, warning: EventWebhookWarning) {
@@ -643,8 +645,8 @@ function bootLogDetails(status: EventWebhookStatus, warning: EventWebhookWarning
     destinationCount: status.destinationCount,
     eventCount: status.eventCount,
     authConfigured: status.authConfigured,
-    warning: warningCode(warning),
-    ...(typeof warning === "string" ? {} : { droppedEvents: [...warning.events] }),
+    warning,
+    ...(warning === "preset_dropped_events" ? { droppedEvents: [...status.droppedEvents] } : {}),
   };
 }
 
@@ -654,9 +656,8 @@ export function logEventWebhookBootStatus(
   log: Pick<typeof logger, "warn"> = logger,
 ): void {
   for (const warning of status.warnings) {
-    const code = warningCode(warning);
     const details = bootLogDetails(status, warning);
-    switch (code) {
+    switch (warning) {
       case "not_configured":
         log.warn(details, "Event webhook is not configured; no events will be delivered");
         break;
@@ -673,7 +674,7 @@ export function logEventWebhookBootStatus(
         log.warn(details, "Grok Bot preset drops configured events");
         break;
       default: {
-        const unreachable: never = code;
+        const unreachable: never = warning;
         throw new Error(`Unknown event webhook warning: ${String(unreachable)}`);
       }
     }
