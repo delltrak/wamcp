@@ -148,6 +148,8 @@ export interface ChannelAdapter {
     action: ParticipantAction,
   ): Promise<void>;
   getGroupMetadata(groupId: string): Promise<GroupMetadata>;
+  assertGroupMemberLabelWritesEnabled(): void;
+  updateGroupMemberLabel(groupId: string, memberLabel: string | null): Promise<void>;
   updateGroupPicture(groupId: string, image: string): Promise<void>;
   removeGroupPicture(groupId: string): Promise<void>;
   getGroupInviteCode(groupId: string): Promise<string>;

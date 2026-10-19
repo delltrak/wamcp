@@ -83,6 +83,7 @@ import type {
   MessageSearchOptions,
   SendEventOptions,
   NormalizedLabelUpdateEvent,
+  NormalizedGroupMemberLabelEvent,
   CatalogProductCreateInput,
   CatalogProductUpdateInput,
   NewsletterPost,
@@ -159,6 +160,7 @@ import {
   type ContactSyncRecord,
 } from "../../services/contact-store.js";
 import { AppStateResyncLogObserver, observeAppStateResyncLogs } from "./app-state-write-safety.js";
+import { GroupMemberLabelStore } from "../../services/group-member-label-store.js";
 
 const logger = createChildLogger({ service: "baileys-adapter" });
 const mediaService = new MediaService();
@@ -907,6 +909,7 @@ function labelOperationError(error: unknown): Error {
 export class BaileysAdapter implements ChannelAdapter {
   private sock: WASocket | null = null;
   private readonly contactStore: ContactStore;
+  private readonly groupMemberLabelStore: GroupMemberLabelStore;
   private status: ConnectionStatus = "disconnected";
   private qrCode: string | null = null;
   private pairingPhone: string | null = null;
@@ -962,8 +965,10 @@ export class BaileysAdapter implements ChannelAdapter {
   constructor(
     private readonly instanceId: string,
     contactStore?: ContactStore,
+    groupMemberLabelStore?: GroupMemberLabelStore,
   ) {
     this.contactStore = contactStore ?? new ContactStore(instanceId, db);
+    this.groupMemberLabelStore = groupMemberLabelStore ?? new GroupMemberLabelStore(instanceId, db);
     this.autoReconnect = process.env.WA_AUTO_RECONNECT !== "false" && DEFAULT_AUTO_RECONNECT;
     this.appStateWritesEnabled = parseBooleanEnv(
       process.env.WA_APP_STATE_WRITES_ENABLED,
@@ -3484,7 +3489,79 @@ export class BaileysAdapter implements ChannelAdapter {
     return this.normalizeGroupMetadata(meta);
   }
 
+  assertGroupMemberLabelWritesEnabled(): void {
+    if (!this.groupWritesEnabled) {
+      throw new Error(
+        "WhatsApp group member label writes are disabled. Set WA_GROUP_WRITES_ENABLED=true to enable them.",
+      );
+    }
+  }
+
+  async updateGroupMemberLabel(groupId: string, memberLabel: string | null): Promise<void> {
+    this.assertGroupMemberLabelWritesEnabled();
+    if (memberLabel !== null && (memberLabel.trim().length === 0 || memberLabel.length > 30)) {
+      throw new Error("Group member labels must contain 1 to 30 characters");
+    }
+
+    const sock = this.getSock();
+    const jid = normalizeGroupJid(groupId);
+    await sock.updateMemberLabel(jid, memberLabel ?? "");
+
+    const participantJids = [sock.user?.id, sock.user?.lid]
+      .filter((participant): participant is string => !!participant)
+      .map((participant) => jidNormalizedUser(participant));
+    this.processGroupMemberLabelUpdate({
+      groupId: jid,
+      participant: participantJids[0],
+      participantAlt: participantJids[1],
+      label: memberLabel,
+      messageTimestamp: Math.floor(Date.now() / 1000),
+    });
+  }
+
+  private processGroupMemberLabelUpdate(update: {
+    groupId: string;
+    participant?: string | null;
+    participantAlt?: string | null;
+    label?: string | null;
+    messageTimestamp?: number;
+  }): void {
+    const participantJids = [...new Set([update.participant, update.participantAlt])]
+      .filter((participant): participant is string => !!participant)
+      .map((participant) => jidNormalizedUser(participant));
+    if (participantJids.length === 0) return;
+
+    const memberLabel = update.label ? update.label : null;
+    const rawTimestamp = Number(update.messageTimestamp);
+    const timestamp =
+      Number.isSafeInteger(rawTimestamp) && rawTimestamp > 0
+        ? rawTimestamp
+        : Math.floor(Date.now() / 1000);
+    const groupId = normalizeGroupJid(update.groupId);
+    const changed = this.groupMemberLabelStore.update(
+      groupId,
+      participantJids,
+      memberLabel,
+      timestamp,
+    );
+    if (!changed) return;
+
+    const event: NormalizedGroupMemberLabelEvent = {
+      instanceId: this.instanceId,
+      groupId,
+      participant: participantJids[0]!,
+      memberLabel,
+      action: memberLabel === null ? "removed" : "set",
+      timestamp,
+    };
+    this.emit("group.member_label_changed", event);
+  }
+
   private async normalizeGroupMetadata(meta: BaileysGroupMetadata): Promise<GroupMetadata> {
+    const memberLabels = this.groupMemberLabelStore.getForGroup(meta.id);
+    const memberLabelsByJid = new Map(
+      memberLabels.map((row) => [jidNormalizedUser(row.participantJid), row]),
+    );
     const participants = await Promise.all(
       (meta.participants ?? []).map(async (participant) => {
         const role: "admin" | "superadmin" | "member" =
@@ -3500,6 +3577,10 @@ export class BaileysAdapter implements ChannelAdapter {
         const phone = phoneJid?.endsWith("@s.whatsapp.net")
           ? (phoneJid.split("@")[0]?.split(":")[0] ?? null)
           : null;
+        const knownMemberLabel = [...participantJids]
+          .map((participantJid) => memberLabelsByJid.get(participantJid))
+          .filter((row): row is NonNullable<typeof row> => !!row)
+          .sort((left, right) => right.labelTimestamp - left.labelTimestamp)[0]?.memberLabel;
 
         return {
           jid: participant.id,
@@ -3507,6 +3588,7 @@ export class BaileysAdapter implements ChannelAdapter {
           phone,
           isAdmin: role === "admin" || role === "superadmin",
           isSuperAdmin: role === "superadmin",
+          ...(knownMemberLabel ? { memberLabel: knownMemberLabel } : {}),
         };
       }),
     );
@@ -6129,6 +6211,23 @@ export class BaileysAdapter implements ChannelAdapter {
           const protocolMessage = unwrappedContent?.protocolMessage as
             NonNullable<WAMessage["message"]>["protocolMessage"] | undefined;
 
+          if (
+            protocolMessage?.type ===
+              proto.Message.ProtocolMessage.Type.GROUP_MEMBER_LABEL_CHANGE &&
+            msg.key.remoteJid?.endsWith("@g.us")
+          ) {
+            this.processGroupMemberLabelUpdate({
+              groupId: msg.key.remoteJid,
+              participant: msg.key.participant,
+              participantAlt: msg.key.participantAlt,
+              label: protocolMessage.memberLabel?.label ?? null,
+              messageTimestamp: messageTimestampToSeconds(
+                msg.messageTimestamp,
+                Math.floor(Date.now() / 1000),
+              ),
+            });
+          }
+
           if (unwrappedContent?.pollUpdateMessage) {
             await this.persistPollVote(msg, unwrappedContent.pollUpdateMessage);
             continue;
@@ -6404,6 +6503,10 @@ export class BaileysAdapter implements ChannelAdapter {
           events["group-participants.update"],
         );
         this.emit("group.participants_changed", event);
+      }
+
+      if (events["group.member-tag.update"]) {
+        this.processGroupMemberLabelUpdate(events["group.member-tag.update"]);
       }
 
       // --- Calls ---

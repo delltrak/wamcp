@@ -48,6 +48,8 @@ export interface EventWebhookPayload {
   buttons?: MessageButton[];
   rawType?: string;
   action?: string;
+  groupId?: string;
+  memberLabel?: string | null;
   eventMessageId?: string;
   responseMessageId?: string;
   participant?: string;
@@ -461,6 +463,10 @@ export function normalizeEventWebhookPayload(
         }
       : undefined;
   const action = firstString(data.action);
+  const memberLabel =
+    typeof data.memberLabel === "string" || data.memberLabel === null
+      ? data.memberLabel
+      : undefined;
   const participant = firstString(data.participant);
   const responseStatus = firstString(data.status);
   const status =
@@ -505,6 +511,12 @@ export function normalizeEventWebhookPayload(
     ...(buttons ? { buttons } : {}),
     ...(typeof message.rawType === "string" ? { rawType: message.rawType } : {}),
     ...(action ? { action } : {}),
+    ...(event === "group.member_label_changed"
+      ? {
+          groupId: firstString(data.groupId) ?? "",
+          memberLabel: memberLabel ?? null,
+        }
+      : {}),
     ...(eventMessageId ? { eventMessageId } : {}),
     ...(responseMessageId ? { responseMessageId } : {}),
     ...(participant ? { participant } : {}),
@@ -589,9 +601,11 @@ export function shouldSendEventWebhook(
   const chatId =
     typeof data.chatId === "string"
       ? data.chatId
-      : typeof association.chatId === "string"
-        ? association.chatId
-        : "";
+      : typeof data.groupId === "string"
+        ? data.groupId
+        : typeof association.chatId === "string"
+          ? association.chatId
+          : "";
   const senderId =
     typeof message.sender === "string"
       ? message.sender

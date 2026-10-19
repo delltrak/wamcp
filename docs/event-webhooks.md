@@ -41,6 +41,10 @@ HTTP Host header.
 | `WA_EVENT_WEBHOOK_RETRY_DELAY_MS` | `1000` | Initial exponential retry delay, from 1 to 300000 ms. Retries add 20% jitter and are capped at five minutes. |
 | `WA_REQUIRE_EVENT_WEBHOOK` | `false` | Refuse to start when no destination is configured or the resolved event set is empty. |
 
+`group.member_label_changed` can be selected in `WA_EVENT_WEBHOOK_EVENTS` or in a destination's
+`events` array. The default event set remains `message.received`, and the `grok-bot` preset remains
+limited to incoming messages.
+
 Startup logs a warning when no destination is configured, when the single-destination
 auth header and value are not set together, or when the event set is empty. No events
 are delivered in those cases. `GET /health` reports the same state without URLs or

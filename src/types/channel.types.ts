@@ -447,6 +447,16 @@ export interface GroupParticipant {
   phone: string | null;
   isAdmin: boolean;
   isSuperAdmin: boolean;
+  memberLabel?: string;
+}
+
+export interface NormalizedGroupMemberLabelEvent {
+  instanceId: string;
+  groupId: string;
+  participant: string;
+  memberLabel: string | null;
+  action: "set" | "removed";
+  timestamp: number;
 }
 
 export interface PrivacySettings {
@@ -710,6 +720,7 @@ export const CHANNEL_EVENTS = [
   "chat.updated",
   "group.updated",
   "group.participants_changed",
+  "group.member_label_changed",
   "contact.updated",
   "connection.changed",
   "instance.connected",
@@ -736,6 +747,7 @@ export type ChannelEventPayload = {
   "chat.updated": NormalizedChatUpdateEvent;
   "group.updated": NormalizedGroupUpdateEvent;
   "group.participants_changed": NormalizedGroupParticipantsEvent;
+  "group.member_label_changed": NormalizedGroupMemberLabelEvent;
   "contact.updated": NormalizedContactUpdateEvent;
   "connection.changed": NormalizedConnectionEvent;
   "instance.connected": InstanceConnectedEvent;
