@@ -605,6 +605,83 @@ describe("Baileys business and message features", () => {
     );
   });
 
+  it("automatically requests bounded history when a chat has no stored messages", async () => {
+    vi.stubEnv("WA_BAILEYS_HISTORY_SYNC_MAX_MESSAGES", "7");
+    const { adapter } = createFixture();
+    const { socket, processEvents } = installSocket(adapter);
+    const emptyChatId = "5500000000003@s.whatsapp.net";
+    const latestMessage: WAMessage = {
+      key: { id: "latest-for-empty-chat", remoteJid: emptyChatId, fromMe: false },
+      message: { conversation: "Latest message" },
+      messageTimestamp: 80,
+    };
+
+    await processEvents({
+      "messages.upsert": { messages: [latestMessage], type: "notify" },
+    });
+    await Promise.resolve();
+
+    expect(socket.fetchMessageHistory).toHaveBeenCalledWith(
+      7,
+      expect.objectContaining({ remoteJid: emptyChatId, id: "latest-for-empty-chat" }),
+      80_000,
+    );
+
+    await processEvents({
+      "messaging-history.set": {
+        contacts: [],
+        chats: [],
+        messages: [
+          {
+            key: { id: "older-for-empty-chat", remoteJid: emptyChatId, fromMe: false },
+            message: { conversation: "Older message" },
+            messageTimestamp: 70,
+          },
+        ],
+        syncType: proto.HistorySync.HistorySyncType.ON_DEMAND,
+        peerDataRequestSessionId: "history-request",
+      },
+      "messaging-history.status": {
+        syncType: proto.HistorySync.HistorySyncType.ON_DEMAND,
+        status: "complete",
+      },
+    });
+
+    expect(
+      sqlite
+        .prepare("SELECT COUNT(*) AS count FROM messages WHERE instance_id = ? AND chat_id = ?")
+        .get(activeInstanceId, emptyChatId),
+    ).toEqual({ count: 2 });
+  });
+
+  it("persists all history sync message types idempotently", async () => {
+    const { instanceId: id, adapter } = createFixture();
+    const { processEvents } = installSocket(adapter);
+    const historyMessage: WAMessage = {
+      key: { id: "initial-history-message", remoteJid: CHAT_ID, fromMe: false },
+      message: { conversation: "Recovered history" },
+      messageTimestamp: 60,
+    };
+    const historySet = {
+      contacts: [],
+      chats: [],
+      messages: [historyMessage],
+      syncType: proto.HistorySync.HistorySyncType.FULL,
+    } as const;
+
+    await processEvents({ "messaging-history.set": historySet });
+    await processEvents({ "messaging-history.set": historySet });
+
+    expect(
+      sqlite
+        .prepare("SELECT COUNT(*) AS count FROM messages WHERE instance_id = ? AND id = ?")
+        .get(id, "initial-history-message"),
+    ).toEqual({ count: 1 });
+    expect(await adapter.getMessages(CHAT_ID)).toContainEqual(
+      expect.objectContaining({ id: "initial-history-message", content: "Recovered history" }),
+    );
+  });
+
   it("does not let a timed-out history session complete the next request", async () => {
     const { instanceId: id, adapter } = createFixture();
     addStoredMessage(id, "history-anchor", { timestamp: 50 });

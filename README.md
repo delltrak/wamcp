@@ -690,6 +690,9 @@ Copy `.env.example` to `.env` and configure:
 | `WA_MCP_PORT`               | `3000`                   | HTTP server port                         |
 | `WA_REDIS_URL`              | `redis://localhost:6379` | Redis for BullMQ queues                  |
 | `WA_LOG_LEVEL`              | `info`                   | `debug` \| `info` \| `warn` \| `error`   |
+| `WA_DATABASE_PATH`          | `data/whatsapp.db`       | SQLite database path; in Docker this resolves under `/app` |
+| `WA_BAILEYS_HISTORY_SYNC_MAX_MESSAGES` | `100` | Maximum messages requested per chat by automatic and on-demand history fetches (1–10000) |
+| `WA_DATA_DIR`               | `wa-data` in Compose     | Optional absolute host directory mounted at `/app/data`; unset preserves the existing named volume |
 | `WA_BAILEYS_RATE_LIMIT`     | `20`                     | Messages/min per Baileys instance        |
 | `WA_CLOUD_RATE_LIMIT`       | `80`                     | Messages/min per Cloud API instance      |
 | `WA_MESSAGE_RETENTION_DAYS` | `30`                     | Auto-delete old messages                 |
@@ -752,6 +755,58 @@ Copy `.env.example` to `.env` and configure:
 | `WA_EVENT_WEBHOOK_RETRY_DELAY_MS` | `1000` | Initial exponential retry delay in milliseconds |
 | `WA_REQUIRE_EVENT_WEBHOOK` | `false` | Exit on startup when no event webhook destination is configured or the event set is empty |
 | `WA_VERSION_CHECK`          | `true`                   | Daily WhatsApp Web version check         |
+
+### Message history and backups
+
+When an instance has no stored messages, a new Baileys socket asks for full history and accepts
+`FULL` history-sync notifications. Every message received in `messaging-history.set` is stored
+idempotently. If a chat has no local messages but a new message arrives with an anchor, WA MCP also
+requests older history for that chat. `WA_BAILEYS_HISTORY_SYNC_MAX_MESSAGES` sets the request count
+for those automatic fetches and caps the existing `wa_fetch_message_history` tool. Its default is
+100 messages per chat.
+
+Baileys 7.0.0-rc14 does not provide a count option for its initial full-history sync. That sync is
+available when the phone sends it while linking a companion device. Restoring an existing session
+does not force the phone to resend full history; on-demand recovery needs at least one known message
+as an anchor. Keep a database backup to preserve history across reinstalls. Automatic recovery
+preserves the saved session.
+
+The SQLite database also contains the Baileys authentication keys, so backing it up preserves the
+session. The existing Docker named volume `wa-data` and default database path remain unchanged. To
+keep `.env`, the database, and the session together in an external directory, set an absolute host
+path for `WA_DATA_DIR` in the Compose environment file and use that file with Compose. For example,
+copy the current `.env` to `/srv/wamcp-data/.env`, set `WA_DATA_DIR=/srv/wamcp-data` there, then run:
+
+```bash
+mkdir -p /srv/wamcp-data
+cp .env /srv/wamcp-data/.env
+docker compose --env-file /srv/wamcp-data/.env up -d
+```
+
+The external directory is mounted at `/app/data`; the application keeps using
+`WA_DATABASE_PATH=data/whatsapp.db` inside the container. Leaving `WA_DATA_DIR` unset continues to
+use the current named volume. When moving an existing named-volume installation, copy its database
+to the external directory before switching the mount.
+
+The scripts use SQLite's online `.backup` API, which includes committed WAL contents. Run them on
+the host with the database path, backup directory, and environment file. The backup writes
+`whatsapp.db.backup` (or the configured database filename plus `.backup`) and copies `.env` into
+that directory when the source exists:
+
+```bash
+./scripts/backup.sh /srv/wamcp-data/whatsapp.db /srv/wamcp-data /srv/wamcp-data/.env
+```
+
+Restore after reinstalling, with the application stopped so SQLite files are not open:
+
+```bash
+./scripts/restore.sh /srv/wamcp-data/whatsapp.db /srv/wamcp-data /srv/wamcp-data/.env
+docker compose --env-file /srv/wamcp-data/.env up -d
+```
+
+For a local installation, omit the arguments to use `WA_DATABASE_PATH` (default
+`data/whatsapp.db`), the database directory as the backup directory, and `.env` from the project
+directory. Restore replaces the database atomically after an integrity check.
 
 Baileys may emit an incoming offline message delivered as an `append` once when its timestamp is
 after the instance's last disconnect (or last connect) or latest stored message. When those timestamps
