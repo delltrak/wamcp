@@ -5,9 +5,20 @@ type FailureKind = "missing_key" | "sync_failed" | "hash_verification_failed" | 
 interface ActiveResync {
   collection: string;
   failureKind?: FailureKind;
+  abortOnFailure: boolean;
 }
 
 export type AppStateResyncResult<T> = { ok: true; value: T } | { ok: false; reason: string };
+
+export interface AppStateResyncObservation {
+  failureReason(): string | undefined;
+  disarm(): void;
+}
+
+function hasWholeCollectionToken(message: string, collection: string): boolean {
+  const escaped = collection.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return new RegExp(`(^|[^\\w])${escaped}(?=$|[^\\w])`, "i").test(message);
+}
 
 /**
  * Baileys resyncAppState can log and return after it gives up or parks a collection.
@@ -16,19 +27,37 @@ export type AppStateResyncResult<T> = { ok: true; value: T } | { ok: false; reas
 export class AppStateResyncLogObserver {
   private readonly activeResyncs: ActiveResync[] = [];
 
-  async capture<T>(collection: string, action: () => Promise<T>): Promise<AppStateResyncResult<T>> {
-    const active: ActiveResync = { collection };
+  arm(collection: string, abortOnFailure = false): AppStateResyncObservation {
+    const active: ActiveResync = { collection, abortOnFailure };
     this.activeResyncs.push(active);
+    return {
+      failureReason: () => (active.failureKind ? this.reasonFor(active.failureKind) : undefined),
+      disarm: () => {
+        const index = this.activeResyncs.lastIndexOf(active);
+        if (index >= 0) this.activeResyncs.splice(index, 1);
+      },
+    };
+  }
+
+  async capture<T>(collection: string, action: () => Promise<T>): Promise<AppStateResyncResult<T>> {
+    const observation = this.arm(collection);
     try {
       const value = await action();
-      return active.failureKind
-        ? { ok: false, reason: this.reasonFor(active.failureKind) }
-        : { ok: true, value };
+      const failureReason = observation.failureReason();
+      return failureReason ? { ok: false, reason: failureReason } : { ok: true, value };
     } catch {
       return { ok: false, reason: "Baileys resync threw an error" };
     } finally {
-      const index = this.activeResyncs.lastIndexOf(active);
-      if (index >= 0) this.activeResyncs.splice(index, 1);
+      observation.disarm();
+    }
+  }
+
+  throwIfArmedFailure(): void {
+    const active = [...this.activeResyncs]
+      .reverse()
+      .find((resync) => Boolean(resync.abortOnFailure && resync.failureKind));
+    if (active?.failureKind) {
+      throw new Error(this.reasonFor(active.failureKind));
     }
   }
 
@@ -39,7 +68,7 @@ export class AppStateResyncLogObserver {
 
     for (const active of this.activeResyncs) {
       const hasCollectionName =
-        message.includes(active.collection.toLowerCase()) ||
+        strings.some((value) => hasWholeCollectionToken(value, active.collection)) ||
         args.some(
           (value) =>
             typeof value === "object" &&
@@ -98,7 +127,9 @@ export function observeAppStateResyncLogs(
       ) {
         return (...args: unknown[]) => {
           observer.observe(args);
-          return value.apply(target, args);
+          const result = value.apply(target, args);
+          observer.throwIfArmedFailure();
+          return result;
         };
       }
       return value;

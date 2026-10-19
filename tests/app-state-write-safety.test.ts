@@ -148,6 +148,25 @@ describe("safe app-state writes", () => {
     });
   });
 
+  it("matches collection names exactly instead of matching substrings", async () => {
+    const observer = new AppStateResyncLogObserver();
+    const logger = observeAppStateResyncLogs(pino({ level: "silent" }), observer);
+
+    const unrelated = await observer.capture("regular", async () => {
+      logger.warn({ name: "regular_high" }, "failed to sync regular_high, giving up");
+      logger.warn("failed to sync regular_low, giving up");
+    });
+    expect(unrelated).toEqual({ ok: true, value: undefined });
+
+    const exact = await observer.capture("regular_low", async () => {
+      logger.warn("failed to sync regular_low, giving up");
+    });
+    expect(exact).toMatchObject({
+      ok: false,
+      reason: "Baileys reported that the collection failed to sync",
+    });
+  });
+
   it("refuses a patch when the current app-state key ID is missing", async () => {
     process.env.WA_APP_STATE_WRITES_ENABLED = "true";
     const { adapter, chatModify, resyncAppState } = makeConnectedAdapter({ appStateKeyId: null });
@@ -235,6 +254,61 @@ describe("safe app-state writes", () => {
     expect(keys.set).not.toHaveBeenCalled();
   });
 
+  it("aborts patch dispatch when Baileys internal resync logs a collection failure", async () => {
+    process.env.WA_APP_STATE_WRITES_ENABLED = "true";
+    let resyncCount = 0;
+    let observedLogger: pino.Logger | undefined;
+    const { adapter, socket, observer, chatModify, versionState } = makeConnectedAdapter({
+      onResync: () => {
+        resyncCount += 1;
+        if (resyncCount === 2) {
+          observedLogger!.warn(
+            { name: "regular_low" },
+            "failed to sync regular_low from v3, giving up",
+          );
+        }
+      },
+    });
+    observedLogger = observeAppStateResyncLogs(pino({ level: "silent" }), observer);
+    const patchDispatch = vi.fn();
+    chatModify.mockImplementation(async () => {
+      await socket.resyncAppState(["regular_low"], false);
+      patchDispatch();
+      if (versionState) versionState.version += 1;
+    });
+
+    await expect(adapter.modifyChat(PN_JID, { action: "pin" })).rejects.toMatchObject({
+      code: "app_state_not_synced",
+      collection: "regular_low",
+      reason: "Baileys reported that the collection failed to sync",
+    });
+    expect(chatModify).toHaveBeenCalledOnce();
+    expect(resyncCount).toBe(2);
+    expect(patchDispatch).not.toHaveBeenCalled();
+  });
+
+  it("aborts patch encoding when Baileys internal resync leaves an invalid version", async () => {
+    process.env.WA_APP_STATE_WRITES_ENABLED = "true";
+    const { adapter, socket, chatModify, keys, versionState } = makeConnectedAdapter();
+    const patchDispatch = vi.fn();
+    chatModify.mockImplementation(async () => {
+      await socket.resyncAppState(["regular_low"], false);
+      if (versionState) {
+        versionState.version = 0;
+        versionState.hash = new Uint8Array(0);
+      }
+      await keys.get("app-state-sync-version", ["regular_low"]);
+      patchDispatch();
+    });
+
+    await expect(adapter.modifyChat(PN_JID, { action: "pin" })).rejects.toMatchObject({
+      code: "app_state_not_synced",
+      collection: "regular_low",
+    });
+    expect(chatModify).toHaveBeenCalledOnce();
+    expect(patchDispatch).not.toHaveBeenCalled();
+  });
+
   it("serializes writes and spaces their starts by the configured interval", async () => {
     process.env.WA_APP_STATE_WRITES_ENABLED = "true";
     process.env.WA_APP_STATE_MIN_INTERVAL_MS = "1500";
@@ -309,6 +383,47 @@ describe("chat patch payloads", () => {
       participant: "1999991111@lid",
       fromMe: false,
     });
+  });
+
+  it("normalizes database and raw message timestamps to Unix seconds", async () => {
+    const { adapter, instanceId, chatModify } = makeConnectedAdapter();
+    const secondKey: WAMessageKey = {
+      remoteJid: LID_JID,
+      remoteJidAlt: PN_JID,
+      id: "unread-seconds-row",
+      fromMe: false,
+    };
+    const thirdKey: WAMessageKey = {
+      remoteJid: LID_JID,
+      remoteJidAlt: PN_JID,
+      id: "unread-milliseconds-raw",
+      fromMe: false,
+    };
+    insertMessage(instanceId, {
+      id: secondKey.id!,
+      chatId: PN_JID,
+      timestamp: 1_700_000_124,
+      rawData: rawMessage(secondKey, 1_700_000_124_000),
+    });
+    insertMessage(instanceId, {
+      id: thirdKey.id!,
+      chatId: PN_JID,
+      timestamp: 0,
+      rawData: rawMessage(thirdKey, 1_700_000_123_000),
+    });
+
+    await adapter.markChatUnread(PN_JID);
+
+    const [modification] = chatModify.mock.calls[0] as unknown as [
+      { lastMessages: Array<{ messageTimestamp: number }> },
+      string,
+    ];
+    expect(modification.lastMessages.map((message) => message.messageTimestamp)).toEqual([
+      1_700_000_124, 1_700_000_123,
+    ]);
+    expect(modification.lastMessages.every((message) => message.messageTimestamp < 1e12)).toBe(
+      true,
+    );
   });
 
   it("skips invalid rows and refuses mark-unread when no valid raw key remains", async () => {

@@ -26,6 +26,7 @@ import makeWASocket, {
   type MinimalMessage,
   type WAMessageKey,
   type WAUrlInfo,
+  type SignalDataTypeMap,
   type CatalogCollection,
   type GetCatalogOptions,
   type NewsletterMetadata,
@@ -242,13 +243,11 @@ function storedMessageTimestampSeconds(
   rowTimestamp: number,
   rawMessageTimestamp: WAMessage["messageTimestamp"],
 ): number | undefined {
-  const timestampMs = messageTimestampToMilliseconds(rowTimestamp, Number.NaN);
-  if (Number.isFinite(timestampMs) && timestampMs > 0) return Math.floor(timestampMs / 1000);
-
-  const timestampSeconds = messageTimestampToSeconds(rawMessageTimestamp, Number.NaN);
-  return Number.isFinite(timestampSeconds) && timestampSeconds > 0
-    ? Math.floor(timestampSeconds)
-    : undefined;
+  for (const value of [rowTimestamp, rawMessageTimestamp]) {
+    const timestampMs = messageTimestampToMilliseconds(value, Number.NaN);
+    if (Number.isFinite(timestampMs) && timestampMs > 0) return Math.floor(timestampMs / 1000);
+  }
+  return undefined;
 }
 
 function parseAudioDataUri(input: string): { data: Buffer; contentType?: string } {
@@ -1104,7 +1103,43 @@ export class BaileysAdapter implements ChannelAdapter {
         return this.refuseAppStateWrite(collection, "the socket closed during the sync preflight");
       }
 
-      const result = await write();
+      const observation = this.appStateResyncLogObserver.arm(collection, true);
+      const keyStore = sock.authState.keys;
+      const originalGet = keyStore.get;
+      let result: T;
+      try {
+        keyStore.get = async <T extends keyof SignalDataTypeMap>(type: T, ids: string[]) => {
+          const values = await originalGet(type, ids);
+          if (type === "app-state-sync-version" && ids.includes(collection)) {
+            const state = (values as Record<string, SignalDataTypeMap["app-state-sync-version"]>)[
+              collection
+            ];
+            const hashLength = state?.hash instanceof Uint8Array ? state.hash.byteLength : -1;
+            if (
+              !state ||
+              !Number.isSafeInteger(state.version) ||
+              state.version <= 0 ||
+              hashLength !== 128
+            ) {
+              this.refuseAppStateWrite(
+                collection,
+                "the collection has no valid positive version and 128-byte hash after its internal resync",
+              );
+            }
+          }
+          return values;
+        };
+        try {
+          result = await write();
+        } catch (error) {
+          const failureReason = observation.failureReason();
+          if (failureReason) return this.refuseAppStateWrite(collection, failureReason);
+          throw error;
+        }
+      } finally {
+        keyStore.get = originalGet;
+        observation.disarm();
+      }
 
       const postResync = await this.appStateResyncLogObserver.capture(collection, () =>
         sock.resyncAppState([collection], false),
