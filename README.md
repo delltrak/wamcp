@@ -146,10 +146,10 @@ Add to your `claude_desktop_config.json`:
 
 ## 🛠️ Tools
 
-WA MCP exposes **133 tools** across 15 domains. All tools use the `wa_` prefix.
+WA MCP exposes **134 tools** across 15 domains. All tools use the `wa_` prefix.
 
 <details>
-<summary>📋 <strong>Instance Management</strong> (8 tools)</summary>
+<summary>📋 <strong>Instance Management</strong> (9 tools)</summary>
 
 | Tool                       | Description                      |
 | -------------------------- | -------------------------------- |
@@ -158,6 +158,7 @@ WA MCP exposes **133 tools** across 15 domains. All tools use the `wa_` prefix.
 | `wa_disconnect_instance`   | Gracefully disconnect            |
 | `wa_delete_instance`       | Permanently remove instance      |
 | `wa_restart_instance`      | Disconnect + reconnect           |
+| `wa_get_instance_status`   | Read lifecycle status for one or all instances |
 | `wa_get_qr_code`           | Get QR as base64 (Baileys)       |
 | `wa_get_pairing_code`      | Get pairing code (Baileys)       |
 | `wa_set_cloud_credentials` | Set Cloud API token              |
@@ -568,6 +569,63 @@ Opt into `event.response` to receive event RSVPs with `eventMessageId`,
 `participant`, `status`, and `timestamp`. The status is included after Baileys
 decrypts the response using the original event's message secret.
 
+Opt into lifecycle events by adding their names to `WA_EVENT_WEBHOOK_EVENTS` or
+the destination's `events` list. Lifecycle timestamps are Unix milliseconds.
+Baileys emits `instance.connected` and `instance.disconnected`; Cloud API emits
+them after successful credential verification and on an explicit disconnect.
+The pairing and QR events are Baileys-only. Disconnect events are coalesced to
+the first close after a connection opens, with a terminal `loggedOut` event
+allowed after a reconnecting close.
+
+```json
+{
+  "event": "instance.connected",
+  "instanceId": "inst_1234abcd",
+  "phone": "5511999999999@s.whatsapp.net",
+  "lid": "9000000000001@lid",
+  "pushName": "Support",
+  "connectedAt": 1792412345678,
+  "wasPairing": true
+}
+```
+
+```json
+{
+  "event": "instance.disconnected",
+  "instanceId": "inst_1234abcd",
+  "reason": "restartRequired",
+  "statusCode": 515,
+  "loggedOut": false,
+  "willReconnect": true,
+  "reconnectInMs": 1000,
+  "disconnectedAt": 1792412345678
+}
+```
+
+```json
+{
+  "event": "instance.pairing_code_generated",
+  "instanceId": "inst_1234abcd",
+  "method": "pairing_code",
+  "generatedAt": 1792412345678,
+  "expiresAt": 1792412405678
+}
+```
+
+`instance.qr_generated` uses the same generated payload with `method: "qr"`.
+`instance.pairing_expired` and `instance.qr_expired` carry `method`,
+`generatedAt`, and `expiredAt`. Pairing codes and QR strings are never included
+in lifecycle webhook payloads. Challenges expire after 60 seconds unless they
+are replaced, the connection closes, or the instance connects first.
+
+`wa_get_instance_status` returns `{ "instances": [...] }`. Pass `instanceId`
+to return one instance; omit it to list all instances. Each entry includes
+`connectionState`, connected phone/LID/push name, ISO `lastConnected` and
+`lastDisconnected` timestamps, the last disconnect reason and status code,
+`pendingPairing` (`none`, `pairing_code`, or `qr`) with ISO generation and expiry
+times, and `presenceMode` when the channel provides it. The tool does not return
+pairing codes, QR strings, tokens, keys, or credential data.
+
 See [Outgoing event webhooks](docs/event-webhooks.md) for configuration details.
 
 ---
@@ -587,7 +645,7 @@ See [Outgoing event webhooks](docs/event-webhooks.md) for configuration details.
 │  │  Layer 1 — MCP Transport (HTTP/stdio) │ │
 │  ├────────────────────────────────────────┤ │
 │  │  Layer 2 — MCP Core                   │ │
-│  │ 133 Tools │ 10 Resources │ 14 Events  │ │
+│  │ 134 Tools │ 10 Resources │ 20 Events  │ │
 │  ├────────────────────────────────────────┤ │
 │  │  Layer 3 — Services                   │ │
 │  │  Instance Manager │ Queue │ Dedup     │ │
@@ -638,7 +696,9 @@ Copy `.env.example` to `.env` and configure:
 | `WA_BAILEYS_APPEND_NOTIFY_MAX_PER_BATCH` | `100` | Maximum offline append `message.received` events emitted per Baileys batch |
 | `WA_BAILEYS_HEALTH_WATCHDOG_MS` | `180000` | Interval between Baileys application health probes; two consecutive failures end the socket for normal reconnect |
 | `WA_BAILEYS_EVENT_BUFFER_STALL_MS` | `60000` | Time a Baileys event buffer may remain active after connect before the watchdog flushes it |
-| `WA_APP_STATE_WRITES_ENABLED` | `false`                 | Enable gated Baileys account, server, and app-state changes; these changes can remove the linked device |
+| `WA_APP_STATE_WRITES_ENABLED` | `false`                 | Enable protected Baileys app-state patches and remaining gated account/server changes |
+| `WA_GROUP_WRITES_ENABLED` | `false` | Enable Baileys group, community, and Channel server writes without enabling app-state patches |
+| `WA_APP_STATE_MIN_INTERVAL_MS` | `1500` | Minimum delay between app-state write attempts per instance; accepts `0` to disable spacing |
 | `WA_PRESENCE_MODE` | `on_activity` | Baileys presence policy: `on_activity` marks online around sends and typing/recording indicators; `always` preserves the legacy behavior |
 | `WA_PRESENCE_IDLE_SECONDS` | `30` | Seconds after activity before Baileys presence returns to unavailable; must be a positive integer no greater than `2147483` |
 | `WA_MARK_ONLINE_ON_CONNECT` | `false` | In `always` mode, mark the Baileys account online when its socket connects; `on_activity` forces this off |
@@ -734,38 +794,42 @@ to `false`. In `always`, presence changes are left to Baileys and explicit prese
 `WA_MARK_ONLINE_ON_CONNECT` retains its existing behavior. Presence update failures are logged but
 do not block outgoing messages. Incoming messages and webhook delivery do not change presence.
 
-`WA_APP_STATE_WRITES_ENABLED` accepts `true` or `false` and defaults to `false`. When disabled,
-Baileys blocks `wa_archive_chat`, `wa_pin_chat`, `wa_mute_chat`, `wa_delete_chat`, `wa_clear_chat`,
+`WA_APP_STATE_WRITES_ENABLED` accepts `true` or `false` and defaults to `false`. It enables
+`wa_archive_chat`, `wa_pin_chat`, `wa_mute_chat`, `wa_delete_chat`, `wa_clear_chat`,
 `wa_mark_chat_unread`, `wa_star_message`, `wa_create_label`, `wa_edit_label`, `wa_delete_label`,
 `wa_add_chat_label`, `wa_remove_chat_label`, `wa_add_message_label`, `wa_remove_message_label`,
 `wa_update_profile_name`, `wa_create_quick_reply`, `wa_edit_quick_reply`, and
-`wa_delete_quick_reply`, plus
-`wa_create_community`, `wa_community_link_group`, `wa_community_unlink_group`, `wa_leave_community`,
-`wa_newsletter_follow`, `wa_newsletter_unfollow`, `wa_create_newsletter`,
-`wa_newsletter_update_name`, `wa_newsletter_update_description`,
-`wa_newsletter_update_picture`, `wa_newsletter_react`, `wa_create_catalog_product`,
-`wa_update_catalog_product`, `wa_delete_catalog_products`, `wa_group_join_approval_mode`, and
-`wa_group_member_add_mode`, `wa_set_disappearing_messages`, `wa_create_group`,
-`wa_group_update_subject`, `wa_group_update_description`, `wa_group_update_settings`,
-`wa_group_leave`, `wa_group_revoke_invite`, `wa_group_toggle_ephemeral`, `wa_group_join`,
-`wa_group_add_participants`, `wa_group_remove_participants`, `wa_group_promote`, `wa_group_demote`,
-`wa_group_update_picture`, `wa_group_remove_picture`, and `wa_group_handle_request` before they
-reach the socket. `wa_update_privacy` is gated only when `setting` is `defaultDisappearingMode`;
-other privacy settings remain available. The flag covers account and server changes even when
-Baileys sends them through IQ or MEX queries instead of an app-state patch. Quick reply writes call Baileys
-`addOrEditQuickReply` or `removeQuickReply`, which use `chatModify` and `appPatch`; those changes can
-get the linked device removed. Set the variable to `true` only if you accept that risk. Read-only
-metadata, group invite metadata, pending-request listings, catalog, collection, order, blocklist,
-and About calls remain available. Normal message sends, including PTV and group-invitation cards,
-remain available. Read receipts and app-state reads/resyncs are also unaffected.
+`wa_delete_quick_reply`, along with catalog product changes, private disappearing timers, default
+disappearing-mode privacy changes, and the group/community/Channel operations below. App-state
+writes are serialized per instance and spaced by
+`WA_APP_STATE_MIN_INTERVAL_MS`. Before dispatch, the adapter checks the open authenticated socket,
+the current app-state key and stored key, then resyncs the target collection. A write is refused if
+Baileys reports a sync, decode, missing-key, or hash-verification problem, or if the collection does
+not have a positive version and 128-byte hash. After a successful patch, the adapter resyncs once
+and warns if the local version did not advance. It does not retry a failed patch automatically.
 
-At the protocol level, issue #74 operations use non-app-state paths: private disappearing timers use
-`sendMessage` control messages but are gated because they change account state; blocklist/About are
-read queries; community actions use `w:g2` IQs;
-Channel metadata, posts, and reactions use newsletter/MEX queries or message nodes; group approval
-modes and catalog operations use IQ/MEX queries; PTV uses a regular video message with `ptv: true`.
-Group settings, membership, invite, and disappearing-message changes are also gated before
-`sendMessage` or group IQ methods run.
+`WA_GROUP_WRITES_ENABLED` also defaults to `false`. Set it to `true` to enable group creation,
+membership/settings, invite and join-request operations, community changes, and Channel follow and
+management operations. Those operations use Baileys group/community IQs, newsletter MEX calls, or
+message queries rather than app-state patches. This flag does not enable chat, profile, label, quick
+reply, or catalog writes. `WA_APP_STATE_WRITES_ENABLED=true` continues to enable both app-state and
+group/server writes, preserving the previous opt-in behavior. Read-only metadata, invite details,
+pending-request listings, catalog reads, order reads, blocklist, and About calls remain available.
+Normal message sends, read receipts, and app-state reads/resyncs remain available as well.
+
+For `wa_mark_chat_unread`, archive, delete, and clear ranges, the adapter uses up to three recent
+stored raw message keys, keeps their original PN/LID addressing, and converts their timestamps to
+Unix seconds. The patch index uses the newest raw key's `remoteJid` so it matches that address.
+Rows without a valid raw key are skipped; the operation is refused when no usable message remains.
+Star and unstar also require the stored raw message key.
+
+Issue #71 is consistent with a stale or partial app-state base: [Baileys PR #2456](https://github.com/WhiskeySockets/Baileys/pull/2456)
+changed sync to skip undecryptable records rather than abort the whole collection. In rc14, resync
+can log and return after it parks a collection or skips records, while `appPatch` proceeds using
+the locally stored version and hash. A patch encoded on a divergent base can desynchronize the
+account. The preflight reduces this risk, but it cannot prove server state in every case. Test
+enabled writes on a disposable WhatsApp number first; no real-number verification has been
+performed for this change.
 
 Baileys status stories go to the account's own normalized JID and known individual contacts by
 default. Each status tool accepts an optional `statusJidList` of phone numbers or individual JIDs

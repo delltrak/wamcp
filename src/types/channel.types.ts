@@ -600,6 +600,56 @@ export interface NormalizedConnectionEvent {
   pairingCode?: string;
 }
 
+export type InstanceAuthMethod = "pairing_code" | "qr";
+
+export interface InstanceConnectedEvent {
+  instanceId: string;
+  phone: string | null;
+  lid: string | null;
+  pushName: string | null;
+  connectedAt: number;
+  wasPairing: boolean;
+}
+
+export interface InstanceDisconnectedEvent {
+  instanceId: string;
+  reason: string;
+  statusCode: number | null;
+  loggedOut: boolean;
+  willReconnect: boolean;
+  reconnectInMs?: number;
+  disconnectedAt: number;
+  offlineSinceMs?: number;
+}
+
+export interface InstanceAuthChallengeGeneratedEvent {
+  instanceId: string;
+  method: InstanceAuthMethod;
+  generatedAt: number;
+  expiresAt: number;
+}
+
+export interface InstanceAuthChallengeExpiredEvent {
+  instanceId: string;
+  method: InstanceAuthMethod;
+  generatedAt: number;
+  expiredAt: number;
+}
+
+export interface InstanceRuntimeStatus {
+  phone: string | null;
+  lid: string | null;
+  pushName: string | null;
+  disconnectReason: string | null;
+  disconnectStatusCode: number | null;
+  pendingChallenge: {
+    method: InstanceAuthMethod;
+    generatedAt: number;
+    expiresAt: number;
+  } | null;
+  presenceMode: string | null;
+}
+
 export interface NormalizedCallEvent {
   instanceId: string;
   chatId: string;
@@ -656,6 +706,12 @@ export const CHANNEL_EVENTS = [
   "group.participants_changed",
   "contact.updated",
   "connection.changed",
+  "instance.connected",
+  "instance.disconnected",
+  "instance.pairing_code_generated",
+  "instance.qr_generated",
+  "instance.pairing_expired",
+  "instance.qr_expired",
   "call.received",
   "label.updated",
   "event.response",
@@ -676,6 +732,12 @@ export type ChannelEventPayload = {
   "group.participants_changed": NormalizedGroupParticipantsEvent;
   "contact.updated": NormalizedContactUpdateEvent;
   "connection.changed": NormalizedConnectionEvent;
+  "instance.connected": InstanceConnectedEvent;
+  "instance.disconnected": InstanceDisconnectedEvent;
+  "instance.pairing_code_generated": InstanceAuthChallengeGeneratedEvent;
+  "instance.qr_generated": InstanceAuthChallengeGeneratedEvent;
+  "instance.pairing_expired": InstanceAuthChallengeExpiredEvent;
+  "instance.qr_expired": InstanceAuthChallengeExpiredEvent;
   "call.received": NormalizedCallEvent;
   "label.updated": NormalizedLabelUpdateEvent;
   "event.response": NormalizedEventResponseEvent;

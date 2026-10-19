@@ -72,32 +72,34 @@ Tools marked **Baileys only** are not available on Cloud API instances.
 - **Automatic read receipts** -- `WA_AUTO_READ=false` (default), `on_fetch` to mark incoming
   messages read when a tool or resource returns them, or `on_receive` to mark them read when they
   arrive. Invalid values disable the feature and log a warning.
-- **Baileys account, server, and app-state writes** -- `WA_APP_STATE_WRITES_ENABLED=false` by
-  default. Set it to `true` to enable `wa_archive_chat`, `wa_pin_chat`, `wa_mute_chat`,
-  `wa_delete_chat`, `wa_clear_chat`, `wa_mark_chat_unread`, `wa_star_message`, `wa_create_label`,
-  `wa_edit_label`, `wa_delete_label`, `wa_add_chat_label`, `wa_remove_chat_label`,
-  `wa_add_message_label`, `wa_remove_message_label`, `wa_update_profile_name`,
-  `wa_create_quick_reply`, `wa_edit_quick_reply`, `wa_delete_quick_reply`,
-  `wa_create_community`, `wa_community_link_group`, `wa_community_unlink_group`,
-  `wa_leave_community`, `wa_newsletter_follow`, `wa_newsletter_unfollow`, `wa_create_newsletter`,
-  `wa_newsletter_update_name`,
-  `wa_newsletter_update_description`, `wa_newsletter_update_picture`, `wa_newsletter_react`,
-  `wa_create_catalog_product`, `wa_update_catalog_product`, `wa_delete_catalog_products`,
-  `wa_group_join_approval_mode`, `wa_group_member_add_mode`, `wa_set_disappearing_messages`,
-  `wa_create_group`, `wa_group_update_subject`, `wa_group_update_description`,
-  `wa_group_update_settings`, `wa_group_leave`, `wa_group_revoke_invite`, `wa_group_toggle_ephemeral`,
-  `wa_group_join`, `wa_group_add_participants`, `wa_group_remove_participants`, `wa_group_promote`,
-  `wa_group_demote`, `wa_group_update_picture`, `wa_group_remove_picture`, and
-  `wa_group_handle_request`. The flag covers account/server changes even when Baileys uses IQ or MEX
-  queries instead of an app-state patch. `wa_update_privacy` is gated only for the
-  `defaultDisappearingMode` setting; other privacy updates remain available. These changes can get
-  the linked device removed. Read-only calls and normal message sends are not gated.
-- **Protocol classification for issue #74 operations** -- `wa_set_disappearing_messages` sends a
-  `sendMessage` protocol control message and is gated because it changes account state;
-  blocklist/About are reads; communities use `w:g2` IQs;
-  Channel metadata/posts/reactions use newsletter/MEX queries or message nodes; group modes use IQs;
-  catalog operations use IQ/MEX queries; and PTV sends a video message with `ptv: true`. Only quick
-  reply create/edit/delete use `chatModify` → `appPatch` and are gated above.
+- **Baileys app-state writes** -- `WA_APP_STATE_WRITES_ENABLED=false` by default. It enables
+  `wa_archive_chat`, `wa_pin_chat`, `wa_mute_chat`, `wa_delete_chat`, `wa_clear_chat`,
+  `wa_mark_chat_unread`, `wa_star_message`, all label tools, `wa_update_profile_name`, the three
+  quick-reply tools, catalog product writes, private disappearing timers, default
+  disappearing-mode privacy changes, and the group/server operations enabled by
+  `WA_GROUP_WRITES_ENABLED`. Per instance, app-state writes are serialized and spaced by
+  `WA_APP_STATE_MIN_INTERVAL_MS` (default `1500`). Before dispatch, the adapter checks the open,
+  authenticated socket, the current app-state key and its stored key, and resyncs the target
+  collection. It refuses to patch if Baileys reports a sync/decode/key/hash failure or if the
+  collection lacks a positive version and 128-byte hash. After a successful patch it resyncs once
+  and warns if the version did not advance; failed patches are not automatically retried.
+- **Group, community, and Channel server writes** -- `WA_GROUP_WRITES_ENABLED=false` by default.
+  It enables group creation, membership/settings, invite and join-request changes, community
+  changes, and Channel follow/management calls. The inspected Baileys methods use group/community
+  IQs, newsletter MEX calls, or message queries; they do not call `appPatch`. This flag does not
+  enable chat, profile, label, quick-reply, or catalog writes. Setting
+  `WA_APP_STATE_WRITES_ENABLED=true` continues to enable both app-state and group/server writes.
+- **Message keys for chat patches** -- Unread, archive, delete, and clear operations use up to three
+  recent stored raw message keys with numeric Unix-second timestamps. The collection index uses the
+  latest raw key's `remoteJid`, preserving the PN/LID address used by that message. Invalid rows are
+  skipped, and the patch is refused if no usable message remains. Star/unstar also requires the raw
+  stored key. These writes remain disabled by default.
+- **Issue #71** -- [Baileys PR #2456](https://github.com/WhiskeySockets/Baileys/pull/2456) changed
+  sync to skip undecryptable records rather than abort the whole collection. In rc14, resync can log and return after a collection is parked or records are
+  skipped, while `appPatch` continues with the local version and hash. A patch encoded on a partial
+  or stale base can desynchronize the account. The preflight reduces that risk but cannot prove
+  server state in every case. Test enabled writes on a disposable WhatsApp number first; no
+  real-number check has been performed for this change.
 - **Real WhatsApp checks** -- Run real integration tests only with a throwaway number. Automated
   tests use mocked sockets and do not connect to WhatsApp.
 
@@ -1199,14 +1201,14 @@ List locally cached chats. Each entry includes the active Business labels associ
 
 #### `wa_mark_chat_unread`
 
-Mark a chat unread. The adapter passes recent stored messages in Baileys' required reverse-chronological `lastMessages` range.
+Mark a chat unread. The adapter passes up to three recent stored raw message keys in Baileys' reverse-chronological `lastMessages` range, with numeric Unix-second timestamps and the same PN/LID address in the patch index as the latest raw key.
 
 | Parameter | Type | Required | Description |
 | --------- | ---- | -------- | ----------- |
 | `instanceId` | string | Yes | The instance ID |
 | `chatId` | string | Yes | Chat JID to mark unread |
 
-**Channel support:** Baileys only. A chat without a locally stored message cannot provide Baileys' required message range.
+**Channel support:** Baileys only. Invalid raw message rows are skipped; the write is refused if no valid stored raw key and timestamp are available.
 
 ---
 
@@ -1221,7 +1223,7 @@ Star or unstar a message in a chat.
 | `messageId` | string | Yes | Stored message ID |
 | `star` | boolean | Yes | `true` to star; `false` to unstar |
 
-**Channel support:** Baileys only. The local message record retains the starred state after Baileys confirms the operation.
+**Channel support:** Baileys only. The stored raw message key is required and supplies the PN/LID address and sender fields. The local message record retains the starred state after Baileys confirms the operation.
 
 ---
 
@@ -1261,10 +1263,12 @@ is blocked unless `WA_APP_STATE_WRITES_ENABLED=true`.
 Tools for creating and managing WhatsApp groups.
 
 Group creation, settings, membership changes, join-request decisions, picture updates, invite-link
-revocations, group joins, and group or private disappearing-message changes are blocked unless
-`WA_APP_STATE_WRITES_ENABLED=true`. Group listing, metadata and pending-request reads, and
-invite-code reads remain available while the flag is disabled. Sending a group-invitation card uses
-the regular message-send path and remains available while the flag is disabled.
+revocations, and group joins are blocked unless `WA_GROUP_WRITES_ENABLED=true` or
+`WA_APP_STATE_WRITES_ENABLED=true`. Group changes use Baileys group IQ methods. Group listing,
+metadata and pending-request reads, and invite-code reads remain available while both flags are
+disabled. Private disappearing-message changes still require `WA_APP_STATE_WRITES_ENABLED=true`;
+group disappearing-message changes use the group write gate. Sending a group-invitation card uses
+the regular message-send path and remains available while both flags are disabled.
 
 #### `wa_list_groups`
 
@@ -1743,8 +1747,8 @@ List pending requests to join a group, including the requester JID and Baileys r
 
 #### `wa_group_join_approval_mode`
 
-Enable or disable admin approval for group join requests. This account/server change is blocked
-unless `WA_APP_STATE_WRITES_ENABLED=true`, even though Baileys sends it through an IQ query.
+Enable or disable admin approval for group join requests. This group IQ change is blocked unless
+`WA_GROUP_WRITES_ENABLED=true` or `WA_APP_STATE_WRITES_ENABLED=true`.
 
 | Parameter    | Type          | Required | Description                 |
 | ------------ | ------------- | -------- | --------------------------- |
@@ -1758,8 +1762,8 @@ unless `WA_APP_STATE_WRITES_ENABLED=true`, even though Baileys sends it through 
 
 #### `wa_group_member_add_mode`
 
-Set who can add members to a group. This account/server change is blocked unless
-`WA_APP_STATE_WRITES_ENABLED=true`, even though Baileys sends it through an IQ query.
+Set who can add members to a group. This group IQ change is blocked unless
+`WA_GROUP_WRITES_ENABLED=true` or `WA_APP_STATE_WRITES_ENABLED=true`.
 
 | Parameter    | Type                            | Required | Description                |
 | ------------ | ------------------------------- | -------- | -------------------------- |
@@ -2269,8 +2273,8 @@ Tools for interacting with WhatsApp Channels (Newsletters). **Baileys only.**
 
 #### `wa_newsletter_follow`
 
-Follow a WhatsApp Channel/Newsletter. This account/server change is blocked unless
-`WA_APP_STATE_WRITES_ENABLED=true`.
+Follow a WhatsApp Channel/Newsletter. This MEX server call is blocked unless
+`WA_GROUP_WRITES_ENABLED=true` or `WA_APP_STATE_WRITES_ENABLED=true`.
 
 | Parameter    | Type   | Required | Description                      |
 | ------------ | ------ | -------- | -------------------------------- |
@@ -2291,8 +2295,8 @@ Follow a WhatsApp Channel/Newsletter. This account/server change is blocked unle
 
 #### `wa_newsletter_unfollow`
 
-Unfollow a WhatsApp Channel/Newsletter. This account/server change is blocked unless
-`WA_APP_STATE_WRITES_ENABLED=true`.
+Unfollow a WhatsApp Channel/Newsletter. This MEX server call is blocked unless
+`WA_GROUP_WRITES_ENABLED=true` or `WA_APP_STATE_WRITES_ENABLED=true`.
 
 | Parameter    | Type   | Required | Description                        |
 | ------------ | ------ | -------- | ---------------------------------- |
@@ -2332,10 +2336,11 @@ Send a message to a WhatsApp Channel/Newsletter (must be admin).
 }
 ```
 
-Channel create/update, post-reaction, community, catalog-write, and group-mode operations change
-account or server state and are blocked unless `WA_APP_STATE_WRITES_ENABLED=true`, regardless of
-whether Baileys sends them through newsletter/MEX queries, IQs, or message nodes. Cloud API returns
-a clear unsupported-operation error. Metadata and post-fetch calls are read-only.
+Channel create/update and post-reaction operations use MEX calls or message queries; community
+operations use IQs. They are blocked unless `WA_GROUP_WRITES_ENABLED=true` or
+`WA_APP_STATE_WRITES_ENABLED=true`. Catalog writes remain behind `WA_APP_STATE_WRITES_ENABLED`;
+read-only metadata and post-fetch calls remain available. Cloud API returns a clear
+unsupported-operation error for these Baileys-only operations.
 
 | Tool                               | Inputs                                             | Description                                      |
 | ---------------------------------- | -------------------------------------------------- | ------------------------------------------------ |
@@ -2512,7 +2517,8 @@ answer the event again to create a new response.
 ### 2.13 Business, Communities, and Catalog (15 tools)
 
 These operations require Baileys. Cloud API calls return unsupported-operation errors. Community
-changes and catalog product writes change account/server state and are blocked unless
+changes use the group write gate (`WA_GROUP_WRITES_ENABLED=true` or
+`WA_APP_STATE_WRITES_ENABLED=true`). Catalog product writes require
 `WA_APP_STATE_WRITES_ENABLED=true`; read-only listing and order tools remain available.
 
 | Tool                         | Inputs                                                                                                       | Description                                           |
@@ -2534,7 +2540,7 @@ changes and catalog product writes change account/server state and are blocked u
 | `wa_get_order_details`       | `instanceId`, `orderId`, `tokenBase64`                                                                       | Read details using the token from the order message. |
 
 Quick reply create/edit/delete call Baileys `addOrEditQuickReply` or `removeQuickReply`, which use
-`chatModify` → `appPatch`. They fail before the socket is touched unless
+`chatModify` → `appPatch` and the app-state preflight described above. They are blocked unless
 `WA_APP_STATE_WRITES_ENABLED=true`. Baileys rc14 has no quick-reply read method, and the server does
 not store quick reply sync actions locally, so there is no list tool. Use the WhatsApp Business app
 to find an existing reply's timestamp before editing or deleting it.

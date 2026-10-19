@@ -38,6 +38,16 @@ export const RestartInstanceSchema = z
   })
   .strict();
 
+export const GetInstanceStatusSchema = z
+  .object({
+    instanceId: z
+      .string()
+      .min(1)
+      .optional()
+      .describe("The instance ID to inspect; omit to list all"),
+  })
+  .strict();
+
 export const GetQrCodeSchema = z
   .object({
     instanceId: z.string().min(1).describe("The instance ID to get QR code for (Baileys only)"),

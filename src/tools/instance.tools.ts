@@ -14,6 +14,7 @@ import {
   DisconnectInstanceSchema,
   DeleteInstanceSchema,
   RestartInstanceSchema,
+  GetInstanceStatusSchema,
   GetQrCodeSchema,
   GetPairingCodeSchema,
   SetCloudCredentialsSchema,
@@ -24,6 +25,54 @@ export function registerInstanceTools(
   instanceManager: InstanceManager,
   _messageQueue: MessageQueue,
 ): void {
+  server.registerTool(
+    "wa_get_instance_status",
+    {
+      description:
+        "Read connection state and lifecycle metadata for one instance or all instances.",
+      inputSchema: GetInstanceStatusSchema,
+    },
+    async (params) => {
+      const log = createRequestLogger("wa_get_instance_status", params.instanceId);
+      const start = Date.now();
+      try {
+        const instances = instanceManager
+          .getInstanceLifecycleStatuses(params.instanceId)
+          .map((item) => ({
+            instanceId: item.instanceId,
+            name: item.name,
+            channel: item.channel,
+            connectionState: item.state,
+            phone: item.phone,
+            lid: item.lid,
+            pushName: item.pushName,
+            lastConnected:
+              item.lastConnectedAt === null ? null : new Date(item.lastConnectedAt).toISOString(),
+            lastDisconnected:
+              item.lastDisconnectedAt === null
+                ? null
+                : new Date(item.lastDisconnectedAt).toISOString(),
+            lastDisconnectReason: item.disconnectReason,
+            lastDisconnectStatusCode: item.disconnectStatusCode,
+            pendingPairing: {
+              status: item.pendingChallenge?.method ?? "none",
+              generatedAt: item.pendingChallenge
+                ? new Date(item.pendingChallenge.generatedAt).toISOString()
+                : null,
+              expiresAt: item.pendingChallenge
+                ? new Date(item.pendingChallenge.expiresAt).toISOString()
+                : null,
+            },
+            presenceMode: item.presenceMode,
+          }));
+        log.info({ duration: Date.now() - start, count: instances.length }, "Instance status read");
+        return toolSuccess({ instances });
+      } catch (err) {
+        return handleToolError("wa_get_instance_status", err, params.instanceId);
+      }
+    },
+  );
+
   server.registerTool(
     "wa_create_instance",
     {

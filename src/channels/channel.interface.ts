@@ -40,6 +40,7 @@ import type {
   CatalogProductCreateInput,
   CatalogProductUpdateInput,
   NewsletterPostsPage,
+  InstanceRuntimeStatus,
 } from "../types/channel.types.js";
 import type {
   CatalogCollection,
@@ -65,6 +66,7 @@ export interface ChannelAdapter {
   connect(): Promise<void>;
   disconnect(): Promise<void>;
   getStatus(): ConnectionStatus;
+  getLifecycleStatus?(): InstanceRuntimeStatus;
 
   // ---- Authentication ----
   getQrCode(): Promise<string | null>;

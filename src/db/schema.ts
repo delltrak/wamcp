@@ -32,6 +32,8 @@ export const instances = sqliteTable("instances", {
   updatedAt: integer("updated_at").notNull(),
   lastConnected: integer("last_connected"),
   lastDisconnected: integer("last_disconnected"),
+  lastDisconnectReason: text("last_disconnect_reason"),
+  lastDisconnectStatusCode: integer("last_disconnect_status_code"),
 });
 
 // ============================================================
