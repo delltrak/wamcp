@@ -237,7 +237,13 @@ export interface ChannelAdapter {
     chatId: string,
     count: number,
     timeoutMs?: number,
-  ): Promise<{ requested: number; stored: number; timedOut: boolean }>;
+  ): Promise<{
+    requested: number;
+    limit: number;
+    capped: boolean;
+    stored: number;
+    timedOut: boolean;
+  }>;
   downloadMessageAudio(
     messageId: string,
     maxBytes?: number,

@@ -1094,7 +1094,13 @@ export class CloudApiAdapter implements ChannelAdapter {
     _chatId: string,
     _count: number,
     _timeoutMs?: number,
-  ): Promise<{ requested: number; stored: number; timedOut: boolean }> {
+  ): Promise<{
+    requested: number;
+    limit: number;
+    capped: boolean;
+    stored: number;
+    timedOut: boolean;
+  }> {
     throw new Error("On-demand message history is only available on Baileys instances");
   }
 

@@ -218,7 +218,7 @@ export function registerChatTools(
     "wa_fetch_message_history",
     {
       description:
-        "Request older messages for a chat from Baileys using the oldest stored message as the anchor. Waits for ON_DEMAND history results up to timeoutMs.",
+        "Request older messages for a chat from Baileys using the oldest stored message as the anchor. Waits for ON_DEMAND history results up to timeoutMs. The response includes limit and capped when the requested count exceeds the configured maximum.",
       inputSchema: FetchMessageHistorySchema,
     },
     async (params) => {

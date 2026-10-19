@@ -135,6 +135,7 @@ import {
 } from "./baileys.events.js";
 import {
   DEFAULT_AUTO_RECONNECT,
+  DEFAULT_BAILEYS_HISTORY_SYNC_MAX_MESSAGES,
   RECONNECT_INITIAL_DELAY_MS,
   RECONNECT_MAX_DELAY_MS,
   RECONNECT_MAX_ATTEMPTS,
@@ -883,11 +884,19 @@ function hasForwardableContent(message: WAMessage, allowEmptyStoredProto = false
 interface HistoryFetchWaiter {
   chatId: string;
   requested: number;
+  limit: number;
+  capped: boolean;
   stored: number;
   peerDataRequestSessionId?: string;
   receivedMatchingHistorySet: boolean;
   seenMessageIds: Set<string>;
-  resolve: (result: { requested: number; stored: number; timedOut: boolean }) => void;
+  resolve: (result: {
+    requested: number;
+    limit: number;
+    capped: boolean;
+    stored: number;
+    timedOut: boolean;
+  }) => void;
   reject: (error: unknown) => void;
   timer: ReturnType<typeof setTimeout>;
 }
@@ -942,6 +951,10 @@ export class BaileysAdapter implements ChannelAdapter {
   private readonly listeners = new Map<ChannelEvent, Set<ChannelEventHandler<ChannelEvent>>>();
   private pendingSocketEventProcessing: Promise<void> = Promise.resolve();
   private activeHistoryFetch: HistoryFetchWaiter | null = null;
+  private readonly automaticHistoryRecoveryChats = new Set<string>();
+  private readonly automaticHistoryRecoveryQueue = new Set<string>();
+  private automaticHistoryRecoveryRunning = false;
+  private readonly historySyncMaxMessages: number;
   private readonly messageDedup = new DedupService();
   private readonly appendNotifyWindowMs: number;
   private readonly appendNotifyMaxPerBatch: number;
@@ -970,6 +983,12 @@ export class BaileysAdapter implements ChannelAdapter {
     this.contactStore = contactStore ?? new ContactStore(instanceId, db);
     this.groupMemberLabelStore = groupMemberLabelStore ?? new GroupMemberLabelStore(instanceId, db);
     this.autoReconnect = process.env.WA_AUTO_RECONNECT !== "false" && DEFAULT_AUTO_RECONNECT;
+    this.historySyncMaxMessages = parsePositiveIntegerEnv(
+      process.env.WA_BAILEYS_HISTORY_SYNC_MAX_MESSAGES,
+      "WA_BAILEYS_HISTORY_SYNC_MAX_MESSAGES",
+      DEFAULT_BAILEYS_HISTORY_SYNC_MAX_MESSAGES,
+      10_000,
+    );
     this.appStateWritesEnabled = parseBooleanEnv(
       process.env.WA_APP_STATE_WRITES_ENABLED,
       "WA_APP_STATE_WRITES_ENABLED",
@@ -1708,6 +1727,7 @@ export class BaileysAdapter implements ChannelAdapter {
     this.authMeLid = state.creds.me?.lid;
 
     const { version } = await getWaVersion();
+    const requestFullHistory = !this.hasStoredMessages();
 
     const sock = makeWASocket({
       version,
@@ -1722,7 +1742,9 @@ export class BaileysAdapter implements ChannelAdapter {
       ),
       generateHighQualityLinkPreview: true,
       keepAliveIntervalMs: BAILEYS_KEEP_ALIVE_INTERVAL_MS,
-      syncFullHistory: true,
+      syncFullHistory: requestFullHistory,
+      shouldSyncHistoryMessage: ({ syncType }) =>
+        syncType !== proto.HistorySync.HistorySyncType.FULL || requestFullHistory,
       markOnlineOnConnect: this.markOnlineOnConnect,
       getMessage: async (key: WAMessageKey): Promise<proto.IMessage | undefined> => {
         if (!key.id) return undefined;
@@ -1774,6 +1796,8 @@ export class BaileysAdapter implements ChannelAdapter {
       this.sock.end(undefined);
       this.sock = null;
     }
+    this.automaticHistoryRecoveryQueue.clear();
+    this.finishHistoryFetch(true);
     this.status = "disconnected";
   }
 
@@ -4381,9 +4405,16 @@ export class BaileysAdapter implements ChannelAdapter {
     chatId: string,
     count: number,
     timeoutMs = 10_000,
-  ): Promise<{ requested: number; stored: number; timedOut: boolean }> {
+  ): Promise<{
+    requested: number;
+    limit: number;
+    capped: boolean;
+    stored: number;
+    timedOut: boolean;
+  }> {
     const sock = this.getSock();
     const jid = this.normalizeJid(chatId);
+    const requestedCount = Math.min(count, this.historySyncMaxMessages);
     if (this.activeHistoryFetch) {
       throw new Error(
         "Another on-demand message history fetch is already in progress for this instance",
@@ -4429,28 +4460,34 @@ export class BaileysAdapter implements ChannelAdapter {
       Number(oldest.timestamp) * 1000,
     );
 
-    const resultPromise = new Promise<{ requested: number; stored: number; timedOut: boolean }>(
-      (resolve, reject) => {
-        const waiter = {
-          chatId: jid,
-          requested: count,
-          stored: 0,
-          receivedMatchingHistorySet: false,
-          seenMessageIds: new Set(),
-          resolve,
-          reject,
-          timer: undefined as unknown as ReturnType<typeof setTimeout>,
-        } satisfies HistoryFetchWaiter;
-        waiter.timer = setTimeout(() => this.finishHistoryFetch(true, waiter), timeoutMs);
-        this.activeHistoryFetch = waiter;
-      },
-    );
+    const resultPromise = new Promise<{
+      requested: number;
+      limit: number;
+      capped: boolean;
+      stored: number;
+      timedOut: boolean;
+    }>((resolve, reject) => {
+      const waiter = {
+        chatId: jid,
+        requested: requestedCount,
+        limit: requestedCount,
+        capped: count > requestedCount,
+        stored: 0,
+        receivedMatchingHistorySet: false,
+        seenMessageIds: new Set(),
+        resolve,
+        reject,
+        timer: undefined as unknown as ReturnType<typeof setTimeout>,
+      } satisfies HistoryFetchWaiter;
+      waiter.timer = setTimeout(() => this.finishHistoryFetch(true, waiter), timeoutMs);
+      this.activeHistoryFetch = waiter;
+    });
 
     try {
       const waiter = this.activeHistoryFetch as HistoryFetchWaiter | null;
       if (!waiter) throw new Error("History fetch waiter was not initialized");
       void sock
-        .fetchMessageHistory(count, oldestKey, oldestTimestamp)
+        .fetchMessageHistory(requestedCount, oldestKey, oldestTimestamp)
         .then((peerDataRequestSessionId) => {
           waiter.peerDataRequestSessionId = peerDataRequestSessionId;
         })
@@ -4463,12 +4500,75 @@ export class BaileysAdapter implements ChannelAdapter {
     return resultPromise;
   }
 
+  private hasStoredMessages(): boolean {
+    return !!sqlite
+      .prepare("SELECT 1 FROM messages WHERE instance_id = ? LIMIT 1")
+      .get(this.instanceId);
+  }
+
+  private hasStoredMessagesForChat(chatId: string): boolean {
+    return !!sqlite
+      .prepare("SELECT 1 FROM messages WHERE instance_id = ? AND chat_id = ? LIMIT 1")
+      .get(this.instanceId, chatId);
+  }
+
+  private scheduleAutomaticHistoryRecovery(chatId: string): void {
+    const jid = this.normalizeJid(chatId);
+    if (
+      !jid ||
+      jid.endsWith("@broadcast") ||
+      jid.endsWith("@newsletter") ||
+      this.automaticHistoryRecoveryChats.has(jid)
+    ) {
+      return;
+    }
+
+    this.automaticHistoryRecoveryChats.add(jid);
+    this.automaticHistoryRecoveryQueue.add(jid);
+    void this.drainAutomaticHistoryRecoveryQueue();
+  }
+
+  private async drainAutomaticHistoryRecoveryQueue(): Promise<void> {
+    if (this.automaticHistoryRecoveryRunning) return;
+    this.automaticHistoryRecoveryRunning = true;
+    try {
+      while (this.automaticHistoryRecoveryQueue.size > 0) {
+        const chatId = this.automaticHistoryRecoveryQueue.values().next().value as string;
+        this.automaticHistoryRecoveryQueue.delete(chatId);
+        try {
+          const result = await this.fetchMessageHistory(
+            chatId,
+            this.historySyncMaxMessages,
+            10_000,
+          );
+          logger.info(
+            { instanceId: this.instanceId, chatId, ...result },
+            "Automatic message history recovery completed",
+          );
+        } catch (error) {
+          logger.warn(
+            { instanceId: this.instanceId, chatId, error },
+            "Automatic message history recovery failed",
+          );
+        }
+      }
+    } finally {
+      this.automaticHistoryRecoveryRunning = false;
+    }
+  }
+
   private finishHistoryFetch(timedOut: boolean, expectedWaiter?: HistoryFetchWaiter): void {
     const waiter = this.activeHistoryFetch;
     if (!waiter || (expectedWaiter && waiter !== expectedWaiter)) return;
     clearTimeout(waiter.timer);
     this.activeHistoryFetch = null;
-    waiter.resolve({ requested: waiter.requested, stored: waiter.stored, timedOut });
+    waiter.resolve({
+      requested: waiter.requested,
+      limit: waiter.limit,
+      capped: waiter.capped,
+      stored: waiter.stored,
+      timedOut,
+    });
   }
 
   private failHistoryFetch(error: unknown, expectedWaiter?: HistoryFetchWaiter): void {
@@ -6117,43 +6217,42 @@ export class BaileysAdapter implements ChannelAdapter {
           );
         }
 
-        if (syncType === proto.HistorySync.HistorySyncType.ON_DEMAND) {
-          const waiter = this.activeHistoryFetch;
-          const sessionMatchesWaiter =
-            !!waiter &&
-            (peerDataRequestSessionId == null ||
-              peerDataRequestSessionId === waiter.peerDataRequestSessionId);
-          if (sessionMatchesWaiter) waiter.receivedMatchingHistorySet = true;
+        const waiter =
+          syncType === proto.HistorySync.HistorySyncType.ON_DEMAND ? this.activeHistoryFetch : null;
+        const sessionMatchesWaiter =
+          !!waiter &&
+          (peerDataRequestSessionId == null ||
+            peerDataRequestSessionId === waiter.peerDataRequestSessionId);
+        if (sessionMatchesWaiter && waiter) waiter.receivedMatchingHistorySet = true;
 
-          for (const message of messages) {
-            const inserted = this.persistSourceMessage(message);
-            const content = unwrapMessageContent(message.message, {
-              unwrapProtocolEdits: false,
-            });
-            if (content?.pollUpdateMessage) {
-              await this.persistPollVote(message, content.pollUpdateMessage);
-            }
-            if (extractMessageDetails(message).type === "poll" && message.key.id) {
-              await this.retryPendingPollVotes(message.key.id);
-            }
-            if (content?.encEventResponseMessage) {
-              await this.persistEncryptedEventResponse(message, content.encEventResponseMessage);
-            }
-            if (content?.eventMessage && message.key.id) {
-              await this.retryPendingEventResponses(message.key.id);
-            }
-            const messageChatId = message.key.remoteJid ?? "";
-            if (
-              inserted &&
-              sessionMatchesWaiter &&
-              waiter &&
-              messageChatId === waiter.chatId &&
-              message.key.id &&
-              !waiter.seenMessageIds.has(message.key.id)
-            ) {
-              waiter.seenMessageIds.add(message.key.id);
-              waiter.stored++;
-            }
+        for (const message of messages) {
+          const inserted = this.persistSourceMessage(message);
+          const content = unwrapMessageContent(message.message, {
+            unwrapProtocolEdits: false,
+          });
+          if (content?.pollUpdateMessage) {
+            await this.persistPollVote(message, content.pollUpdateMessage);
+          }
+          if (extractMessageDetails(message).type === "poll" && message.key.id) {
+            await this.retryPendingPollVotes(message.key.id);
+          }
+          if (content?.encEventResponseMessage) {
+            await this.persistEncryptedEventResponse(message, content.encEventResponseMessage);
+          }
+          if (content?.eventMessage && message.key.id) {
+            await this.retryPendingEventResponses(message.key.id);
+          }
+          const messageChatId = getChatJid(message);
+          if (
+            inserted &&
+            sessionMatchesWaiter &&
+            waiter &&
+            messageChatId === waiter.chatId &&
+            message.key.id &&
+            !waiter.seenMessageIds.has(message.key.id)
+          ) {
+            waiter.seenMessageIds.add(message.key.id);
+            waiter.stored++;
           }
         }
       }
@@ -6177,6 +6276,7 @@ export class BaileysAdapter implements ChannelAdapter {
       // --- Messages ---
       if (events["messages.upsert"]) {
         const data = events["messages.upsert"];
+        const automaticHistoryRecoveryCandidates = new Set<string>();
         const appendNow = Date.now();
         const appendWatermark =
           data.type === "append"
@@ -6251,9 +6351,11 @@ export class BaileysAdapter implements ChannelAdapter {
           // Persist ALL messages (notify + append) to DB
           if (msg.key.id && msg.key.remoteJid && !protocolMessage) {
             const details = extractMessageDetails(msg);
+            const chatId = getChatJid(msg);
+            const needsHistoryRecovery = !this.hasStoredMessagesForChat(chatId);
             const normalized: NormalizedMessageEvent = {
               instanceId: this.instanceId,
-              chatId: getChatJid(msg),
+              chatId,
               message: {
                 id: msg.key.id,
                 sender: getSenderJid(msg),
@@ -6269,6 +6371,7 @@ export class BaileysAdapter implements ChannelAdapter {
               },
             };
             this.persistMessage(normalized, msg);
+            if (needsHistoryRecovery) automaticHistoryRecoveryCandidates.add(chatId);
             if (details.type === "poll") await this.retryPendingPollVotes(msg.key.id);
           }
 
@@ -6278,6 +6381,10 @@ export class BaileysAdapter implements ChannelAdapter {
           if (unwrappedContent?.eventMessage && msg.key.id) {
             await this.retryPendingEventResponses(msg.key.id);
           }
+        }
+
+        for (const chatId of automaticHistoryRecoveryCandidates) {
+          this.scheduleAutomaticHistoryRecovery(chatId);
         }
 
         if (data.type === "notify") {
