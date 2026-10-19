@@ -30,7 +30,7 @@ export function registerInstanceTools(
     "wa_get_instance_status",
     {
       description:
-        "Read connection state and lifecycle metadata for one instance or all instances. Also returns the redacted event-webhook status shared with GET /health: configured, destinationCount, eventCount, authConfigured, and warnings. URLs, header names, header values, and tokens are omitted.",
+        "Read connection state and lifecycle metadata for one instance or all instances. Also returns the redacted event-webhook status shared with GET /health: configured, destinationCount, eventCount, authConfigured, and warnings. The preset_dropped_events warning includes safe event names. URLs, header names, header values, and tokens are omitted.",
       inputSchema: GetInstanceStatusSchema,
     },
     async (params) => {

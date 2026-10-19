@@ -47,7 +47,13 @@ export interface EventWebhookConfig {
   retryDelayMs: number;
 }
 
-export type EventWebhookWarning = "not_configured" | "incomplete_auth" | "empty_event_set";
+export type PresetDroppedEventsWarning = {
+  code: "preset_dropped_events";
+  events: ChannelEvent[];
+};
+
+export type EventWebhookWarning =
+  "not_configured" | "incomplete_auth" | "empty_event_set" | PresetDroppedEventsWarning;
 
 /** Redacted webhook state. Never includes URLs, header names, header values, tokens, or secrets. */
 export interface EventWebhookStatus {
@@ -397,9 +403,29 @@ function effectiveEvents(
   events: readonly ChannelEvent[],
   preset: EventWebhookPreset | undefined,
 ): ChannelEvent[] {
-  // grok-bot delivery only forwards message.received; other names never leave the process.
-  if (preset === "grok-bot") return events.filter((event) => event === "message.received");
+  if (preset === "grok-bot") {
+    return events.filter((event) => event === "message.received" || event.startsWith("instance."));
+  }
   return [...events];
+}
+
+function droppedPresetEvents(
+  config: EventWebhookConfig,
+  fallbackPreset: EventWebhookPreset | undefined,
+): ChannelEvent[] {
+  if (config.destinations.length === 0) return [];
+  const groups = config.destinations.map((destination) => ({
+    events: destination.events,
+    preset: destination.preset ?? fallbackPreset,
+  }));
+  const dropped = new Set<ChannelEvent>();
+  for (const group of groups) {
+    if (group.preset !== "grok-bot") continue;
+    for (const event of group.events) {
+      if (event !== "message.received" && !event.startsWith("instance.")) dropped.add(event);
+    }
+  }
+  return [...dropped];
 }
 
 function countEffectiveEvents(
@@ -566,9 +592,13 @@ export function getEventWebhookStatus(
   const configured = destinationCount > 0;
   const eventCount = countEffectiveEvents(resolved, preset);
   const warnings: EventWebhookWarning[] = [];
+  const droppedEvents = droppedPresetEvents(resolved, preset);
   if (!configured) warnings.push("not_configured");
   if (!multi && auth.incomplete) warnings.push("incomplete_auth");
   if (eventCount === 0) warnings.push("empty_event_set");
+  if (droppedEvents.length > 0) {
+    warnings.push({ code: "preset_dropped_events", events: droppedEvents });
+  }
 
   return {
     configured,
@@ -594,8 +624,17 @@ export function eventWebhookHealth(status: EventWebhookStatus): {
     destinationCount: status.destinationCount,
     eventCount: status.eventCount,
     authConfigured: status.authConfigured,
-    warnings: [...status.warnings],
+    warnings: status.warnings.map((warning) =>
+      typeof warning === "string" ? warning : { ...warning, events: [...warning.events] },
+    ),
   };
+}
+
+type EventWebhookWarningCode =
+  "not_configured" | "incomplete_auth" | "empty_event_set" | "preset_dropped_events";
+
+function warningCode(warning: EventWebhookWarning): EventWebhookWarningCode {
+  return typeof warning === "string" ? warning : warning.code;
 }
 
 function bootLogDetails(status: EventWebhookStatus, warning: EventWebhookWarning) {
@@ -604,7 +643,8 @@ function bootLogDetails(status: EventWebhookStatus, warning: EventWebhookWarning
     destinationCount: status.destinationCount,
     eventCount: status.eventCount,
     authConfigured: status.authConfigured,
-    warning,
+    warning: warningCode(warning),
+    ...(typeof warning === "string" ? {} : { droppedEvents: [...warning.events] }),
   };
 }
 
@@ -614,8 +654,9 @@ export function logEventWebhookBootStatus(
   log: Pick<typeof logger, "warn"> = logger,
 ): void {
   for (const warning of status.warnings) {
+    const code = warningCode(warning);
     const details = bootLogDetails(status, warning);
-    switch (warning) {
+    switch (code) {
       case "not_configured":
         log.warn(details, "Event webhook is not configured; no events will be delivered");
         break;
@@ -628,8 +669,11 @@ export function logEventWebhookBootStatus(
       case "empty_event_set":
         log.warn(details, "Event webhook event set is empty; no events will be delivered");
         break;
+      case "preset_dropped_events":
+        log.warn(details, "Grok Bot preset drops configured events");
+        break;
       default: {
-        const unreachable: never = warning;
+        const unreachable: never = code;
         throw new Error(`Unknown event webhook warning: ${String(unreachable)}`);
       }
     }

@@ -24,7 +24,7 @@ HTTP Host header.
 | --- | --- | --- |
 | `WA_EVENT_WEBHOOK_URL` | unset | One outgoing destination; unset disables it. |
 | `WA_EVENT_WEBHOOKS` | unset | JSON array of destinations. Use instead of `URL` for multiple endpoints. |
-| `WA_EVENT_WEBHOOK_PRESET` | unset | `grok-bot` selects the compact Grok Bot payload and incoming-message filters. |
+| `WA_EVENT_WEBHOOK_PRESET` | unset | `grok-bot` selects compact Grok Bot message and lifecycle payloads plus incoming-message filters. |
 | `WA_EVENT_WEBHOOK_EVENTS` | `message.received` | Comma-separated events for the single destination and multi-destination defaults. |
 | `WA_EVENT_WEBHOOK_IGNORE_FROM_ME` | `true` | Ignore messages sent by this WhatsApp instance. |
 | `WA_EVENT_WEBHOOK_HEADERS` | unset | JSON object of extra headers for the single destination. |
@@ -42,10 +42,13 @@ HTTP Host header.
 | `WA_REQUIRE_EVENT_WEBHOOK` | `false` | Refuse to start when no destination is configured or the resolved event set is empty. |
 
 Startup logs a warning when no destination is configured, when the single-destination
-auth header and value are not set together, or when the event set is empty. No events
-are delivered in those cases. `GET /health` reports the same state without URLs or
-secrets. `WA_REQUIRE_EVENT_WEBHOOK=true` exits before the server starts when no
-destination is configured or the event set is empty.
+auth header and value are not set together, when the event set is empty, or when a
+Grok Bot preset drops configured non-lifecycle events. The latter warning includes
+only the dropped event names. In `warnings`, it has the shape
+`{ "code": "preset_dropped_events", "events": ["connection.changed"] }`.
+`GET /health` and `wa_get_instance_status` report the same redacted state without
+URLs or secrets. `WA_REQUIRE_EVENT_WEBHOOK=true` exits before the server starts
+when no destination is configured or the event set is empty.
 
 For HTTP 429 and 5xx responses, a valid `Retry-After` header (seconds or an
 HTTP date) sets a minimum retry delay. Its value is capped at five minutes.
@@ -79,8 +82,10 @@ Each destination accepts `id`, `url`, `headers`, `authHeader`, `authEnv`,
 `authValue`, `secretEnv`, `secret`, `events`, `preset`, `ignoreFromMe`,
 `chatAllowlist`, `senderAllowlist`, and `debounceMs`. Missing destination event
 lists inherit `WA_EVENT_WEBHOOK_EVENTS`. A Grok Bot destination with the
-`grok-bot` preset forwards only `message.received`; status, broadcast, and
-newsletter JIDs are excluded. If both allowlists are set, a message must match
+`grok-bot` preset forwards configured `message.received` and `instance.*`
+lifecycle events. It drops other configured events and reports their names in
+the webhook status warning. Status, broadcast, and newsletter JIDs are excluded
+from incoming message delivery. If both allowlists are set, a message must match
 both. IDs must match the chat or sender JIDs in the webhook event.
 
 ## Grok Bot routine setup
@@ -97,6 +102,7 @@ both. IDs must match the chat or sender JIDs in the webhook event.
    WA_EVENT_WEBHOOK_AUTH_HEADER=X-Grok-Bot-Key
    WA_EVENT_WEBHOOK_AUTH_VALUE=your-routine-send-key
    WA_EVENT_WEBHOOK_IGNORE_FROM_ME=true
+   WA_EVENT_WEBHOOK_EVENTS=message.received,instance.connected,instance.disconnected,instance.pairing_code_generated,instance.qr_generated,instance.pairing_expired,instance.qr_expired
    ```
 
 4. Restart WA MCP and send a WhatsApp message from another account. The
@@ -274,8 +280,15 @@ is stored and retried when the event arrives, and is emitted after decryption.
 }
 ```
 
-The `grok-bot` preset remains limited to `message.received`; it can include
-`chatLabels` and `messageLabels` on those message payloads when present.
+Configured `instance.*` events use a compact Grok Bot body with `event`,
+`instanceId`, a short Portuguese `text`, and an event timestamp. Disconnect
+payloads may also contain `reason`, `statusCode`, and reconnect state. Pairing
+and QR payloads may contain the method and expiry time. Pairing codes, QR
+strings, credentials, and secrets are never included. The preset drops other
+configured events and reports their names in the webhook status warning.
+
+Grok Bot `message.received` payloads can include `chatLabels` and
+`messageLabels` when present.
 For the `grok-bot` preset, `mediaUrl`, `mediaMimetype`, `buttons`, and `rawType` are forwarded
 when present; media identifiers remain subject to the preset's existing safe-ID filtering.
 

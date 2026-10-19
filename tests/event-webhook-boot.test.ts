@@ -206,15 +206,40 @@ describe("event webhook boot status", () => {
     expect(logs.warn.mock.calls[0]?.[0]).toMatchObject({ warning: "empty_event_set" });
   });
 
-  it("treats a Grok Bot preset that filters out every event as an empty set", () => {
+  it("reports configured events dropped by the Grok Bot preset", () => {
+    const logs = captureLogs();
+    const env = {
+      WA_EVENT_WEBHOOK_URL: "https://hooks.example.test/receive",
+      WA_EVENT_WEBHOOK_PRESET: "grok-bot",
+      WA_EVENT_WEBHOOK_EVENTS: "message.received,instance.connected,connection.changed",
+    };
+    const status = bootEventWebhook(env);
+
+    expect(status.eventCount).toBe(2);
+    expect(status.warnings).toEqual([
+      { code: "preset_dropped_events", events: ["connection.changed"] },
+    ]);
+    expect(eventWebhookHealth(status).warnings).toEqual(status.warnings);
+    expect(healthFor(status).webhook.warnings).toEqual(status.warnings);
+    expect(logs.warn).toHaveBeenCalledOnce();
+    expect(logs.warn.mock.calls[0]?.[0]).toMatchObject({
+      warning: "preset_dropped_events",
+      droppedEvents: ["connection.changed"],
+    });
+  });
+
+  it("does not warn when all Grok Bot events are supported", () => {
+    const logs = captureLogs();
     const status = getEventWebhookStatus({
       WA_EVENT_WEBHOOK_URL: "https://hooks.example.test/receive",
       WA_EVENT_WEBHOOK_PRESET: "grok-bot",
-      WA_EVENT_WEBHOOK_EVENTS: "connection.changed",
+      WA_EVENT_WEBHOOK_EVENTS:
+        "message.received,instance.connected,instance.disconnected,instance.qr_generated",
     });
 
-    expect(status.eventCount).toBe(0);
-    expect(status.warnings).toEqual(["empty_event_set"]);
+    expect(status.eventCount).toBe(4);
+    expect(status.warnings).toEqual([]);
+    expect(logs.warn).not.toHaveBeenCalled();
   });
 
   it("logs one warning per code when several problems are present", () => {
@@ -295,8 +320,8 @@ describe("event webhook boot status", () => {
   it("adds the same redacted webhook object to wa_get_instance_status", async () => {
     const secretUrl = `${FIXTURE_URL}?token=${FIXTURE_TOKEN}`;
     vi.stubEnv("WA_EVENT_WEBHOOKS", "");
-    vi.stubEnv("WA_EVENT_WEBHOOK_PRESET", "");
-    vi.stubEnv("WA_EVENT_WEBHOOK_EVENTS", "message.received");
+    vi.stubEnv("WA_EVENT_WEBHOOK_PRESET", "grok-bot");
+    vi.stubEnv("WA_EVENT_WEBHOOK_EVENTS", "message.received,instance.connected,connection.changed");
     vi.stubEnv("WA_EVENT_WEBHOOK_URL", secretUrl);
     vi.stubEnv("WA_EVENT_WEBHOOK_AUTH_HEADER", FIXTURE_HEADER_NAME);
     vi.stubEnv("WA_EVENT_WEBHOOK_AUTH_VALUE", FIXTURE_HEADER_VALUE);
@@ -337,9 +362,9 @@ describe("event webhook boot status", () => {
     expect(body.webhook).toEqual({
       configured: true,
       destinationCount: 1,
-      eventCount: 1,
+      eventCount: 2,
       authConfigured: true,
-      warnings: [],
+      warnings: [{ code: "preset_dropped_events", events: ["connection.changed"] }],
     });
     expect(Object.keys(body.webhook).sort()).toEqual([
       "authConfigured",
