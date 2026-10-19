@@ -30,6 +30,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- App-state writes now run through a per-instance queue with configurable spacing and a resync
+  preflight that requires a retrievable current key, a positive collection version, a 128-byte hash,
+  and no Baileys-reported sync, decode, missing-key, or hash-verification failure. Successful writes
+  are resynced once and checked for version advancement; failed patches are not retried.
+- Chat unread/archive/delete/clear ranges now use at most three recent stored raw message keys,
+  numeric Unix-second timestamps, and the raw key's PN/LID `remoteJid` for the patch index. Star and
+  unstar refuse messages without a valid stored raw key.
+- Added `WA_GROUP_WRITES_ENABLED=false` for group, community, and Channel server operations that
+  use IQ/MEX/message queries. `WA_APP_STATE_WRITES_ENABLED=true` continues to enable those writes
+  along with app-state and other gated account/server operations.
 - Baileys presence now defaults to appearing online only around outgoing messages and typing or
   recording activity, then returning to unavailable after the configured idle timeout.
 - Incoming offline messages delivered through Baileys `append` upserts now emit one `message.received`
