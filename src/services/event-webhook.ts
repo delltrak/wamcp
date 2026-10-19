@@ -613,8 +613,10 @@ export function shouldSendEventWebhook(
     }
   }
 
-  if (config.chatAllowlist && !config.chatAllowlist.includes(chatId)) return false;
-  if (config.senderAllowlist && !config.senderAllowlist.includes(senderId)) return false;
+  if (!event.startsWith("instance.")) {
+    if (config.chatAllowlist && !config.chatAllowlist.includes(chatId)) return false;
+    if (config.senderAllowlist && !config.senderAllowlist.includes(senderId)) return false;
+  }
   return true;
 }
 

@@ -40,7 +40,9 @@ function initializeDatabase(): void {
       created_at      INTEGER NOT NULL,
       updated_at      INTEGER NOT NULL,
       last_connected  INTEGER,
-      last_disconnected INTEGER
+      last_disconnected INTEGER,
+      last_disconnect_reason TEXT,
+      last_disconnect_status_code INTEGER
     );
 
     CREATE TABLE IF NOT EXISTS auth_keys (
@@ -253,6 +255,18 @@ try {
 
 try {
   sqlite.exec(`ALTER TABLE messages ADD COLUMN starred INTEGER NOT NULL DEFAULT 0`);
+} catch {
+  // column already exists or table doesn't exist yet — ignore
+}
+
+try {
+  sqlite.exec(`ALTER TABLE instances ADD COLUMN last_disconnect_reason TEXT`);
+} catch {
+  // column already exists or table doesn't exist yet — ignore
+}
+
+try {
+  sqlite.exec(`ALTER TABLE instances ADD COLUMN last_disconnect_status_code INTEGER`);
 } catch {
   // column already exists or table doesn't exist yet — ignore
 }

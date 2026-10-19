@@ -145,6 +145,39 @@ describe("instance lifecycle events", () => {
     expect(adapter.getLifecycleStatus().pendingChallenge).toBeNull();
   });
 
+  it("persists disconnect details and returns them after adapter recreation", async () => {
+    const instanceManager = new InstanceManager();
+    const instance = await instanceManager.createInstance("disconnect persistence fixture");
+    activeInstanceIds.add(instance.id);
+    const adapter = instanceManager.ensureAdapter(instance.id) as BaileysAdapter;
+    activeAdapters.add(adapter);
+
+    invokePrivate(adapter, "emit", "instance.disconnected", {
+      instanceId: instance.id,
+      reason: "logged out",
+      statusCode: 401,
+      loggedOut: true,
+      willReconnect: false,
+      disconnectedAt: 1_800_000_123_000,
+    } satisfies ChannelEventPayload["instance.disconnected"]);
+
+    expect(
+      sqlite
+        .prepare(
+          "SELECT last_disconnect_reason, last_disconnect_status_code FROM instances WHERE id = ?",
+        )
+        .get(instance.id),
+    ).toEqual({ last_disconnect_reason: "logged out", last_disconnect_status_code: 401 });
+
+    const recreatedManager = new InstanceManager();
+    const recreatedAdapter = recreatedManager.ensureAdapter(instance.id) as BaileysAdapter;
+    activeAdapters.add(recreatedAdapter);
+    expect(recreatedManager.getInstanceLifecycleStatuses(instance.id)[0]).toMatchObject({
+      disconnectReason: "logged out",
+      disconnectStatusCode: 401,
+    });
+  });
+
   it("expires pairing and QR challenges without including their contents", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-10-19T12:00:00.000Z"));

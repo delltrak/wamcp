@@ -222,6 +222,8 @@ export class InstanceManager {
         phoneNumber: instances.phoneNumber,
         lastConnected: instances.lastConnected,
         lastDisconnected: instances.lastDisconnected,
+        lastDisconnectReason: instances.lastDisconnectReason,
+        lastDisconnectStatusCode: instances.lastDisconnectStatusCode,
       })
       .from(instances);
     const rows = id ? select.where(eq(instances.id, id)).all() : select.all();
@@ -243,8 +245,8 @@ export class InstanceManager {
         pushName: connected ? (runtime?.pushName ?? null) : null,
         lastConnectedAt: row.lastConnected,
         lastDisconnectedAt: row.lastDisconnected,
-        disconnectReason: runtime?.disconnectReason ?? null,
-        disconnectStatusCode: runtime?.disconnectStatusCode ?? null,
+        disconnectReason: runtime?.disconnectReason ?? row.lastDisconnectReason,
+        disconnectStatusCode: runtime?.disconnectStatusCode ?? row.lastDisconnectStatusCode,
         pendingChallenge: runtime?.pendingChallenge ?? null,
         presenceMode: runtime?.presenceMode ?? null,
       };
@@ -296,6 +298,17 @@ export class InstanceManager {
             .set({
               ...(connectedPayload.phone ? { phoneNumber: connectedPayload.phone } : {}),
               updatedAt: connectedPayload.connectedAt,
+            })
+            .where(eq(instances.id, instanceId))
+            .run();
+        }
+
+        if (event === "instance.disconnected") {
+          const disconnectedPayload = payload as ChannelEventPayload["instance.disconnected"];
+          db.update(instances)
+            .set({
+              lastDisconnectReason: disconnectedPayload.reason,
+              lastDisconnectStatusCode: disconnectedPayload.statusCode,
             })
             .where(eq(instances.id, instanceId))
             .run();
