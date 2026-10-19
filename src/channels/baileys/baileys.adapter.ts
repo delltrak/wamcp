@@ -929,6 +929,7 @@ export class BaileysAdapter implements ChannelAdapter {
   private retainedClosedSocket: WASocket | null = null;
   private reconnectSuspended = false;
   private reconnectBackoffExhaustedNotified = false;
+  private connectInFlight: Promise<void> | null = null;
   private watchdogTimer: ReturnType<typeof setTimeout> | null = null;
   private saveCreds: (() => Promise<void>) | null = null;
   private authMeId: string | undefined;
@@ -1717,6 +1718,19 @@ export class BaileysAdapter implements ChannelAdapter {
   // ---- Lifecycle ----
 
   async connect(): Promise<void> {
+    // The reconnect timer, the health check, and tool calls can all call connect();
+    // share one in-flight attempt so they never open two sockets at once.
+    if (this.connectInFlight) return this.connectInFlight;
+    const attempt = this.connectOnce();
+    this.connectInFlight = attempt;
+    try {
+      await attempt;
+    } finally {
+      if (this.connectInFlight === attempt) this.connectInFlight = null;
+    }
+  }
+
+  private async connectOnce(): Promise<void> {
     if (this.sock && this.status !== "disconnected") {
       this.cancelReconnectTimer();
       logger.warn({ instanceId: this.instanceId }, "Already connected or connecting");
@@ -6850,6 +6864,19 @@ export class BaileysAdapter implements ChannelAdapter {
     this.cancelReconnectTimer();
 
     const exhausted = this.reconnectAttempt >= RECONNECT_MAX_ATTEMPTS;
+    if (exhausted && !this.authMeId) {
+      // An unpaired session (abandoned QR or pairing code) keeps the bounded retry.
+      logger.error(
+        {
+          instanceId: this.instanceId,
+          attempts: this.reconnectAttempt,
+          reason: this.lastDisconnectReason,
+          statusCode: this.lastDisconnectStatusCode,
+        },
+        "Max reconnect attempts reached for an unpaired session",
+      );
+      return null;
+    }
     const delay = exhausted
       ? RECONNECT_MAX_DELAY_MS
       : Math.min(

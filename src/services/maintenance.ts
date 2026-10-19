@@ -194,8 +194,9 @@ export class MaintenanceService {
     for (const instance of allInstances) {
       const stuckConnecting = this.isStuckConnecting(instance, now);
       if (instance.status !== "disconnected" && !stuckConnecting) continue;
-      // Disconnected instances reconnect only after a previous successful connection.
-      if (!stuckConnecting && !instance.lastConnected) continue;
+      // Only reconnect instances that connected before, so an abandoned pairing
+      // does not keep generating QR codes.
+      if (!instance.lastConnected) continue;
 
       try {
         logger.info(
