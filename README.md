@@ -763,7 +763,8 @@ When an instance has no stored messages, a new Baileys socket asks for full hist
 idempotently. If a chat has no local messages but a new message arrives with an anchor, WA MCP also
 requests older history for that chat. `WA_BAILEYS_HISTORY_SYNC_MAX_MESSAGES` sets the request count
 for those automatic fetches and caps the existing `wa_fetch_message_history` tool. Its default is
-100 messages per chat.
+100 messages per chat. The `wa_fetch_message_history` response includes `limit` and `capped` so
+callers can see when the requested count was reduced to the configured maximum.
 
 Baileys 7.0.0-rc14 does not provide a count option for its initial full-history sync. That sync is
 available when the phone sends it while linking a companion device. Restoring an existing session
@@ -791,13 +792,21 @@ to the external directory before switching the mount.
 The scripts use SQLite's online `.backup` API, which includes committed WAL contents. Run them on
 the host with the database path, backup directory, and environment file. The backup writes
 `whatsapp.db.backup` (or the configured database filename plus `.backup`) and copies `.env` into
-that directory when the source exists:
+that directory when the source exists. These files contain WhatsApp authentication credentials and
+keys: they are created with mode `0600`, must be treated as secrets, and must not be committed or
+shared.
 
 ```bash
 ./scripts/backup.sh /srv/wamcp-data/whatsapp.db /srv/wamcp-data /srv/wamcp-data/.env
 ```
 
-Restore after reinstalling, with the application stopped so SQLite files are not open:
+Restore only after stopping every WA MCP container/process and disconnecting or turning off the
+original WhatsApp session. Restore refuses to proceed while the database is locked or a `-wal` file
+exists. `--force` permits a restore when a `-wal` file exists, but the database lock check still
+applies. Before replacing an existing database, the script writes a private
+`<database>.pre-restore-<timestamp>` copy beside it.
+
+Restore after reinstalling, with the application and original session stopped:
 
 ```bash
 ./scripts/restore.sh /srv/wamcp-data/whatsapp.db /srv/wamcp-data /srv/wamcp-data/.env
@@ -806,7 +815,14 @@ docker compose --env-file /srv/wamcp-data/.env up -d
 
 For a local installation, omit the arguments to use `WA_DATABASE_PATH` (default
 `data/whatsapp.db`), the database directory as the backup directory, and `.env` from the project
-directory. Restore replaces the database atomically after an integrity check.
+directory for backup. A restore with no explicit environment-file argument writes the saved `.env`
+to the database directory (normally `data/.env`) rather than the current working directory. Restore
+replaces the database atomically after an integrity check. Add `--force` to the restore command only
+when intentionally overriding a leftover WAL file, for example:
+
+```bash
+./scripts/restore.sh /srv/wamcp-data/whatsapp.db /srv/wamcp-data /srv/wamcp-data/.env --force
+```
 
 Baileys may emit an incoming offline message delivered as an `append` once when its timestamp is
 after the instance's last disconnect (or last connect) or latest stored message. When those timestamps

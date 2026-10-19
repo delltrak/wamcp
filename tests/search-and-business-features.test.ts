@@ -599,7 +599,7 @@ describe("Baileys business and message features", () => {
       expect.objectContaining({ remoteJid: CHAT_ID, id: "history-anchor", fromMe: false }),
       50_000,
     );
-    expect(result).toEqual({ requested: 20, stored: 1, timedOut: false });
+    expect(result).toEqual({ requested: 20, limit: 20, capped: false, stored: 1, timedOut: false });
     expect(await adapter.getMessages(CHAT_ID)).toContainEqual(
       expect.objectContaining({ id: "history-new", content: "Older fetched text" }),
     );
@@ -652,6 +652,93 @@ describe("Baileys business and message features", () => {
         .prepare("SELECT COUNT(*) AS count FROM messages WHERE instance_id = ? AND chat_id = ?")
         .get(activeInstanceId, emptyChatId),
     ).toEqual({ count: 2 });
+  });
+
+  it("reports when an on-demand history request was reduced to its configured limit", async () => {
+    vi.stubEnv("WA_BAILEYS_HISTORY_SYNC_MAX_MESSAGES", "7");
+    const { instanceId: id, adapter } = createFixture();
+    addStoredMessage(id, "history-cap-anchor", { timestamp: 50 });
+    const { socket, processEvents } = installSocket(adapter);
+
+    const request = adapter.fetchMessageHistory(CHAT_ID, 20, 1_000);
+    await Promise.resolve();
+    await processEvents({
+      "messaging-history.set": {
+        contacts: [],
+        chats: [],
+        messages: [],
+        syncType: proto.HistorySync.HistorySyncType.ON_DEMAND,
+        peerDataRequestSessionId: "history-request",
+      },
+      "messaging-history.status": {
+        syncType: proto.HistorySync.HistorySyncType.ON_DEMAND,
+        status: "complete",
+        explicit: true,
+      },
+    });
+
+    expect(socket.fetchMessageHistory).toHaveBeenCalledWith(
+      7,
+      expect.objectContaining({ id: "history-cap-anchor" }),
+      expect.any(Number),
+    );
+    await expect(request).resolves.toEqual({
+      requested: 7,
+      limit: 7,
+      capped: true,
+      stored: 0,
+      timedOut: false,
+    });
+  });
+
+  it("emits an offline message once when its append arrives during automatic history recovery", async () => {
+    const { instanceId: id, adapter } = createFixture();
+    const { socket, processEvents } = installSocket(adapter);
+    const recoveredChatId = "5500000000090@s.whatsapp.net";
+    const offlineMessage: WAMessage = {
+      key: { id: "offline-before-append", remoteJid: recoveredChatId, fromMe: false },
+      message: { conversation: "Offline message" },
+      messageTimestamp: Math.floor(Date.now() / 1000),
+    };
+    const received = vi.fn();
+    adapter.on("message.received", received);
+
+    await processEvents({
+      "messages.upsert": { messages: [offlineMessage], type: "notify" },
+    });
+    await Promise.resolve();
+    expect(socket.fetchMessageHistory).toHaveBeenCalledWith(
+      expect.any(Number),
+      expect.objectContaining({ id: "offline-before-append", remoteJid: recoveredChatId }),
+      expect.any(Number),
+    );
+
+    await processEvents({
+      "messages.upsert": { messages: [offlineMessage], type: "append" },
+    });
+    await processEvents({
+      "messaging-history.set": {
+        contacts: [],
+        chats: [],
+        messages: [],
+        syncType: proto.HistorySync.HistorySyncType.ON_DEMAND,
+        peerDataRequestSessionId: "history-request",
+      },
+      "messaging-history.status": {
+        syncType: proto.HistorySync.HistorySyncType.ON_DEMAND,
+        status: "complete",
+        explicit: true,
+      },
+    });
+
+    expect(received).toHaveBeenCalledTimes(1);
+    expect(received).toHaveBeenCalledWith(
+      expect.objectContaining({
+        instanceId: id,
+        chatId: recoveredChatId,
+        message: expect.objectContaining({ id: "offline-before-append" }),
+      }),
+    );
   });
 
   it("persists all history sync message types idempotently", async () => {
@@ -720,7 +807,13 @@ describe("Baileys business and message features", () => {
     privateAdapter.bindEvents(socket);
 
     const timedOut = await adapter.fetchMessageHistory(CHAT_ID, 20, 5);
-    expect(timedOut).toEqual({ requested: 20, stored: 0, timedOut: true });
+    expect(timedOut).toEqual({
+      requested: 20,
+      limit: 20,
+      capped: false,
+      stored: 0,
+      timedOut: true,
+    });
 
     const currentRequest = adapter.fetchMessageHistory(CHAT_ID, 20, 1_000);
     await Promise.resolve();
@@ -761,7 +854,13 @@ describe("Baileys business and message features", () => {
       },
     });
 
-    await expect(currentRequest).resolves.toEqual({ requested: 20, stored: 1, timedOut: false });
+    await expect(currentRequest).resolves.toEqual({
+      requested: 20,
+      limit: 20,
+      capped: false,
+      stored: 1,
+      timedOut: false,
+    });
   });
 });
 

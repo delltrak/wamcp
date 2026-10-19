@@ -857,11 +857,19 @@ function hasForwardableContent(message: WAMessage, allowEmptyStoredProto = false
 interface HistoryFetchWaiter {
   chatId: string;
   requested: number;
+  limit: number;
+  capped: boolean;
   stored: number;
   peerDataRequestSessionId?: string;
   receivedMatchingHistorySet: boolean;
   seenMessageIds: Set<string>;
-  resolve: (result: { requested: number; stored: number; timedOut: boolean }) => void;
+  resolve: (result: {
+    requested: number;
+    limit: number;
+    capped: boolean;
+    stored: number;
+    timedOut: boolean;
+  }) => void;
   reject: (error: unknown) => void;
   timer: ReturnType<typeof setTimeout>;
 }
@@ -4196,7 +4204,13 @@ export class BaileysAdapter implements ChannelAdapter {
     chatId: string,
     count: number,
     timeoutMs = 10_000,
-  ): Promise<{ requested: number; stored: number; timedOut: boolean }> {
+  ): Promise<{
+    requested: number;
+    limit: number;
+    capped: boolean;
+    stored: number;
+    timedOut: boolean;
+  }> {
     const sock = this.getSock();
     const jid = this.normalizeJid(chatId);
     const requestedCount = Math.min(count, this.historySyncMaxMessages);
@@ -4245,22 +4259,28 @@ export class BaileysAdapter implements ChannelAdapter {
       Number(oldest.timestamp) * 1000,
     );
 
-    const resultPromise = new Promise<{ requested: number; stored: number; timedOut: boolean }>(
-      (resolve, reject) => {
-        const waiter = {
-          chatId: jid,
-          requested: requestedCount,
-          stored: 0,
-          receivedMatchingHistorySet: false,
-          seenMessageIds: new Set(),
-          resolve,
-          reject,
-          timer: undefined as unknown as ReturnType<typeof setTimeout>,
-        } satisfies HistoryFetchWaiter;
-        waiter.timer = setTimeout(() => this.finishHistoryFetch(true, waiter), timeoutMs);
-        this.activeHistoryFetch = waiter;
-      },
-    );
+    const resultPromise = new Promise<{
+      requested: number;
+      limit: number;
+      capped: boolean;
+      stored: number;
+      timedOut: boolean;
+    }>((resolve, reject) => {
+      const waiter = {
+        chatId: jid,
+        requested: requestedCount,
+        limit: requestedCount,
+        capped: count > requestedCount,
+        stored: 0,
+        receivedMatchingHistorySet: false,
+        seenMessageIds: new Set(),
+        resolve,
+        reject,
+        timer: undefined as unknown as ReturnType<typeof setTimeout>,
+      } satisfies HistoryFetchWaiter;
+      waiter.timer = setTimeout(() => this.finishHistoryFetch(true, waiter), timeoutMs);
+      this.activeHistoryFetch = waiter;
+    });
 
     try {
       const waiter = this.activeHistoryFetch as HistoryFetchWaiter | null;
@@ -4341,7 +4361,13 @@ export class BaileysAdapter implements ChannelAdapter {
     if (!waiter || (expectedWaiter && waiter !== expectedWaiter)) return;
     clearTimeout(waiter.timer);
     this.activeHistoryFetch = null;
-    waiter.resolve({ requested: waiter.requested, stored: waiter.stored, timedOut });
+    waiter.resolve({
+      requested: waiter.requested,
+      limit: waiter.limit,
+      capped: waiter.capped,
+      stored: waiter.stored,
+      timedOut,
+    });
   }
 
   private failHistoryFetch(error: unknown, expectedWaiter?: HistoryFetchWaiter): void {
