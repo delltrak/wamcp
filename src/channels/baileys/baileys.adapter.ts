@@ -60,6 +60,7 @@ import type {
   Message,
   GroupSummary,
   GroupMetadata,
+  CreateGroupFromGroupResponse,
   ChatModification,
   GroupModification,
   ParticipantAction,
@@ -138,6 +139,7 @@ import {
   RECONNECT_MAX_DELAY_MS,
   RECONNECT_MAX_ATTEMPTS,
   MAX_BASE64_MEDIA_BYTES,
+  MAX_GROUP_PARTICIPANTS,
   MEDIA_LIMITS,
 } from "../../constants.js";
 import { createChildLogger } from "../../utils/logger.js";
@@ -596,6 +598,29 @@ function groupPictureFailure(error: unknown, operation: "update" | "remove"): Er
     return new Error(`Only a group admin can ${operation} this group's picture`);
   }
   return error instanceof Error ? error : new Error(message);
+}
+
+function isMissingGroupError(error: unknown): boolean {
+  const errorObject =
+    typeof error === "object" && error !== null ? (error as Record<string, unknown>) : undefined;
+  const output = errorObject?.output;
+  const statusCode =
+    typeof output === "object" && output !== null && "statusCode" in output
+      ? (output as Record<string, unknown>).statusCode
+      : errorObject?.statusCode;
+  const message = error instanceof Error ? error.message : String(error);
+
+  return (
+    statusCode === 404 ||
+    /item-not-found|group (?:was )?not found|group does not exist/i.test(message)
+  );
+}
+
+function hasMatchingIdentity(left: Set<string>, right: Set<string>): boolean {
+  for (const identity of left) {
+    if (right.has(identity)) return true;
+  }
+  return false;
 }
 
 function parseBooleanEnv(value: string | undefined, key: string, fallback: boolean): boolean {
@@ -3287,6 +3312,100 @@ export class BaileysAdapter implements ChannelAdapter {
     const jids = participants.map((p) => this.normalizeJid(p));
     const result = await sock.groupCreate(name, jids);
     return { groupId: result.id, inviteCode: undefined };
+  }
+
+  async createGroupFromGroup(
+    sourceGroupId: string,
+    name: string,
+    includeParticipants?: string[],
+    excludeParticipants?: string[],
+  ): Promise<CreateGroupFromGroupResponse> {
+    this.requireGroupWritesEnabled();
+    const sock = this.getSock();
+    const sourceJid = normalizeGroupJid(sourceGroupId);
+
+    let source: BaileysGroupMetadata;
+    try {
+      source = await sock.groupMetadata(sourceJid);
+    } catch (error) {
+      if (isMissingGroupError(error)) {
+        throw new Error(`Source group does not exist: ${sourceJid}`, { cause: error });
+      }
+      throw error;
+    }
+    if (!source?.id) throw new Error(`Source group does not exist: ${sourceJid}`);
+
+    const filterIdentities = async (members: string[] | undefined): Promise<Set<string> | null> => {
+      if (!members) return null;
+      const identities = new Set<string>();
+      for (const member of members) {
+        for (const identity of await this.getChatJidAliases(member)) identities.add(identity);
+      }
+      return identities;
+    };
+    const includeIdentities = await filterIdentities(includeParticipants);
+    const excludeIdentities = await filterIdentities(excludeParticipants);
+    const ownIdentities = await this.getOwnGroupParticipantJids(sock);
+    const seenParticipants = new Set<string>();
+    const selected: Array<{ jid: string; identities: Set<string> }> = [];
+
+    for (const participant of source.participants ?? []) {
+      const identities = await this.getGroupParticipantIdentities(participant);
+      if (includeIdentities && !hasMatchingIdentity(identities, includeIdentities)) continue;
+      if (hasMatchingIdentity(identities, ownIdentities)) continue;
+      if (excludeIdentities && hasMatchingIdentity(identities, excludeIdentities)) continue;
+
+      const jid =
+        [...identities].find((identity) => identity.endsWith("@s.whatsapp.net")) ??
+        [participant.id, participant.phoneNumber, participant.lid]
+          .filter((identity): identity is string => !!identity)
+          .map((identity) => jidNormalizedUser(identity))
+          .find((identity) => identity.endsWith("@lid"));
+      if (!jid) continue;
+
+      const dedupeKey =
+        [...identities].find((identity) => identity.endsWith("@s.whatsapp.net")) ?? jid;
+      if (seenParticipants.has(dedupeKey)) continue;
+      seenParticipants.add(dedupeKey);
+      selected.push({ jid, identities });
+    }
+
+    if (selected.length === 0) {
+      throw new Error(
+        "Cannot create a group because no source participants remain after filtering",
+      );
+    }
+    if (selected.length > MAX_GROUP_PARTICIPANTS - 1) {
+      throw new Error(
+        `Cannot create a group with more than ${MAX_GROUP_PARTICIPANTS - 1} participants; the creator is added automatically and WhatsApp allows up to ${MAX_GROUP_PARTICIPANTS} members`,
+      );
+    }
+
+    const created = await sock.groupCreate(
+      name,
+      selected.map(({ jid }) => jid),
+    );
+    if (!created.id) throw new Error("Baileys created the group without returning its ID");
+
+    const returnedParticipants = created.participants ?? [];
+    const returnedIdentities = await Promise.all(
+      returnedParticipants.map((participant) => this.getGroupParticipantIdentities(participant)),
+    );
+    const failedParticipants =
+      returnedParticipants.length > 0
+        ? selected
+            .filter(
+              ({ identities }) =>
+                !returnedIdentities.some((returned) => hasMatchingIdentity(identities, returned)),
+            )
+            .map(({ jid }) => jid)
+        : [];
+
+    return {
+      groupId: created.id,
+      addedCount: selected.length - failedParticipants.length,
+      failedParticipants,
+    };
   }
 
   async modifyGroup(groupId: string, modification: GroupModification): Promise<void> {
