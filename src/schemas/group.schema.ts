@@ -22,6 +22,26 @@ export const GetGroupInfoSchema = z
   })
   .strict();
 
+export const SetGroupMemberLabelSchema = z
+  .object({
+    instanceId: z.string().min(1).describe("The instance ID"),
+    groupId: GroupIdSchema.describe("WhatsApp group JID or bare group ID"),
+    memberLabel: z
+      .string()
+      .trim()
+      .min(1)
+      .max(30)
+      .describe("Label for this connected account in the group (maximum 30 characters)"),
+  })
+  .strict();
+
+export const RemoveGroupMemberLabelSchema = z
+  .object({
+    instanceId: z.string().min(1).describe("The instance ID"),
+    groupId: GroupIdSchema.describe("WhatsApp group JID or bare group ID"),
+  })
+  .strict();
+
 export const UpdateGroupPictureSchema = z
   .object({
     instanceId: z.string().min(1).describe("The instance ID"),

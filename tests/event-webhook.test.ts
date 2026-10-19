@@ -258,6 +258,14 @@ describe("outgoing event webhook config", () => {
       ignoreFromMe: true,
     });
   });
+
+  it("accepts group member label events without changing webhook defaults or presets", () => {
+    const labels = configuredWebhook({ WA_EVENT_WEBHOOK_EVENTS: "group.member_label_changed" });
+    expect(labels.destinations[0]?.events).toEqual(["group.member_label_changed"]);
+
+    const grokBot = configuredWebhook({ WA_EVENT_WEBHOOK_PRESET: "grok-bot" });
+    expect(grokBot.destinations[0]?.events).toEqual(["message.received"]);
+  });
 });
 
 describe("outgoing event webhook events", () => {
@@ -355,6 +363,30 @@ describe("outgoing event webhook events", () => {
       participant: "5511777777777@s.whatsapp.net",
       status: "GOING",
       extraGuestCount: 1,
+    });
+  });
+
+  it("forwards group member label events with the label and group identifiers", () => {
+    const payload: ChannelEventPayload["group.member_label_changed"] = {
+      instanceId: "inst_fixture",
+      groupId: "120363000000000000@g.us",
+      participant: "participant-placeholder@lid",
+      memberLabel: "Group coordinator",
+      action: "set",
+      timestamp: 1_700_000_000,
+    };
+    const config = configuredWebhook({ WA_EVENT_WEBHOOK_EVENTS: "group.member_label_changed" });
+
+    expect(shouldSendEventWebhook("group.member_label_changed", payload, config)).toBe(true);
+    expect(
+      normalizeEventWebhookPayload("group.member_label_changed", payload.instanceId, payload),
+    ).toMatchObject({
+      event: "group.member_label_changed",
+      groupId: payload.groupId,
+      participant: payload.participant,
+      memberLabel: payload.memberLabel,
+      action: "set",
+      timestamp: payload.timestamp,
     });
   });
 

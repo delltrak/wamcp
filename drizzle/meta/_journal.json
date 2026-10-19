@@ -22,6 +22,13 @@
       "when": 1792382391908,
       "tag": "0002_persist_instance_disconnect_details",
       "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "6",
+      "when": 1792440653809,
+      "tag": "0003_yummy_harry_osborn",
+      "breakpoints": true
     }
   ]
 }

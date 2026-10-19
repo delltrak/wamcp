@@ -32,12 +32,14 @@ import {
   HandleJoinRequestSchema,
   GroupJoinApprovalModeSchema,
   GroupMemberAddModeSchema,
+  SetGroupMemberLabelSchema,
+  RemoveGroupMemberLabelSchema,
 } from "../schemas/group.schema.js";
 
 export function registerGroupTools(
   server: McpServer,
   instanceManager: InstanceManager,
-  _messageQueue: MessageQueue,
+  messageQueue: MessageQueue,
 ): void {
   server.registerTool(
     "wa_list_groups",
@@ -75,6 +77,60 @@ export function registerGroupTools(
         return toolSuccess(info);
       } catch (err) {
         return handleToolError("wa_get_group_info", err, params.instanceId);
+      }
+    },
+  );
+
+  server.registerTool(
+    "wa_group_set_member_label",
+    {
+      description:
+        "Set a member label for the connected account in a WhatsApp group. WhatsApp member labels are self-assigned: Baileys does not let this tool label another participant. The write is queued and rate limited per instance, requires WA_GROUP_WRITES_ENABLED=true, and is available on Baileys only.",
+      inputSchema: SetGroupMemberLabelSchema,
+    },
+    async (params) => {
+      const log = createRequestLogger("wa_group_set_member_label", params.instanceId);
+      const start = Date.now();
+      try {
+        const adapter = instanceManager.getAdapter(params.instanceId);
+        adapter.assertGroupMemberLabelWritesEnabled();
+        const result = await messageQueue.enqueueGroupMemberLabel(
+          params.instanceId,
+          params.groupId,
+          params.memberLabel,
+          instanceManager.getInstanceChannel(params.instanceId),
+        );
+        log.info({ duration: Date.now() - start }, "Group member label update queued");
+        return toolSuccess(result);
+      } catch (err) {
+        return handleToolError("wa_group_set_member_label", err, params.instanceId);
+      }
+    },
+  );
+
+  server.registerTool(
+    "wa_group_remove_member_label",
+    {
+      description:
+        "Remove the connected account's member label from a WhatsApp group. WhatsApp member labels are self-assigned: Baileys does not let this tool change another participant's label. The write is queued and rate limited per instance, requires WA_GROUP_WRITES_ENABLED=true, and is available on Baileys only.",
+      inputSchema: RemoveGroupMemberLabelSchema,
+    },
+    async (params) => {
+      const log = createRequestLogger("wa_group_remove_member_label", params.instanceId);
+      const start = Date.now();
+      try {
+        const adapter = instanceManager.getAdapter(params.instanceId);
+        adapter.assertGroupMemberLabelWritesEnabled();
+        const result = await messageQueue.enqueueGroupMemberLabel(
+          params.instanceId,
+          params.groupId,
+          null,
+          instanceManager.getInstanceChannel(params.instanceId),
+        );
+        log.info({ duration: Date.now() - start }, "Group member label removal queued");
+        return toolSuccess(result);
+      } catch (err) {
+        return handleToolError("wa_group_remove_member_label", err, params.instanceId);
       }
     },
   );
