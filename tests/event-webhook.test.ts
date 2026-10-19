@@ -284,6 +284,36 @@ describe("outgoing event webhook events", () => {
     );
   });
 
+  it("sends lifecycle events when chat and sender allowlists are configured", () => {
+    const destination = loadEventWebhookConfig({
+      WA_EVENT_WEBHOOKS: JSON.stringify([
+        {
+          id: "lifecycle",
+          url: "https://hooks.example.test/lifecycle",
+          events: ["instance.disconnected"],
+          chatAllowlist: ["allowed-chat"],
+          senderAllowlist: ["allowed-sender"],
+        },
+      ]),
+    }).destinations[0]!;
+    const disconnected: ChannelEventPayload["instance.disconnected"] = {
+      instanceId: "inst_1234abcd",
+      reason: "logged out",
+      statusCode: 401,
+      loggedOut: true,
+      willReconnect: false,
+      disconnectedAt: 1_800_000_123_000,
+    };
+
+    expect(shouldSendEventWebhook("instance.disconnected", disconnected, destination)).toBe(true);
+    expect(
+      shouldSendEventWebhook("message.received", incomingMessage(), {
+        ...destination,
+        events: ["message.received"],
+      }),
+    ).toBe(false);
+  });
+
   it("normalizes message.received to the documented JSON fields", () => {
     expect(
       normalizeEventWebhookPayload("message.received", "inst_1234abcd", incomingMessage()),
