@@ -618,13 +618,15 @@ allowed after a reconnecting close.
 in lifecycle webhook payloads. Challenges expire after 60 seconds unless they
 are replaced, the connection closes, or the instance connects first.
 
-`wa_get_instance_status` returns `{ "instances": [...] }`. Pass `instanceId`
-to return one instance; omit it to list all instances. Each entry includes
-`connectionState`, connected phone/LID/push name, ISO `lastConnected` and
-`lastDisconnected` timestamps, the last disconnect reason and status code,
-`pendingPairing` (`none`, `pairing_code`, or `qr`) with ISO generation and expiry
-times, and `presenceMode` when the channel provides it. The tool does not return
-pairing codes, QR strings, tokens, keys, or credential data.
+`wa_get_instance_status` returns `{ "instances": [...], "webhook": { ... } }`.
+Pass `instanceId` to return one instance; omit it to list all instances. Each
+entry includes `connectionState`, connected phone/LID/push name, ISO
+`lastConnected` and `lastDisconnected` timestamps, the last disconnect reason and
+status code, `pendingPairing` (`none`, `pairing_code`, or `qr`) with ISO
+generation and expiry times, and `presenceMode` when the channel provides it.
+The tool does not return pairing codes, QR strings, tokens, keys, or credential
+data. `webhook` is the same redacted event-webhook state as `GET /health`:
+`configured`, `destinationCount`, `eventCount`, `authConfigured`, and `warnings`.
 
 See [Outgoing event webhooks](docs/event-webhooks.md) for configuration details.
 

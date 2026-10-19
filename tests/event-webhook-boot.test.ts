@@ -1,10 +1,15 @@
+import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { buildHealthBody } from "../src/server/health.js";
 import {
   bootEventWebhook,
+  eventWebhookHealth,
   getEventWebhookStatus,
   type EventWebhookStatus,
 } from "../src/services/event-webhook-config.js";
+import type { InstanceManager } from "../src/services/instance-manager.js";
+import type { MessageQueue } from "../src/services/message-queue.js";
+import { registerInstanceTools } from "../src/tools/instance.tools.js";
 import { logger } from "../src/utils/logger.js";
 
 const FIXTURE_URL = "https://hooks.example.test/super-secret-webhook-url-9f3a";
@@ -60,6 +65,7 @@ function healthFor(status: EventWebhookStatus) {
 }
 
 afterEach(() => {
+  vi.unstubAllEnvs();
   vi.restoreAllMocks();
 });
 
@@ -284,6 +290,66 @@ describe("event webhook boot status", () => {
     assertRedacted(health.webhook);
     assertRedacted(serializedLogs(logs));
     expect(exit).toHaveBeenCalledWith(1);
+  });
+
+  it("adds the same redacted webhook object to wa_get_instance_status", async () => {
+    const secretUrl = `${FIXTURE_URL}?token=${FIXTURE_TOKEN}`;
+    vi.stubEnv("WA_EVENT_WEBHOOKS", "");
+    vi.stubEnv("WA_EVENT_WEBHOOK_PRESET", "");
+    vi.stubEnv("WA_EVENT_WEBHOOK_EVENTS", "message.received");
+    vi.stubEnv("WA_EVENT_WEBHOOK_URL", secretUrl);
+    vi.stubEnv("WA_EVENT_WEBHOOK_AUTH_HEADER", FIXTURE_HEADER_NAME);
+    vi.stubEnv("WA_EVENT_WEBHOOK_AUTH_VALUE", FIXTURE_HEADER_VALUE);
+    vi.stubEnv("WA_EVENT_WEBHOOK_SECRET", FIXTURE_HMAC);
+    vi.stubEnv(
+      "WA_EVENT_WEBHOOK_HEADERS",
+      JSON.stringify({
+        [FIXTURE_HEADER_NAME]: FIXTURE_HEADER_VALUE,
+        Authorization: `Bearer ${FIXTURE_TOKEN}`,
+      }),
+    );
+
+    const handlers = new Map<string, (params: { instanceId?: string }) => Promise<unknown>>();
+    const server = {
+      registerTool: (
+        name: string,
+        _config: unknown,
+        handler: (params: { instanceId?: string }) => Promise<unknown>,
+      ) => handlers.set(name, handler),
+    } as unknown as McpServer;
+    const manager = {
+      getInstanceLifecycleStatuses: () => [],
+    } as unknown as InstanceManager;
+    registerInstanceTools(server, manager, {} as MessageQueue);
+
+    const response = (await handlers.get("wa_get_instance_status")?.({})) as {
+      content: Array<{ text: string }>;
+    };
+    const body = JSON.parse(response.content[0]!.text) as {
+      instances: unknown[];
+      webhook: ReturnType<typeof eventWebhookHealth>;
+    };
+    const expected = eventWebhookHealth(getEventWebhookStatus());
+
+    expect(body.instances).toEqual([]);
+    expect(body.webhook).toEqual(expected);
+    expect(body.webhook).toEqual(healthFor(getEventWebhookStatus()).webhook);
+    expect(body.webhook).toEqual({
+      configured: true,
+      destinationCount: 1,
+      eventCount: 1,
+      authConfigured: true,
+      warnings: [],
+    });
+    expect(Object.keys(body.webhook).sort()).toEqual([
+      "authConfigured",
+      "configured",
+      "destinationCount",
+      "eventCount",
+      "warnings",
+    ]);
+    assertRedacted(body);
+    assertRedacted(body.webhook);
   });
 
   it("rejects an invalid WA_REQUIRE_EVENT_WEBHOOK value", () => {
