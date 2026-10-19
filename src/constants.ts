@@ -22,6 +22,9 @@ export const DEFAULT_CLOUD_RATE_LIMIT = 80;
 // Message Retention
 export const DEFAULT_MESSAGE_RETENTION_DAYS = 30;
 
+// Baileys history requests (per chat)
+export const DEFAULT_BAILEYS_HISTORY_SYNC_MAX_MESSAGES = 100;
+
 // Media
 export const DEFAULT_MEDIA_CACHE_MAX_MB = 500;
 
@@ -60,6 +63,7 @@ export const INSTANCE_ID_PREFIX = "inst_";
 
 // Message limits
 export const MAX_TEXT_LENGTH = 65536;
+export const MAX_GROUP_PARTICIPANTS = 1024;
 
 // Media size limits (bytes)
 export const MEDIA_LIMITS = {

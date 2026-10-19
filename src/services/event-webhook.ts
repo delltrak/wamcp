@@ -129,13 +129,31 @@ export interface GrokBotWebhookPayload {
   messageLabels?: BusinessLabel[];
 }
 
+export type GrokBotInstanceEvent = Extract<ChannelEvent, `instance.${string}`>;
+
+export interface GrokBotInstanceWebhookPayload {
+  event: GrokBotInstanceEvent;
+  instanceId: string;
+  text: string;
+  timestamp: number;
+  method?: InstanceAuthMethod;
+  reason?: string;
+  statusCode?: number | null;
+  status?: "connected" | "disconnected";
+  wasPairing?: boolean;
+  loggedOut?: boolean;
+  willReconnect?: boolean;
+  expiresAt?: number;
+}
+
 export type EventWebhookBody =
   | EventWebhookPayload
   | InstanceLifecycleWebhookPayload
   | GrokBotWebhookPayload
+  | GrokBotInstanceWebhookPayload
   | (EventWebhookPayload & { messages: EventWebhookPayload[] })
   | (GrokBotWebhookPayload & { messages: GrokBotWebhookPayload[] })
-  | { events: NormalizedEventWebhookPayload[] }
+  | { events: (NormalizedEventWebhookPayload | GrokBotInstanceWebhookPayload)[] }
   | { messages: GrokBotWebhookPayload[] };
 
 export interface EventWebhookJob {
@@ -180,7 +198,9 @@ type EnqueueWebhookJob = (job: EventWebhookJob) => Promise<unknown>;
 const MAX_BATCH_SIZE = 25;
 
 interface BufferedDestinationEvents {
-  payloads: (NormalizedEventWebhookPayload | GrokBotWebhookPayload)[];
+  payloads: (
+    NormalizedEventWebhookPayload | GrokBotWebhookPayload | GrokBotInstanceWebhookPayload
+  )[];
   timer: ReturnType<typeof setTimeout>;
 }
 
@@ -206,6 +226,12 @@ export type EventWebhookUnsubscribe = (() => void) & { flush: () => Promise<void
 
 const resolveWebhookDns: EventWebhookDnsResolver = (hostname) =>
   lookupDns(hostname, { all: true, verbatim: true });
+
+function isGrokBotMessagePayload(
+  payload: NormalizedEventWebhookPayload | GrokBotWebhookPayload | GrokBotInstanceWebhookPayload,
+): payload is GrokBotWebhookPayload {
+  return !("event" in payload) && "messageId" in payload;
+}
 
 export function createPinnedWebhookConnectionOptions(
   hostname: string,
@@ -376,6 +402,17 @@ function businessLabels(value: unknown): BusinessLabel[] | undefined {
   if (!Array.isArray(value)) return undefined;
   const labels = value.map(businessLabel).filter((label): label is BusinessLabel => !!label);
   return labels.length ? labels : undefined;
+}
+
+function safeLifecycleReason(value: string): string {
+  return [...value]
+    .map((character) => {
+      const code = character.charCodeAt(0);
+      return code < 32 || code === 127 ? " " : character;
+    })
+    .join("")
+    .trim()
+    .slice(0, 120);
 }
 
 /** Flatten a normalized channel event into the stable outgoing webhook shape. */
@@ -586,6 +623,85 @@ export function normalizeGrokBotWebhookPayload(
   };
 }
 
+/** Build a compact lifecycle body without copying credentials or challenge material. */
+export function normalizeGrokBotInstanceWebhookPayload(
+  event: GrokBotInstanceEvent,
+  instanceId: string,
+  payload: ChannelEventPayload[ChannelEvent],
+): GrokBotInstanceWebhookPayload {
+  const normalized = normalizeEventWebhookPayload(
+    event,
+    instanceId,
+    payload,
+  ) as InstanceLifecycleWebhookPayload;
+
+  switch (event) {
+    case "instance.connected": {
+      const connected = normalized as Extract<
+        InstanceLifecycleWebhookPayload,
+        { event: "instance.connected" }
+      >;
+      return {
+        event,
+        instanceId,
+        text: "WhatsApp conectado",
+        timestamp: connected.connectedAt,
+        status: "connected",
+        wasPairing: connected.wasPairing,
+      };
+    }
+    case "instance.disconnected": {
+      const disconnected = normalized as Extract<
+        InstanceLifecycleWebhookPayload,
+        { event: "instance.disconnected" }
+      >;
+      const reason = safeLifecycleReason(disconnected.reason);
+      return {
+        event,
+        instanceId,
+        text: `WhatsApp desconectado (${reason || "unknown"})`,
+        timestamp: disconnected.disconnectedAt,
+        reason,
+        statusCode: disconnected.statusCode,
+        status: "disconnected",
+        loggedOut: disconnected.loggedOut,
+        willReconnect: disconnected.willReconnect,
+      };
+    }
+    case "instance.pairing_code_generated":
+    case "instance.qr_generated": {
+      const generated = normalized as Extract<
+        InstanceLifecycleWebhookPayload,
+        { event: "instance.pairing_code_generated" | "instance.qr_generated" }
+      >;
+      return {
+        event,
+        instanceId,
+        text:
+          event === "instance.pairing_code_generated" ? "Código de pareamento gerado" : "QR gerado",
+        timestamp: generated.generatedAt,
+        method: generated.method,
+        expiresAt: generated.expiresAt,
+      };
+    }
+    case "instance.pairing_expired":
+    case "instance.qr_expired": {
+      const expired = normalized as Extract<
+        InstanceLifecycleWebhookPayload,
+        { event: "instance.pairing_expired" | "instance.qr_expired" }
+      >;
+      return {
+        event,
+        instanceId,
+        text:
+          event === "instance.pairing_expired" ? "Código de pareamento expirado" : "QR expirado",
+        timestamp: expired.expiredAt,
+        method: expired.method,
+      };
+    }
+  }
+}
+
 export function shouldSendEventWebhook(
   event: ChannelEvent,
   payload: ChannelEventPayload[ChannelEvent],
@@ -593,7 +709,13 @@ export function shouldSendEventWebhook(
     Partial<Pick<EventWebhookDestination, "preset" | "chatAllowlist" | "senderAllowlist">>,
 ): boolean {
   if (!config.events.includes(event)) return false;
-  if (config.preset === "grok-bot" && event !== "message.received") return false;
+  if (
+    config.preset === "grok-bot" &&
+    event !== "message.received" &&
+    !event.startsWith("instance.")
+  ) {
+    return false;
+  }
 
   const data = payload as unknown as Record<string, unknown>;
   const message = isRecord(data.message) ? data.message : {};
@@ -700,9 +822,13 @@ export function registerEventWebhookHandler(
       return enqueuePayload(destination, buffer.payloads[0] as EventWebhookBody);
     }
     const payload: EventWebhookBody =
-      destination.preset === "grok-bot"
+      destination.preset === "grok-bot" && buffer.payloads.every(isGrokBotMessagePayload)
         ? { messages: buffer.payloads as GrokBotWebhookPayload[] }
-        : { events: buffer.payloads as NormalizedEventWebhookPayload[] };
+        : {
+            events: buffer.payloads as (
+              NormalizedEventWebhookPayload | GrokBotInstanceWebhookPayload
+            )[],
+          };
     return enqueuePayload(destination, payload);
   };
 
@@ -827,7 +953,7 @@ export function registerEventWebhookHandler(
 
   const queuePayload = (
     destination: EventWebhookDestination,
-    payload: NormalizedEventWebhookPayload | GrokBotWebhookPayload,
+    payload: NormalizedEventWebhookPayload | GrokBotWebhookPayload | GrokBotInstanceWebhookPayload,
   ): void => {
     if (destination.debounceMs === 0) {
       void enqueuePayload(destination, payload);
@@ -835,6 +961,14 @@ export function registerEventWebhookHandler(
     }
 
     let buffer = buffers.get(destination.id);
+    if (
+      buffer &&
+      destination.preset === "grok-bot" &&
+      isGrokBotMessagePayload(buffer.payloads[0]!) !== isGrokBotMessagePayload(payload)
+    ) {
+      void flushDestination(destination);
+      buffer = undefined;
+    }
     if (!buffer) {
       const timer = setTimeout(() => {
         void flushDestination(destination);
@@ -852,11 +986,18 @@ export function registerEventWebhookHandler(
         for (const destination of config.destinations) {
           if (!shouldSendEventWebhook(event, payload, destination)) continue;
 
-          let webhookPayload: NormalizedEventWebhookPayload | GrokBotWebhookPayload;
+          let webhookPayload:
+            NormalizedEventWebhookPayload | GrokBotWebhookPayload | GrokBotInstanceWebhookPayload;
           if (destination.preset === "grok-bot" && event === "message.received") {
             webhookPayload = normalizeGrokBotWebhookPayload(
               instanceId,
               payload as ChannelEventPayload["message.received"],
+            );
+          } else if (destination.preset === "grok-bot" && event.startsWith("instance.")) {
+            webhookPayload = normalizeGrokBotInstanceWebhookPayload(
+              event as GrokBotInstanceEvent,
+              instanceId,
+              payload as ChannelEventPayload[ChannelEvent],
             );
           } else {
             webhookPayload = normalizeEventWebhookPayload(

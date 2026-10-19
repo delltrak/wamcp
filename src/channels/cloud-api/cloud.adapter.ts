@@ -15,6 +15,7 @@ import type {
   MessageContent,
   MessageResponse,
   GroupResponse,
+  CreateGroupFromGroupResponse,
   GroupSummary,
   NumberExistsResponse,
   BusinessProfile,
@@ -743,6 +744,15 @@ export class CloudApiAdapter implements ChannelAdapter {
     throw new Error("Group management is not supported on Cloud API");
   }
 
+  async createGroupFromGroup(
+    _sourceGroupId: string,
+    _name: string,
+    _includeParticipants?: string[],
+    _excludeParticipants?: string[],
+  ): Promise<CreateGroupFromGroupResponse> {
+    throw new Error("Creating a group from another group is not supported on Cloud API");
+  }
+
   async modifyGroup(_groupId: string, _modification: GroupModification): Promise<void> {
     throw new Error("Group management is not supported on Cloud API");
   }
@@ -1088,7 +1098,13 @@ export class CloudApiAdapter implements ChannelAdapter {
     _chatId: string,
     _count: number,
     _timeoutMs?: number,
-  ): Promise<{ requested: number; stored: number; timedOut: boolean }> {
+  ): Promise<{
+    requested: number;
+    limit: number;
+    capped: boolean;
+    stored: number;
+    timedOut: boolean;
+  }> {
     throw new Error("On-demand message history is only available on Baileys instances");
   }
 

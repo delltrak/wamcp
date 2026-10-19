@@ -9,6 +9,7 @@ import type {
   MessageContent,
   MessageResponse,
   GroupResponse,
+  CreateGroupFromGroupResponse,
   GroupSummary,
   NumberExistsResponse,
   BusinessProfile,
@@ -136,6 +137,12 @@ export interface ChannelAdapter {
   // ---- Groups ----
   listGroups(): Promise<GroupSummary[]>;
   createGroup(name: string, participants: string[]): Promise<GroupResponse>;
+  createGroupFromGroup(
+    sourceGroupId: string,
+    name: string,
+    includeParticipants?: string[],
+    excludeParticipants?: string[],
+  ): Promise<CreateGroupFromGroupResponse>;
   modifyGroup(groupId: string, modification: GroupModification): Promise<void>;
   modifyParticipants(
     groupId: string,
@@ -232,7 +239,13 @@ export interface ChannelAdapter {
     chatId: string,
     count: number,
     timeoutMs?: number,
-  ): Promise<{ requested: number; stored: number; timedOut: boolean }>;
+  ): Promise<{
+    requested: number;
+    limit: number;
+    capped: boolean;
+    stored: number;
+    timedOut: boolean;
+  }>;
   downloadMessageAudio(
     messageId: string,
     maxBytes?: number,

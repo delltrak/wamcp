@@ -47,7 +47,8 @@ export interface EventWebhookConfig {
   retryDelayMs: number;
 }
 
-export type EventWebhookWarning = "not_configured" | "incomplete_auth" | "empty_event_set";
+export type EventWebhookWarning =
+  "not_configured" | "incomplete_auth" | "empty_event_set" | "preset_dropped_events";
 
 /** Redacted webhook state. Never includes URLs, header names, header values, tokens, or secrets. */
 export interface EventWebhookStatus {
@@ -56,6 +57,7 @@ export interface EventWebhookStatus {
   eventCount: number;
   authConfigured: boolean;
   warnings: EventWebhookWarning[];
+  droppedEvents: ChannelEvent[];
 }
 
 type Environment = Record<string, string | undefined>;
@@ -397,9 +399,29 @@ function effectiveEvents(
   events: readonly ChannelEvent[],
   preset: EventWebhookPreset | undefined,
 ): ChannelEvent[] {
-  // grok-bot delivery only forwards message.received; other names never leave the process.
-  if (preset === "grok-bot") return events.filter((event) => event === "message.received");
+  if (preset === "grok-bot") {
+    return events.filter((event) => event === "message.received" || event.startsWith("instance."));
+  }
   return [...events];
+}
+
+function droppedPresetEvents(
+  config: EventWebhookConfig,
+  fallbackPreset: EventWebhookPreset | undefined,
+): ChannelEvent[] {
+  if (config.destinations.length === 0) return [];
+  const groups = config.destinations.map((destination) => ({
+    events: destination.events,
+    preset: destination.preset ?? fallbackPreset,
+  }));
+  const dropped = new Set<ChannelEvent>();
+  for (const group of groups) {
+    if (group.preset !== "grok-bot") continue;
+    for (const event of group.events) {
+      if (event !== "message.received" && !event.startsWith("instance.")) dropped.add(event);
+    }
+  }
+  return [...dropped];
 }
 
 function countEffectiveEvents(
@@ -550,9 +572,10 @@ function usesMultiDestinationConfig(env: Environment): boolean {
 }
 
 /**
- * Redacted event-webhook state for boot logs, health, and status tools.
- * Callers can pass a parsed config to avoid loading twice. Nothing returned
- * includes a URL, header name, header value, token, or secret.
+ * Internal redacted event-webhook state for boot logs and status projections.
+ * The health projection omits dropped event names; only the tool projection
+ * exposes them. Callers can pass a parsed config to avoid loading twice.
+ * Nothing returned includes a URL, header name, header value, token, or secret.
  */
 export function getEventWebhookStatus(
   env: Environment = process.env,
@@ -566,9 +589,11 @@ export function getEventWebhookStatus(
   const configured = destinationCount > 0;
   const eventCount = countEffectiveEvents(resolved, preset);
   const warnings: EventWebhookWarning[] = [];
+  const droppedEvents = droppedPresetEvents(resolved, preset);
   if (!configured) warnings.push("not_configured");
   if (!multi && auth.incomplete) warnings.push("incomplete_auth");
   if (eventCount === 0) warnings.push("empty_event_set");
+  if (droppedEvents.length > 0) warnings.push("preset_dropped_events");
 
   return {
     configured,
@@ -578,10 +603,11 @@ export function getEventWebhookStatus(
       (!multi && auth.configured) ||
       resolved.destinations.some((destination) => destinationsWithAuth.has(destination)),
     warnings,
+    droppedEvents,
   };
 }
 
-/** Fields safe to expose from health and status responses. */
+/** Fields safe to expose from the public health response. */
 export function eventWebhookHealth(status: EventWebhookStatus): {
   configured: boolean;
   destinationCount: number;
@@ -598,6 +624,21 @@ export function eventWebhookHealth(status: EventWebhookStatus): {
   };
 }
 
+/** Fields safe to expose from wa_get_instance_status, including dropped event names. */
+export function eventWebhookToolStatus(status: EventWebhookStatus): {
+  configured: boolean;
+  destinationCount: number;
+  eventCount: number;
+  authConfigured: boolean;
+  warnings: EventWebhookWarning[];
+  droppedEvents: ChannelEvent[];
+} {
+  return {
+    ...eventWebhookHealth(status),
+    droppedEvents: [...status.droppedEvents],
+  };
+}
+
 function bootLogDetails(status: EventWebhookStatus, warning: EventWebhookWarning) {
   return {
     configured: status.configured,
@@ -605,6 +646,7 @@ function bootLogDetails(status: EventWebhookStatus, warning: EventWebhookWarning
     eventCount: status.eventCount,
     authConfigured: status.authConfigured,
     warning,
+    ...(warning === "preset_dropped_events" ? { droppedEvents: [...status.droppedEvents] } : {}),
   };
 }
 
@@ -627,6 +669,9 @@ export function logEventWebhookBootStatus(
         break;
       case "empty_event_set":
         log.warn(details, "Event webhook event set is empty; no events will be delivered");
+        break;
+      case "preset_dropped_events":
+        log.warn(details, "Grok Bot preset drops configured events");
         break;
       default: {
         const unreachable: never = warning;
