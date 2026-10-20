@@ -871,7 +871,8 @@ the WAL) and inserts rows into an empty Postgres database. It does not delete th
 does not pair the WhatsApp account again. Start wa-mcp with the same `WA_DATABASE_URL` only after
 that copy finishes. A later run is refused when `instances` or `auth_keys` already has rows: copying
 again would replace the live Baileys session with the older SQLite snapshot. `--force` truncates
-the application tables in Postgres and then loads the snapshot. It does not merge leftover rows.
+the application tables in Postgres and then loads the snapshot. `TRUNCATE ... CASCADE` also empties
+tables that reference those tables. It does not merge leftover rows.
 Do not rerun the copy to refresh Postgres.
 
 Postgres queries run off the Node.js event loop, so a remote database or a history sync does not
@@ -896,9 +897,10 @@ The copy CLI is compiled to `dist/db/migrate-to-postgres-cli.js`. Mount the SQLi
 it in the container. From a checkout, `npm run db:migrate-to-postgres` remains the normal command.
 
 Back up Postgres with `pg_dump` while the server can stay up. The dump contains auth keys: mode
-`0600`, treat it as a secret, and do not commit it. The scripts keep the password out of the
-process arguments by writing a temporary `.pgpass` file. The backup scripts run on the host; the
-runtime image does not include `pg_dump`.
+`0600`, treat it as a secret, and do not commit it. The backup and restore scripts need `node` on
+the host. They write a temporary `.pgpass` file and pass the database URL to `node` through the
+environment, so the password is not a process argument. The scripts run on the host; the runtime
+image does not include `pg_dump`.
 
 ```bash
 ./scripts/postgres-backup.sh "$WA_DATABASE_URL" /srv/wamcp-backups
@@ -935,8 +937,10 @@ the configured interval. Successful probes and inbound message, receipt, or pres
 as healthy; raw websocket frames do not. Two consecutive failed probes end the socket and let automatic
 reconnect handle the connection. If Baileys' event buffer stays active longer than
 `WA_BAILEYS_EVENT_BUFFER_STALL_MS`, the watchdog flushes it to release held events; if it remains
-active at the next check, the socket ends and follows the normal reconnect flow. Connection close
-and reconnect logs include the disconnect reason, status code, and offline duration.
+active at the next check, the socket ends and follows the normal reconnect flow. A Baileys
+`ev.process` batch that throws is logged and discarded. The events in that batch are not replayed;
+later batches are still processed. Connection close and reconnect logs include the disconnect
+reason, status code, and offline duration.
 
 `wa_send_sticker` accepts PNG, JPG, GIF, and WebP URLs or base64. PNG/JPG and GIF inputs are
 converted to 512x512 WebP with transparent padding. Static stickers are limited to 100 KB and

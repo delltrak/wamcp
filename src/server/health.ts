@@ -27,3 +27,25 @@ export function buildHealthBody(input: {
     webhook: eventWebhookHealth(input.webhook),
   };
 }
+
+/** True when a failure comes from SQLite, Postgres, or the connection to either. */
+export function isDatabaseError(error: unknown): boolean {
+  if (typeof error !== "object" || error === null) return false;
+  if ("cause" in error && isDatabaseError(error.cause)) return true;
+  const code = "code" in error && error.code != null ? String(error.code) : "";
+  if (/^SQLITE_/.test(code) || /^[0-9A-Z]{5}$/.test(code)) return true;
+  if (
+    code === "ECONNREFUSED" ||
+    code === "ECONNRESET" ||
+    code === "ETIMEDOUT" ||
+    code === "EPIPE"
+  ) {
+    return true;
+  }
+  const name = "name" in error ? String(error.name) : "";
+  if (name === "SqliteError" || name === "DatabaseError") return true;
+  const message = error instanceof Error ? error.message : "";
+  return /timeout expired|query read timeout|timeout exceeded when trying to connect|connection terminated|server closed the connection|database system is/i.test(
+    message,
+  );
+}

@@ -928,6 +928,8 @@ export class BaileysAdapter implements ChannelAdapter {
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private watchdogTimer: ReturnType<typeof setTimeout> | null = null;
   private saveCreds: (() => Promise<void>) | null = null;
+  private credsSaveTimer: ReturnType<typeof setTimeout> | null = null;
+  private credsSaveAttempt = 0;
   private authMeId: string | undefined;
   private authMeLid: string | undefined;
 
@@ -1786,6 +1788,7 @@ export class BaileysAdapter implements ChannelAdapter {
   }
 
   async disconnect(): Promise<void> {
+    this.clearCredsSaveTimer();
     this.clearReconnectTimer();
     this.clearHealthWatchdog();
     this.clearEventBufferStallWatchdog();
@@ -6041,15 +6044,9 @@ export class BaileysAdapter implements ChannelAdapter {
         if (connection === "open") {
           const connectedAt = Date.now();
           const wasPairing = this.pendingAuthChallenges.size > 0;
-          this.appendNotifyWatermarkMs = await this.getAppendNotifyWatermark(connectedAt);
           this.status = "connected";
-          const persistedDisconnect = (
-            await db
-              .select({ lastDisconnected: instancesTable.lastDisconnected })
-              .from(instancesTable)
-              .where(eq(instancesTable.id, this.instanceId))
-              .get()
-          )?.lastDisconnected;
+          this.appendNotifyWatermarkMs = await this.readAppendNotifyWatermark(connectedAt);
+          const persistedDisconnect = await this.readPersistedDisconnect();
           const offlineSince = this.disconnectedAtMs ?? persistedDisconnect ?? null;
           const offlineDurationMs =
             offlineSince !== null ? Math.max(0, Date.now() - offlineSince) : undefined;
@@ -6114,6 +6111,7 @@ export class BaileysAdapter implements ChannelAdapter {
           let reconnectInMs: number | null = null;
           if (loggedOut) {
             logger.info({ instanceId: this.instanceId }, "Logged out, clearing auth");
+            this.clearCredsSaveTimer();
             await clearAuthState(this.instanceId);
             this.sock = null;
           } else if (this.autoReconnect) {
@@ -6153,9 +6151,9 @@ export class BaileysAdapter implements ChannelAdapter {
     // creds.update is not buffered — use ev.on directly
     sock.ev.on("creds.update", async () => {
       try {
-        await this.saveCreds?.();
+        await this.persistCreds();
       } catch (err) {
-        logger.error({ err, instanceId: this.instanceId }, "Failed to save credentials");
+        this.scheduleCredsSave(err);
       }
     });
 
@@ -6849,6 +6847,64 @@ export class BaileysAdapter implements ChannelAdapter {
       }
     }, delay);
     return delay;
+  }
+
+  private async persistCreds(): Promise<void> {
+    await this.saveCreds?.();
+    this.clearCredsSaveTimer();
+  }
+
+  private clearCredsSaveTimer(): void {
+    if (this.credsSaveTimer) {
+      clearTimeout(this.credsSaveTimer);
+      this.credsSaveTimer = null;
+    }
+    this.credsSaveAttempt = 0;
+  }
+
+  private scheduleCredsSave(err: unknown): void {
+    logger.error({ err, instanceId: this.instanceId }, "Failed to save credentials");
+    if (this.credsSaveTimer) return;
+    const delay = Math.min(
+      RECONNECT_INITIAL_DELAY_MS * Math.pow(2, this.credsSaveAttempt),
+      RECONNECT_MAX_DELAY_MS,
+    );
+    this.credsSaveAttempt += 1;
+    this.credsSaveTimer = setTimeout(() => {
+      this.credsSaveTimer = null;
+      void this.persistCreds().catch((error: unknown) => {
+        this.scheduleCredsSave(error);
+      });
+    }, delay);
+  }
+
+  private async readAppendNotifyWatermark(connectedAt: number): Promise<number> {
+    try {
+      return await this.getAppendNotifyWatermark(connectedAt);
+    } catch (err) {
+      logger.error(
+        { err, instanceId: this.instanceId },
+        "Failed to read append notification watermark",
+      );
+      return connectedAt;
+    }
+  }
+
+  private async readPersistedDisconnect(): Promise<number | null> {
+    try {
+      return (
+        (
+          await db
+            .select({ lastDisconnected: instancesTable.lastDisconnected })
+            .from(instancesTable)
+            .where(eq(instancesTable.id, this.instanceId))
+            .get()
+        )?.lastDisconnected ?? null
+      );
+    } catch (err) {
+      logger.error({ err, instanceId: this.instanceId }, "Failed to read last disconnect time");
+      return null;
+    }
   }
 
   private clearReconnectTimer(): void {

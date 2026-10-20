@@ -7,6 +7,11 @@ if ! command -v pg_dump >/dev/null 2>&1; then
   exit 1
 fi
 
+if ! command -v node >/dev/null 2>&1; then
+  echo "node is required on the host to back up Postgres" >&2
+  exit 1
+fi
+
 database_url=${1:-${WA_DATABASE_URL:-}}
 backup_dir=${2:-.}
 
@@ -36,19 +41,19 @@ destination="$backup_dir/wamcp-postgres-$stamp.dump"
 pgpass=$(mktemp)
 chmod 600 "$pgpass"
 trap 'rm -f "$pgpass"' EXIT
-safe_url=$(node -e '
+safe_url=$(WAMCP_DATABASE_URL="$database_url" WAMCP_PGPASS_FILE="$pgpass" node -e '
 const fs = require("node:fs");
-const url = new URL(process.argv[1]);
+const url = new URL(process.env.WAMCP_DATABASE_URL);
 const esc = (value) => value.replaceAll("\\", "\\\\").replaceAll(":", "\\:");
 const host = url.hostname || "localhost";
 const port = url.port || "5432";
 const database = decodeURIComponent(url.pathname.replace(/^\//, ""));
 const user = decodeURIComponent(url.username);
 const password = decodeURIComponent(url.password);
-fs.writeFileSync(process.argv[2], `${esc(host)}:${esc(port)}:${esc(database)}:${esc(user)}:${esc(password)}\n`);
+fs.writeFileSync(process.env.WAMCP_PGPASS_FILE, `${esc(host)}:${esc(port)}:${esc(database)}:${esc(user)}:${esc(password)}\n`);
 url.password = "";
 process.stdout.write(url.href);
-' "$database_url" "$pgpass")
+')
 PGPASSFILE=$pgpass pg_dump --format=custom --no-owner --file="$destination" "$safe_url"
 chmod 600 "$destination"
 echo "$destination"
