@@ -9,7 +9,7 @@ const DEFAULT_RECENT_SUCCESS_MS = 60 * 60 * 1000;
 const DEFAULT_EXEMPT_FAILURES = 3;
 const MAX_BUCKETS = 10_000;
 /** Fixed username table. A hash collision shares a bucket and only makes the limit stricter. */
-const USER_SLOTS = 4096;
+const USER_SLOTS = 65_536;
 
 export interface AuthLimiterOptions {
   freeFailures?: number;
@@ -25,6 +25,11 @@ export interface AuthLimiterOptions {
 export interface AuthAttemptResult {
   /** Positive when a lock is already in effect and the password must not be checked. */
   retryAfterMs: number;
+  /**
+   * Delay safe to send as Retry-After.
+   * A username lock always uses the ceiling, so the number does not identify the bucket.
+   */
+  headerRetryAfterMs?: number;
   /** Set when this attempt was counted and may still be undone. */
   token?: string;
 }
@@ -77,13 +82,17 @@ interface PendingUndo {
  * doubles on the next failure, up to `maxDelayMs`. Quiet time starts at the
  * later of the last attempt and the end of the lock. The address is an IPv6
  * /64 or everyone behind the same NAT, so a recent success exempts only that
- * username at that address, and only for a few failures. Usernames live in a
- * fixed table of 4096 buckets, indexed by an HMAC with a per-process key.
- * Nothing is evicted from that table. A collision shares a bucket. Each bucket
- * still forgets its count after a quiet period once its lock has ended. The
- * address maps, when full, drop the unlocked entry with the fewest failures.
- * When every address slot is an active lock, a new address shares one overflow
- * bucket, and a recent success does not create an address bucket.
+ * username at that address, and only for a few failures. An access token that
+ * was already issued is not checked again here. Usernames live in a fixed
+ * table of 65536 buckets, indexed by an HMAC with a per-process key. Nothing
+ * is evicted from that table. A collision shares a bucket. A quiet period
+ * halves the username count instead of clearing it. Locking every bucket takes
+ * on the order of 11 million spread-out failures, and keeping them locked
+ * takes about one failure per bucket per quiet window. Retry-After for that
+ * lock is always the ceiling. The address maps, when full, drop the unlocked
+ * entry with the fewest failures. When every address slot is an active lock, a
+ * new address shares one overflow bucket, and a recent success does not create
+ * an address bucket.
  */
 export class AuthAttemptLimiter {
   private readonly freeFailures: number;
@@ -93,12 +102,12 @@ export class AuthAttemptLimiter {
   private readonly recentSuccessMs: number;
   private readonly exemptFailures: number;
   private readonly now: () => number;
-  private readonly byIp = new Map<string, AttemptBucket>();
-  private readonly byPair = new Map<string, AttemptBucket>();
+  private readonly byIp = new CountedBuckets();
+  private readonly byPair = new CountedBuckets();
   private readonly userHashKey = randomBytes(32);
-  private readonly userSlots: AttemptBucket[] = Array.from({ length: USER_SLOTS }, () =>
-    emptyBucket(),
-  );
+  private readonly userFailures = new Uint32Array(USER_SLOTS);
+  private readonly userLockedUntil = new Float64Array(USER_SLOTS);
+  private readonly userLastAttempt = new Float64Array(USER_SLOTS);
   private readonly exemptions = new Map<string, Exemption>();
   /** Counted attempts that can still be undone, keyed by the token given to the caller. */
   private readonly pending = new Map<string, PendingUndo>();
@@ -132,7 +141,7 @@ export class AuthAttemptLimiter {
     const userBucket = this.userBucket(userKey);
     this.decay(this.byIp, ipKey, now);
     this.decay(this.byPair, pairKey, now);
-    this.decayBucket(userBucket, now);
+    this.decayUser(userBucket, now);
     this.decayOverflow(now);
     const placement = this.placement(ipKey, pairKey, now);
     const ipWait = placement.ipOverflow
@@ -145,7 +154,9 @@ export class AuthAttemptLimiter {
     const exemption = this.exemptionFor(ipKey, userKey, now);
     const blocked = Math.max(ipWait, pairWait, userWait);
     const bypass = exemption !== undefined && blocked > 0;
-    if (!bypass && blocked > 0) return { retryAfterMs: blocked };
+    if (!bypass && blocked > 0) {
+      return { retryAfterMs: blocked, headerRetryAfterMs: this.headerWait(blocked, userWait) };
+    }
     if (bypass && exemption) {
       exemption.remaining -= 1;
       if (exemption.remaining <= 0) this.exemptions.delete(this.exemptionKey(ipKey, userKey));
@@ -168,8 +179,8 @@ export class AuthAttemptLimiter {
         ? skipped
         : this.bump(this.byPair, pairKey, now, this.freeFailures);
     if (!ipBump || !pairBump) {
-      restoreBucket(this.byIp, ipKey, ipBefore);
-      restoreBucket(this.byPair, pairKey, pairBefore);
+      this.restore(this.byIp, ipKey, ipBefore);
+      this.restore(this.byPair, pairKey, pairBefore);
       this.restoreEvicted(this.byIp, ipBump?.evicted);
       this.restoreEvicted(this.byPair, pairBump?.evicted);
       return { retryAfterMs: this.baseDelayMs };
@@ -199,6 +210,16 @@ export class AuthAttemptLimiter {
   }
 
   retryAfterMs(ip: string, username?: string): number {
+    return this.charges(ip, username).blocked;
+  }
+
+  /** Retry-After that does not identify which username bucket is locked. */
+  headerRetryAfterMs(ip: string, username?: string): number {
+    const charges = this.charges(ip, username);
+    return this.headerWait(charges.blocked, charges.userWait);
+  }
+
+  private charges(ip: string, username?: string): { blocked: number; userWait: number } {
     const now = this.now();
     const ipKey = normalizeClientIp(ip);
     this.decay(this.byIp, ipKey, now);
@@ -207,18 +228,24 @@ export class AuthAttemptLimiter {
     const ipWait = ipOverflow
       ? this.wait(this.overflow, now)
       : this.wait(this.byIp.get(ipKey), now);
-    if (!username) return ipWait;
+    if (!username) return { blocked: ipWait, userWait: 0 };
     const userKey = normalizeUser(username);
     const pairKey = this.pairKey(ipKey, userKey);
     this.decay(this.byPair, pairKey, now);
     const userBucket = this.userBucket(userKey);
-    this.decayBucket(userBucket, now);
-    if (this.exemptionFor(ipKey, userKey, now)) return 0;
+    this.decayUser(userBucket, now);
+    if (this.exemptionFor(ipKey, userKey, now)) return { blocked: 0, userWait: 0 };
     const pairOverflow = this.needsOverflow(this.byPair, pairKey, now);
     const pairWait = pairOverflow
       ? this.wait(this.overflow, now)
       : this.wait(this.byPair.get(pairKey), now);
-    return Math.max(ipWait, pairWait, this.wait(userBucket, now));
+    const userWait = this.wait(userBucket, now);
+    return { blocked: Math.max(ipWait, pairWait, userWait), userWait };
+  }
+
+  private headerWait(blocked: number, userWait: number): number {
+    if (userWait <= 0) return blocked;
+    return Math.max(blocked, this.maxDelayMs);
   }
 
   /**
@@ -312,7 +339,7 @@ export class AuthAttemptLimiter {
 
   /** Drop this attempt's increment and the lock it set, unless a later attempt replaced that lock. */
   private undo(
-    buckets: Map<string, AttemptBucket>,
+    buckets: CountedBuckets,
     key: string,
     now: number,
     lockBefore: number,
@@ -320,17 +347,40 @@ export class AuthAttemptLimiter {
   ): void {
     const bucket = buckets.get(key);
     if (!bucket) return;
-    if (this.undoBucket(bucket, now, lockBefore, lockAfter)) buckets.delete(key);
+    const previousFailures = bucket.failures;
+    if (this.undoBucket(bucket, now, lockBefore, lockAfter)) {
+      buckets.deleteCounted(key, previousFailures);
+      return;
+    }
+    if (bucket.failures !== previousFailures) buckets.replace(key, bucket, previousFailures, true);
   }
 
   private userBucket(userKey: string): AttemptBucket {
     const mac = createHmac("sha256", this.userHashKey).update(userKey).digest();
-    const index = mac.readUInt32BE(0) % USER_SLOTS;
-    const existing = this.userSlots[index];
-    if (existing) return existing;
-    const created = emptyBucket();
-    this.userSlots[index] = created;
-    return created;
+    const index = mac.readUInt16BE(0);
+    const failures = this.userFailures;
+    const lockedUntil = this.userLockedUntil;
+    const lastAttempt = this.userLastAttempt;
+    return {
+      get failures() {
+        return failures[index] ?? 0;
+      },
+      set failures(value: number) {
+        failures[index] = value;
+      },
+      get lockedUntil() {
+        return lockedUntil[index] ?? 0;
+      },
+      set lockedUntil(value: number) {
+        lockedUntil[index] = value;
+      },
+      get lastAttempt() {
+        return lastAttempt[index] ?? 0;
+      },
+      set lastAttempt(value: number) {
+        lastAttempt[index] = value;
+      },
+    };
   }
 
   private exemptionFor(ipKey: string, userKey: string, now: number): Exemption | undefined {
@@ -344,10 +394,24 @@ export class AuthAttemptLimiter {
     return entry;
   }
 
-  private decay(buckets: Map<string, AttemptBucket>, key: string, now: number): void {
+  private decay(buckets: CountedBuckets, key: string, now: number): void {
     const bucket = buckets.get(key);
     if (!bucket) return;
     if (this.idle(bucket, now)) buckets.delete(key);
+  }
+
+  /** A quiet username keeps half its count, so the same burst every window still reaches the lock. */
+  private decayUser(bucket: AttemptBucket, now: number): void {
+    if (bucket.failures === 0 && bucket.lockedUntil <= now) return;
+    if (!this.idle(bucket, now)) return;
+    const halved = Math.floor(bucket.failures / 2);
+    if (halved === 0) {
+      clearBucket(bucket);
+      return;
+    }
+    bucket.failures = halved;
+    bucket.lockedUntil = 0;
+    bucket.lastAttempt = now;
   }
 
   private idle(bucket: AttemptBucket, now: number): boolean {
@@ -372,20 +436,21 @@ export class AuthAttemptLimiter {
 
   /** @returns undefined when a new bucket cannot be stored without dropping a live lock. */
   private bump(
-    buckets: Map<string, AttemptBucket>,
+    buckets: CountedBuckets,
     key: string,
     now: number,
     freeFailures: number,
   ): { evicted?: EvictedBucket } | undefined {
     let evicted: EvictedBucket | undefined;
-    if (!buckets.has(key) && buckets.size >= MAX_BUCKETS) {
-      evicted = this.evictUnlocked(buckets, now);
+    const existing = buckets.get(key);
+    if (!existing && buckets.size >= MAX_BUCKETS) {
+      evicted = buckets.evictUnlocked(now);
       if (!evicted) return undefined;
     }
-    const current = buckets.get(key) ?? { failures: 0, lockedUntil: 0, lastAttempt: now };
+    const current = existing ?? emptyBucket();
+    const previousFailures = existing ? existing.failures : undefined;
     this.applyFailure(current, now, freeFailures);
-    buckets.delete(key);
-    buckets.set(key, current);
+    buckets.replace(key, current, previousFailures);
     return { evicted };
   }
 
@@ -399,32 +464,9 @@ export class AuthAttemptLimiter {
     }
   }
 
-  /** Drop the unlocked bucket with the fewest failures. The oldest wins a tie. */
-  private evictUnlocked(
-    buckets: Map<string, AttemptBucket>,
-    now: number,
-  ): EvictedBucket | undefined {
-    const best = this.findUnlocked(buckets, now);
-    if (!best) return undefined;
-    buckets.delete(best.key);
-    return best;
-  }
-
-  private findUnlocked(
-    buckets: Map<string, AttemptBucket>,
-    now: number,
-  ): EvictedBucket | undefined {
-    let best: EvictedBucket | undefined;
-    for (const [key, bucket] of buckets) {
-      if (bucket.lockedUntil > now) continue;
-      if (!best || bucket.failures < best.bucket.failures) best = { key, bucket };
-    }
-    return best;
-  }
-
-  private needsOverflow(buckets: Map<string, AttemptBucket>, key: string, now: number): boolean {
+  private needsOverflow(buckets: CountedBuckets, key: string, now: number): boolean {
     if (buckets.has(key) || buckets.size < MAX_BUCKETS) return false;
-    return this.findUnlocked(buckets, now) === undefined;
+    return buckets.findUnlocked(now) === undefined;
   }
 
   private decayBucket(bucket: AttemptBucket, now: number): void {
@@ -454,12 +496,17 @@ export class AuthAttemptLimiter {
     this.undoBucket(this.overflow, now, lockBefore, lockAfter);
   }
 
-  private restoreEvicted(
-    buckets: Map<string, AttemptBucket>,
-    evicted: EvictedBucket | undefined,
-  ): void {
+  private restore(buckets: CountedBuckets, key: string, previous: AttemptBucket | undefined): void {
+    if (!previous) {
+      buckets.delete(key);
+      return;
+    }
+    buckets.replace(key, previous);
+  }
+
+  private restoreEvicted(buckets: CountedBuckets, evicted: EvictedBucket | undefined): void {
     if (!evicted) return;
-    buckets.set(evicted.key, evicted.bucket);
+    buckets.replace(evicted.key, evicted.bucket);
   }
 }
 
@@ -483,16 +530,194 @@ function cloneBucket(bucket: AttemptBucket | undefined): AttemptBucket | undefin
   return bucket ? { ...bucket } : undefined;
 }
 
-function restoreBucket(
-  buckets: Map<string, AttemptBucket>,
-  key: string,
-  previous: AttemptBucket | undefined,
-): void {
-  if (!previous) {
-    buckets.delete(key);
-    return;
+interface AgeNode {
+  key: string;
+  age: number;
+  prev?: AgeNode;
+  next?: AgeNode;
+}
+
+/** Keys of one failure count, oldest at the head. */
+class AgeList {
+  head?: AgeNode;
+  tail?: AgeNode;
+  readonly nodes = new Map<string, AgeNode>();
+
+  get size(): number {
+    return this.nodes.size;
   }
-  buckets.set(key, previous);
+
+  insert(key: string, age: number): void {
+    const node: AgeNode = { key, age };
+    this.nodes.set(key, node);
+    const tail = this.tail;
+    if (!tail || tail.age <= age) {
+      if (!tail) {
+        this.head = node;
+        this.tail = node;
+        return;
+      }
+      tail.next = node;
+      node.prev = tail;
+      this.tail = node;
+      return;
+    }
+    let cursor = this.head;
+    while (cursor && cursor.age <= age) cursor = cursor.next;
+    if (!cursor) {
+      const end = this.tail;
+      if (!end) {
+        this.head = node;
+        this.tail = node;
+        return;
+      }
+      end.next = node;
+      node.prev = end;
+      this.tail = node;
+      return;
+    }
+    node.next = cursor;
+    node.prev = cursor.prev;
+    if (cursor.prev) cursor.prev.next = node;
+    else this.head = node;
+    cursor.prev = node;
+  }
+
+  remove(key: string): void {
+    const node = this.nodes.get(key);
+    if (!node) return;
+    this.nodes.delete(key);
+    if (node.prev) node.prev.next = node.next;
+    else this.head = node.next;
+    if (node.next) node.next.prev = node.prev;
+    else this.tail = node.prev;
+  }
+}
+
+/**
+ * Address buckets indexed by failure count.
+ * Eviction takes the oldest unlocked key of the smallest count, without scanning every key.
+ */
+class CountedBuckets {
+  private readonly buckets = new Map<string, AttemptBucket>();
+  private readonly lists = new Map<number, AgeList>();
+  private readonly ages = new Map<string, number>();
+  private nextAge = 1;
+  private cached: EvictedBucket | undefined;
+  private cachedAt = Number.NaN;
+  /** No unlocked bucket exists before this time. */
+  private noneUntil = 0;
+
+  get size(): number {
+    return this.buckets.size;
+  }
+
+  has(key: string): boolean {
+    return this.buckets.has(key);
+  }
+
+  get(key: string): AttemptBucket | undefined {
+    return this.buckets.get(key);
+  }
+
+  /**
+   * Insert or replace a key.
+   * A kept age stays where it was among the other keys. A refreshed age becomes the newest.
+   */
+  replace(key: string, bucket: AttemptBucket, previousFailures?: number, keepAge = false): void {
+    const kept = keepAge ? this.ages.get(key) : undefined;
+    if (previousFailures !== undefined) this.detach(key, previousFailures);
+    else {
+      const current = this.buckets.get(key);
+      if (current) this.detach(key, current.failures);
+    }
+    this.buckets.set(key, bucket);
+    const age = kept ?? this.nextAge++;
+    this.ages.set(key, age);
+    this.list(bucket.failures).insert(key, age);
+    this.invalidate();
+  }
+
+  delete(key: string): void {
+    const current = this.buckets.get(key);
+    if (!current) return;
+    this.deleteCounted(key, current.failures);
+  }
+
+  /** Remove a key whose failure count was already changed in place. */
+  deleteCounted(key: string, indexedFailures: number): void {
+    this.detach(key, indexedFailures);
+    this.buckets.delete(key);
+    this.ages.delete(key);
+    this.invalidate();
+  }
+
+  findUnlocked(now: number): EvictedBucket | undefined {
+    if (
+      this.cached &&
+      this.cachedAt === now &&
+      this.cached.bucket.lockedUntil <= now &&
+      this.buckets.get(this.cached.key) === this.cached.bucket
+    ) {
+      return this.cached;
+    }
+    if (now < this.noneUntil) return undefined;
+    const counts = [...this.lists.keys()].sort((left, right) => left - right);
+    let soonest = Number.POSITIVE_INFINITY;
+    for (const count of counts) {
+      let node = this.lists.get(count)?.head;
+      while (node) {
+        const bucket = this.buckets.get(node.key);
+        if (!bucket) {
+          node = node.next;
+          continue;
+        }
+        if (bucket.lockedUntil > now) {
+          if (bucket.lockedUntil < soonest) soonest = bucket.lockedUntil;
+          node = node.next;
+          continue;
+        }
+        this.cached = { key: node.key, bucket };
+        this.cachedAt = now;
+        this.noneUntil = 0;
+        return this.cached;
+      }
+    }
+    this.cached = undefined;
+    this.cachedAt = now;
+    this.noneUntil = soonest;
+    return undefined;
+  }
+
+  evictUnlocked(now: number): EvictedBucket | undefined {
+    const best = this.findUnlocked(now);
+    if (!best) return undefined;
+    const saved: EvictedBucket = { key: best.key, bucket: { ...best.bucket } };
+    this.delete(best.key);
+    return saved;
+  }
+
+  private list(failures: number): AgeList {
+    let list = this.lists.get(failures);
+    if (!list) {
+      list = new AgeList();
+      this.lists.set(failures, list);
+    }
+    return list;
+  }
+
+  private detach(key: string, failures: number): void {
+    const list = this.lists.get(failures);
+    if (!list) return;
+    list.remove(key);
+    if (list.size === 0) this.lists.delete(failures);
+  }
+
+  private invalidate(): void {
+    this.cached = undefined;
+    this.cachedAt = Number.NaN;
+    this.noneUntil = 0;
+  }
 }
 
 export { clientAddress, normalizeClientIp, type TrustedProxy };

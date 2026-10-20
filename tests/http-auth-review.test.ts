@@ -1041,7 +1041,7 @@ describe("unknown usernames and bucket eviction", () => {
     expect(allowed).toBe(36);
   });
 
-  it("forgets a username bucket after a quiet period", () => {
+  it("halves a username count after a quiet period", () => {
     let now = 0;
     const limiter = new AuthAttemptLimiter({
       globalFreeFailures: 1,
@@ -1054,6 +1054,45 @@ describe("unknown usernames and bucket eviction", () => {
     expect(limiter.beginAttempt("203.0.113.3", "admin").retryAfterMs).toBe(1000);
     now += 61_000;
     expect(limiter.beginAttempt("203.0.113.4", "admin").retryAfterMs).toBe(0);
+    expect(limiter.beginAttempt("203.0.113.5", "admin").retryAfterMs).toBeGreaterThan(0);
+  });
+
+  it("locks a username that repeats its free attempts after each quiet window", () => {
+    let now = 0;
+    const limiter = new AuthAttemptLimiter({ baseDelayMs: 60_000, now: () => now });
+    const ipFor = (index: number) => `198.51.${Math.floor(index / 250)}.${(index % 250) + 1}`;
+    let next = 0;
+    const burst = () => {
+      let blocked = 0;
+      for (let index = 0; index < 128; index += 1) {
+        if (limiter.beginAttempt(ipFor(next), "admin").retryAfterMs > 0) blocked += 1;
+        next += 1;
+      }
+      return blocked;
+    };
+    expect(burst()).toBe(0);
+    now += 15 * 60 * 1000;
+    expect(burst()).toBeGreaterThan(0);
+  });
+
+  it("reports one Retry-After for every locked username bucket", () => {
+    let now = 0;
+    const limiter = new AuthAttemptLimiter({
+      globalFreeFailures: 0,
+      baseDelayMs: 1_000,
+      maxDelayMs: 60_000,
+      now: () => now,
+    });
+    expect(limiter.beginAttempt("203.0.113.1", "alice").retryAfterMs).toBe(0);
+    now = 400;
+    limiter.beginAttempt("203.0.113.2", "bob");
+    now = 500;
+    const alice = limiter.beginAttempt("203.0.113.3", "alice");
+    const bob = limiter.beginAttempt("203.0.113.4", "bob");
+    expect(alice.retryAfterMs).toBeGreaterThan(0);
+    expect(alice.headerRetryAfterMs).toBe(60_000);
+    if (bob.retryAfterMs > 0) expect(bob.headerRetryAfterMs).toBe(60_000);
+    expect(limiter.headerRetryAfterMs("203.0.113.3", "alice")).toBe(60_000);
   });
 
   it("does not evict a locked bucket to store another username", () => {

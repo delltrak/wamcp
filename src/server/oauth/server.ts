@@ -524,7 +524,7 @@ export class McpOAuthServer {
     const attempt = this.limiter?.beginAttempt(ip, subject);
     const reserved = attempt?.retryAfterMs ?? 0;
     if (reserved > 0) {
-      this.sendRateLimited(res, reserved);
+      this.sendRateLimited(res, attempt?.headerRetryAfterMs ?? reserved);
       return;
     }
     const credentialsWellFormed =
@@ -902,7 +902,7 @@ ${error}
     if (allowed === "limited") {
       this.sendRateLimited(
         res,
-        this.limiter?.retryAfterMs(clientAddress(req, this.trustProxy), username) ?? 1000,
+        this.limiter?.headerRetryAfterMs(clientAddress(req, this.trustProxy), username) ?? 1000,
       );
       return;
     }

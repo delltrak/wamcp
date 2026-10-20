@@ -68,13 +68,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   IPv6 /64s or NATs using the free attempts. A recent success exempts only that username at that
   address (the whole IPv6 /64 or NAT) for a few failures, and a wrong password removes the
   exemption. The presented username is limited whether or not an account exists. Usernames are kept
-  in a fixed table of 4096 buckets chosen by an HMAC with a per-process key, with no eviction. A
-  hash collision shares a bucket and only makes the limit stricter. Each bucket still expires after
-  a quiet period once its lock has ended. The address maps drop the unlocked entry with the fewest
-  failures, the oldest on a tie, and do not drop a live lock. When every address slot is an active
-  lock, a new address is counted in one shared overflow bucket, and a recent success does not create
-  an address bucket. That overflow does not apply to usernames, so a saturated username table does
-  not leave sign-in at 429 after the address locks expire. An attempt that does not finish is
+  in a fixed table of 65536 buckets chosen by an HMAC with a per-process key, with no eviction. A
+  hash collision shares a bucket and only makes the limit stricter. A quiet period halves that
+  count instead of clearing it, so the same free attempts once per window eventually lock the name.
+  Locking every bucket takes on the order of 11 million spread-out failures. Keeping them locked
+  takes about one failure per bucket per 15 minutes: roughly 70 requests per second with a name for
+  each bucket, or several hundred per second without that map. While that continues, authorization
+  and Basic authentication stay 429 except for a username that signed in from that address in the
+  last hour, and an access token that was already issued still works. The `Retry-After` of a
+  username lock is the 15 minute ceiling for every bucket. The address maps drop the unlocked entry
+  with the fewest failures, the oldest on a tie, and do not drop a live lock. When every address
+  slot is an active lock, a new address is counted in one shared overflow bucket, and a recent
+  success does not create an address bucket. That overflow does not apply to usernames, so a
+  saturated username table does not leave sign-in at 429 after the address locks expire. An attempt that does not finish is
   tied to a bounded token, so it cannot undo a later failure. scrypt work uses a short queue, keeps
   one slot for a recent sign-in, and a rejected attempt still counts. The credential key is linked
   into place so it is never read empty. Back up `oauth.db.mac` with `oauth.db`; losing the key

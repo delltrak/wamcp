@@ -119,7 +119,7 @@ export async function authorizeMcpHttpRequest(
     const reserved = attempt?.retryAfterMs ?? 0;
     if (reserved > 0) {
       logger.warn("MCP Basic authentication is rate limited");
-      writeTooMany(res, reserved, challenges);
+      writeTooMany(res, attempt?.headerRetryAfterMs ?? reserved, challenges);
       return false;
     }
     let settled = false;
