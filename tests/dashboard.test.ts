@@ -1,4 +1,4 @@
-import { createServer, request as httpRequest, type Server } from "node:http";
+import { createServer, request as httpRequest, type IncomingMessage, type Server } from "node:http";
 import { readFileSync } from "node:fs";
 import { afterEach, describe, expect, it } from "vitest";
 import { baileysCredsArePaired, pairingRefusal } from "../src/channels/baileys/pairing-state.js";
@@ -80,6 +80,7 @@ function handlerFor(input: {
   loginWindowMs?: number;
   loginProbeIntervalMs?: number;
   maxComparisonsPerMinute?: number;
+  clientAddress?: (req: IncomingMessage) => string;
   users?: DashboardConfig["users"];
   matchCredentials?: (
     users: DashboardConfig["users"],
@@ -155,6 +156,7 @@ function handlerFor(input: {
       ...(input.maxComparisonsPerMinute
         ? { maxComparisonsPerMinute: input.maxComparisonsPerMinute }
         : {}),
+      ...(input.clientAddress ? { clientAddress: input.clientAddress } : {}),
       ...(input.matchCredentials ? { matchCredentials: input.matchCredentials } : {}),
       now: input.now ?? (() => 6_000),
     }),
@@ -647,11 +649,16 @@ describe("dashboard HTTP", () => {
     });
     expect(accepted.status).toBe(200);
     expect(comparisons).toBe(10);
+    const otherUser = await fetch(`${base}/dashboard/`, {
+      headers: { Authorization: basic("night", "wrong-horse") },
+    });
+    expect(otherUser.status).toBe(429);
+    expect(comparisons).toBe(10);
     const afterSuccess = await fetch(`${base}/dashboard/`, {
       headers: { Authorization: basic("ops", "wrong-horse") },
     });
-    expect(afterSuccess.status).toBe(429);
-    expect(comparisons).toBe(10);
+    expect(afterSuccess.status).toBe(401);
+    expect(comparisons).toBe(11);
   });
 
   it("keeps the address limited when a correct login is not itself limited", async () => {
@@ -705,12 +712,13 @@ describe("dashboard HTTP", () => {
     const polledAgain = await fetch(`${base}/dashboard/`, {
       headers: { Authorization: basic("ops", "correct-horse") },
     });
-    expect(polledAgain.status).toBe(429);
+    expect(polledAgain.status).toBe(200);
+    expect(comparisons).toBe(10);
     const attacker = await fetch(`${base}/dashboard/`, {
       headers: { Authorization: basic("night", "wrong-horse") },
     });
     expect(attacker.status).toBe(429);
-    expect(comparisons).toBe(9);
+    expect(comparisons).toBe(10);
   });
 
   it("limits password comparisons across addresses", async () => {
@@ -730,6 +738,134 @@ describe("dashboard HTTP", () => {
     const blocked = await fetch(`${base}/dashboard/`, { headers: wrong });
     expect(blocked.status).toBe(429);
     expect(comparisons).toBe(2);
+  });
+
+  it("serves four polling tabs without spending the global failure cap", async () => {
+    let clock = 1_000_000;
+    const { handle } = handlerFor({
+      maxComparisonsPerMinute: 60,
+      now: () => clock,
+    });
+    const base = await serve(handle);
+    const auth = { Authorization: basic("ops", "correct-horse") };
+    for (let tick = 0; tick < 20; tick += 1) {
+      for (let tab = 0; tab < 4; tab += 1) {
+        expect((await fetch(`${base}/dashboard/`, { headers: auth })).status).toBe(200);
+      }
+      clock += 3_000;
+    }
+    const outsider = await fetch(`${base}/dashboard/`, {
+      headers: { Authorization: basic("night", "wrong-horse") },
+    });
+    expect(outsider.status).toBe(401);
+  });
+
+  it("keeps a recent success available while other addresses fill the global cap", async () => {
+    let clock = 1_000_000;
+    let comparisons = 0;
+    const { handle } = handlerFor({
+      maxComparisonsPerMinute: 60,
+      now: () => clock,
+      clientAddress(req) {
+        const raw = req.headers["x-client-address"];
+        return typeof raw === "string" && raw.length > 0 ? raw : "203.0.113.10";
+      },
+      matchCredentials(list, username, password) {
+        comparisons += 1;
+        return dashboardCredentialsMatch(list, username, password);
+      },
+    });
+    const base = await serve(handle);
+    const operator = {
+      Authorization: basic("ops", "correct-horse"),
+      "x-client-address": "203.0.113.10",
+    };
+    expect((await fetch(`${base}/dashboard/`, { headers: operator })).status).toBe(200);
+    for (let index = 1; index <= 60; index += 1) {
+      const attack = await fetch(`${base}/dashboard/`, {
+        headers: {
+          Authorization: basic("ops", "wrong-horse"),
+          "x-client-address": `198.51.100.${index}`,
+        },
+      });
+      expect(attack.status).toBe(401);
+    }
+    expect(comparisons).toBe(61);
+    const blocked = await fetch(`${base}/dashboard/`, {
+      headers: {
+        Authorization: basic("ops", "wrong-horse"),
+        "x-client-address": "198.51.100.61",
+      },
+    });
+    expect(blocked.status).toBe(429);
+    expect(comparisons).toBe(61);
+    const polled = await fetch(`${base}/dashboard/`, { headers: operator });
+    expect(polled.status).toBe(200);
+    expect(comparisons).toBe(62);
+  });
+
+  it("lets a recent success pass the address total but not its own pair limit", async () => {
+    let clock = 1_000_000;
+    let comparisons = 0;
+    const { handle } = handlerFor({
+      maxLoginFailures: 8,
+      loginProbeIntervalMs: 60_000,
+      now: () => clock,
+      users: [
+        { username: "ops", password: "correct-horse" },
+        { username: "night", password: "night-password" },
+      ],
+      matchCredentials(list, username, password) {
+        comparisons += 1;
+        return dashboardCredentialsMatch(list, username, password);
+      },
+    });
+    const base = await serve(handle);
+    const operator = { Authorization: basic("ops", "correct-horse") };
+    const attacker = { Authorization: basic("night", "wrong-horse") };
+    expect((await fetch(`${base}/dashboard/`, { headers: operator })).status).toBe(200);
+    for (let attempt = 0; attempt < 8; attempt += 1) {
+      expect((await fetch(`${base}/dashboard/`, { headers: attacker })).status).toBe(401);
+    }
+    expect((await fetch(`${base}/dashboard/`, { headers: attacker })).status).toBe(429);
+    expect(comparisons).toBe(10);
+    expect((await fetch(`${base}/dashboard/`, { headers: operator })).status).toBe(200);
+    expect(comparisons).toBe(11);
+    expect((await fetch(`${base}/dashboard/`, { headers: attacker })).status).toBe(429);
+    expect(comparisons).toBe(11);
+    const ownFailure = { Authorization: basic("ops", "wrong-horse") };
+    for (let attempt = 0; attempt < 8; attempt += 1) {
+      expect((await fetch(`${base}/dashboard/`, { headers: ownFailure })).status).toBe(401);
+    }
+    const ownLimited = await fetch(`${base}/dashboard/`, { headers: operator });
+    expect(ownLimited.status).toBe(429);
+    expect(comparisons).toBe(19);
+  });
+
+  it("keeps the global failure window independent of the probe interval", async () => {
+    let clock = 1_000_000;
+    const { handle } = handlerFor({
+      maxComparisonsPerMinute: 1,
+      loginProbeIntervalMs: 1_000,
+      now: () => clock,
+      clientAddress(req) {
+        const raw = req.headers["x-client-address"];
+        return typeof raw === "string" && raw.length > 0 ? raw : "203.0.113.10";
+      },
+    });
+    const base = await serve(handle);
+    const wrong = (address: string) =>
+      fetch(`${base}/dashboard/`, {
+        headers: {
+          Authorization: basic("ops", "wrong-horse"),
+          "x-client-address": address,
+        },
+      });
+    expect((await wrong("198.51.100.1")).status).toBe(401);
+    clock += 1_000;
+    expect((await wrong("198.51.100.2")).status).toBe(429);
+    clock += 60_000;
+    expect((await wrong("198.51.100.3")).status).toBe(401);
   });
 
   it("uses relative API URLs under its mount path", async () => {
