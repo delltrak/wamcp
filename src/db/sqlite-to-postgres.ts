@@ -34,7 +34,8 @@ interface ForeignKeyInfo {
 /**
  * Copies application tables, including Baileys `auth_keys`, into Postgres.
  * Refuses when the target already has instance or auth rows unless `force` is set.
- * The SQLite file is not modified or deleted.
+ * `--force` truncates those destination tables before loading the snapshot.
+ * Only columns present in both databases are copied. The SQLite file is not modified.
  */
 export async function migrateSqliteToPostgres(options: {
   sqlitePath: string;
@@ -70,6 +71,7 @@ export async function migrateSqliteToPostgres(options: {
     const counts: Record<string, number> = {};
     await client.query("BEGIN");
     try {
+      if (options.force === true) await truncateDestination(client, applicationTableNames());
       for (const table of tables) {
         counts[table] = await copyTable(source, client, table);
       }
@@ -104,7 +106,7 @@ async function assertCopyAllowed(client: Client, force: boolean): Promise<void> 
   const authKeys = Number(row?.auth_keys ?? 0);
   if (!force && (instances > 0 || authKeys > 0)) {
     throw new Error(
-      "Refusing to copy into Postgres because instances or auth_keys already has rows. Stop wa-mcp, copy once into an empty database, then start wa-mcp with WA_DATABASE_URL. Pass --force to overwrite those rows.",
+      "Refusing to copy into Postgres because instances or auth_keys already has rows. Stop wa-mcp, copy once into an empty database, then start wa-mcp with WA_DATABASE_URL. Pass --force to truncate the destination tables and load this snapshot.",
     );
   }
 }
@@ -160,18 +162,43 @@ function parentTables(source: Database.Database, table: string): string[] {
   return rows.map((row) => row.table);
 }
 
+async function truncateDestination(client: Client, tables: string[]): Promise<void> {
+  if (tables.length === 0) return;
+  await client.query(
+    `TRUNCATE TABLE ${tables.map(quoteIdent).join(", ")} RESTART IDENTITY CASCADE`,
+  );
+}
+
+async function destinationColumns(client: Client, table: string): Promise<Set<string>> {
+  const result = await client.query<{ column_name: string }>(
+    `SELECT column_name FROM information_schema.columns
+     WHERE table_schema = current_schema() AND table_name = $1`,
+    [table],
+  );
+  return new Set(result.rows.map((row) => row.column_name));
+}
+
 async function copyTable(
   source: Database.Database,
   client: Client,
   table: string,
 ): Promise<number> {
   const columns = source.prepare(`PRAGMA table_info(${quoteIdent(table)})`).all() as ColumnInfo[];
-  if (columns.length === 0) return 0;
-  const names = columns.map((column) => column.name);
-  const primaryKey = columns
+  const destination = await destinationColumns(client, table);
+  const shared = columns.filter((column) => destination.has(column.name));
+  const skipped = columns
+    .filter((column) => !destination.has(column.name))
+    .map((column) => column.name);
+  if (skipped.length > 0) {
+    log.warn({ table, columns: skipped }, "Skipping SQLite columns that are not in Postgres");
+  }
+  if (shared.length === 0) return 0;
+  const names = shared.map((column) => column.name);
+  const fullPrimaryKey = columns
     .filter((column) => column.pk > 0)
     .sort((left, right) => left.pk - right.pk)
     .map((column) => column.name);
+  const primaryKey = fullPrimaryKey.every((column) => names.includes(column)) ? fullPrimaryKey : [];
   const rows = source.prepare(`SELECT * FROM ${quoteIdent(table)}`).all() as Array<
     Record<string, unknown>
   >;

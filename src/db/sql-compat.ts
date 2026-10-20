@@ -284,9 +284,37 @@ function readNamedPlaceholder(
 ): { token: string; name: string; next: number } | null {
   const sigil = sql[index];
   if (sigil !== "@" && sigil !== ":" && sigil !== "$") return null;
+  // `::bigint` is a Postgres cast, not a `:bigint` parameter.
+  if (sigil === ":" && (sql[index - 1] === ":" || sql[index + 1] === ":")) return null;
   const name = /^[A-Za-z_][A-Za-z0-9_]*/.exec(sql.slice(index + 1));
   if (!name) return null;
   return { token: sigil + name[0], name: name[0], next: index + 1 + name[0].length };
+}
+
+const READ_VERBS = new Set(["SELECT", "EXPLAIN", "SHOW", "TABLE", "VALUES"]);
+
+/** True for statements that are safe to run again after a dropped connection. */
+export function isIdempotentRead(sql: string): boolean {
+  return READ_VERBS.has(leadingSqlVerb(sql));
+}
+
+function leadingSqlVerb(sql: string): string {
+  let index = 0;
+  while (index < sql.length) {
+    while (index < sql.length && /\s/.test(sql[index] ?? "")) index += 1;
+    if (sql.startsWith("--", index)) {
+      const end = sql.indexOf("\n", index);
+      index = end === -1 ? sql.length : end + 1;
+      continue;
+    }
+    if (sql.startsWith("/*", index)) {
+      const end = sql.indexOf("*/", index + 2);
+      index = end === -1 ? sql.length : end + 2;
+      continue;
+    }
+    break;
+  }
+  return /^[A-Za-z]+/.exec(sql.slice(index))?.[0]?.toUpperCase() ?? "";
 }
 
 const VALUE_KEYWORDS = new Set([

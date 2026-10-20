@@ -11,11 +11,12 @@ import type {
 } from "@whiskeysockets/baileys";
 import { proto } from "@whiskeysockets/baileys";
 import { initAuthCreds, BufferJSON } from "@whiskeysockets/baileys";
-import { eq, and } from "drizzle-orm";
+import { and, eq, inArray, sql } from "drizzle-orm";
 import { db } from "../../db/client.js";
 import { authKeys } from "../../db/schema.js";
 
 const CREDS_KEY = "creds";
+const KEY_BATCH = 100;
 
 /**
  * Creates a Baileys-compatible AuthenticationState backed by SQLite.
@@ -43,13 +44,6 @@ export async function useSqliteAuthState(
         target: [authKeys.instanceId, authKeys.keyId],
         set: { keyData: data },
       })
-      .run();
-  };
-
-  const removeData = async (key: string): Promise<void> => {
-    await db
-      .delete(authKeys)
-      .where(and(eq(authKeys.instanceId, instanceId), eq(authKeys.keyId, key)))
       .run();
   };
 
@@ -89,16 +83,37 @@ export async function useSqliteAuthState(
       },
 
       set: async (data: Record<string, Record<string, unknown>>): Promise<void> => {
+        const writes: Array<{ keyId: string; keyData: string }> = [];
+        const removals: string[] = [];
         for (const [type, entries] of Object.entries(data)) {
           for (const [id, value] of Object.entries(entries)) {
             const keyId = `${type}-${id}`;
-            if (value) {
-              await writeData(keyId, JSON.stringify(value, BufferJSON.replacer));
-            } else {
-              await removeData(keyId);
-            }
+            if (value) writes.push({ keyId, keyData: JSON.stringify(value, BufferJSON.replacer) });
+            else removals.push(keyId);
           }
         }
+        if (writes.length === 0 && removals.length === 0) return;
+
+        await db.transaction(async (tx) => {
+          for (let offset = 0; offset < writes.length; offset += KEY_BATCH) {
+            const batch = writes.slice(offset, offset + KEY_BATCH);
+            await tx
+              .insert(authKeys)
+              .values(batch.map((row) => ({ instanceId, keyId: row.keyId, keyData: row.keyData })))
+              .onConflictDoUpdate({
+                target: [authKeys.instanceId, authKeys.keyId],
+                set: { keyData: sql`excluded.key_data` },
+              })
+              .run();
+          }
+          for (let offset = 0; offset < removals.length; offset += KEY_BATCH) {
+            const batch = removals.slice(offset, offset + KEY_BATCH);
+            await tx
+              .delete(authKeys)
+              .where(and(eq(authKeys.instanceId, instanceId), inArray(authKeys.keyId, batch)))
+              .run();
+          }
+        });
       },
     },
   };

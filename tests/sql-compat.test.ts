@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import { POSTGRES_BASELINE_MIGRATION_ID, applySchemaSql } from "../src/db/schema-sql.js";
 import {
   bindParameters,
+  isIdempotentRead,
   replaceScalarMax,
   replaceSqlitePlaceholders,
   splitSqlStatements,
@@ -59,6 +60,26 @@ describe("SQL compatibility", () => {
       sql: 'select "id" from "t" where "id" in ($1, $2) order by "id" desc limit $3',
       values: ["a", "b", 10],
     });
+  });
+
+  it("does not treat a Postgres cast as a named parameter", () => {
+    expect(bindParameters("select ?::bigint", [1])).toEqual({
+      sql: "select $1::bigint",
+      values: [1],
+    });
+    expect(bindParameters("select id::bigint from t where id = :id", [{ id: 4 }])).toEqual({
+      sql: "select id::bigint from t where id = $1",
+      values: [4],
+    });
+  });
+
+  it("retries only read statements", () => {
+    expect(isIdempotentRead("/* note */ select 1")).toBe(true);
+    expect(isIdempotentRead("WITH rows AS (SELECT 1) INSERT INTO t SELECT * FROM rows")).toBe(
+      false,
+    );
+    expect(isIdempotentRead("insert into t (id) values (?)")).toBe(false);
+    expect(isIdempotentRead("UPDATE t SET id = 1")).toBe(false);
   });
 
   it("binds named parameters from one object", () => {

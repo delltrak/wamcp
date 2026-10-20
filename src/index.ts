@@ -26,6 +26,10 @@ import { getAutoReadMode } from "./services/auto-read.js";
 import { bootEventWebhook, type EventWebhookStatus } from "./services/event-webhook-config.js";
 import { buildHealthBody } from "./server/health.js";
 
+process.on("unhandledRejection", (reason) => {
+  logger.error({ err: reason }, "Unhandled promise rejection");
+});
+
 const CLOUD_WEBHOOK_PATH = "/cloud-webhook";
 
 const transport = process.env.WA_TRANSPORT ?? DEFAULT_TRANSPORT;
@@ -101,20 +105,29 @@ async function startHttp(webhookStatus: EventWebhookStatus): Promise<void> {
 
     // Health endpoint
     if (url.pathname === HEALTH_ENDPOINT && req.method === "GET") {
-      const allInstances = await instanceManager.getAllInstances();
-      const connected = allInstances.filter((i) => i.status === "connected").length;
-      const health = buildHealthBody({
-        uptimeSeconds: Math.floor((Date.now() - startTime) / 1000),
-        instances: {
-          total: allInstances.length,
-          connected,
-          disconnected: allInstances.length - connected,
-        },
-        version: VERSION,
-        webhook: webhookStatus,
-      });
-      res.writeHead(200, { "Content-Type": "application/json" });
-      res.end(JSON.stringify(health));
+      try {
+        const allInstances = await instanceManager.getAllInstances();
+        const connected = allInstances.filter((i) => i.status === "connected").length;
+        const health = buildHealthBody({
+          uptimeSeconds: Math.floor((Date.now() - startTime) / 1000),
+          instances: {
+            total: allInstances.length,
+            connected,
+            disconnected: allInstances.length - connected,
+          },
+          version: VERSION,
+          webhook: webhookStatus,
+        });
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify(health));
+      } catch (err) {
+        logger.error({ err }, "Health check failed");
+        if (!res.headersSent) {
+          const unavailable = isDatabaseError(err);
+          res.writeHead(unavailable ? 503 : 500, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ status: unavailable ? "unavailable" : "error" }));
+        }
+      }
       return;
     }
 
@@ -300,3 +313,24 @@ main().catch((err) => {
   logger.fatal(err, "Failed to start WA MCP server");
   process.exit(1);
 });
+
+function isDatabaseError(error: unknown): boolean {
+  if (typeof error !== "object" || error === null) return false;
+  if ("cause" in error && isDatabaseError(error.cause)) return true;
+  const code = "code" in error && error.code != null ? String(error.code) : "";
+  if (/^SQLITE_/.test(code) || /^[0-9A-Z]{5}$/.test(code)) return true;
+  if (
+    code === "ECONNREFUSED" ||
+    code === "ECONNRESET" ||
+    code === "ETIMEDOUT" ||
+    code === "EPIPE"
+  ) {
+    return true;
+  }
+  const name = "name" in error ? String(error.name) : "";
+  if (name === "SqliteError" || name === "DatabaseError") return true;
+  const message = error instanceof Error ? error.message : "";
+  return /timeout expired|connection terminated|server closed the connection|database system is/i.test(
+    message,
+  );
+}

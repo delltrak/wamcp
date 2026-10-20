@@ -33,6 +33,22 @@ mkdir -p "$backup_dir"
 umask 077
 stamp=$(date -u +%Y%m%dT%H%M%SZ)
 destination="$backup_dir/wamcp-postgres-$stamp.dump"
-pg_dump --format=custom --no-owner --file="$destination" "$database_url"
+pgpass=$(mktemp)
+chmod 600 "$pgpass"
+trap 'rm -f "$pgpass"' EXIT
+safe_url=$(node -e '
+const fs = require("node:fs");
+const url = new URL(process.argv[1]);
+const esc = (value) => value.replaceAll("\\", "\\\\").replaceAll(":", "\\:");
+const host = url.hostname || "localhost";
+const port = url.port || "5432";
+const database = decodeURIComponent(url.pathname.replace(/^\//, ""));
+const user = decodeURIComponent(url.username);
+const password = decodeURIComponent(url.password);
+fs.writeFileSync(process.argv[2], `${esc(host)}:${esc(port)}:${esc(database)}:${esc(user)}:${esc(password)}\n`);
+url.password = "";
+process.stdout.write(url.href);
+' "$database_url" "$pgpass")
+PGPASSFILE=$pgpass pg_dump --format=custom --no-owner --file="$destination" "$safe_url"
 chmod 600 "$destination"
 echo "$destination"

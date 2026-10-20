@@ -68,8 +68,10 @@ Tools marked **Baileys only** are not available on Cloud API instances.
   (`data/whatsapp.db`), including Baileys auth keys. A `postgres://` or `postgresql://` URL stores
   that same data in Postgres. Nothing is copied until you stop wa-mcp and run
   `npm run db:migrate-to-postgres` once, into an empty database, before the first Postgres boot.
-  A second copy is refused unless `--force` is passed, because it would replace newer Postgres
-  rows with the stale SQLite snapshot.
+  A second copy is refused when `instances` or `auth_keys` already has rows. `--force` truncates
+  the destination application tables and loads this snapshot; it does not merge leftover rows.
+  The copy inserts only columns that exist on both sides. A pull request that adds a table or
+  column must update `src/db/schema-sql.ts` in the same change.
 - **Media** -- Image/video/audio/document fields accept a URL (`https://...`) or base64-encoded data.
   Stickers and GIFs are converted to WhatsApp-compatible formats with ffmpeg. Received media can
   be saved under `WA_MEDIA_DOWNLOAD_DIR` (default `data/media-downloads`) or returned as base64.

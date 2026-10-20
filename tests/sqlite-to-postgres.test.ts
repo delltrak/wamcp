@@ -55,6 +55,7 @@ async function buildSqlite(options?: {
   content?: string;
   creds?: unknown;
   unknownTables?: boolean;
+  extraColumn?: boolean;
 }): Promise<{ path: string; instanceId: string }> {
   const instanceId = `migrate-${randomUUID()}`;
   const directory = mkdtempSync(join(tmpdir(), "wamcp-migrate-src-"));
@@ -83,6 +84,12 @@ async function buildSqlite(options?: {
        ) VALUES ('msg-1', ?, '15550001111@s.whatsapp.net', '15550001111@s.whatsapp.net', 'text', ?, 1, 0, 'sent', ?)`,
     )
     .run(instanceId, options?.content ?? "kept", now);
+  if (options?.extraColumn) {
+    source.exec("ALTER TABLE messages ADD COLUMN extra_future TEXT");
+    source
+      .prepare("UPDATE messages SET extra_future = 'later' WHERE instance_id = ?")
+      .run(instanceId);
+  }
   if (options?.unknownTables) {
     source.exec(
       "CREATE TABLE __drizzle_migrations (id INTEGER PRIMARY KEY, hash TEXT, created_at NUMERIC)",
@@ -155,6 +162,7 @@ describe.skipIf(!postgresEnabled)("SQLite to Postgres migration", () => {
       expect(JSON.parse(await credsJson(target.url, again.instanceId)).advSecretKey).toBe(
         "replaced",
       );
+      expect(await credsJson(target.url, source.instanceId)).toBe("");
     } finally {
       await target.drop();
     }
@@ -178,10 +186,33 @@ describe.skipIf(!postgresEnabled)("SQLite to Postgres migration", () => {
           [source.instanceId],
         );
         expect(message.rows[0]?.content).toBe("ab");
-        const unknown = await client.query(
-          "SELECT to_regclass('group_history_sends') AS present",
-        );
+        const unknown = await client.query("SELECT to_regclass('group_history_sends') AS present");
         expect(unknown.rows[0]?.present).toBeNull();
+      } finally {
+        await client.end();
+      }
+    } finally {
+      await target.drop();
+    }
+  });
+
+  it("skips SQLite columns that are not in Postgres", async () => {
+    const target = await freshSchema();
+    try {
+      const source = await buildSqlite({ extraColumn: true });
+      const copied = await migrateSqliteToPostgres({
+        sqlitePath: source.path,
+        databaseUrl: target.url,
+      });
+      expect(copied.tables.messages).toBe(1);
+      const client = new Client({ connectionString: target.url });
+      await client.connect();
+      try {
+        const message = await client.query<{ content: string }>(
+          "SELECT content FROM messages WHERE instance_id = $1",
+          [source.instanceId],
+        );
+        expect(message.rows[0]?.content).toBe("kept");
       } finally {
         await client.end();
       }
@@ -205,6 +236,19 @@ describe.skipIf(!postgresEnabled)("SQLite to Postgres migration", () => {
       expect(result.status).toBe(0);
       expect(result.stdout).toContain("Copied");
       expect(JSON.parse(await credsJson(target.url, source.instanceId)).registered).toBe(true);
+
+      const refused = spawnSync(
+        process.execPath,
+        ["./node_modules/tsx/dist/cli.mjs", "src/db/migrate-to-postgres-cli.ts", source.path],
+        {
+          env: { ...process.env, WA_DATABASE_URL: target.url },
+          encoding: "utf8",
+        },
+      );
+      expect(refused.status).toBe(1);
+      expect(refused.stderr).toContain("Refusing to copy");
+      expect(refused.stderr).not.toMatch(/\n\s+at /);
+      expect(refused.stdout).not.toContain("Copied");
 
       const migrate = spawnSync(
         process.execPath,

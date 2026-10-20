@@ -2,6 +2,8 @@
 // WA MCP — Runtime schema for SQLite and Postgres
 // SQLite keeps the historical CREATE/ALTER script. Postgres runs
 // the same script with INTEGER widened to BIGINT.
+// Drizzle does not migrate Postgres. A pull request that adds a
+// table or column must update SCHEMA_SQL in this file in the same change.
 // ============================================================
 
 import type { DatabaseDriverName } from "./config.js";

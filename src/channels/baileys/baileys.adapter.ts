@@ -1854,8 +1854,10 @@ export class BaileysAdapter implements ChannelAdapter {
     if (existing) await this.expireAuthChallenge(method, existing.generatedAt, generatedAt);
 
     const expiresAt = generatedAt + AUTH_CHALLENGE_TTL_MS;
-    const timer = setTimeout(async () => {
-      await this.expireAuthChallenge(method, generatedAt, Date.now());
+    const timer = setTimeout(() => {
+      void this.expireAuthChallenge(method, generatedAt, Date.now()).catch((err: unknown) => {
+        logger.error({ err, instanceId: this.instanceId }, "Failed to expire auth challenge");
+      });
     }, AUTH_CHALLENGE_TTL_MS);
     this.pendingAuthChallenges.set(method, { generatedAt, expiresAt, timer });
 
@@ -5994,156 +5996,167 @@ export class BaileysAdapter implements ChannelAdapter {
 
   private bindEvents(sock: WASocket): void {
     sock.ev.on("connection.update", async (update) => {
-      const { connection, lastDisconnect, qr } = update;
+      try {
+        const { connection, lastDisconnect, qr } = update;
 
-      if (qr) {
-        await this.emitAuthChallengeGenerated("qr");
-        this.qrCode = qr;
-        this.status = "qr_pending";
+        if (qr) {
+          await this.emitAuthChallengeGenerated("qr");
+          this.qrCode = qr;
+          this.status = "qr_pending";
 
-        if (this.pairingPhone && sock) {
-          // Evolution API pattern: call requestPairingCode inside the QR event, with a small delay
-          const pairingPhone = this.pairingPhone;
-          setTimeout(async () => {
-            try {
-              if (this.sock !== sock || this.status !== "qr_pending") {
-                this.pairingCodeResolver?.(null);
-                this.pairingCodeResolver = null;
-                return;
+          if (this.pairingPhone && sock) {
+            // Evolution API pattern: call requestPairingCode inside the QR event, with a small delay
+            const pairingPhone = this.pairingPhone;
+            setTimeout(async () => {
+              try {
+                if (this.sock !== sock || this.status !== "qr_pending") {
+                  this.pairingCodeResolver?.(null);
+                  this.pairingCodeResolver = null;
+                  return;
+                }
+                const code = await sock.requestPairingCode(pairingPhone);
+                if (this.sock !== sock || this.status !== "qr_pending") return;
+                const pairingCode = code ?? null;
+                if (pairingCode) await this.emitAuthChallengeGenerated("pairing_code");
+                this.pairingCodeValue = pairingCode;
+                if (this.pairingCodeResolver) {
+                  this.pairingCodeResolver(this.pairingCodeValue);
+                  this.pairingCodeResolver = null;
+                }
+                logger.info({ instanceId: this.instanceId }, "Pairing code generated");
+              } catch (err) {
+                logger.error(
+                  { instanceId: this.instanceId, err },
+                  "Failed to generate pairing code",
+                );
+                if (this.pairingCodeResolver) {
+                  this.pairingCodeResolver(null);
+                  this.pairingCodeResolver = null;
+                }
               }
-              const code = await sock.requestPairingCode(pairingPhone);
-              if (this.sock !== sock || this.status !== "qr_pending") return;
-              const pairingCode = code ?? null;
-              if (pairingCode) await this.emitAuthChallengeGenerated("pairing_code");
-              this.pairingCodeValue = pairingCode;
-              if (this.pairingCodeResolver) {
-                this.pairingCodeResolver(this.pairingCodeValue);
-                this.pairingCodeResolver = null;
-              }
-              logger.info({ instanceId: this.instanceId }, "Pairing code generated");
-            } catch (err) {
-              logger.error({ instanceId: this.instanceId, err }, "Failed to generate pairing code");
-              if (this.pairingCodeResolver) {
-                this.pairingCodeResolver(null);
-                this.pairingCodeResolver = null;
-              }
-            }
-          }, 1000);
+            }, 1000);
+          }
         }
-      }
 
-      if (connection === "open") {
-        const connectedAt = Date.now();
-        const wasPairing = this.pendingAuthChallenges.size > 0;
-        this.appendNotifyWatermarkMs = await this.getAppendNotifyWatermark(connectedAt);
-        this.status = "connected";
-        const persistedDisconnect = (
-          await db
-            .select({ lastDisconnected: instancesTable.lastDisconnected })
-            .from(instancesTable)
-            .where(eq(instancesTable.id, this.instanceId))
-            .get()
-        )?.lastDisconnected;
-        const offlineSince = this.disconnectedAtMs ?? persistedDisconnect ?? null;
-        const offlineDurationMs =
-          offlineSince !== null ? Math.max(0, Date.now() - offlineSince) : undefined;
-        this.connectedAtMs = connectedAt;
-        this.disconnectedAtMs = null;
-        this.qrCode = null;
-        this.pairingPhone = null;
-        this.pairingCodeValue = null;
-        this.pairingCodeResolver = null;
-        await this.clearAuthChallenges();
-        this.disconnectEventEmittedSinceOpen = false;
-        this.terminalDisconnectEventEmittedSinceOpen = false;
-        this.reconnectAttempt = 0;
-        this.consecutiveHealthProbeFailures = 0;
-        this.resetHealthWatchdog(sock);
-        if (this.presenceMode === "on_activity") {
-          void this.setGlobalPresence(sock, "unavailable").catch((error: unknown) => {
-            this.logGlobalPresenceFailure(error);
-          });
-        }
-        const user = sock.user as { lid?: string; name?: string } | undefined;
-        await this.emit("instance.connected", {
-          instanceId: this.instanceId,
-          phone: this.ownPhoneJid(sock),
-          lid: this.ownLid(user),
-          pushName: typeof user?.name === "string" ? user.name : null,
-          connectedAt,
-          wasPairing,
-        });
-        logger.info({ instanceId: this.instanceId, offlineDurationMs }, "Connected to WhatsApp");
-      }
-
-      if (connection === "close") {
-        this.clearHealthWatchdog();
-        this.clearEventBufferStallWatchdog();
-        this.resetActivityPresence();
-        this.appendNotifyWatermarkMs = null;
-        this.status = "disconnected";
-        const boom = (lastDisconnect?.error as Boom)?.output;
-        const statusCode = typeof boom?.statusCode === "number" ? boom.statusCode : undefined;
-        const reason = disconnectReasonName(statusCode);
-        const loggedOut = statusCode === DisconnectReason.loggedOut;
-        const closedAt = Date.now();
-        const priorDisconnectedAt = this.disconnectedAtMs;
-        const connectedDurationMs =
-          this.connectedAtMs !== null ? Math.max(0, closedAt - this.connectedAtMs) : undefined;
-        this.connectedAtMs = null;
-        if (this.disconnectedAtMs === null) this.disconnectedAtMs = closedAt;
-        this.lastDisconnectReason = reason;
-        this.lastDisconnectStatusCode = statusCode ?? null;
-        await this.clearAuthChallenges(closedAt);
-        logger.warn(
-          {
+        if (connection === "open") {
+          const connectedAt = Date.now();
+          const wasPairing = this.pendingAuthChallenges.size > 0;
+          this.appendNotifyWatermarkMs = await this.getAppendNotifyWatermark(connectedAt);
+          this.status = "connected";
+          const persistedDisconnect = (
+            await db
+              .select({ lastDisconnected: instancesTable.lastDisconnected })
+              .from(instancesTable)
+              .where(eq(instancesTable.id, this.instanceId))
+              .get()
+          )?.lastDisconnected;
+          const offlineSince = this.disconnectedAtMs ?? persistedDisconnect ?? null;
+          const offlineDurationMs =
+            offlineSince !== null ? Math.max(0, Date.now() - offlineSince) : undefined;
+          this.connectedAtMs = connectedAt;
+          this.disconnectedAtMs = null;
+          this.qrCode = null;
+          this.pairingPhone = null;
+          this.pairingCodeValue = null;
+          this.pairingCodeResolver = null;
+          await this.clearAuthChallenges();
+          this.disconnectEventEmittedSinceOpen = false;
+          this.terminalDisconnectEventEmittedSinceOpen = false;
+          this.reconnectAttempt = 0;
+          this.consecutiveHealthProbeFailures = 0;
+          this.resetHealthWatchdog(sock);
+          if (this.presenceMode === "on_activity") {
+            void this.setGlobalPresence(sock, "unavailable").catch((error: unknown) => {
+              this.logGlobalPresenceFailure(error);
+            });
+          }
+          const user = sock.user as { lid?: string; name?: string } | undefined;
+          await this.emit("instance.connected", {
             instanceId: this.instanceId,
-            reason,
-            statusCode,
-            connectedDurationMs,
-          },
-          "Baileys connection closed",
-        );
-
-        let reconnectInMs: number | null = null;
-        if (loggedOut) {
-          logger.info({ instanceId: this.instanceId }, "Logged out, clearing auth");
-          await clearAuthState(this.instanceId);
-          this.sock = null;
-        } else if (this.autoReconnect) {
-          reconnectInMs = this.scheduleReconnect();
-        }
-
-        const shouldEmitDisconnected =
-          !this.disconnectEventEmittedSinceOpen ||
-          (loggedOut && !this.terminalDisconnectEventEmittedSinceOpen);
-        if (shouldEmitDisconnected) {
-          await this.emit("instance.disconnected", {
-            instanceId: this.instanceId,
-            reason,
-            statusCode: statusCode ?? null,
-            loggedOut,
-            willReconnect: reconnectInMs !== null,
-            ...(reconnectInMs !== null ? { reconnectInMs } : {}),
-            disconnectedAt: closedAt,
-            ...(priorDisconnectedAt !== null
-              ? { offlineSinceMs: Math.max(0, closedAt - priorDisconnectedAt) }
-              : {}),
+            phone: this.ownPhoneJid(sock),
+            lid: this.ownLid(user),
+            pushName: typeof user?.name === "string" ? user.name : null,
+            connectedAt,
+            wasPairing,
           });
-          this.disconnectEventEmittedSinceOpen = true;
-          if (loggedOut) this.terminalDisconnectEventEmittedSinceOpen = true;
+          logger.info({ instanceId: this.instanceId, offlineDurationMs }, "Connected to WhatsApp");
         }
-      }
 
-      const normalized = normalizeConnectionUpdate(this.instanceId, update);
-      if (normalized) {
-        await this.emit("connection.changed", normalized);
+        if (connection === "close") {
+          this.clearHealthWatchdog();
+          this.clearEventBufferStallWatchdog();
+          this.resetActivityPresence();
+          this.appendNotifyWatermarkMs = null;
+          this.status = "disconnected";
+          const boom = (lastDisconnect?.error as Boom)?.output;
+          const statusCode = typeof boom?.statusCode === "number" ? boom.statusCode : undefined;
+          const reason = disconnectReasonName(statusCode);
+          const loggedOut = statusCode === DisconnectReason.loggedOut;
+          const closedAt = Date.now();
+          const priorDisconnectedAt = this.disconnectedAtMs;
+          const connectedDurationMs =
+            this.connectedAtMs !== null ? Math.max(0, closedAt - this.connectedAtMs) : undefined;
+          this.connectedAtMs = null;
+          if (this.disconnectedAtMs === null) this.disconnectedAtMs = closedAt;
+          this.lastDisconnectReason = reason;
+          this.lastDisconnectStatusCode = statusCode ?? null;
+          await this.clearAuthChallenges(closedAt);
+          logger.warn(
+            {
+              instanceId: this.instanceId,
+              reason,
+              statusCode,
+              connectedDurationMs,
+            },
+            "Baileys connection closed",
+          );
+
+          let reconnectInMs: number | null = null;
+          if (loggedOut) {
+            logger.info({ instanceId: this.instanceId }, "Logged out, clearing auth");
+            await clearAuthState(this.instanceId);
+            this.sock = null;
+          } else if (this.autoReconnect) {
+            reconnectInMs = this.scheduleReconnect();
+          }
+
+          const shouldEmitDisconnected =
+            !this.disconnectEventEmittedSinceOpen ||
+            (loggedOut && !this.terminalDisconnectEventEmittedSinceOpen);
+          if (shouldEmitDisconnected) {
+            await this.emit("instance.disconnected", {
+              instanceId: this.instanceId,
+              reason,
+              statusCode: statusCode ?? null,
+              loggedOut,
+              willReconnect: reconnectInMs !== null,
+              ...(reconnectInMs !== null ? { reconnectInMs } : {}),
+              disconnectedAt: closedAt,
+              ...(priorDisconnectedAt !== null
+                ? { offlineSinceMs: Math.max(0, closedAt - priorDisconnectedAt) }
+                : {}),
+            });
+            this.disconnectEventEmittedSinceOpen = true;
+            if (loggedOut) this.terminalDisconnectEventEmittedSinceOpen = true;
+          }
+        }
+
+        const normalized = normalizeConnectionUpdate(this.instanceId, update);
+        if (normalized) {
+          await this.emit("connection.changed", normalized);
+        }
+      } catch (err) {
+        logger.error({ err, instanceId: this.instanceId }, "Failed to handle connection update");
       }
     });
 
     // creds.update is not buffered — use ev.on directly
     sock.ev.on("creds.update", async () => {
-      await this.saveCreds?.();
+      try {
+        await this.saveCreds?.();
+      } catch (err) {
+        logger.error({ err, instanceId: this.instanceId }, "Failed to save credentials");
+      }
     });
 
     const resolveLidToPn: ContactPnResolver = async (lid) => {
@@ -6758,26 +6771,32 @@ export class BaileysAdapter implements ChannelAdapter {
     };
 
     sock.ev.process(async (events) => {
-      if (
-        events["messages.upsert"] ||
-        events["messages.update"] ||
-        events["message-receipt.update"] ||
-        events["presence.update"]
-      ) {
-        this.noteInboundApplicationActivity(sock);
-      }
-      const processing = processEvents(events);
-      const tracked = processing.catch((error: unknown) => {
+      try {
+        if (
+          events["messages.upsert"] ||
+          events["messages.update"] ||
+          events["message-receipt.update"] ||
+          events["presence.update"]
+        ) {
+          this.noteInboundApplicationActivity(sock);
+        }
+        const processing = processEvents(events).catch((error: unknown) => {
+          logger.error(
+            { instanceId: this.instanceId, error },
+            "Buffered Baileys event processing failed",
+          );
+        });
+        this.pendingSocketEventProcessing = Promise.all([
+          this.pendingSocketEventProcessing.catch(() => undefined),
+          processing,
+        ]).then(() => undefined);
+        await processing;
+      } catch (error) {
         logger.error(
           { instanceId: this.instanceId, error },
           "Buffered Baileys event processing failed",
         );
-      });
-      this.pendingSocketEventProcessing = Promise.all([
-        this.pendingSocketEventProcessing,
-        tracked,
-      ]).then(() => undefined);
-      return processing;
+      }
     });
   }
 

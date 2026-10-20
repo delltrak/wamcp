@@ -11,6 +11,7 @@ import { createChildLogger } from "../utils/logger.js";
 import {
   adaptSqliteStatement,
   bindParameters,
+  isIdempotentRead,
   splitSqlStatements,
   sqliteDdlToPostgres,
 } from "./sql-compat.js";
@@ -185,8 +186,10 @@ export class PostgresExecutor implements SqlExecutor {
     try {
       return await this.run(bound.sql, bound.values, scope?.client);
     } catch (error) {
-      if (scope?.client || !isTransientConnectionError(error)) throw error;
-      log.warn({ err: errorMessage(error) }, "Retrying Postgres query on a new connection");
+      if (scope?.client || !isTransientConnectionError(error) || !isIdempotentRead(bound.sql)) {
+        throw error;
+      }
+      log.warn({ err: errorMessage(error) }, "Retrying Postgres read on a new connection");
       return await this.run(bound.sql, bound.values);
     }
   }
@@ -202,25 +205,46 @@ export class PostgresExecutor implements SqlExecutor {
     if (existing?.client) return this.nested(existing, fn);
     this.assertOpen();
     const client = await this.pool.connect();
+    const onClientError = (err: Error) => {
+      log.error({ err: err.message }, "Postgres transaction connection dropped");
+    };
+    client.on("error", onClientError);
     const scope: TransactionScope = { depth: 0, client };
+    let discard: Error | undefined;
     try {
       return await this.scope.run(scope, async () => {
-        await client.query("BEGIN");
+        try {
+          await client.query("BEGIN");
+        } catch (error) {
+          discard = asError(error);
+          throw error;
+        }
         try {
           const result = await fn();
-          await client.query("COMMIT");
+          try {
+            await client.query("COMMIT");
+          } catch (error) {
+            discard = asError(error);
+            throw error;
+          }
           return result;
         } catch (error) {
+          if (!discard) discard = asError(error);
           try {
             await client.query("ROLLBACK");
-          } catch {
-            // Keep the original failure.
+          } catch (rollbackError) {
+            discard = asError(rollbackError);
           }
           throw error;
         }
       });
     } finally {
-      client.release();
+      if (discard) {
+        client.release(discard);
+      } else {
+        client.removeListener("error", onClientError);
+        client.release();
+      }
     }
   }
 
@@ -303,4 +327,8 @@ function isTransientConnectionError(error: unknown): boolean {
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+function asError(error: unknown): Error {
+  return error instanceof Error ? error : new Error(errorMessage(error));
 }

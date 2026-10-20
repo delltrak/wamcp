@@ -852,9 +852,10 @@ auth keys in that database. The SQLite file is not opened, moved, or migrated on
 
 `npm run db:migrate` applies the SQLite Drizzle migrations when the URL is empty, and applies the
 Postgres schema when it is set. Postgres records that baseline in `schema_migrations`. The files in
-`drizzle/` are SQLite-only: Postgres never runs them. A new table or column has to be added to
-`src/db/schema-sql.ts` by hand (and to `src/db/schema.ts`) or a Postgres database will not grow it.
-`npm run db:generate` does not update that script.
+`drizzle/` are SQLite-only: Postgres never runs them. A pull request that adds a table or column
+must update `src/db/schema-sql.ts` in the same change (and `src/db/schema.ts`). `npm run db:generate`
+does not update that script. The SQLite copy inserts only columns that exist on both sides, so an
+extra SQLite column is skipped instead of aborting the copy.
 
 To copy an existing SQLite database, including the session, stop wa-mcp and run the copy **once**,
 before the first process that boots with `WA_DATABASE_URL` set:
@@ -869,12 +870,14 @@ The command refuses to run without a Postgres URL. It reads SQLite (a consistent
 the WAL) and inserts rows into an empty Postgres database. It does not delete the SQLite file and
 does not pair the WhatsApp account again. Start wa-mcp with the same `WA_DATABASE_URL` only after
 that copy finishes. A later run is refused when `instances` or `auth_keys` already has rows: copying
-again would replace the live Baileys session with the older SQLite snapshot. `--force` overwrites
-those rows anyway. Do not rerun the copy to refresh Postgres.
+again would replace the live Baileys session with the older SQLite snapshot. `--force` truncates
+the application tables in Postgres and then loads the snapshot. It does not merge leftover rows.
+Do not rerun the copy to refresh Postgres.
 
 Postgres queries run off the Node.js event loop, so a remote database or a history sync does not
-freeze Baileys, HTTP, or BullMQ. Each statement fails after 10 seconds instead of hanging, and a
-dropped connection is retried once outside an open transaction. Text sort order follows the database
+freeze Baileys, HTTP, or BullMQ. Each statement fails after 10 seconds instead of hanging. A dropped
+connection is retried once only for a read (`SELECT`, `EXPLAIN`, `SHOW`, `TABLE`, `VALUES`) that is
+not inside an open transaction. Writes are not retried. Text sort order follows the database
 collation (often `en_US.UTF-8`) rather than SQLite's binary order. Create the cluster with
 `LC_COLLATE=C` when you need that binary order. Integers above 2^53 are returned as strings. NUL
 bytes in text are stripped, because Postgres rejects them.
@@ -893,8 +896,9 @@ The copy CLI is compiled to `dist/db/migrate-to-postgres-cli.js`. Mount the SQLi
 it in the container. From a checkout, `npm run db:migrate-to-postgres` remains the normal command.
 
 Back up Postgres with `pg_dump` while the server can stay up. The dump contains auth keys: mode
-`0600`, treat it as a secret, and do not commit it. The backup scripts run on the host; the runtime
-image does not include `pg_dump`.
+`0600`, treat it as a secret, and do not commit it. The scripts keep the password out of the
+process arguments by writing a temporary `.pgpass` file. The backup scripts run on the host; the
+runtime image does not include `pg_dump`.
 
 ```bash
 ./scripts/postgres-backup.sh "$WA_DATABASE_URL" /srv/wamcp-backups
