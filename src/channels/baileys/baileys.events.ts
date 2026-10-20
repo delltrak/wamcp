@@ -691,6 +691,12 @@ export function normalizeMessagesUpsert(
       return {
         instanceId,
         chatId,
+        ...(typeof msg.key.remoteJidAlt === "string" && msg.key.remoteJidAlt
+          ? { chatIdAlt: msg.key.remoteJidAlt }
+          : {}),
+        ...(typeof msg.key.participantAlt === "string" && msg.key.participantAlt
+          ? { senderAlt: msg.key.participantAlt }
+          : {}),
         chatName: isGroup ? null : (msg.pushName ?? null),
         senderName: msg.pushName ?? null,
         isGroup,

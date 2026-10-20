@@ -240,6 +240,13 @@ function initializeDatabase(): void {
       last_sent_at    INTEGER,
       rate_limited_until INTEGER
     );
+
+    CREATE TABLE IF NOT EXISTS auto_reply_cooldowns (
+      instance_id    TEXT NOT NULL REFERENCES instances(id) ON DELETE CASCADE,
+      contact_key    TEXT NOT NULL,
+      last_reply_at  INTEGER NOT NULL,
+      PRIMARY KEY (instance_id, contact_key)
+    );
   `);
 }
 

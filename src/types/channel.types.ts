@@ -517,6 +517,10 @@ export interface CloudCredentials {
 export interface NormalizedMessageEvent {
   instanceId: string;
   chatId: string;
+  /** Alternate chat JID from the protocol key, usually the PN/LID pair of chatId. */
+  chatIdAlt?: string;
+  /** Alternate sender JID, usually the PN/LID pair of the sender. */
+  senderAlt?: string;
   /** Optional display metadata used by outgoing integrations. */
   chatName?: string | null;
   senderName?: string | null;

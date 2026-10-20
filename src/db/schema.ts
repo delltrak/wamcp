@@ -362,6 +362,22 @@ export const pendingPollVotes = sqliteTable(
 );
 
 // ============================================================
+// AUTO-REPLY COOLDOWNS
+// Last automatic reply per contact, shared across PN/LID aliases.
+// ============================================================
+export const autoReplyCooldowns = sqliteTable(
+  "auto_reply_cooldowns",
+  {
+    instanceId: text("instance_id")
+      .notNull()
+      .references(() => instances.id, { onDelete: "cascade" }),
+    contactKey: text("contact_key").notNull(),
+    lastReplyAt: integer("last_reply_at").notNull(),
+  },
+  (table) => [primaryKey({ columns: [table.instanceId, table.contactKey] })],
+);
+
+// ============================================================
 // VERSION CACHE
 // WhatsApp Web version auto-update (daily check)
 // ============================================================

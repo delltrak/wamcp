@@ -729,12 +729,14 @@ Copy `.env.example` to `.env` and configure:
 | `WA_AUTO_REJECT_CALLS`      | `false`                  | Automatically reject incoming one-to-one Baileys call offers |
 | `WA_STATUS_MAX_RECIPIENTS`  | `256`                    | Maximum recipients per Baileys status; excess recipients are truncated and reported |
 | `WA_AUTO_READ`              | `false`                  | `on_fetch` marks incoming messages read when fetched; `on_receive` marks them read on arrival |
-| `WA_AUTO_REPLY_ENABLED`     | `false`                  | Queue one fixed reply for incoming private messages |
+| `WA_AUTO_REPLY_ENABLED`     | `false`                  | Queue one fixed reply for incoming private messages. Other `WA_AUTO_REPLY_*` values are validated only when this is `true` |
 | `WA_AUTO_REPLY_TEXT`        | —                        | Reply text. Required and non-blank when auto-reply is enabled; at most 4000 characters |
-| `WA_AUTO_REPLY_COOLDOWN_HOURS` | `24`                  | Minimum delay between auto-replies to the same chat (1–8760 hours) |
-| `WA_AUTO_REPLY_IGNORE_JIDS` | —                        | Comma-separated chats or senders to skip. Exact JIDs, phone numbers, suffixes such as `@lid`, and `*` wildcards |
-| `WA_AUTO_REPLY_GROUPS`      | `false`                  | Also auto-reply in groups. Status broadcasts are never answered |
+| `WA_AUTO_REPLY_COOLDOWN_HOURS` | `24`                  | Minimum delay between auto-replies to the same contact (1–8760 hours). Stored in the database and shared by PN/LID aliases |
+| `WA_AUTO_REPLY_MAX_AGE_SECONDS` | `180`               | Skip messages with no timestamp or older than this (30–3600) |
+| `WA_AUTO_REPLY_IGNORE_JIDS` | —                        | Chats or senders to skip. Device suffixes are stripped. Patterns without `@` match only `@s.whatsapp.net` |
+| `WA_AUTO_REPLY_GROUPS`      | `false`                  | Also auto-reply in groups. Status broadcasts and hosted chats are never answered |
 | `WA_AUTO_REPLY_RATE_PER_MINUTE` | `6`                 | Maximum auto-replies per instance each rolling minute (1–30) |
+| `WA_AUTO_REPLY_INSTANCES`   | all instances            | Optional comma-separated instance ids. Blank replies on every instance |
 | `WA_MEDIA_CACHE_MAX_MB`     | `500`                    | Media cache size limit                   |
 | `WA_MEDIA_DOWNLOAD_DIR`     | `data/media-downloads`   | Dedicated directory for downloaded files; separate from Baileys session data |
 | `WA_MEDIA_DOWNLOAD_MAX_BYTES` | `26214400` (25 MB)     | Maximum size for received media downloads; base64 mode is capped at 5 MB |
@@ -881,20 +883,36 @@ directory.
 read receipts and produce a warning. Automatic receipts never delay message delivery or tool
 responses; receipt failures are logged.
 
-`WA_AUTO_REPLY_ENABLED` defaults to `false`, which disables auto-reply. Set it to `true` and set
-`WA_AUTO_REPLY_TEXT` to a non-blank text of at most 4000 characters to queue that exact text for
-incoming private messages, including media. `WA_AUTO_REPLY_GROUPS` defaults to `false`; set it to
-`true` to also reply inside groups. Status broadcasts (`status@broadcast` and any `@broadcast`
-chat) and newsletters are never answered. Messages sent by the same account are ignored, and an
-incoming message whose text equals the configured reply is ignored so two accounts with the same
-text cannot loop. `WA_AUTO_REPLY_IGNORE_JIDS` skips matching chats and senders. Entries are
-comma-separated exact JIDs, bare phone numbers, suffixes such as `@lid` or `@g.us`, and `*`
-wildcards such as `5577*@s.whatsapp.net`. The same chat is not answered again until
-`WA_AUTO_REPLY_COOLDOWN_HOURS` has passed (default 24, allowed 1–8760). Each instance also stops
-after `WA_AUTO_REPLY_RATE_PER_MINUTE` replies in a rolling minute (default 6, allowed 1–30).
-Replies go through the normal outbound queue. Invalid enabled, text, cooldown, rate, group, or
-ignore-list values stop startup with an error that names the variable and the accepted range.
-Leaving the feature disabled does not send a reply, even when `WA_AUTO_REPLY_TEXT` is set.
+`WA_AUTO_REPLY_ENABLED` defaults to `false`, which disables auto-reply. The other
+`WA_AUTO_REPLY_*` variables are validated only when it is `true`, so a bad value does not stop
+startup while the feature is off. Set it to `true` and set `WA_AUTO_REPLY_TEXT` to a non-blank
+text of at most 4000 characters to queue that exact text for incoming private messages that carry
+real content: text, image, video, audio, document, sticker, location, contact, poll, event, or
+album, and only when the text, caption, or media is non-empty. Reactions, empty messages, protocol
+and stub messages, edits, and revokes are skipped. `WA_AUTO_REPLY_GROUPS` defaults to `false`; set
+it to `true` to also reply inside groups. Status broadcasts (`status@broadcast` and any
+`@broadcast` chat), newsletters, and `@hosted` / `@hosted.lid` chats are never answered. Messages
+sent by the same account are ignored, including when the chat or sender is that account's own
+phone or LID. An incoming message whose text equals the configured reply is ignored so two
+accounts with the same text cannot loop. Messages with a missing or zero timestamp, or older than
+`WA_AUTO_REPLY_MAX_AGE_SECONDS` (default 180, allowed 30–3600), are skipped so a reconnect does
+not answer the offline backlog.
+
+`WA_AUTO_REPLY_IGNORE_JIDS` skips matching chats and senders. A device suffix such as `:12` is
+removed before matching, and the user part and the domain are matched separately. An entry without
+`@`, such as `5577*` or a bare phone number, matches only `@s.whatsapp.net`, including the phone
+JID resolved from an `@lid`. Suffixes such as `@lid` still match that domain. An entry that cannot
+match, such as `s.whatsapp.net` without `@`, is rejected at startup. The same person is not
+answered again until `WA_AUTO_REPLY_COOLDOWN_HOURS` has passed (default 24, allowed 1–8760). That
+cooldown is stored in the database under one contact key, the phone JID when it is known, so
+`@s.whatsapp.net` and `@lid` aliases share it and it remains after a restart. Each instance also
+stops after `WA_AUTO_REPLY_RATE_PER_MINUTE` replies in a rolling minute (default 6, allowed 1–30).
+`WA_AUTO_REPLY_INSTANCES` is an optional comma-separated list of instance ids; blank means every
+instance. Replies go through the normal outbound queue. In `on_activity` presence mode each
+auto-reply is an outgoing message, so the account is shown online briefly and then returns to
+unavailable after the idle timeout. Invalid values, when the feature is enabled, stop startup
+with an error that names the variable and the accepted range. Leaving the feature disabled does
+not send a reply, even when `WA_AUTO_REPLY_TEXT` is set.
 
 `WA_PRESENCE_MODE` accepts `on_activity` or `always`. In `on_activity`, Baileys sends one global
 `unavailable` update after each connection opens, switches to global `available` before an outgoing
