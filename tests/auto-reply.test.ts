@@ -595,6 +595,44 @@ describe("auto-reply decisions", () => {
     expect(exact.send).not.toHaveBeenCalled();
   });
 
+  it("skips every group when ignore is @g.us and still replies in a private chat", () => {
+    const { service, send, event } = harness(
+      enabledConfig({ groups: true, ignoreJids: ["@g.us"] }),
+    );
+
+    service.handle(
+      "inst_auto",
+      event({
+        chatId: GROUP,
+        isGroup: true,
+        message: { id: "group", sender: OTHER },
+      }),
+    );
+    service.handle("inst_auto", event({ message: { id: "direct" } }));
+
+    expect(send).toHaveBeenCalledTimes(1);
+    expect(send).toHaveBeenCalledWith("inst_auto", DIRECT, REPLY);
+  });
+
+  it("skips every group when ignore is *@g.us and still replies in a private chat", () => {
+    const { service, send, event } = harness(
+      enabledConfig({ groups: true, ignoreJids: ["*@g.us"] }),
+    );
+
+    service.handle(
+      "inst_auto",
+      event({
+        chatId: GROUP,
+        isGroup: true,
+        message: { id: "group", sender: OTHER },
+      }),
+    );
+    service.handle("inst_auto", event({ message: { id: "direct" } }));
+
+    expect(send).toHaveBeenCalledTimes(1);
+    expect(send).toHaveBeenCalledWith("inst_auto", DIRECT, REPLY);
+  });
+
   it("shares one cooldown across every sender in a group", () => {
     const { service, send, event } = harness(enabledConfig({ groups: true, cooldownMs: HOUR_MS }));
     const otherGroup = "120363000000000001@g.us";

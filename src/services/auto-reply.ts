@@ -447,9 +447,14 @@ function matchesIgnoreList(
     if (isDomainOnlyPattern(pattern)) domainPatterns.push(pattern);
     else exactPatterns.push(pattern);
   }
-  const group = isGroupChat(event.chatId, event.isGroup);
-  const subject = group ? (event.message.sender ?? "") : event.chatId;
-  if (domainPatterns.length > 0 && subject && jidMatchesIgnoreList(subject, domainPatterns)) {
+  const subjects = [event.chatId];
+  if (isGroupChat(event.chatId, event.isGroup) && event.message.sender) {
+    subjects.push(event.message.sender);
+  }
+  if (
+    domainPatterns.length > 0 &&
+    subjects.some((jid) => jidMatchesIgnoreList(jid, domainPatterns))
+  ) {
     return true;
   }
   return (
