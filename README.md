@@ -731,9 +731,9 @@ Copy `.env.example` to `.env` and configure:
 | `WA_AUTO_READ`              | `false`                  | `on_fetch` marks incoming messages read when fetched; `on_receive` marks them read on arrival |
 | `WA_AUTO_REPLY_ENABLED`     | `false`                  | Queue one fixed reply for incoming private messages. Other `WA_AUTO_REPLY_*` values are validated only when this is `true` |
 | `WA_AUTO_REPLY_TEXT`        | —                        | Reply text. Required and non-blank when auto-reply is enabled; at most 4000 characters |
-| `WA_AUTO_REPLY_COOLDOWN_HOURS` | `24`                  | Minimum delay between auto-replies to the same contact (1–8760 hours). Stored in the database and shared by PN/LID aliases |
+| `WA_AUTO_REPLY_COOLDOWN_HOURS` | `24`                  | Minimum delay between auto-replies to the same contact (1–8760 hours). Stored in the database. Groups share one key |
 | `WA_AUTO_REPLY_MAX_AGE_SECONDS` | `180`               | Skip messages with no timestamp or older than this (30–3600) |
-| `WA_AUTO_REPLY_IGNORE_JIDS` | —                        | Chats or senders to skip. Device suffixes are stripped. Patterns without `@` match only `@s.whatsapp.net` |
+| `WA_AUTO_REPLY_IGNORE_JIDS` | —                        | Chats or senders to skip. Domain suffixes match the chat, or the sender in a group. Exact entries also match aliases |
 | `WA_AUTO_REPLY_GROUPS`      | `false`                  | Also auto-reply in groups. Status broadcasts and hosted chats are never answered |
 | `WA_AUTO_REPLY_RATE_PER_MINUTE` | `6`                 | Maximum auto-replies per instance each rolling minute (1–30) |
 | `WA_AUTO_REPLY_INSTANCES`   | all instances            | Optional comma-separated instance ids. Blank replies on every instance |
@@ -901,11 +901,15 @@ not answer the offline backlog.
 `WA_AUTO_REPLY_IGNORE_JIDS` skips matching chats and senders. A device suffix such as `:12` is
 removed before matching, and the user part and the domain are matched separately. An entry without
 `@`, such as `5577*` or a bare phone number, matches only `@s.whatsapp.net`, including the phone
-JID resolved from an `@lid`. Suffixes such as `@lid` still match that domain. An entry that cannot
-match, such as `s.whatsapp.net` without `@`, is rejected at startup. The same person is not
-answered again until `WA_AUTO_REPLY_COOLDOWN_HOURS` has passed (default 24, allowed 1–8760). That
-cooldown is stored in the database under one contact key, the phone JID when it is known, so
-`@s.whatsapp.net` and `@lid` aliases share it and it remains after a restart. Each instance also
+JID resolved from an `@lid`. A domain suffix such as `@lid` or `@s.whatsapp.net` matches the chat
+itself, or the sender when the chat is a group. It does not match the other identity in a PN/LID
+pair. An exact JID still matches every alias. Accepted domains are `s.whatsapp.net`, `lid`,
+`g.us`, `broadcast`, `newsletter`, `hosted`, and `hosted.lid`. An entry that cannot match, such
+as `s.whatsapp.net` without `@` or `abc@xyz`, is rejected at startup. The same private contact is
+not answered again until `WA_AUTO_REPLY_COOLDOWN_HOURS` has passed (default 24, allowed 1–8760).
+That cooldown is stored in the database under one contact key, the phone JID when it is known, so
+`@s.whatsapp.net` and `@lid` aliases share it and it remains after a restart. In a group the key
+is the group JID, so one reply covers every sender in that group. Each instance also
 stops after `WA_AUTO_REPLY_RATE_PER_MINUTE` replies in a rolling minute (default 6, allowed 1–30).
 `WA_AUTO_REPLY_INSTANCES` is an optional comma-separated list of instance ids; blank means every
 instance. Replies go through the normal outbound queue. In `on_activity` presence mode each

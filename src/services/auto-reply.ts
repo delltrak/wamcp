@@ -33,6 +33,15 @@ const MAX_INSTANCE_ID_LENGTH = 128;
 const MAX_TRACKED_MESSAGE_IDS = 1_000;
 const IGNORE_JID_PATTERN = /^[a-z0-9@.*_:-]+$/i;
 const DIRECT_CHAT_SERVERS = new Set(["s.whatsapp.net", "lid"]);
+const AUTO_REPLY_IGNORE_DOMAINS = new Set([
+  "s.whatsapp.net",
+  "lid",
+  "g.us",
+  "broadcast",
+  "newsletter",
+  "hosted",
+  "hosted.lid",
+]);
 const CONTENT_TYPES = new Set<MessageType>([
   "text",
   "image",
@@ -60,7 +69,7 @@ export interface AutoReplyConfig {
 }
 
 export interface AutoReplyContact {
-  /** PN when one is known, otherwise the chat or group sender. */
+  /** Phone JID for a private chat when one is known. The group JID when the chat is a group. */
   contactKey: string;
   aliases: readonly string[];
   ownJids: readonly string[];
@@ -173,6 +182,17 @@ function assertIgnorePatternCanMatch(pattern: string): void {
   if (!domain || (user.length === 0 && !pattern.startsWith("@"))) {
     throw new Error(`Invalid WA_AUTO_REPLY_IGNORE_JIDS; entry "${pattern}" cannot match a chat`);
   }
+  if (!AUTO_REPLY_IGNORE_DOMAINS.has(domain)) {
+    throw new Error(`Invalid WA_AUTO_REPLY_IGNORE_JIDS; entry "${pattern}" cannot match a chat`);
+  }
+}
+
+/** `@lid` and `*@lid` select a server. Exact JIDs and phone patterns do not. */
+function isDomainOnlyPattern(pattern: string): boolean {
+  const at = pattern.indexOf("@");
+  if (at < 0) return false;
+  if (at === 0) return true;
+  return pattern.slice(0, at) === "*";
 }
 
 /** Parse the comma-separated ignore list. Blank means nothing is ignored. */
@@ -357,14 +377,36 @@ function preferPn(candidates: readonly string[], resolvedPn: string | undefined)
   return pn || candidates[0] || "";
 }
 
-/** Canonical contact for cooldown and ignore checks. PN wins when an alias is known. */
+function contactAliases(event: NormalizedMessageEvent, resolvedPn: string | undefined): string[] {
+  return uniqueJids([
+    event.chatId,
+    event.chatLid,
+    event.message.sender,
+    event.message.senderLid,
+    resolvedPn,
+  ]);
+}
+
+function contactKeyFor(
+  event: NormalizedMessageEvent,
+  subject: string | undefined,
+  subjectLid: string | undefined,
+  resolvedPn: string | undefined,
+): string {
+  if (isGroupChat(event.chatId, event.isGroup)) return bareJid(event.chatId);
+  return (
+    preferPn(uniqueJids([subject, subjectLid, resolvedPn]), resolvedPn) || bareJid(event.chatId)
+  );
+}
+
+/** Canonical contact for cooldown and ignore checks. A group shares one key. */
 export async function resolveAutoReplyContact(
   event: NormalizedMessageEvent,
   lookup: IdentityLookup = {},
 ): Promise<AutoReplyContact> {
   const group = isGroupChat(event.chatId, event.isGroup);
   const subject = group ? event.message.sender : event.chatId;
-  const subjectAlt = group ? event.senderAlt : event.chatIdAlt;
+  const subjectLid = group ? event.message.senderLid : event.chatLid;
   let resolvedPn: string | undefined;
   const subjectBare = bareJid(subject ?? "");
   if (chatServer(subjectBare) === "lid" && lookup.resolvePn) {
@@ -375,17 +417,9 @@ export async function resolveAutoReplyContact(
       resolvedPn = undefined;
     }
   }
-  const aliases = uniqueJids([
-    event.chatId,
-    event.chatIdAlt,
-    event.message.sender,
-    event.senderAlt,
-    resolvedPn,
-  ]);
-  const contactKey = preferPn(uniqueJids([subject, subjectAlt, resolvedPn]), resolvedPn);
   return {
-    contactKey: contactKey || bareJid(event.chatId),
-    aliases,
+    contactKey: contactKeyFor(event, subject, subjectLid, resolvedPn),
+    aliases: contactAliases(event, resolvedPn),
     ownJids: uniqueJids([...(lookup.ownJids ?? [])]),
   };
 }
@@ -393,18 +427,35 @@ export async function resolveAutoReplyContact(
 function contactFromEvent(event: NormalizedMessageEvent): AutoReplyContact {
   const group = isGroupChat(event.chatId, event.isGroup);
   const subject = group ? event.message.sender : event.chatId;
-  const subjectAlt = group ? event.senderAlt : event.chatIdAlt;
-  const aliases = uniqueJids([
-    event.chatId,
-    event.chatIdAlt,
-    event.message.sender,
-    event.senderAlt,
-  ]);
+  const subjectLid = group ? event.message.senderLid : event.chatLid;
   return {
-    contactKey: preferPn(uniqueJids([subject, subjectAlt]), undefined) || bareJid(event.chatId),
-    aliases,
+    contactKey: contactKeyFor(event, subject, subjectLid, undefined),
+    aliases: contactAliases(event, undefined),
     ownJids: [],
   };
+}
+
+function matchesIgnoreList(
+  event: NormalizedMessageEvent,
+  contact: AutoReplyContact,
+  patterns: readonly string[],
+): boolean {
+  if (patterns.length === 0) return false;
+  const domainPatterns: string[] = [];
+  const exactPatterns: string[] = [];
+  for (const pattern of patterns) {
+    if (isDomainOnlyPattern(pattern)) domainPatterns.push(pattern);
+    else exactPatterns.push(pattern);
+  }
+  const group = isGroupChat(event.chatId, event.isGroup);
+  const subject = group ? (event.message.sender ?? "") : event.chatId;
+  if (domainPatterns.length > 0 && subject && jidMatchesIgnoreList(subject, domainPatterns)) {
+    return true;
+  }
+  return (
+    exactPatterns.length > 0 &&
+    contact.aliases.some((jid) => jidMatchesIgnoreList(jid, exactPatterns))
+  );
 }
 
 export function memoryAutoReplyCooldownStore(): AutoReplyCooldownStore {
@@ -454,9 +505,9 @@ export class AutoReplyGate {
     const own = new Set(contact.ownJids.map((jid) => bareJid(jid)));
     const participants = uniqueJids([
       chatId,
-      event.chatIdAlt,
+      event.chatLid,
       event.message.sender,
-      event.senderAlt,
+      event.message.senderLid,
     ]);
     if (participants.some((jid) => own.has(jid))) {
       return { action: "skip", reason: "own_identity" };
@@ -466,7 +517,7 @@ export class AutoReplyGate {
     if (isHosted(chatId) || isHosted(event.message.sender ?? "")) {
       return { action: "skip", reason: "unsupported_chat" };
     }
-    if (contact.aliases.some((jid) => jidMatchesIgnoreList(jid, this.config.ignoreJids))) {
+    if (matchesIgnoreList(event, contact, this.config.ignoreJids)) {
       return { action: "skip", reason: "ignored" };
     }
 

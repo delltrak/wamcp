@@ -6,6 +6,7 @@ import { existsSync, mkdirSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import Database, { type Database as DatabaseType } from "better-sqlite3";
 import { drizzle } from "drizzle-orm/better-sqlite3";
+import { AUTO_REPLY_COOLDOWNS_TABLE_SQL } from "./auto-reply-cooldown-sql.js";
 import * as schema from "./schema.js";
 
 const DB_PATH = resolve(process.env.WA_DATABASE_PATH?.trim() || "data/whatsapp.db");
@@ -241,12 +242,7 @@ function initializeDatabase(): void {
       rate_limited_until INTEGER
     );
 
-    CREATE TABLE IF NOT EXISTS auto_reply_cooldowns (
-      instance_id    TEXT NOT NULL REFERENCES instances(id) ON DELETE CASCADE,
-      contact_key    TEXT NOT NULL,
-      last_reply_at  INTEGER NOT NULL,
-      PRIMARY KEY (instance_id, contact_key)
-    );
+    ${AUTO_REPLY_COOLDOWNS_TABLE_SQL};
   `);
 }
 

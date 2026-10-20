@@ -4,30 +4,30 @@
 // ============================================================
 
 import { sqlite } from "./client.js";
+import {
+  AUTO_REPLY_COOLDOWN_SELECT_SQL,
+  AUTO_REPLY_COOLDOWN_UPSERT_SQL,
+} from "./auto-reply-cooldown-sql.js";
 
 export interface AutoReplyCooldownStore {
   load(instanceId: string, contactKey: string): number | undefined;
   save(instanceId: string, contactKey: string, lastReplyAt: number): void;
 }
 
-interface CooldownRow {
-  lastReplyAt: number;
+/** Read the snake_case column. Unquoted aliases are not stable across SQLite and Postgres. */
+export function cooldownTimestamp(row: Record<string, unknown> | undefined): number | undefined {
+  const value = row?.last_reply_at;
+  return typeof value === "number" ? value : undefined;
 }
 
-const readCooldown = sqlite.prepare(
-  "SELECT last_reply_at AS lastReplyAt FROM auto_reply_cooldowns WHERE instance_id = ? AND contact_key = ?",
-);
+const readCooldown = sqlite.prepare(AUTO_REPLY_COOLDOWN_SELECT_SQL);
 
-const writeCooldown = sqlite.prepare(
-  `INSERT INTO auto_reply_cooldowns (instance_id, contact_key, last_reply_at)
-   VALUES (?, ?, ?)
-   ON CONFLICT(instance_id, contact_key) DO UPDATE SET last_reply_at = excluded.last_reply_at`,
-);
+const writeCooldown = sqlite.prepare(AUTO_REPLY_COOLDOWN_UPSERT_SQL);
 
 export const sqliteAutoReplyCooldownStore: AutoReplyCooldownStore = {
   load(instanceId: string, contactKey: string): number | undefined {
-    const row = readCooldown.get(instanceId, contactKey) as CooldownRow | undefined;
-    return row?.lastReplyAt;
+    const row = readCooldown.get(instanceId, contactKey) as Record<string, unknown> | undefined;
+    return cooldownTimestamp(row);
   },
   save(instanceId: string, contactKey: string, lastReplyAt: number): void {
     writeCooldown.run(instanceId, contactKey, lastReplyAt);

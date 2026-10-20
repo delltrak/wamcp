@@ -1,8 +1,17 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import type { WAMessage } from "@whiskeysockets/baileys";
 import { eq } from "drizzle-orm";
 import { randomUUID } from "node:crypto";
+import { messageLidFields, normalizeMessagesUpsert } from "../src/channels/baileys/baileys.events.js";
 import { db } from "../src/db/client.js";
-import { sqliteAutoReplyCooldownStore } from "../src/db/auto-reply-cooldown.js";
+import {
+  AUTO_REPLY_COOLDOWN_SELECT_SQL,
+  AUTO_REPLY_COOLDOWNS_TABLE_SQL,
+} from "../src/db/auto-reply-cooldown-sql.js";
+import {
+  cooldownTimestamp,
+  sqliteAutoReplyCooldownStore,
+} from "../src/db/auto-reply-cooldown.js";
 import { instances } from "../src/db/schema.js";
 import {
   AUTO_REPLY_DEFAULT_COOLDOWN_HOURS,
@@ -156,6 +165,11 @@ describe("auto-reply configuration", () => {
       'Invalid WA_AUTO_REPLY_IGNORE_JIDS; entry "s.whatsapp.net" cannot match a chat',
     );
 
+    process.env.WA_AUTO_REPLY_IGNORE_JIDS = "abc@xyz";
+    expect(() => loadAutoReplyConfig()).toThrow(
+      'Invalid WA_AUTO_REPLY_IGNORE_JIDS; entry "abc@xyz" cannot match a chat',
+    );
+
     process.env.WA_AUTO_REPLY_IGNORE_JIDS = "";
     process.env.WA_AUTO_REPLY_MAX_AGE_SECONDS = "29";
     expect(() => loadAutoReplyConfig()).toThrow(
@@ -231,6 +245,12 @@ describe("auto-reply configuration", () => {
       expect(jidMatchesIgnoreList(entry.jid, entry.patterns), entry.jid).toBe(entry.match);
     }
     expect(() => parseAutoReplyIgnoreJids("s.whatsapp.net")).toThrow(/cannot match a chat/);
+    expect(() => parseAutoReplyIgnoreJids("abc@xyz")).toThrow(/cannot match a chat/);
+    expect(parseAutoReplyIgnoreJids("@hosted.lid, *@newsletter, 5511*@g.us")).toEqual([
+      "@hosted.lid",
+      "*@newsletter",
+      "5511*@g.us",
+    ]);
   });
 
   it("does not subscribe while disabled", () => {
@@ -522,6 +542,93 @@ describe("auto-reply decisions", () => {
     expect(send).toHaveBeenCalledWith("inst_auto", "1999991111@lid", REPLY);
   });
 
+  it("applies a domain suffix to the chat or group sender, and exact entries to aliases", () => {
+    const domain = harness(enabledConfig({ ignoreJids: ["@lid"] }));
+    domain.service.handle(
+      "inst_auto",
+      domain.event({
+        chatId: DIRECT,
+        chatLid: "1999991111@lid",
+        message: { id: "pn-with-lid", sender: DIRECT, senderLid: "1999991111@lid" },
+      }),
+    );
+    domain.service.handle(
+      "inst_auto",
+      domain.event({ chatId: "1999991111@lid", message: { id: "lid-chat" } }),
+    );
+    expect(domain.send).toHaveBeenCalledTimes(1);
+    expect(domain.send).toHaveBeenCalledWith("inst_auto", DIRECT, REPLY);
+
+    const groups = harness(enabledConfig({ groups: true, ignoreJids: ["@lid"] }));
+    groups.service.handle(
+      "inst_auto",
+      groups.event({
+        chatId: GROUP,
+        isGroup: true,
+        message: { id: "sender-pn", sender: DIRECT, senderLid: "1999991111@lid" },
+      }),
+    );
+    groups.service.handle(
+      "inst_auto",
+      groups.event({
+        chatId: "120363000000000002@g.us",
+        isGroup: true,
+        message: { id: "sender-lid", sender: "1999991111@lid" },
+      }),
+    );
+    expect(groups.send).toHaveBeenCalledTimes(1);
+    expect(groups.send).toHaveBeenCalledWith("inst_auto", GROUP, REPLY);
+
+    const exact = harness(enabledConfig({ ignoreJids: [DIRECT] }));
+    exact.service.handle(
+      "inst_auto",
+      exact.event({
+        chatId: "5511666666666@s.whatsapp.net",
+        message: { id: "exact-alias" },
+      }),
+      {
+        contactKey: "5511666666666@s.whatsapp.net",
+        aliases: ["5511666666666@s.whatsapp.net", DIRECT],
+        ownJids: [],
+      },
+    );
+    expect(exact.send).not.toHaveBeenCalled();
+  });
+
+  it("shares one cooldown across every sender in a group", () => {
+    const { service, send, event } = harness(enabledConfig({ groups: true, cooldownMs: HOUR_MS }));
+    const otherGroup = "120363000000000001@g.us";
+
+    service.handle(
+      "inst_auto",
+      event({
+        chatId: GROUP,
+        isGroup: true,
+        message: { id: "g1", sender: "5511111111111@s.whatsapp.net" },
+      }),
+    );
+    service.handle(
+      "inst_auto",
+      event({
+        chatId: GROUP,
+        isGroup: true,
+        message: { id: "g2", sender: "5511222222222@s.whatsapp.net" },
+      }),
+    );
+    service.handle(
+      "inst_auto",
+      event({
+        chatId: otherGroup,
+        isGroup: true,
+        message: { id: "g3", sender: "5511111111111@s.whatsapp.net" },
+      }),
+    );
+
+    expect(send).toHaveBeenCalledTimes(2);
+    expect(send).toHaveBeenNthCalledWith(1, "inst_auto", GROUP, REPLY);
+    expect(send).toHaveBeenNthCalledWith(2, "inst_auto", otherGroup, REPLY);
+  });
+
   it("limits replies to the configured instances", () => {
     const { service, send, event } = harness(enabledConfig({ instances: ["inst_other"] }));
 
@@ -602,21 +709,22 @@ describe("auto-reply decisions", () => {
 });
 
 describe("auto-reply contact identity", () => {
-  it("uses the phone JID from an alternate id or the adapter mapping", async () => {
-    const fromAlt = await resolveAutoReplyContact(
+  it("uses the phone JID from the chat and the adapter mapping", async () => {
+    const fromPair = await resolveAutoReplyContact(
       incoming({
-        chatId: "1999991111@lid",
-        chatIdAlt: DIRECT,
-        message: { sender: "1999991111@lid" },
+        chatId: DIRECT,
+        chatLid: "1999991111@lid",
+        message: { sender: DIRECT, senderLid: "1999991111@lid" },
       }),
     );
-    expect(fromAlt.contactKey).toBe(DIRECT);
-    expect(fromAlt.aliases).toEqual(expect.arrayContaining([DIRECT, "1999991111@lid"]));
+    expect(fromPair.contactKey).toBe(DIRECT);
+    expect(fromPair.aliases).toEqual(expect.arrayContaining([DIRECT, "1999991111@lid"]));
 
     const fromLookup = await resolveAutoReplyContact(
       incoming({
         chatId: "1999991111:8@lid",
-        message: { sender: "1999991111:8@lid" },
+        chatLid: "1999991111@lid",
+        message: { sender: "1999991111:8@lid", senderLid: "1999991111@lid" },
       }),
       { resolvePn: async () => DIRECT },
     );
@@ -627,11 +735,12 @@ describe("auto-reply contact identity", () => {
       incoming({
         chatId: GROUP,
         isGroup: true,
-        senderAlt: DIRECT,
-        message: { sender: "1999991111@lid" },
+        message: { sender: "1999991111@lid", senderLid: "1999991111@lid" },
       }),
+      { resolvePn: async () => DIRECT },
     );
-    expect(group.contactKey).toBe(DIRECT);
+    expect(group.contactKey).toBe(GROUP);
+    expect(group.aliases).toContain(DIRECT);
   });
 
   it("uses the adapter phone mapping and the account's own ids", async () => {
@@ -729,5 +838,99 @@ describe("auto-reply cooldown table", () => {
     }
 
     expect(sqliteAutoReplyCooldownStore.load(instanceId, DIRECT)).toBeUndefined();
+  });
+
+  it("reads last_reply_at without a camelCase alias", () => {
+    expect(AUTO_REPLY_COOLDOWN_SELECT_SQL).toBe(
+      "SELECT last_reply_at FROM auto_reply_cooldowns WHERE instance_id = ? AND contact_key = ?",
+    );
+    expect(AUTO_REPLY_COOLDOWN_SELECT_SQL.toLowerCase()).not.toContain(" as ");
+    expect(cooldownTimestamp({ last_reply_at: 42 })).toBe(42);
+    expect(cooldownTimestamp({ lastreplyat: 42 })).toBeUndefined();
+    expect(cooldownTimestamp({ lastReplyAt: 42 })).toBeUndefined();
+    expect(AUTO_REPLY_COOLDOWNS_TABLE_SQL).toContain(
+      "CREATE TABLE IF NOT EXISTS auto_reply_cooldowns",
+    );
+    expect(AUTO_REPLY_COOLDOWNS_TABLE_SQL).not.toContain("@");
+    expect(AUTO_REPLY_COOLDOWNS_TABLE_SQL).not.toContain("?");
+  });
+});
+
+describe("message lid fields", () => {
+  function message(key: WAMessage["key"]): WAMessage {
+    return {
+      key,
+      message: { conversation: "hello" },
+      messageTimestamp: 1_700_000_000,
+    } as WAMessage;
+  }
+
+  it("keeps the lid on chatLid and senderLid after phone normalization", () => {
+    const direct = normalizeMessagesUpsert("inst_auto", {
+      type: "notify",
+      messages: [
+        message({
+          id: "pn",
+          remoteJid: DIRECT,
+          remoteJidAlt: "1999991111@lid",
+          fromMe: false,
+        }),
+      ],
+    } as Parameters<typeof normalizeMessagesUpsert>[1])[0];
+    expect(direct?.chatId).toBe(DIRECT);
+    expect(direct?.chatLid).toBe("1999991111@lid");
+    expect(direct?.message.senderLid).toBe("1999991111@lid");
+
+    const swapped = messageLidFields(
+      message({
+        id: "swap",
+        remoteJid: "1999991111@lid",
+        remoteJidAlt: DIRECT,
+        fromMe: false,
+      }),
+    );
+    const swappedEvent = normalizeMessagesUpsert("inst_auto", {
+      type: "notify",
+      messages: [
+        message({
+          id: "swap",
+          remoteJid: "1999991111@lid",
+          remoteJidAlt: DIRECT,
+          fromMe: false,
+        }),
+      ],
+    } as Parameters<typeof normalizeMessagesUpsert>[1])[0];
+    expect(swapped.chatLid).toBe("1999991111@lid");
+    expect(swappedEvent?.chatId).toBe(DIRECT);
+    expect(swappedEvent?.chatLid).toBe("1999991111@lid");
+
+    const group = normalizeMessagesUpsert("inst_auto", {
+      type: "notify",
+      messages: [
+        message({
+          id: "group",
+          remoteJid: GROUP,
+          participant: DIRECT,
+          participantAlt: "1999991111@lid",
+          fromMe: false,
+        }),
+      ],
+    } as Parameters<typeof normalizeMessagesUpsert>[1])[0];
+    expect(group?.chatId).toBe(GROUP);
+    expect(group?.chatLid).toBeUndefined();
+    expect(group?.message.sender).toBe(DIRECT);
+    expect(group?.message.senderLid).toBe("1999991111@lid");
+
+    const senderIsLid = messageLidFields(
+      message({
+        id: "sender-lid",
+        remoteJid: GROUP,
+        participant: "1999991111@lid",
+        participantAlt: DIRECT,
+        fromMe: false,
+      }),
+    );
+    expect(senderIsLid.senderLid).toBe("1999991111@lid");
+    expect(senderIsLid.chatLid).toBeUndefined();
   });
 });
