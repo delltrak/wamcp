@@ -78,6 +78,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Chatwoot maps an attachment that exceeds the remaining reply budget to `attachment_budget`
+  when the pinned download rejects it for size. Shutdown drains those replies before closing
+  the outbound queue and answers `503` to new webhooks. A full delivery-id cache returns `503`
+  instead of dropping a live id. `private: "true"` is treated as a private note.
 - Chatwoot replies accept `@lid` chats again, ignore `@newsletter` destinations with HTTP 200,
   and return `422` when the instance does not exist before accepting the webhook. A background
   download or queue failure posts a private note. Attachments past the 16 MB budget are reported

@@ -239,12 +239,14 @@ async function startHttp(
 
   let servicesClosePromise: Promise<void> | null = null;
   const closeServices = (): Promise<void> => {
-    servicesClosePromise ??= Promise.all([
-      chatwoot.stop(),
-      messageQueue.close(),
-      eventWebhook.close(),
-      maintenance.stop(),
-    ]).then(() => undefined);
+    // Finish in-flight Chatwoot replies before the outbound queue closes.
+    servicesClosePromise ??= chatwoot
+      .stop()
+      .then(() =>
+        Promise.all([messageQueue.close(), eventWebhook.close(), maintenance.stop()]).then(
+          () => undefined,
+        ),
+      );
     return servicesClosePromise;
   };
   httpServer.on("close", () => {
@@ -286,12 +288,14 @@ async function startStdio(chatwootConfig: ChatwootConfig): Promise<void> {
   const onServerClose = mcpServer.server.onclose;
   let servicesClosePromise: Promise<void> | null = null;
   const closeServices = (): Promise<void> => {
-    servicesClosePromise ??= Promise.all([
-      chatwoot.stop(),
-      messageQueue.close(),
-      eventWebhook.close(),
-      maintenance.stop(),
-    ]).then(() => undefined);
+    // Finish in-flight Chatwoot replies before the outbound queue closes.
+    servicesClosePromise ??= chatwoot
+      .stop()
+      .then(() =>
+        Promise.all([messageQueue.close(), eventWebhook.close(), maintenance.stop()]).then(
+          () => undefined,
+        ),
+      );
     return servicesClosePromise;
   };
   mcpServer.server.onclose = () => {

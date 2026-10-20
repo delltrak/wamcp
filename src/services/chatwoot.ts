@@ -26,6 +26,7 @@ import {
   type EnabledChatwootConfig,
 } from "./chatwoot-config.js";
 import {
+  ChatwootAttachmentTooLargeError,
   ChatwootClient,
   createChatwootTransport,
   fetchPinnedResource,
@@ -38,8 +39,11 @@ const MAX_SEEN = 2_000;
 export const CHATWOOT_SIGNATURE_WINDOW_SECONDS = 300;
 export const MAX_REPLY_ATTACHMENTS = 8;
 export const MAX_REPLY_ATTACHMENT_BYTES = 16 * 1024 * 1024;
-/** Memory ceiling for delivery ids. Expiry still walks from the oldest entry only. */
-const MAX_DELIVERIES = 10_000;
+/**
+ * Memory ceiling for delivery ids. A full map of ids that are still inside the
+ * signature window is not evicted; the webhook is refused so Chatwoot can retry.
+ */
+export const MAX_CHATWOOT_DELIVERIES = 10_000;
 /** Shutdown waits this long for background replies, then continues. */
 export const CHATWOOT_REPLY_DRAIN_TIMEOUT_MS = 5_000;
 
@@ -238,7 +242,7 @@ export function parseChatwootWebhook(body: unknown): ChatwootWebhookDecision {
       id: body.id,
       content: typeof body.content === "string" ? body.content : "",
       messageType: messageType(body.message_type),
-      privateNote: body.private === true,
+      privateNote: body.private === true || body.private === "true",
       sourceId: stringOf(body.source_id),
       deleted: isDeleted(body.content_attributes),
       senderType: stringOf(sender.type).toLowerCase(),
@@ -379,6 +383,12 @@ async function downloadedAttachment(
   try {
     downloaded = await fetchAttachment(url, maxBytes);
   } catch (error) {
+    // The pinned fetcher throws when the body passes maxBytes. That is the reply
+    // budget only when this cap is tighter than the per-type media limit.
+    if (error instanceof ChatwootAttachmentTooLargeError && maxBytes < typeLimit) {
+      logAttachmentBudget(attachment.fileType, budget);
+      return { status: "budget" };
+    }
     logger.warn(
       { err: error, fileType: attachment.fileType },
       "Chatwoot attachment was not downloaded",
@@ -540,6 +550,7 @@ export class ChatwootService {
   private readonly seenChatwootSet = new Set<number>();
   private readonly deliveries = new Map<string, number>();
   private readonly replyJobs = new Set<Promise<void>>();
+  private stopped = false;
   private readonly client: ChatwootClient | null;
   private readonly fetchAttachment: ChatwootAttachmentFetcher;
 
@@ -590,6 +601,7 @@ export class ChatwootService {
   }
 
   stop(): Promise<void> {
+    this.stopped = true;
     this.stopListener?.();
     this.stopListener = null;
     return drainReplyJobs(this.replyJobs, CHATWOOT_REPLY_DRAIN_TIMEOUT_MS);
@@ -627,6 +639,9 @@ export class ChatwootService {
     if (!this.config.enabled || !this.client) {
       return { status: 404, body: { error: "Not found" } };
     }
+    if (this.stopped) {
+      return { status: 503, body: { error: "Chatwoot bridge is stopping" } };
+    }
     const nowSeconds = input.nowSeconds ?? Math.floor(Date.now() / 1000);
     const auth = authorizeChatwootWebhook({
       secret: this.config.webhookSecret,
@@ -646,7 +661,14 @@ export class ChatwootService {
     }
     if (deliveryId) {
       const signedAt = Number(input.timestamp);
-      this.rememberDelivery(deliveryId, signedAt + CHATWOOT_SIGNATURE_WINDOW_SECONDS);
+      const stored = this.rememberDelivery(
+        deliveryId,
+        signedAt + CHATWOOT_SIGNATURE_WINDOW_SECONDS,
+        nowSeconds,
+      );
+      if (!stored) {
+        return { status: 503, body: { error: "Chatwoot delivery cache is full" } };
+      }
     }
 
     let parsedJson: unknown;
@@ -861,9 +883,11 @@ export class ChatwootService {
     return expiresAt !== undefined && expiresAt >= nowSeconds;
   }
 
-  private rememberDelivery(id: string, expiresAt: number): void {
-    this.pruneDeliveries(expiresAt - CHATWOOT_SIGNATURE_WINDOW_SECONDS);
+  private rememberDelivery(id: string, expiresAt: number, nowSeconds: number): boolean {
+    this.pruneDeliveries(nowSeconds);
+    if (!this.deliveries.has(id) && this.deliveries.size >= MAX_CHATWOOT_DELIVERIES) return false;
     this.deliveries.set(id, expiresAt);
+    return true;
   }
 
   private forgetDelivery(id: string): void {
@@ -872,17 +896,12 @@ export class ChatwootService {
 
   /**
    * Map iteration is insertion order. Drop the expired prefix and stop at the
-   * first id that is still inside the window, then enforce the size ceiling.
+   * first id that is still inside the window. Live ids are never evicted.
    */
   private pruneDeliveries(nowSeconds: number): void {
     for (const [id, expiresAt] of this.deliveries) {
       if (expiresAt >= nowSeconds) break;
       this.deliveries.delete(id);
-    }
-    while (this.deliveries.size > MAX_DELIVERIES) {
-      const oldest = this.deliveries.keys().next().value;
-      if (oldest === undefined) break;
-      this.deliveries.delete(oldest);
     }
   }
 

@@ -19,6 +19,7 @@ import {
   type EnabledChatwootConfig,
 } from "../src/services/chatwoot-config.js";
 import {
+  ChatwootAttachmentTooLargeError,
   ChatwootClient,
   ChatwootRequestError,
   createChatwootTransport,
@@ -30,6 +31,7 @@ import {
   CHATWOOT_REPLY_DRAIN_TIMEOUT_MS,
   CHATWOOT_SIGNATURE_WINDOW_SECONDS,
   ChatwootService,
+  MAX_CHATWOOT_DELIVERIES,
   MAX_REPLY_ATTACHMENT_BYTES,
   authorizeChatwootWebhook,
   handleChatwootHttpRequest,
@@ -853,6 +855,54 @@ describe("Chatwoot agent replies", () => {
     );
   });
 
+  it("treats a pinned oversize error as the reply budget for two 10 MB attachments", async () => {
+    const tenMb = 10 * 1024 * 1024;
+    const queue = runtime();
+    const recorded = recordingTransport();
+    const fetchAttachment = vi.fn(async (_url: string, maxBytes: number) => {
+      if (tenMb > maxBytes) throw new ChatwootAttachmentTooLargeError();
+      return { data: Buffer.alloc(tenMb), contentType: "image/png" };
+    });
+    const service = new ChatwootService(
+      enabledConfig(),
+      queue,
+      recorded.transport,
+      fetchAttachment,
+    );
+    const result = await service.handleWebhook(
+      signedWebhook(
+        webhookBody({
+          id: 131,
+          content: "caption",
+          attachments: [
+            { file_type: "image", data_url: "https://files.example.com/a.png" },
+            { file_type: "image", data_url: "https://files.example.com/b.png" },
+          ],
+          conversation: {
+            id: 80,
+            inbox_id: 34,
+            contact_inbox: { source_id: "15551234567@s.whatsapp.net" },
+          },
+        }),
+        1_700_001_010,
+        "delivery-budget-throw",
+      ),
+    );
+    expect(result.status).toBe(202);
+    await waitQueued(queue);
+    expect(fetchAttachment).toHaveBeenNthCalledWith(1, "https://files.example.com/a.png", 16 * 1024 * 1024);
+    expect(fetchAttachment).toHaveBeenNthCalledWith(
+      2,
+      "https://files.example.com/b.png",
+      6 * 1024 * 1024,
+    );
+    await vi.waitFor(() => {
+      const note = privateNotes(recorded.calls, 80).join(" ");
+      expect(note).toContain("16 MB");
+      expect(note).not.toContain("could not be downloaded");
+    });
+  });
+
   it("reports an attachment that exceeds the 16 MB reply budget", async () => {
     const queue = runtime();
     const recorded = recordingTransport();
@@ -1011,6 +1061,74 @@ describe("Chatwoot agent replies", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it("ignores a private note when private is the string true", async () => {
+    const queue = runtime();
+    const service = new ChatwootService(legacyConfig(), queue);
+    const note = await service.handleWebhook({
+      rawBody: webhookBody({ id: 55, private: "true" }),
+      headerSecret: SECRET,
+    });
+    expect(note.status).toBe(200);
+    expect(note.body).toMatchObject({ status: "ignored", reason: "echo" });
+    expect(queue.enqueueMessage).not.toHaveBeenCalled();
+  });
+
+  it("returns 503 for a new webhook after stop", async () => {
+    const queue = runtime();
+    const service = new ChatwootService(enabledConfig(), queue);
+    await service.stop();
+    const result = await service.handleWebhook(
+      signedWebhook(webhookBody({ id: 160 }), 1_700_001_400, "delivery-stopped"),
+    );
+    expect(result.status).toBe(503);
+    expect(queue.enqueueMessage).not.toHaveBeenCalled();
+  });
+
+  it("prunes deliveries with the server clock when the signature timestamp is ahead", async () => {
+    const queue = runtime();
+    const service = new ChatwootService(enabledConfig(), queue);
+    const now = 1_700_004_100;
+    const early = await service.handleWebhook(
+      signedWebhook(webhookBody({ id: 301 }), now - 100, "keep-me"),
+    );
+    expect(early.status).toBe(202);
+    const body = webhookBody({ id: 302, content: "later" });
+    const timestamp = String(now + CHATWOOT_SIGNATURE_WINDOW_SECONDS);
+    const signature = `sha256=${createHmac("sha256", SECRET).update(`${timestamp}.`).update(body).digest("hex")}`;
+    const ahead = await service.handleWebhook({
+      rawBody: body,
+      signature,
+      timestamp,
+      deliveryId: "future-signed",
+      nowSeconds: now,
+    });
+    expect(ahead.status).toBe(202);
+    const replay = await service.handleWebhook(
+      signedWebhook(webhookBody({ id: 303 }), now, "keep-me"),
+    );
+    expect(replay.body).toMatchObject({ reason: "duplicate" });
+  });
+
+  it("returns 503 instead of dropping a live delivery id when the cache is full", async () => {
+    const queue = runtime();
+    const service = new ChatwootService(enabledConfig(), queue);
+    const now = 1_700_003_000;
+    for (let index = 0; index < MAX_CHATWOOT_DELIVERIES; index += 1) {
+      const result = await service.handleWebhook(
+        signedWebhook(webhookBody({ id: 4_000 + index, content: `m${index}` }), now, `full-${index}`),
+      );
+      expect(result.status).toBe(202);
+    }
+    const overflow = await service.handleWebhook(
+      signedWebhook(webhookBody({ id: 99_000, content: "overflow" }), now, "full-overflow"),
+    );
+    expect(overflow.status).toBe(503);
+    const replay = await service.handleWebhook(
+      signedWebhook(webhookBody({ id: 99_001, content: "replay" }), now, "full-0"),
+    );
+    expect(replay.body).toMatchObject({ reason: "duplicate" });
   });
 
   it("still recognizes a delivery id after thousands of newer deliveries in the same window", async () => {

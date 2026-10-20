@@ -27,6 +27,15 @@ export class ChatwootRequestError extends Error {
   }
 }
 
+/** The response body was larger than the byte cap passed to the pinned download. */
+export class ChatwootAttachmentTooLargeError extends ChatwootRequestError {
+  constructor() {
+    super(0);
+    this.name = "ChatwootAttachmentTooLargeError";
+    this.message = "Chatwoot attachment exceeded the download size limit";
+  }
+}
+
 export interface ChatwootRequest {
   method: "GET" | "POST";
   path: string;
@@ -319,7 +328,7 @@ async function readLimitedResponse(response: Response, maxBytes: number): Promis
   const reader = response.body?.getReader();
   if (!reader) {
     const buffer = Buffer.from(await response.arrayBuffer());
-    if (buffer.length > maxBytes) throw new ChatwootRequestError(0);
+    if (buffer.length > maxBytes) throw new ChatwootAttachmentTooLargeError();
     return buffer;
   }
   const chunks: Uint8Array[] = [];
@@ -332,7 +341,7 @@ async function readLimitedResponse(response: Response, maxBytes: number): Promis
       size += value.byteLength;
       if (size > maxBytes) {
         await reader.cancel();
-        throw new ChatwootRequestError(0);
+        throw new ChatwootAttachmentTooLargeError();
       }
       chunks.push(value);
     }
@@ -377,7 +386,8 @@ export async function fetchPinnedResource(
     } as RequestInit & { dispatcher: Agent });
     if (!response.ok) throw new ChatwootRequestError(response.status);
     const declared = Number(response.headers.get("content-length"));
-    if (Number.isFinite(declared) && declared > maxBytes) throw new ChatwootRequestError(0);
+    if (Number.isFinite(declared) && declared > maxBytes)
+      throw new ChatwootAttachmentTooLargeError();
     const data = await readLimitedResponse(response, maxBytes);
     const rawType = response.headers.get("content-type");
     const contentType = rawType?.split(";")[0]?.trim() || null;
