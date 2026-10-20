@@ -39,7 +39,8 @@ HTTP Host header.
 | `WA_EVENT_WEBHOOK_TIMEOUT_MS` | `10000` | Per-request timeout, from 1 to 300000 ms. |
 | `WA_EVENT_WEBHOOK_RETRY_ATTEMPTS` | `5` | Total BullMQ attempts per delivery, including the first. |
 | `WA_EVENT_WEBHOOK_RETRY_DELAY_MS` | `1000` | Initial exponential retry delay, from 1 to 300000 ms. Retries add 20% jitter and are capped at five minutes. |
-| `WA_REQUIRE_EVENT_WEBHOOK` | `false` | Refuse to start when no destination is configured or the resolved event set is empty. |
+| `WA_REQUIRE_EVENT_WEBHOOK` | `false` | Refuse to start when no global destination and no per-instance webhook is configured, or the resolved event set is empty. |
+| `WA_EVENT_WEBHOOK_INSTANCE_MERGE_GLOBAL` | `false` | When false, a stored instance webhook replaces global destinations for that instance. When true, the instance URL is added to the global destinations. The same URL is delivered once. |
 
 `group.member_label_changed` can be selected in `WA_EVENT_WEBHOOK_EVENTS` or in a destination's
 `events` array. The default event set remains `message.received`, and the `grok-bot` preset remains
@@ -56,7 +57,32 @@ dropped). The public `GET /health` response returns only the first five fields;
 it includes the warning code but never includes `droppedEvents` or any event
 names, including configured or dropped event names. Neither response includes
 URLs or secrets. `WA_REQUIRE_EVENT_WEBHOOK=true` exits before the server starts
-when no destination is configured or the event set is empty.
+when no global destination and no per-instance webhook is configured, or the
+event set is empty. A stored instance webhook counts as a configured destination.
+`GET /health` reads that state on each request and still omits URLs, header
+names, header values, tokens, and secrets.
+
+## Per-instance webhooks
+
+`wa_set_instance_webhook`, `wa_get_instance_webhook`, and
+`wa_delete_instance_webhook` persist one webhook per instance in SQLite. The
+fields are the URL, an optional auth header, and an optional event list. Omit
+`events` to inherit `WA_EVENT_WEBHOOK_EVENTS`; an empty list is rejected.
+Instance webhooks also use `WA_EVENT_WEBHOOK_PRESET` and
+`WA_EVENT_WEBHOOK_IGNORE_FROM_ME`. The auth value is stored for delivery and is
+never included in tool results, logs,
+or `GET /health`. The get and set tools return the URL and the auth header
+name, plus `authConfigured`.
+
+With `WA_EVENT_WEBHOOK_INSTANCE_MERGE_GLOBAL=false` (the default), events for
+that instance go only to its webhook. Other instances keep the global
+destinations. Set the variable to `true` to deliver to the instance webhook and
+the global destinations. If the instance URL is the same as a global URL, the
+event is sent once and the instance auth header and event list are used. The
+global HMAC secret stays on global destinations. An instance webhook does not
+copy it. Deleting the row, or deleting the instance, restores global routing
+for that instance. When the new options are unset and no instance webhook is
+stored, routing matches the global configuration.
 
 For HTTP 429 and 5xx responses, a valid `Retry-After` header (seconds or an
 HTTP date) sets a minimum retry delay. Its value is capped at five minutes.

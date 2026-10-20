@@ -18,10 +18,14 @@ import { createChildLogger } from "../utils/logger.js";
 import { getRedisConnectionOptions } from "./redis.js";
 import { transcribeIncomingAudioIfConfigured } from "./incoming-audio-transcription.js";
 import {
+  destinationsForInstance,
+  eventWebhookAllowsHttp,
+  instanceWebhookDestination,
   loadEventWebhookConfig,
   type EventWebhookConfig,
   type EventWebhookDestination,
 } from "./event-webhook-config.js";
+import { listInstanceWebhooks } from "./instance-webhook-store.js";
 import { isNonPublicIp } from "../utils/validation.js";
 
 const logger = createChildLogger({ service: "event-webhook" });
@@ -766,6 +770,8 @@ export function registerEventWebhookHandler(
   enqueue: EnqueueWebhookJob,
   onEnqueueFailure: () => void = () =>
     logger.warn("Unable to enqueue outgoing event webhook; message processing continues"),
+  destinationsFor: (instanceId: string) => readonly EventWebhookDestination[] = () =>
+    config.destinations,
 ): EventWebhookUnsubscribe {
   if (config.messageDebounceMs > 0) {
     for (const destination of config.destinations) {
@@ -983,7 +989,7 @@ export function registerEventWebhookHandler(
   const removeListener = instanceManager.onAnyEvent(
     <E extends ChannelEvent>(event: E, instanceId: string, payload: ChannelEventPayload[E]) => {
       try {
-        for (const destination of config.destinations) {
+        for (const destination of destinationsFor(instanceId)) {
           if (!shouldSendEventWebhook(event, payload, destination)) continue;
 
           let webhookPayload:
@@ -1412,15 +1418,25 @@ export class EventWebhookService {
   private queue: Queue<EventWebhookJob> | null = null;
   private worker: Worker<EventWebhookJob> | null = null;
   private removeEventHandler: EventWebhookUnsubscribe | null = null;
+  private readonly knownDestinations = new Map<string, EventWebhookDestination>();
+  private boundManager: InstanceManager | null = null;
 
   constructor(config = loadEventWebhookConfig()) {
     this.config = config;
   }
 
-  start(instanceManager: InstanceManager): void {
-    if (this.queue || this.config.destinations.length === 0) return;
+  /** Reload instance webhooks and start the worker once any destination exists. */
+  sync(): void {
+    if (this.boundManager) this.start(this.boundManager);
+  }
 
-    const destinations = new Map(this.config.destinations.map((item) => [item.id, item]));
+  start(instanceManager: InstanceManager): void {
+    this.boundManager = instanceManager;
+    if (!this.hasDeliveryWork()) return;
+
+    this.rebuildKnownDestinations();
+    if (this.queue) return;
+
     this.queue = new Queue<EventWebhookJob>(WEBHOOK_QUEUE_NAME, {
       connection: getRedisConnectionOptions(),
       prefix: this.config.queuePrefix,
@@ -1429,7 +1445,7 @@ export class EventWebhookService {
     this.worker = new Worker<EventWebhookJob>(
       WEBHOOK_QUEUE_NAME,
       (job: Job<EventWebhookJob>) =>
-        processEventWebhookJob(job.data, destinations, this.config.timeoutMs),
+        processEventWebhookJob(job.data, this.destinationMap(), this.config.timeoutMs),
       {
         connection: getRedisConnectionOptions(),
         prefix: this.config.queuePrefix,
@@ -1437,7 +1453,7 @@ export class EventWebhookService {
       },
     );
     this.worker.on("failed", (job, error) => {
-      const destination = job ? destinations.get(job.data.destinationId) : undefined;
+      const destination = job ? this.knownDestinations.get(job.data.destinationId) : undefined;
       logger.warn(
         eventWebhookFailureLogData(job?.attemptsMade, error, destination),
         "Outgoing event webhook delivery attempt failed",
@@ -1447,10 +1463,37 @@ export class EventWebhookService {
       logger.error("Outgoing event webhook worker encountered an error");
     });
 
-    this.removeEventHandler = registerEventWebhookHandler(instanceManager, this.config, (job) => {
-      if (!this.queue) return Promise.reject(new Error("Event webhook queue is closed"));
-      return this.queue.add("deliver", job);
-    });
+    this.removeEventHandler = registerEventWebhookHandler(
+      instanceManager,
+      this.config,
+      (job) => {
+        if (!this.queue) return Promise.reject(new Error("Event webhook queue is closed"));
+        return this.queue.add("deliver", job);
+      },
+      undefined,
+      (instanceId) => destinationsForInstance(this.config, instanceId),
+    );
+  }
+
+  private hasDeliveryWork(): boolean {
+    return this.config.destinations.length > 0 || listInstanceWebhooks().length > 0;
+  }
+
+  private destinationMap(): ReadonlyMap<string, EventWebhookDestination> {
+    this.rebuildKnownDestinations();
+    return this.knownDestinations;
+  }
+
+  private rebuildKnownDestinations(): void {
+    this.knownDestinations.clear();
+    for (const destination of this.config.destinations) {
+      this.knownDestinations.set(destination.id, destination);
+    }
+    const allowHttp = eventWebhookAllowsHttp();
+    for (const row of listInstanceWebhooks()) {
+      const destination = instanceWebhookDestination(row, this.config, allowHttp);
+      this.knownDestinations.set(destination.id, destination);
+    }
   }
 
   async close(): Promise<void> {

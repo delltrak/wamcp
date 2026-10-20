@@ -23,7 +23,7 @@ import type { MetaWebhookPayload } from "./channels/cloud-api/cloud.events.js";
 import { installShutdownHandlers, SHUTDOWN_TIMEOUT_MS } from "./utils/shutdown.js";
 import { logger } from "./utils/logger.js";
 import { getAutoReadMode } from "./services/auto-read.js";
-import { bootEventWebhook, type EventWebhookStatus } from "./services/event-webhook-config.js";
+import { bootEventWebhook, getEventWebhookStatus } from "./services/event-webhook-config.js";
 import { buildHealthBody } from "./server/health.js";
 
 const CLOUD_WEBHOOK_PATH = "/cloud-webhook";
@@ -91,9 +91,9 @@ async function initServices() {
   return { instanceManager, messageQueue, eventWebhook, maintenance };
 }
 
-async function startHttp(webhookStatus: EventWebhookStatus): Promise<void> {
+async function startHttp(): Promise<void> {
   const { instanceManager, messageQueue, eventWebhook, maintenance } = await initServices();
-  const mcpSessions = new McpHttpSessionManager(instanceManager, messageQueue);
+  const mcpSessions = new McpHttpSessionManager(instanceManager, messageQueue, eventWebhook);
   const startTime = Date.now();
 
   const httpServer = createServer(async (req: IncomingMessage, res: ServerResponse) => {
@@ -111,7 +111,7 @@ async function startHttp(webhookStatus: EventWebhookStatus): Promise<void> {
           disconnected: allInstances.length - connected,
         },
         version: VERSION,
-        webhook: webhookStatus,
+        webhook: getEventWebhookStatus(),
       });
       res.writeHead(200, { "Content-Type": "application/json" });
       res.end(JSON.stringify(health));
@@ -250,7 +250,7 @@ async function startHttp(webhookStatus: EventWebhookStatus): Promise<void> {
 
 async function startStdio(): Promise<void> {
   const { instanceManager, messageQueue, eventWebhook, maintenance } = await initServices();
-  const { server: mcpServer } = createMcpServer(instanceManager, messageQueue);
+  const { server: mcpServer } = createMcpServer(instanceManager, messageQueue, eventWebhook);
   const onServerClose = mcpServer.server.onclose;
   let servicesClosePromise: Promise<void> | null = null;
   const closeServices = (): Promise<void> => {
@@ -287,12 +287,12 @@ async function startStdio(): Promise<void> {
 
 async function main(): Promise<void> {
   logger.info({ transport, version: VERSION }, "Starting WA MCP server");
-  const webhookStatus = bootEventWebhook();
+  bootEventWebhook();
 
   if (transport === "stdio") {
     await startStdio();
   } else {
-    await startHttp(webhookStatus);
+    await startHttp();
   }
 }
 

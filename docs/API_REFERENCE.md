@@ -110,7 +110,7 @@ Tools marked **Baileys only** are not available on Cloud API instances.
 
 ## 2. Tools Reference
 
-WA MCP exposes **137 tools** grouped by domain. All tools return MCP-standard responses.
+WA MCP exposes **140 tools** grouped by domain. All tools return MCP-standard responses.
 
 ### Success Response Format
 
@@ -141,7 +141,7 @@ WA MCP exposes **137 tools** grouped by domain. All tools return MCP-standard re
 
 ---
 
-### 2.1 Instance Management (9 tools)
+### 2.1 Instance Management (12 tools)
 
 Tools for creating, connecting, and managing WhatsApp instances.
 
@@ -326,6 +326,85 @@ Configure Meta Cloud API credentials for a Cloud API instance. Required before c
 {
   "instanceId": "inst_abc123",
   "configured": true
+}
+```
+
+---
+
+#### `wa_set_instance_webhook`
+
+Replace the outgoing event webhook stored for one instance. The auth value is saved for delivery and is not returned. Omit `events` to inherit `WA_EVENT_WEBHOOK_EVENTS`. An empty event list is rejected. The instance webhook uses `WA_EVENT_WEBHOOK_PRESET` and `WA_EVENT_WEBHOOK_IGNORE_FROM_ME`.
+
+`WA_EVENT_WEBHOOK_INSTANCE_MERGE_GLOBAL` defaults to `false`: this instance then uses only this webhook. Set it to `true` to also deliver to the global destinations. A URL that matches a global destination is delivered once, with this instance's auth header and events. Instances without a stored webhook keep the global destinations.
+
+| Parameter    | Type     | Required | Description                                                                 |
+| ------------ | -------- | -------- | --------------------------------------------------------------------------- |
+| `instanceId` | string   | Yes      | Instance ID (`inst_` plus 8 hex characters)                                 |
+| `url`        | string   | Yes      | Public HTTPS URL. HTTP only when `WA_EVENT_WEBHOOK_ALLOW_HTTP=true`         |
+| `authHeader` | string   | No       | Auth header name. Must be set together with `authValue`                     |
+| `authValue`  | string   | No       | Auth header value. Write-only; omitted from this response, logs, and health |
+| `events`     | string[] | No       | Channel event names. Omit to inherit the global event list                  |
+
+**Channel support:** Both
+
+**Response:**
+
+```json
+{
+  "configured": true,
+  "url": "https://automation.example.com/instance-events",
+  "authHeader": "X-Instance-Token",
+  "authConfigured": true,
+  "events": null,
+  "updatedAt": 1709136000000
+}
+```
+
+`events: null` means the instance inherits `WA_EVENT_WEBHOOK_EVENTS`. `authHeader` is `null` when no auth header is stored.
+
+---
+
+#### `wa_get_instance_webhook`
+
+Read the webhook stored for one instance. The auth value is never returned. `configured: false` means the instance uses the global destinations.
+
+| Parameter    | Type   | Required | Description                                 |
+| ------------ | ------ | -------- | ------------------------------------------- |
+| `instanceId` | string | Yes      | Instance ID (`inst_` plus 8 hex characters) |
+
+**Channel support:** Both
+
+**Response:**
+
+```json
+{
+  "configured": true,
+  "url": "https://automation.example.com/instance-events",
+  "authHeader": "X-Instance-Token",
+  "authConfigured": true,
+  "events": ["message.received"],
+  "updatedAt": 1709136000000
+}
+```
+
+---
+
+#### `wa_delete_instance_webhook`
+
+Remove the webhook stored for one instance. Later events for that instance use the global destinations.
+
+| Parameter    | Type   | Required | Description                                 |
+| ------------ | ------ | -------- | ------------------------------------------- |
+| `instanceId` | string | Yes      | Instance ID (`inst_` plus 8 hex characters) |
+
+**Channel support:** Both
+
+**Response:**
+
+```json
+{
+  "instanceId": "inst_abc123",
+  "deleted": true
 }
 ```
 

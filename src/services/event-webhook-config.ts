@@ -3,6 +3,11 @@ import { hostname } from "node:os";
 import { CHANNEL_EVENTS, type ChannelEvent } from "../types/channel.types.js";
 import { logger } from "../utils/logger.js";
 import { validateWebhookUrl } from "../utils/validation.js";
+import {
+  getInstanceWebhook,
+  listInstanceWebhooks,
+  type InstanceWebhookRow,
+} from "./instance-webhook-store.js";
 
 const DISALLOWED_HEADERS = new Set([
   "connection",
@@ -45,6 +50,10 @@ export interface EventWebhookConfig {
   timeoutMs: number;
   retryAttempts: number;
   retryDelayMs: number;
+  /** Global preset from WA_EVENT_WEBHOOK_PRESET, also used by instance webhooks. */
+  preset?: EventWebhookPreset;
+  /** When false, an instance webhook replaces global destinations for that instance. */
+  instanceMergeGlobal: boolean;
 }
 
 export type EventWebhookWarning =
@@ -408,9 +417,11 @@ function effectiveEvents(
 function droppedPresetEvents(
   config: EventWebhookConfig,
   fallbackPreset: EventWebhookPreset | undefined,
+  extra: readonly EventWebhookDestination[] = [],
 ): ChannelEvent[] {
-  if (config.destinations.length === 0) return [];
-  const groups = config.destinations.map((destination) => ({
+  const destinations = [...config.destinations, ...extra];
+  if (destinations.length === 0) return [];
+  const groups = destinations.map((destination) => ({
     events: destination.events,
     preset: destination.preset ?? fallbackPreset,
   }));
@@ -427,10 +438,12 @@ function droppedPresetEvents(
 function countEffectiveEvents(
   config: EventWebhookConfig,
   fallbackPreset: EventWebhookPreset | undefined,
+  extra: readonly EventWebhookDestination[] = [],
 ): number {
+  const destinations = [...config.destinations, ...extra];
   const groups =
-    config.destinations.length > 0
-      ? config.destinations.map((destination) => ({
+    destinations.length > 0
+      ? destinations.map((destination) => ({
           events: destination.events,
           preset: destination.preset ?? fallbackPreset,
         }))
@@ -463,6 +476,7 @@ export function loadEventWebhookConfig(env: Environment = process.env): EventWeb
     `wa-event-webhooks-${createHash("sha256").update(deploymentId).digest("hex").slice(0, 16)}`;
   const allowHttp = parseBoolean(env, "WA_EVENT_WEBHOOK_ALLOW_HTTP", false);
   const ignoreFromMe = parseBoolean(env, "WA_EVENT_WEBHOOK_IGNORE_FROM_ME", true);
+  const instanceMergeGlobal = parseBoolean(env, "WA_EVENT_WEBHOOK_INSTANCE_MERGE_GLOBAL", false);
   const timeoutMs = parsePositiveInteger(env, "WA_EVENT_WEBHOOK_TIMEOUT_MS", 10_000, 300_000);
   const retryAttempts = parsePositiveInteger(env, "WA_EVENT_WEBHOOK_RETRY_ATTEMPTS", 5, 100);
   const retryDelayMs = parsePositiveInteger(env, "WA_EVENT_WEBHOOK_RETRY_DELAY_MS", 1_000, 300_000);
@@ -513,6 +527,8 @@ export function loadEventWebhookConfig(env: Environment = process.env): EventWeb
       timeoutMs,
       retryAttempts,
       retryDelayMs,
+      ...(preset ? { preset } : {}),
+      instanceMergeGlobal,
     };
   }
 
@@ -538,6 +554,8 @@ export function loadEventWebhookConfig(env: Environment = process.env): EventWeb
       timeoutMs,
       retryAttempts,
       retryDelayMs,
+      ...(preset ? { preset } : {}),
+      instanceMergeGlobal,
     };
   }
 
@@ -564,11 +582,94 @@ export function loadEventWebhookConfig(env: Environment = process.env): EventWeb
     timeoutMs,
     retryAttempts,
     retryDelayMs,
+    ...(preset ? { preset } : {}),
+    instanceMergeGlobal,
   };
 }
 
 function usesMultiDestinationConfig(env: Environment): boolean {
   return Boolean(env.WA_EVENT_WEBHOOKS?.trim());
+}
+
+export function eventWebhookAllowsHttp(env: Environment = process.env): boolean {
+  return parseBoolean(env, "WA_EVENT_WEBHOOK_ALLOW_HTTP", false);
+}
+
+export function normalizeInstanceWebhookUrl(url: string, allowHttp: boolean): string {
+  return validateDestinationUrl(url, allowHttp, "instance webhook URL");
+}
+
+export function instanceWebhookHeaders(
+  authHeader: string | undefined,
+  authValue: string | undefined,
+): Record<string, string> {
+  if ((authHeader === undefined) !== (authValue === undefined)) {
+    throw new Error("Instance webhook authHeader and authValue must be set together");
+  }
+  const headers: Record<string, string> = {};
+  if (authHeader !== undefined && authValue !== undefined) {
+    setHeader(headers, authHeader, authValue, "instance webhook auth");
+  }
+  return headers;
+}
+
+export function normalizeInstanceWebhookEvents(
+  events: readonly string[] | undefined,
+): ChannelEvent[] | null {
+  if (events === undefined) return null;
+  const names = [...new Set(events.map((event) => event.trim()).filter(Boolean))];
+  if (names.length === 0) {
+    throw new Error("Instance webhook events must list at least one event name");
+  }
+  if (names.some((event) => !CHANNEL_EVENTS.includes(event as ChannelEvent))) {
+    throw new Error("Invalid instance webhook events; contains an unsupported event name");
+  }
+  return names as ChannelEvent[];
+}
+
+export function instanceWebhookDestination(
+  row: InstanceWebhookRow,
+  config: EventWebhookConfig,
+  allowHttp: boolean,
+): EventWebhookDestination {
+  const authHeader = row.authHeader ?? undefined;
+  const authValue = row.authValue ?? undefined;
+  const headers = instanceWebhookHeaders(authHeader, authValue);
+  return trackDestinationAuth(
+    {
+      id: `instance:${row.instanceId}`,
+      url: normalizeInstanceWebhookUrl(row.url, allowHttp),
+      headers,
+      ...(config.preset ? { preset: config.preset } : {}),
+      events: row.events ?? config.events,
+      ignoreFromMe: config.ignoreFromMe,
+      debounceMs: 0,
+    },
+    authHeader !== undefined && authValue !== undefined,
+  );
+}
+
+/** Global destinations, or the instance webhook in replace mode, or both when merge is on. */
+export function destinationsForInstance(
+  config: EventWebhookConfig,
+  instanceId: string,
+  allowHttp = eventWebhookAllowsHttp(),
+): EventWebhookDestination[] {
+  const row = getInstanceWebhook(instanceId);
+  if (!row) return config.destinations;
+  const instanceDestination = instanceWebhookDestination(row, config, allowHttp);
+  if (!config.instanceMergeGlobal) return [instanceDestination];
+  const globals = config.destinations.filter(
+    (destination) => destination.url !== instanceDestination.url,
+  );
+  return [...globals, instanceDestination];
+}
+
+function storedInstanceDestinations(
+  config: EventWebhookConfig,
+  allowHttp: boolean,
+): EventWebhookDestination[] {
+  return listInstanceWebhooks().map((row) => instanceWebhookDestination(row, config, allowHttp));
 }
 
 /**
@@ -585,11 +686,12 @@ export function getEventWebhookStatus(
   const preset = parsePreset(env.WA_EVENT_WEBHOOK_PRESET, "WA_EVENT_WEBHOOK_PRESET");
   const auth = resolveSingleDestinationAuth(env, preset);
   const resolved = config ?? loadConfigForStatus(env, !multi && auth.incomplete);
-  const destinationCount = resolved.destinations.length;
+  const instanceDestinations = storedInstanceDestinations(resolved, eventWebhookAllowsHttp(env));
+  const destinationCount = resolved.destinations.length + instanceDestinations.length;
   const configured = destinationCount > 0;
-  const eventCount = countEffectiveEvents(resolved, preset);
+  const eventCount = countEffectiveEvents(resolved, preset, instanceDestinations);
   const warnings: EventWebhookWarning[] = [];
-  const droppedEvents = droppedPresetEvents(resolved, preset);
+  const droppedEvents = droppedPresetEvents(resolved, preset, instanceDestinations);
   if (!configured) warnings.push("not_configured");
   if (!multi && auth.incomplete) warnings.push("incomplete_auth");
   if (eventCount === 0) warnings.push("empty_event_set");
@@ -601,7 +703,8 @@ export function getEventWebhookStatus(
     eventCount,
     authConfigured:
       (!multi && auth.configured) ||
-      resolved.destinations.some((destination) => destinationsWithAuth.has(destination)),
+      resolved.destinations.some((destination) => destinationsWithAuth.has(destination)) ||
+      instanceDestinations.some((destination) => destinationsWithAuth.has(destination)),
     warnings,
     droppedEvents,
   };

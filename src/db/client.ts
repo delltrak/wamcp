@@ -233,6 +233,15 @@ function initializeDatabase(): void {
       is_latest       INTEGER NOT NULL DEFAULT 1
     );
 
+    CREATE TABLE IF NOT EXISTS instance_webhooks (
+      instance_id     TEXT PRIMARY KEY REFERENCES instances(id) ON DELETE CASCADE,
+      url             TEXT NOT NULL,
+      auth_header     TEXT,
+      auth_value      TEXT,
+      events          TEXT,
+      updated_at      INTEGER NOT NULL
+    );
+
     CREATE TABLE IF NOT EXISTS queue_stats (
       instance_id     TEXT NOT NULL PRIMARY KEY REFERENCES instances(id) ON DELETE CASCADE,
       messages_sent   INTEGER NOT NULL DEFAULT 0,

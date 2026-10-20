@@ -5,10 +5,12 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { InstanceManager } from "../services/instance-manager.js";
 import type { MessageQueue } from "../services/message-queue.js";
+import type { EventWebhookService } from "../services/event-webhook.js";
 import { eventWebhookToolStatus, getEventWebhookStatus } from "../services/event-webhook-config.js";
 import { toolSuccess } from "../types/mcp.types.js";
 import { handleToolError } from "../utils/tool-handler.js";
 import { createRequestLogger } from "../utils/logger.js";
+import { registerInstanceWebhookTools } from "./instance-webhook.tools.js";
 import {
   CreateInstanceSchema,
   ConnectInstanceSchema,
@@ -25,12 +27,15 @@ export function registerInstanceTools(
   server: McpServer,
   instanceManager: InstanceManager,
   _messageQueue: MessageQueue,
+  eventWebhook?: EventWebhookService,
 ): void {
+  registerInstanceWebhookTools(server, eventWebhook);
+
   server.registerTool(
     "wa_get_instance_status",
     {
       description:
-        "Read connection state and lifecycle metadata for one instance or all instances. Also returns redacted event-webhook status: configured, destinationCount, eventCount, authConfigured, warnings (string codes), and droppedEvents. droppedEvents lists configured event names excluded by the Grok Bot preset; public GET /health omits this field and all event names. URLs, header names, header values, and tokens are omitted.",
+        "Read connection state and lifecycle metadata for one instance or all instances. Also returns redacted event-webhook status: configured, destinationCount, eventCount, authConfigured, warnings (string codes), and droppedEvents. destinationCount includes global destinations and per-instance webhooks. droppedEvents lists configured event names excluded by the Grok Bot preset; public GET /health omits this field and all event names. URLs, header names, header values, and tokens are omitted.",
       inputSchema: GetInstanceStatusSchema,
     },
     async (params) => {
