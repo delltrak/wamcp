@@ -221,13 +221,15 @@ describe("BaileysAdapter.markRead", () => {
     ]);
   });
 
-  it("keeps direct chat keys unchanged", async () => {
+  it("sets ownership and omits participants for direct chat keys", async () => {
     const chatJid = "5511888888888@s.whatsapp.net";
     const { adapter, readMessages } = connectedAdapter();
 
     await adapter.markRead(chatJid, ["direct-message"]);
 
-    expect(readMessages).toHaveBeenCalledWith([{ remoteJid: chatJid, id: "direct-message" }]);
+    expect(readMessages).toHaveBeenCalledWith([
+      { remoteJid: chatJid, id: "direct-message", fromMe: false },
+    ]);
   });
 
   it("uses an explicitly supplied participant when a group message is not stored", async () => {

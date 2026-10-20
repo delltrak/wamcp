@@ -34,6 +34,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Baileys message operations now resolve full stored keys, including group authorship and ownership.
 - App-state writes now run through a per-instance queue with configurable spacing and a resync
   preflight that requires a retrievable current key, a positive collection version, a 128-byte hash,
   and no Baileys-reported sync, decode, missing-key, or hash-verification failure. Successful writes
