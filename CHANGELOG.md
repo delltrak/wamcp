@@ -67,11 +67,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   other address cannot lock the name. 128 failures spread across addresses can, for example 16
   IPv6 /64s or NATs using the free attempts. A recent success exempts only that username at that
   address (the whole IPv6 /64 or NAT) for a few failures, and a wrong password removes the
-  exemption. The presented username is limited whether or not an account exists. A full limiter
-  drops the unlocked entry with the fewest failures, the oldest on a tie, and never drops a
-  username above the free-attempt count. A live lock is not evicted. When every slot is an active
-  lock, a new key is counted in one shared overflow bucket, and a recent success does not create a
-  bucket. An attempt that does not finish is
+  exemption. The presented username is limited whether or not an account exists. Usernames are kept
+  in a fixed table of 4096 buckets chosen by an HMAC with a per-process key, with no eviction. A
+  hash collision shares a bucket and only makes the limit stricter. Each bucket still expires after
+  a quiet period once its lock has ended. The address maps drop the unlocked entry with the fewest
+  failures, the oldest on a tie, and do not drop a live lock. When every address slot is an active
+  lock, a new address is counted in one shared overflow bucket, and a recent success does not create
+  an address bucket. That overflow does not apply to usernames, so a saturated username table does
+  not leave sign-in at 429 after the address locks expire. An attempt that does not finish is
   tied to a bounded token, so it cannot undo a later failure. scrypt work uses a short queue, keeps
   one slot for a recent sign-in, and a rejected attempt still counts. The credential key is linked
   into place so it is never read empty. Back up `oauth.db.mac` with `oauth.db`; losing the key
