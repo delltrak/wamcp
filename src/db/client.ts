@@ -6,6 +6,7 @@ import { existsSync, mkdirSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import Database, { type Database as DatabaseType } from "better-sqlite3";
 import { drizzle } from "drizzle-orm/better-sqlite3";
+import { INSTANCE_WEBHOOKS_SCHEMA_SQL } from "./instance-webhooks-schema.js";
 import * as schema from "./schema.js";
 
 const DB_PATH = resolve(process.env.WA_DATABASE_PATH?.trim() || "data/whatsapp.db");
@@ -233,15 +234,6 @@ function initializeDatabase(): void {
       is_latest       INTEGER NOT NULL DEFAULT 1
     );
 
-    CREATE TABLE IF NOT EXISTS instance_webhooks (
-      instance_id     TEXT PRIMARY KEY REFERENCES instances(id) ON DELETE CASCADE,
-      url             TEXT NOT NULL,
-      auth_header     TEXT,
-      auth_value      TEXT,
-      events          TEXT,
-      updated_at      INTEGER NOT NULL
-    );
-
     CREATE TABLE IF NOT EXISTS queue_stats (
       instance_id     TEXT NOT NULL PRIMARY KEY REFERENCES instances(id) ON DELETE CASCADE,
       messages_sent   INTEGER NOT NULL DEFAULT 0,
@@ -250,6 +242,7 @@ function initializeDatabase(): void {
       rate_limited_until INTEGER
     );
   `);
+  sqlite.exec(INSTANCE_WEBHOOKS_SCHEMA_SQL);
 }
 
 // Inline migration: add `lid` column for existing databases (pre-v7 upgrade)

@@ -2,10 +2,13 @@ import { eq } from "drizzle-orm";
 import { db } from "../db/client.js";
 import { instances } from "../db/schema.js";
 import type { ChannelEvent } from "../types/channel.types.js";
+import { logger } from "../utils/logger.js";
 import { isValidInstanceId } from "../utils/validation.js";
 import {
+  assertInstanceWebhookHostAllowed,
   eventWebhookAllowsHttp,
   instanceWebhookHeaders,
+  loadEventWebhookConfig,
   normalizeInstanceWebhookEvents,
   normalizeInstanceWebhookUrl,
 } from "./event-webhook-config.js";
@@ -17,7 +20,8 @@ import {
 
 export interface InstanceWebhookConfigured {
   configured: true;
-  url: string;
+  /** Origin only. The full URL stays in the database. */
+  endpoint: string;
   authHeader: string | null;
   authConfigured: boolean;
   /** Null inherits WA_EVENT_WEBHOOK_EVENTS. */
@@ -45,6 +49,14 @@ function requireInstance(instanceId: string): void {
   if (!row) throw new Error("Instance not found");
 }
 
+function redactedWebhookEndpoint(url: string): string {
+  try {
+    return new URL(url).origin;
+  } catch {
+    return "[invalid URL]";
+  }
+}
+
 function viewFromStored(
   url: string,
   authHeader: string | null,
@@ -54,7 +66,7 @@ function viewFromStored(
 ): InstanceWebhookConfigured {
   return {
     configured: true,
-    url,
+    endpoint: redactedWebhookEndpoint(url),
     authHeader,
     authConfigured: authHeader !== null && authValue !== null && authValue !== "",
     events,
@@ -66,8 +78,16 @@ function viewFromStored(
 export function setInstanceWebhook(input: InstanceWebhookInput): InstanceWebhookConfigured {
   requireInstance(input.instanceId);
   const url = normalizeInstanceWebhookUrl(input.url.trim(), eventWebhookAllowsHttp());
+  assertInstanceWebhookHostAllowed(url);
   instanceWebhookHeaders(input.authHeader, input.authValue);
   const events = normalizeInstanceWebhookEvents(input.events);
+  const active = loadEventWebhookConfig();
+  if (!active.instanceMergeGlobal && active.destinations.length > 0) {
+    logger.warn(
+      { service: "instance-webhook", instanceId: input.instanceId },
+      "Instance webhook replaces the global event webhook for this instance",
+    );
+  }
   const updatedAt = Date.now();
   const authHeader = input.authHeader ?? null;
   const authValue = input.authValue ?? null;

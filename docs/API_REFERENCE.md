@@ -110,7 +110,8 @@ Tools marked **Baileys only** are not available on Cloud API instances.
 
 ## 2. Tools Reference
 
-WA MCP exposes **140 tools** grouped by domain. All tools return MCP-standard responses.
+WA MCP exposes **137 tools** grouped by domain. All tools return MCP-standard responses.
+`WA_INSTANCE_WEBHOOK_TOOLS_ENABLED=true` adds three #142 instance webhook tools.
 
 ### Success Response Format
 
@@ -141,7 +142,7 @@ WA MCP exposes **140 tools** grouped by domain. All tools return MCP-standard re
 
 ---
 
-### 2.1 Instance Management (12 tools)
+### 2.1 Instance Management (9 tools, plus 3 when `WA_INSTANCE_WEBHOOK_TOOLS_ENABLED=true`)
 
 Tools for creating, connecting, and managing WhatsApp instances.
 
@@ -333,9 +334,9 @@ Configure Meta Cloud API credentials for a Cloud API instance. Required before c
 
 #### `wa_set_instance_webhook`
 
-Replace the outgoing event webhook stored for one instance. The auth value is saved for delivery and is not returned. Omit `events` to inherit `WA_EVENT_WEBHOOK_EVENTS`. An empty event list is rejected. The instance webhook uses `WA_EVENT_WEBHOOK_PRESET` and `WA_EVENT_WEBHOOK_IGNORE_FROM_ME`.
+Registered only when `WA_INSTANCE_WEBHOOK_TOOLS_ENABLED=true` (#142). Replace the outgoing event webhook stored for one instance. `auth_value` is saved in plaintext for delivery and is not returned. Omit `events` to inherit `WA_EVENT_WEBHOOK_EVENTS`. An empty event list is rejected. The instance webhook uses `WA_EVENT_WEBHOOK_PRESET`, `WA_EVENT_WEBHOOK_IGNORE_FROM_ME`, and `WA_EVENT_WEBHOOK_SECRET` when that global HMAC secret is set. The response `endpoint` is the URL origin, not the full URL.
 
-`WA_EVENT_WEBHOOK_INSTANCE_MERGE_GLOBAL` defaults to `false`: this instance then uses only this webhook. Set it to `true` to also deliver to the global destinations. A URL that matches a global destination is delivered once, with this instance's auth header and events. Instances without a stored webhook keep the global destinations.
+`WA_EVENT_WEBHOOK_INSTANCE_MERGE_GLOBAL` defaults to `false`: this instance then uses only this webhook, and a warning is logged when a global destination exists. Set it to `true` to also deliver to the global destinations. A URL that matches a global destination, after lowercasing the host and removing a trailing slash, is delivered once, with this instance's auth header, events, and the global HMAC secret. `WA_INSTANCE_WEBHOOK_ALLOWED_HOSTS` optionally restricts the host. Instances without a stored webhook keep the global destinations. One stored instance webhook satisfies `WA_REQUIRE_EVENT_WEBHOOK` for the whole process. An invalid stored row is skipped so the other destinations keep working.
 
 | Parameter    | Type     | Required | Description                                                                 |
 | ------------ | -------- | -------- | --------------------------------------------------------------------------- |
@@ -352,7 +353,7 @@ Replace the outgoing event webhook stored for one instance. The auth value is sa
 ```json
 {
   "configured": true,
-  "url": "https://automation.example.com/instance-events",
+  "endpoint": "https://automation.example.com",
   "authHeader": "X-Instance-Token",
   "authConfigured": true,
   "events": null,
@@ -360,13 +361,13 @@ Replace the outgoing event webhook stored for one instance. The auth value is sa
 }
 ```
 
-`events: null` means the instance inherits `WA_EVENT_WEBHOOK_EVENTS`. `authHeader` is `null` when no auth header is stored.
+`events: null` means the instance inherits `WA_EVENT_WEBHOOK_EVENTS`. `authHeader` is `null` when no auth header is stored. `endpoint` is the origin only.
 
 ---
 
 #### `wa_get_instance_webhook`
 
-Read the webhook stored for one instance. The auth value is never returned. `configured: false` means the instance uses the global destinations.
+Read the webhook stored for one instance. The auth value and full URL are never returned. `configured: false` means the instance uses the global destinations.
 
 | Parameter    | Type   | Required | Description                                 |
 | ------------ | ------ | -------- | ------------------------------------------- |
@@ -379,7 +380,7 @@ Read the webhook stored for one instance. The auth value is never returned. `con
 ```json
 {
   "configured": true,
-  "url": "https://automation.example.com/instance-events",
+  "endpoint": "https://automation.example.com",
   "authHeader": "X-Instance-Token",
   "authConfigured": true,
   "events": ["message.received"],

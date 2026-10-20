@@ -6,7 +6,11 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { InstanceManager } from "../services/instance-manager.js";
 import type { MessageQueue } from "../services/message-queue.js";
 import type { EventWebhookService } from "../services/event-webhook.js";
-import { eventWebhookToolStatus, getEventWebhookStatus } from "../services/event-webhook-config.js";
+import {
+  eventWebhookToolStatus,
+  getEventWebhookStatus,
+  instanceWebhookToolsEnabled,
+} from "../services/event-webhook-config.js";
 import { toolSuccess } from "../types/mcp.types.js";
 import { handleToolError } from "../utils/tool-handler.js";
 import { createRequestLogger } from "../utils/logger.js";
@@ -29,7 +33,9 @@ export function registerInstanceTools(
   _messageQueue: MessageQueue,
   eventWebhook?: EventWebhookService,
 ): void {
-  registerInstanceWebhookTools(server, eventWebhook);
+  if (instanceWebhookToolsEnabled()) {
+    registerInstanceWebhookTools(server, eventWebhook);
+  }
 
   server.registerTool(
     "wa_get_instance_status",

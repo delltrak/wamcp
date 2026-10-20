@@ -20,7 +20,7 @@ import { transcribeIncomingAudioIfConfigured } from "./incoming-audio-transcript
 import {
   destinationsForInstance,
   eventWebhookAllowsHttp,
-  instanceWebhookDestination,
+  storedInstanceDestinations,
   loadEventWebhookConfig,
   type EventWebhookConfig,
   type EventWebhookDestination,
@@ -754,6 +754,7 @@ export function shouldSendEventWebhook(
   }
 
   if (!event.startsWith("instance.")) {
+    // #142: instance destinations copy ignoreJids. #140's matcher reads that field here.
     if (config.chatAllowlist && !config.chatAllowlist.includes(chatId)) return false;
     if (config.senderAllowlist && !config.senderAllowlist.includes(senderId)) return false;
   }
@@ -1479,8 +1480,8 @@ export class EventWebhookService {
     return this.config.destinations.length > 0 || listInstanceWebhooks().length > 0;
   }
 
-  private destinationMap(): ReadonlyMap<string, EventWebhookDestination> {
-    this.rebuildKnownDestinations();
+  /** Cached map. Rebuilt from storage only in start/sync, not on each delivery. */
+  destinationMap(): ReadonlyMap<string, EventWebhookDestination> {
     return this.knownDestinations;
   }
 
@@ -1489,9 +1490,7 @@ export class EventWebhookService {
     for (const destination of this.config.destinations) {
       this.knownDestinations.set(destination.id, destination);
     }
-    const allowHttp = eventWebhookAllowsHttp();
-    for (const row of listInstanceWebhooks()) {
-      const destination = instanceWebhookDestination(row, this.config, allowHttp);
+    for (const destination of storedInstanceDestinations(this.config, eventWebhookAllowsHttp())) {
       this.knownDestinations.set(destination.id, destination);
     }
   }

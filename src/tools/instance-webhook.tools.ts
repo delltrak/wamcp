@@ -26,7 +26,7 @@ export function registerInstanceWebhookTools(
     "wa_set_instance_webhook",
     {
       description:
-        "Replace the outgoing event webhook stored for one instance. Saves the URL, an optional auth header, and an optional event list. Omit events to inherit WA_EVENT_WEBHOOK_EVENTS. The auth value is stored for delivery and is not returned. WA_EVENT_WEBHOOK_INSTANCE_MERGE_GLOBAL defaults to false, so this webhook replaces the global destinations for this instance only. Set that variable to true to also deliver to the global destinations; a duplicate URL is sent once, using this instance's auth header and events.",
+        "Replace the outgoing event webhook stored for one instance. Registered only when WA_INSTANCE_WEBHOOK_TOOLS_ENABLED=true. Saves the URL, an optional auth header, and an optional event list. Omit events to inherit WA_EVENT_WEBHOOK_EVENTS. The auth value is stored in plaintext for delivery and is not returned. The response includes the redacted endpoint origin, not the full URL. Delivery uses WA_EVENT_WEBHOOK_SECRET when that global HMAC secret is set. WA_EVENT_WEBHOOK_INSTANCE_MERGE_GLOBAL defaults to false, so this webhook replaces the global destinations for this instance only. Set that variable to true to also deliver to the global destinations; a duplicate URL is sent once, using this instance's auth header and events and the global HMAC secret.",
       inputSchema: SetInstanceWebhookSchema,
     },
     async (params) => {
@@ -54,7 +54,7 @@ export function registerInstanceWebhookTools(
     "wa_get_instance_webhook",
     {
       description:
-        "Read the outgoing event webhook stored for one instance. Returns the URL, auth header name, whether auth is configured, and the event list. Null events mean this instance inherits WA_EVENT_WEBHOOK_EVENTS. The auth value is never returned. When no webhook is stored, the instance uses the global destinations.",
+        "Read the outgoing event webhook stored for one instance. Returns the redacted endpoint origin, auth header name, whether auth is configured, and the event list. Null events mean this instance inherits WA_EVENT_WEBHOOK_EVENTS. The auth value and full URL are never returned. When no webhook is stored, the instance uses the global destinations.",
       inputSchema: GetInstanceWebhookSchema,
     },
     async (params) => {

@@ -5,6 +5,7 @@ import { logger } from "../utils/logger.js";
 import { validateWebhookUrl } from "../utils/validation.js";
 import {
   getInstanceWebhook,
+  instanceWebhookStorageGeneration,
   listInstanceWebhooks,
   type InstanceWebhookRow,
 } from "./instance-webhook-store.js";
@@ -34,6 +35,11 @@ export interface EventWebhookDestination {
   ignoreFromMe: boolean;
   chatAllowlist?: string[];
   senderAllowlist?: string[];
+  /**
+   * #142 hook for #140. Instance destinations copy the global ignore list when
+   * that field is present. #140 matches it inside shouldSendEventWebhook.
+   */
+  ignoreJids?: string[];
   debounceMs: number;
 }
 
@@ -595,8 +601,87 @@ export function eventWebhookAllowsHttp(env: Environment = process.env): boolean 
   return parseBoolean(env, "WA_EVENT_WEBHOOK_ALLOW_HTTP", false);
 }
 
+/** Lowercase host, no trailing slash. Used before instance/global URL dedup. */
+export function canonicalWebhookUrl(url: string): string {
+  const parsed = new URL(url);
+  if (parsed.pathname.length > 1 && parsed.pathname.endsWith("/")) {
+    parsed.pathname = parsed.pathname.replace(/\/+$/, "");
+  }
+  return parsed.href;
+}
+
+export function webhookUrlsMatch(left: string, right: string): boolean {
+  try {
+    return canonicalWebhookUrl(left) === canonicalWebhookUrl(right);
+  } catch {
+    return left === right;
+  }
+}
+
 export function normalizeInstanceWebhookUrl(url: string, allowHttp: boolean): string {
-  return validateDestinationUrl(url, allowHttp, "instance webhook URL");
+  return canonicalWebhookUrl(validateDestinationUrl(url, allowHttp, "instance webhook URL"));
+}
+
+/** #142: unset by default, so the three instance webhook tools are not registered. */
+export function instanceWebhookToolsEnabled(env: Environment = process.env): boolean {
+  return parseBoolean(env, "WA_INSTANCE_WEBHOOK_TOOLS_ENABLED", false);
+}
+
+/**
+ * #142: optional host allowlist for wa_set_instance_webhook.
+ * Unset allows any public host that passes the webhook URL policy.
+ */
+export function assertInstanceWebhookHostAllowed(
+  url: string,
+  env: Environment = process.env,
+): void {
+  const raw = env.WA_INSTANCE_WEBHOOK_ALLOWED_HOSTS;
+  if (raw === undefined || raw.trim() === "") return;
+  const hosts = raw
+    .split(",")
+    .map((host) => host.trim().toLowerCase())
+    .filter(Boolean);
+  const hostPattern = /^[a-z0-9.-]+$/;
+  if (
+    hosts.length === 0 ||
+    hosts.some((host) => !hostPattern.test(host) || host.startsWith(".") || host.endsWith("."))
+  ) {
+    throw new Error(
+      "Invalid WA_INSTANCE_WEBHOOK_ALLOWED_HOSTS; expected a comma-separated host list",
+    );
+  }
+  const hostname = new URL(url).hostname.toLowerCase();
+  if (!hosts.includes(hostname)) {
+    throw new Error(
+      "Invalid instance webhook URL; host is not in WA_INSTANCE_WEBHOOK_ALLOWED_HOSTS",
+    );
+  }
+}
+
+function inheritedWebhookSecret(url: string, config: EventWebhookConfig): string | undefined {
+  const matched = config.destinations.find((destination) => webhookUrlsMatch(destination.url, url));
+  if (matched?.secret) return matched.secret;
+  const secrets = [
+    ...new Set(
+      config.destinations
+        .map((destination) => destination.secret)
+        .filter((secret): secret is string => typeof secret === "string" && secret.length > 0),
+    ),
+  ];
+  return secrets.length === 1 ? secrets[0] : undefined;
+}
+
+/**
+ * #142: copy WA_EVENT_WEBHOOK_IGNORE_JIDS onto the instance destination once #140
+ * has attached ignoreJids to the global destinations or the config object.
+ */
+export function instanceWebhookIgnoreJids(config: EventWebhookConfig): string[] | undefined {
+  const fromDestinations = config.destinations.flatMap(
+    (destination) => destination.ignoreJids ?? [],
+  );
+  const fromConfig = (config as { ignoreJids?: readonly string[] }).ignoreJids ?? [];
+  const merged = [...new Set([...fromDestinations, ...fromConfig])];
+  return merged.length > 0 ? merged : undefined;
 }
 
 export function instanceWebhookHeaders(
@@ -635,18 +720,40 @@ export function instanceWebhookDestination(
   const authHeader = row.authHeader ?? undefined;
   const authValue = row.authValue ?? undefined;
   const headers = instanceWebhookHeaders(authHeader, authValue);
+  const url = normalizeInstanceWebhookUrl(row.url, allowHttp);
+  const secret = inheritedWebhookSecret(url, config);
+  const ignoreJids = instanceWebhookIgnoreJids(config);
   return trackDestinationAuth(
     {
       id: `instance:${row.instanceId}`,
-      url: normalizeInstanceWebhookUrl(row.url, allowHttp),
+      url,
       headers,
+      ...(secret ? { secret } : {}),
       ...(config.preset ? { preset: config.preset } : {}),
       events: row.events ?? config.events,
       ignoreFromMe: config.ignoreFromMe,
+      ...(ignoreJids ? { ignoreJids } : {}),
       debounceMs: 0,
     },
     authHeader !== undefined && authValue !== undefined,
   );
+}
+
+function skipInvalidInstanceWebhook(instanceId: string): void {
+  logger.warn({ instanceId }, "Skipping invalid stored instance webhook");
+}
+
+function tryInstanceWebhookDestination(
+  row: InstanceWebhookRow,
+  config: EventWebhookConfig,
+  allowHttp: boolean,
+): EventWebhookDestination | null {
+  try {
+    return instanceWebhookDestination(row, config, allowHttp);
+  } catch {
+    skipInvalidInstanceWebhook(row.instanceId);
+    return null;
+  }
 }
 
 /** Global destinations, or the instance webhook in replace mode, or both when merge is on. */
@@ -655,21 +762,58 @@ export function destinationsForInstance(
   instanceId: string,
   allowHttp = eventWebhookAllowsHttp(),
 ): EventWebhookDestination[] {
-  const row = getInstanceWebhook(instanceId);
+  let row: InstanceWebhookRow | undefined;
+  try {
+    row = getInstanceWebhook(instanceId);
+  } catch {
+    skipInvalidInstanceWebhook(instanceId);
+    return config.destinations;
+  }
   if (!row) return config.destinations;
-  const instanceDestination = instanceWebhookDestination(row, config, allowHttp);
+  const instanceDestination = tryInstanceWebhookDestination(row, config, allowHttp);
+  if (!instanceDestination) return config.destinations;
   if (!config.instanceMergeGlobal) return [instanceDestination];
   const globals = config.destinations.filter(
-    (destination) => destination.url !== instanceDestination.url,
+    (destination) => !webhookUrlsMatch(destination.url, instanceDestination.url),
   );
   return [...globals, instanceDestination];
 }
 
-function storedInstanceDestinations(
+export function storedInstanceDestinations(
   config: EventWebhookConfig,
   allowHttp: boolean,
 ): EventWebhookDestination[] {
-  return listInstanceWebhooks().map((row) => instanceWebhookDestination(row, config, allowHttp));
+  const destinations: EventWebhookDestination[] = [];
+  for (const row of listInstanceWebhooks()) {
+    const destination = tryInstanceWebhookDestination(row, config, allowHttp);
+    if (destination) destinations.push(destination);
+  }
+  return destinations;
+}
+
+let cachedEventWebhookStatus: {
+  generation: number;
+  fingerprint: string;
+  status: EventWebhookStatus;
+} | null = null;
+
+function eventWebhookStatusFingerprint(env: Environment): string {
+  return [
+    env.WA_EVENT_WEBHOOK_URL,
+    env.WA_EVENT_WEBHOOKS,
+    env.WA_EVENT_WEBHOOK_ALLOW_HTTP,
+    env.WA_EVENT_WEBHOOK_PRESET,
+    env.WA_EVENT_WEBHOOK_EVENTS,
+    env.WA_EVENT_WEBHOOK_IGNORE_FROM_ME,
+    env.WA_EVENT_WEBHOOK_AUTH_HEADER,
+    env.WA_EVENT_WEBHOOK_AUTH_VALUE,
+    env.WA_EVENT_WEBHOOK_SECRET,
+    env.WA_EVENT_WEBHOOK_HEADERS,
+    env.WA_EVENT_WEBHOOK_INSTANCE_MERGE_GLOBAL,
+    env.WA_EVENT_WEBHOOK_DEBOUNCE_MS,
+    env.WA_WEBHOOK_DEBOUNCE_MS,
+    env.WA_WEBHOOK_DEBOUNCE_MAX_MS,
+  ].join("\u0000");
 }
 
 /**
@@ -677,10 +821,31 @@ function storedInstanceDestinations(
  * The health projection omits dropped event names; only the tool projection
  * exposes them. Callers can pass a parsed config to avoid loading twice.
  * Nothing returned includes a URL, header name, header value, token, or secret.
+ * #142: the no-config path caches the database read until instance webhook storage changes.
  */
 export function getEventWebhookStatus(
   env: Environment = process.env,
   config?: EventWebhookConfig,
+): EventWebhookStatus {
+  const generation = instanceWebhookStorageGeneration();
+  const fingerprint = config ? "" : eventWebhookStatusFingerprint(env);
+  if (
+    !config &&
+    cachedEventWebhookStatus &&
+    cachedEventWebhookStatus.generation === generation &&
+    cachedEventWebhookStatus.fingerprint === fingerprint
+  ) {
+    return cachedEventWebhookStatus.status;
+  }
+
+  const status = readEventWebhookStatus(env, config);
+  if (!config) cachedEventWebhookStatus = { generation, fingerprint, status };
+  return status;
+}
+
+function readEventWebhookStatus(
+  env: Environment,
+  config: EventWebhookConfig | undefined,
 ): EventWebhookStatus {
   const multi = usesMultiDestinationConfig(env);
   const preset = parsePreset(env.WA_EVENT_WEBHOOK_PRESET, "WA_EVENT_WEBHOOK_PRESET");
