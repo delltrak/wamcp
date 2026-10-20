@@ -27,6 +27,7 @@ HTTP Host header.
 | `WA_EVENT_WEBHOOK_PRESET` | unset | `grok-bot` selects compact Grok Bot message and lifecycle payloads plus incoming-message filters. |
 | `WA_EVENT_WEBHOOK_EVENTS` | `message.received` | Comma-separated events for the single destination and multi-destination defaults. |
 | `WA_EVENT_WEBHOOK_IGNORE_FROM_ME` | `true` | Ignore messages sent by this WhatsApp instance. |
+| `WA_EVENT_WEBHOOK_IGNORE_JIDS` | unset | Comma-separated exact JIDs or address wildcards to drop. Unset forwards every chat. |
 | `WA_EVENT_WEBHOOK_HEADERS` | unset | JSON object of extra headers for the single destination. |
 | `WA_EVENT_WEBHOOK_AUTH_HEADER` | unset | Single-destination authentication header. Grok Bot defaults to `X-Grok-Bot-Key` when the preset and auth value are set. |
 | `WA_EVENT_WEBHOOK_AUTH_VALUE` | unset | Single-destination authentication value. |
@@ -44,6 +45,24 @@ HTTP Host header.
 `group.member_label_changed` can be selected in `WA_EVENT_WEBHOOK_EVENTS` or in a destination's
 `events` array. The default event set remains `message.received`, and the `grok-bot` preset remains
 limited to incoming messages.
+
+`WA_EVENT_WEBHOOK_IGNORE_JIDS` drops events whose chat or sender JID matches the list. It is
+independent of `WA_EVENT_WEBHOOK_EVENTS`: an event is delivered only when its name is selected and
+none of its JIDs are ignored. Unset or empty applies no JID filter.
+
+An entry that starts with `@` is an address-space wildcard. Supported wildcards are `@g.us`,
+`@s.whatsapp.net`, `@lid`, `@newsletter`, `@broadcast`, and `@c.us`. Every other entry is an exact,
+case-sensitive JID. Invalid entries fail startup with `Invalid WA_EVENT_WEBHOOK_IGNORE_JIDS`.
+
+The match covers `chatId`, `groupId`, `newsletterId`, the sender (`message.sender`, `participant`,
+`callerId`, `reactedBy`, `deletedBy`, `author`, `contactId`), association `chatId`, and LID fields
+`chatLid`, `senderLid`, `fromLid`, and `participantLid`. It does not scan participant arrays.
+`instance.*` events are never dropped by this list. A multi-destination `ignoreJids` array is
+unioned with the global list for that destination only.
+
+`@g.us` mutes group traffic because the group id ends in `@g.us`. `@s.whatsapp.net` also matches
+the sender of a group message, so it suppresses those group events too. Use an exact JID to mute
+one direct chat. `@lid` matches LID identities kept alongside a resolved phone JID.
 
 Startup logs a warning when no destination is configured, when the single-destination
 auth header and value are not set together, when the event set is empty, or when a
@@ -88,7 +107,7 @@ GROK_FAMILY_ROUTINE_KEY=replace-with-the-second-routine-key
 
 Each destination accepts `id`, `url`, `headers`, `authHeader`, `authEnv`,
 `authValue`, `secretEnv`, `secret`, `events`, `preset`, `ignoreFromMe`,
-`chatAllowlist`, `senderAllowlist`, and `debounceMs`. Missing destination event
+`chatAllowlist`, `senderAllowlist`, `ignoreJids`, and `debounceMs`. Missing destination event
 lists inherit `WA_EVENT_WEBHOOK_EVENTS`. A Grok Bot destination with the
 `grok-bot` preset forwards configured `message.received` and `instance.*`
 lifecycle events. It drops other configured events and reports their names in

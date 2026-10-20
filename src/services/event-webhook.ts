@@ -702,11 +702,58 @@ export function normalizeGrokBotInstanceWebhookPayload(
   }
 }
 
+function addJidCandidate(candidates: string[], value: unknown): void {
+  if (typeof value !== "string") return;
+  const jid = value.trim();
+  if (jid.includes("@")) candidates.push(jid);
+}
+
+/** Chat, sender, and LID fields a JID ignore rule can match. Participant lists are not included. */
+export function eventJidCandidates(payload: ChannelEventPayload[ChannelEvent]): string[] {
+  const data = payload as unknown as Record<string, unknown>;
+  const message = isRecord(data.message) ? data.message : {};
+  const association = isRecord(data.association) ? data.association : {};
+  const candidates: string[] = [];
+  addJidCandidate(candidates, data.chatId);
+  addJidCandidate(candidates, data.groupId);
+  addJidCandidate(candidates, data.newsletterId);
+  addJidCandidate(candidates, data.contactId);
+  addJidCandidate(candidates, data.participant);
+  addJidCandidate(candidates, data.callerId);
+  addJidCandidate(candidates, data.reactedBy);
+  addJidCandidate(candidates, data.deletedBy);
+  addJidCandidate(candidates, data.author);
+  addJidCandidate(candidates, data.chatLid);
+  addJidCandidate(candidates, data.senderLid);
+  addJidCandidate(candidates, data.fromLid);
+  addJidCandidate(candidates, data.participantLid);
+  addJidCandidate(candidates, message.sender);
+  addJidCandidate(candidates, message.senderLid);
+  addJidCandidate(candidates, association.chatId);
+  return candidates;
+}
+
+export function jidMatchesIgnorePattern(jid: string, pattern: string): boolean {
+  return pattern.startsWith("@") ? jid.endsWith(pattern) : jid === pattern;
+}
+
+export function eventMatchesIgnoreJids(
+  payload: ChannelEventPayload[ChannelEvent],
+  ignoreJids: readonly string[] | undefined,
+): boolean {
+  if (!ignoreJids || ignoreJids.length === 0) return false;
+  return eventJidCandidates(payload).some((jid) =>
+    ignoreJids.some((pattern) => jidMatchesIgnorePattern(jid, pattern)),
+  );
+}
+
 export function shouldSendEventWebhook(
   event: ChannelEvent,
   payload: ChannelEventPayload[ChannelEvent],
   config: Pick<EventWebhookConfig, "events" | "ignoreFromMe"> &
-    Partial<Pick<EventWebhookDestination, "preset" | "chatAllowlist" | "senderAllowlist">>,
+    Partial<
+      Pick<EventWebhookDestination, "preset" | "chatAllowlist" | "senderAllowlist" | "ignoreJids">
+    >,
 ): boolean {
   if (!config.events.includes(event)) return false;
   if (
@@ -750,6 +797,7 @@ export function shouldSendEventWebhook(
   }
 
   if (!event.startsWith("instance.")) {
+    if (eventMatchesIgnoreJids(payload, config.ignoreJids)) return false;
     if (config.chatAllowlist && !config.chatAllowlist.includes(chatId)) return false;
     if (config.senderAllowlist && !config.senderAllowlist.includes(senderId)) return false;
   }

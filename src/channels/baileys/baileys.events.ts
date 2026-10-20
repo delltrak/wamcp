@@ -669,6 +669,24 @@ export function getSenderJid(msg: WAMessage): string {
   return "me";
 }
 
+function lidJid(value: string | null | undefined): string | undefined {
+  if (!value?.endsWith("@lid")) return undefined;
+  return value;
+}
+
+/** LID identities that remain after phone-number normalization, for webhook JID filters. */
+export function messageLidFields(msg: WAMessage): { chatLid?: string; senderLid?: string } {
+  const chatLid = lidJid(msg.key.remoteJid) ?? lidJid(msg.key.remoteJidAlt);
+  const senderLid =
+    lidJid(msg.key.participant) ??
+    lidJid(msg.key.participantAlt) ??
+    (msg.key.participant ? undefined : chatLid);
+  return {
+    ...(chatLid ? { chatLid } : {}),
+    ...(senderLid ? { senderLid } : {}),
+  };
+}
+
 // ---- Normalizers ----
 
 /** Normalize a Baileys messages.upsert event to NormalizedMessageEvent[]. */
@@ -687,16 +705,19 @@ export function normalizeMessagesUpsert(
       normalizeLidInMessage(msg);
       const details = extractMessageDetails(msg);
       const chatId = getChatJid(msg);
+      const lids = messageLidFields(msg);
       const isGroup = chatId.endsWith("@g.us");
       return {
         instanceId,
         chatId,
+        ...(lids.chatLid ? { chatLid: lids.chatLid } : {}),
         chatName: isGroup ? null : (msg.pushName ?? null),
         senderName: msg.pushName ?? null,
         isGroup,
         message: {
           id: msg.key.id ?? "",
           sender: getSenderJid(msg),
+          ...(lids.senderLid ? { senderLid: lids.senderLid } : {}),
           timestamp: messageTimestampToSeconds(msg.messageTimestamp, 0),
           type: details.type,
           content: details.content,
