@@ -1,6 +1,8 @@
 // ============================================================
 // WA MCP — Scheduled message table
 // Created in the existing SQLite database. The file path does not change.
+// Millisecond timestamps use INTEGER. Fold this DDL into SCHEMA_SQL before
+// running it on Postgres so those columns widen to BIGINT. Queries use `?`.
 // ============================================================
 
 import type Database from "better-sqlite3";

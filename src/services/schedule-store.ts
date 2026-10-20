@@ -97,6 +97,7 @@ export class ScheduleStore {
   }
 
   insert(row: NewScheduleRow): ScheduleRecord {
+    const weekdaysJson = row.weekdays.length > 0 ? JSON.stringify(row.weekdays) : null;
     this.sqlite
       .prepare(
         `INSERT INTO scheduled_messages (
@@ -104,15 +105,28 @@ export class ScheduleStore {
           scheduled_at, next_run_at, weekdays_json, day_of_month, end_at, occurrence_limit,
           occurrence_count, attempts, status, created_at, updated_at
         ) VALUES (
-          @id, @instanceId, @recipient, @messageType, @payloadJson, @timezone, @recurrence,
-          @scheduledAt, @nextRunAt, @weekdaysJson, @dayOfMonth, @endAt, @occurrenceLimit,
-          0, 0, 'active', @now, @now
+          ?, ?, ?, ?, ?, ?, ?,
+          ?, ?, ?, ?, ?, ?,
+          0, 0, 'active', ?, ?
         )`,
       )
-      .run({
-        ...row,
-        weekdaysJson: row.weekdays.length > 0 ? JSON.stringify(row.weekdays) : null,
-      });
+      .run(
+        row.id,
+        row.instanceId,
+        row.recipient,
+        row.messageType,
+        row.payloadJson,
+        row.timezone,
+        row.recurrence,
+        row.scheduledAt,
+        row.nextRunAt,
+        weekdaysJson,
+        row.dayOfMonth,
+        row.endAt,
+        row.occurrenceLimit,
+        row.now,
+        row.now,
+      );
     const stored = this.get(row.instanceId, row.id);
     if (!stored) throw new Error("Invalid scheduled send; it could not be stored");
     return stored;
@@ -134,17 +148,17 @@ export class ScheduleStore {
     const totalRow = this.sqlite
       .prepare(
         `SELECT COUNT(*) AS total FROM scheduled_messages
-         WHERE instance_id = @instanceId AND (@status IS NULL OR status = @status)`,
+         WHERE instance_id = ? AND (? IS NULL OR status = ?)`,
       )
-      .get({ instanceId, status }) as { total: number };
+      .get(instanceId, status, status) as { total: number };
     const rows = this.sqlite
       .prepare(
         `SELECT * FROM scheduled_messages
-         WHERE instance_id = @instanceId AND (@status IS NULL OR status = @status)
+         WHERE instance_id = ? AND (? IS NULL OR status = ?)
          ORDER BY next_run_at ASC, id ASC
-         LIMIT @limit OFFSET @offset`,
+         LIMIT ? OFFSET ?`,
       )
-      .all({ instanceId, status, limit, offset }) as ScheduleRow[];
+      .all(instanceId, status, status, limit, offset) as ScheduleRow[];
     return { rows: rows.map(mapRow), total: totalRow.total };
   }
 
@@ -169,41 +183,38 @@ export class ScheduleStore {
     token: string,
     excludeInstanceIds: readonly string[] = [],
   ): ScheduleRecord | null {
-    const params: Record<string, string | number> = { now, leaseUntil, token };
-    const excludeNames: string[] = [];
-    excludeInstanceIds.forEach((instanceId, index) => {
-      const name = `exclude${index}`;
-      params[name] = instanceId;
-      excludeNames.push(`@${name}`);
-    });
-    const excludeSql =
-      excludeNames.length > 0 ? `AND instance_id NOT IN (${excludeNames.join(", ")})` : "";
+    const params: Array<string | number> = [token, leaseUntil, now, now];
+    let excludeSql = "";
+    if (excludeInstanceIds.length > 0) {
+      excludeSql = `AND instance_id NOT IN (${excludeInstanceIds.map(() => "?").join(", ")})`;
+      params.push(...excludeInstanceIds);
+    }
     const row = this.sqlite
       .prepare(
         `UPDATE scheduled_messages
-         SET status = 'running', lease_token = @token, lease_until = @leaseUntil, updated_at = @now
+         SET status = 'running', lease_token = ?, lease_until = ?, updated_at = ?
          WHERE id = (
            SELECT id FROM scheduled_messages
-           WHERE status = 'active' AND next_run_at <= @now
+           WHERE status = 'active' AND next_run_at <= ?
            ${excludeSql}
            ORDER BY next_run_at ASC, id ASC
            LIMIT 1
          )
          RETURNING *`,
       )
-      .get(params) as ScheduleRow | undefined;
+      .get(...params) as ScheduleRow | undefined;
     return row ? mapRow(row) : null;
   }
 
-  /** Put a claimed row back to active without moving next_run_at. */
-  release(id: string, leaseToken: string | null, now: number): boolean {
+  /** Put a claimed row back to active. `nextRunAt` is the due time to keep. */
+  release(id: string, leaseToken: string | null, now: number, nextRunAt: number): boolean {
     const result = this.sqlite
       .prepare(
         `UPDATE scheduled_messages
-         SET status = 'active', lease_token = NULL, lease_until = NULL, updated_at = @now
-         WHERE id = @id AND status = 'running' AND lease_token IS @leaseToken`,
+         SET status = 'active', next_run_at = ?, lease_token = NULL, lease_until = NULL, updated_at = ?
+         WHERE id = ? AND status = 'running' AND lease_token IS ?`,
       )
-      .run({ id, leaseToken, now });
+      .run(nextRunAt, now, id, leaseToken);
     return result.changes > 0;
   }
 
@@ -239,19 +250,30 @@ export class ScheduleStore {
     const result = this.sqlite
       .prepare(
         `UPDATE scheduled_messages
-         SET status = @status,
-             occurrence_count = @occurrenceCount,
-             next_run_at = @nextRunAt,
-             last_run_at = @lastRunAt,
-             last_job_id = @lastJobId,
-             last_error = @lastError,
-             attempts = @attempts,
+         SET status = ?,
+             occurrence_count = ?,
+             next_run_at = ?,
+             last_run_at = ?,
+             last_job_id = ?,
+             last_error = ?,
+             attempts = ?,
              lease_token = NULL,
              lease_until = NULL,
-             updated_at = @now
-         WHERE id = @id AND status = 'running' AND lease_token IS @leaseToken`,
+             updated_at = ?
+         WHERE id = ? AND status = 'running' AND lease_token IS ?`,
       )
-      .run(update);
+      .run(
+        update.status,
+        update.occurrenceCount,
+        update.nextRunAt,
+        update.lastRunAt,
+        update.lastJobId,
+        update.lastError,
+        update.attempts,
+        update.now,
+        update.id,
+        update.leaseToken,
+      );
     return result.changes > 0;
   }
 
@@ -267,15 +289,15 @@ export class ScheduleStore {
       .prepare(
         `UPDATE scheduled_messages
          SET status = 'active',
-             next_run_at = @nextRunAt,
-             attempts = @attempts,
-             last_error = @lastError,
+             next_run_at = ?,
+             attempts = ?,
+             last_error = ?,
              lease_token = NULL,
              lease_until = NULL,
-             updated_at = @now
-         WHERE id = @id AND status = 'running' AND lease_token IS @leaseToken`,
+             updated_at = ?
+         WHERE id = ? AND status = 'running' AND lease_token IS ?`,
       )
-      .run({ id, leaseToken, nextRunAt, attempts, lastError, now });
+      .run(nextRunAt, attempts, lastError, now, id, leaseToken);
     return result.changes > 0;
   }
 }

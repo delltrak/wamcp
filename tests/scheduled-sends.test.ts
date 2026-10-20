@@ -8,6 +8,7 @@ import { DEFAULT_SCHEDULER_TIMEZONE } from "../src/constants.js";
 import { createScheduledMessagesTable } from "../src/db/scheduled-messages.js";
 import { ScheduleMessageSchema } from "../src/schemas/schedule.schema.js";
 import {
+  canonicalTimeZone,
   firstOccurrence,
   isValidTimeZone,
   nextOccurrence,
@@ -222,14 +223,21 @@ describe("schedule clock", () => {
     expect(firstOccurrence({ ...spec, scheduledAt: onTheDay })).toBe(onTheDay);
   });
 
-  it("accepts IANA timezone names and rejects offsets and Etc zones", () => {
+  it("accepts IANA timezone names and rejects offsets, abbreviations, and offset Etc zones", () => {
     expect(isValidTimeZone("America/Bahia")).toBe(true);
     expect(isValidTimeZone("UTC")).toBe(true);
+    expect(isValidTimeZone("Etc/UTC")).toBe(true);
+    expect(canonicalTimeZone("america/bahia")).toBe("America/Bahia");
+    expect(canonicalTimeZone("Etc/UTC")).toBe("UTC");
     expect(isValidTimeZone("+03:00")).toBe(false);
+    expect(isValidTimeZone("EST")).toBe(false);
     expect(isValidTimeZone("Etc/GMT+3")).toBe(false);
     const now = Date.parse("2026-10-20T12:00:00Z");
     expect(() =>
       parseScheduleRequest({ scheduledAt: "2026-10-21T09:00:00-03:00", timezone: "+03:00" }, now),
+    ).toThrow(/IANA/);
+    expect(() =>
+      parseScheduleRequest({ scheduledAt: "2026-10-21T09:00:00-03:00", timezone: "EST" }, now),
     ).toThrow(/IANA/);
     expect(() =>
       parseScheduleRequest(
@@ -237,6 +245,16 @@ describe("schedule clock", () => {
         now,
       ),
     ).toThrow(/IANA/);
+    expect(
+      parseScheduleRequest(
+        { scheduledAt: "2026-10-21T09:00:00-03:00", timezone: "america/bahia" },
+        now,
+      ).timezone,
+    ).toBe("America/Bahia");
+    expect(
+      parseScheduleRequest({ scheduledAt: "2026-10-21T09:00:00Z", timezone: "Etc/UTC" }, now)
+        .timezone,
+    ).toBe("UTC");
   });
 
   it("pushes a wall time inside a DST gap forward", () => {
@@ -646,7 +664,7 @@ describe("scheduled sends", () => {
     expect(
       scheduler.list({ instanceId: INSTANCE_ID }).schedules.find((row) => row.id === recurring.id)
         ?.nextRunAt,
-    ).toBe("2026-10-21T12:05:00.000Z");
+    ).toBe("2026-10-21T15:00:00.000Z");
 
     expect((await scheduler.tick()).dispatched).toBe(0);
     expect(sent).toHaveLength(1);
@@ -658,6 +676,31 @@ describe("scheduled sends", () => {
     expect(sent).toHaveLength(2);
     expect(scheduler.list({ instanceId: INSTANCE_ID, status: "active" }).total).toBe(0);
     expect(scheduler.list({ instanceId: INSTANCE_ID, status: "cancelled" }).total).toBe(1);
+  });
+
+  it("does not skip on-time rows that wait for the send rate limit", async () => {
+    let now = Date.parse("2026-10-20T12:00:00Z");
+    const { scheduler, sent } = harness({
+      now: () => now,
+      missedPolicy: "skip",
+      rateLimit: 2,
+    });
+    for (let index = 0; index < 8; index++) {
+      scheduler.create({
+        instanceId: INSTANCE_ID,
+        to: `550000000000${index + 1}`,
+        scheduledAt: "2026-10-21T09:00:00-03:00",
+        content: { type: "text", text: `slot ${index}` },
+      });
+    }
+    now = Date.parse("2026-10-21T12:00:00Z");
+    for (let minute = 0; minute < 4; minute++) {
+      await scheduler.tick();
+      now += 60_000;
+    }
+    expect(sent).toHaveLength(8);
+    expect(scheduler.list({ instanceId: INSTANCE_ID, status: "skipped" }).total).toBe(0);
+    expect(scheduler.list({ instanceId: INSTANCE_ID, status: "completed" }).total).toBe(8);
   });
 
   it("skips an overdue backlog without waiting for send budget", async () => {

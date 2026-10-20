@@ -111,12 +111,13 @@ Tools marked **Baileys only** are not available on Cloud API instances.
   anything. `wa_pause_scheduled` and `wa_cancel_scheduled` work while the gate is false, so overdue
   rows can be stopped before it is turned on. `wa_list_scheduled` still reads rows.
   Schedules persist in the existing SQLite database (`scheduled_messages`). The timezone is an IANA
-  name; the default is `America/Bahia`. Numeric offsets and `Etc/*` zones are rejected.
+  name; the default is `America/Bahia`. It is stored in canonical form. `Etc/UTC` is accepted as
+  `UTC`. Numeric offsets, abbreviations such as `EST`, and other `Etc/*` zones are rejected.
   `WA_SCHEDULER_MISSED_POLICY` is `skip` or `send` (default `skip`). A due time
   within 2 minutes is sent. Older than that, `skip` drops the occurrence and waits for the next
   future slot (a one-shot becomes `skipped`); `send` queues that one occurrence and then advances
   a recurring schedule to the next slot after now. A catch-up backlog is not enqueued faster than
-  the instance outbound rate limit. `WA_SCHEDULER_MAX_ACTIVE` (default 100) caps active, paused,
+  the instance outbound rate limit. Time spent waiting for that limit is not a missed run. `WA_SCHEDULER_MAX_ACTIVE` (default 100) caps active, paused,
   and running rows per instance. `scheduledAt` must be within 1 year. A claimed row whose lease
   expires is not sent again. Due sends go through the existing outbound rate limiter.
 
@@ -2650,8 +2651,9 @@ existing SQLite file; the database path is unchanged.
 
 `scheduledAt` is RFC3339, must be in the future, and must be at most 1 year ahead. `to` is a phone
 number or a group JID. Phone numbers are stored as `<digits>@s.whatsapp.net`. `status@broadcast`
-and `@newsletter` are rejected. `timezone` is an IANA name such as `America/Bahia` (the default).
-Numeric offsets (`+03:00`) and `Etc/*` zones are rejected. `once` sends a single time. `daily`,
+and `@newsletter` are rejected. `timezone` is an IANA name such as `America/Bahia` (the default)
+and is stored in canonical form. `Etc/UTC` is accepted as `UTC`. Numeric offsets (`+03:00`),
+abbreviations such as `EST`, and other `Etc/*` zones are rejected. `once` sends a single time. `daily`,
 `weekly`, and `monthly` repeat that instant's wall clock in the schedule timezone. The first weekly
 or monthly run is the first matching weekday or day of month at or after `scheduledAt`. Weekly
 `weekdays` use `0` for Sunday through `6` for Saturday. Monthly `dayOfMonth` is clamped to the last
@@ -2661,10 +2663,11 @@ instance can hold `WA_SCHEDULER_MAX_ACTIVE` schedules in `active`, `paused`, or 
 are `text`, `image`, `video`, `audio`, `document`, and `sticker`.
 
 A due backlog is enqueued at most as fast as `WA_BAILEYS_RATE_LIMIT` or `WA_CLOUD_RATE_LIMIT`
-(messages per minute for that instance). Rows past that budget stay `active` with the same
-`nextRunAt` and are claimed again on a later tick. The missed-run policy is applied when a row is
-taken for dispatch, including a second check immediately before enqueue. `skip` does not wait on
-the send budget: overdue rows are dropped up to 50 per tick.
+(messages per minute for that instance). Rows past that budget stay `active` and are claimed again
+on a later tick. A row that was on time when the limiter held it gets `nextRunAt` moved to that
+moment, so the wait is not a missed run. A row that was already late on first claim still follows
+the missed-run policy, including a second check immediately before enqueue. `skip` does not wait on
+the send budget: rows that are already overdue are dropped up to 50 per tick.
 
 Missed-run policy (`WA_SCHEDULER_MISSED_POLICY`, default `skip`):
 
@@ -2685,7 +2688,7 @@ given up (one-shot `failed`, recurring advances).
 | `instanceId`      | string | Yes      | Instance to send from |
 | `to`              | string | Yes      | Phone number or group JID. Not `status@broadcast` or `@newsletter` |
 | `scheduledAt`     | string | Yes      | RFC3339 instant, in the future and at most 1 year ahead |
-| `timezone`        | string | No       | IANA name such as `America/Bahia`. Not `+03:00` or `Etc/*` |
+| `timezone`        | string | No       | IANA name such as `America/Bahia`. `Etc/UTC` becomes `UTC`. Not `+03:00`, `EST`, or other `Etc/*` |
 | `recurrence`      | string | No       | `once` (default), `daily`, `weekly`, or `monthly` |
 | `weekdays`        | number[] | No    | Weekly only. Unique values `0`–`6` |
 | `dayOfMonth`      | number | No       | Monthly only. `1`–`31` |

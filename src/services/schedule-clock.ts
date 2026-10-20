@@ -46,22 +46,26 @@ const RFC3339 = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(\.\d{1,9})?(Z|
 const OFFSET_ZONE = /^[+-]\d{2}:?\d{2}$/;
 
 /**
- * Accept IANA names such as America/Bahia or UTC.
- * Numeric offsets (+03:00) and Etc/* zones are rejected.
+ * Canonical IANA name, or null.
+ * `america/bahia` becomes `America/Bahia`. `Etc/UTC` becomes `UTC`.
+ * Numeric offsets, abbreviations such as EST, and other Etc/* zones are rejected.
  */
-export function isValidTimeZone(timeZone: string): boolean {
+export function canonicalTimeZone(timeZone: string): string | null {
   const value = timeZone.trim();
-  if (value === "" || OFFSET_ZONE.test(value) || value === "Etc" || value.startsWith("Etc/")) {
-    return false;
-  }
+  if (value === "" || OFFSET_ZONE.test(value)) return null;
+  if (!value.includes("/") && value.toUpperCase() !== "UTC") return null;
   try {
     const resolved = new Intl.DateTimeFormat("en-US", { timeZone: value }).resolvedOptions()
       .timeZone;
-    if (!resolved || resolved.startsWith("Etc/")) return false;
-    return true;
+    if (!resolved || resolved.startsWith("Etc/")) return null;
+    return resolved;
   } catch {
-    return false;
+    return null;
   }
+}
+
+export function isValidTimeZone(timeZone: string): boolean {
+  return canonicalTimeZone(timeZone) !== null;
 }
 
 export function defaultTimeZone(): string {
@@ -224,8 +228,8 @@ export interface ScheduleRequestInput {
 }
 
 export function parseScheduleRequest(input: ScheduleRequestInput, now: number): ParsedSchedule {
-  const timezone = (input.timezone ?? defaultTimeZone()).trim();
-  if (!isValidTimeZone(timezone)) {
+  const timezone = canonicalTimeZone(input.timezone ?? defaultTimeZone());
+  if (!timezone) {
     throw new Error("Invalid timezone; expected an IANA timezone");
   }
   const scheduledAt = parseRfc3339(input.scheduledAt, "scheduledAt");

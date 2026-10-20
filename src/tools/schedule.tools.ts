@@ -27,7 +27,7 @@ export function registerScheduleTools(server: McpServer, scheduler: MessageSched
     "wa_schedule_message",
     {
       description: `Schedule a WhatsApp message once, or repeat it daily, weekly, or monthly.
-The timezone is an IANA name. The default is America/Bahia. Numeric offsets and Etc/* zones are rejected.
+The timezone is an IANA name. The default is America/Bahia. It is stored in canonical form. Etc/UTC is accepted as UTC. Numeric offsets, abbreviations such as EST, and other Etc/* zones are rejected.
 The first run is the first valid slot at or after scheduledAt, so a weekly or monthly schedule waits
 when that instant is not a selected weekday or day of the month. Later runs use that wall-clock time.
 Weekdays are 0 (Sunday) through 6 (Saturday). The recipient is a phone number or group JID.

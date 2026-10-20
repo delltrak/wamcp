@@ -492,8 +492,12 @@ export class MessageScheduler {
   }
 
   private releaseClaim(job: ScheduleRecord): void {
-    if (this.store.release(job.id, job.leaseToken, this.now())) return;
-    this.store.setStatus(job.instanceId, job.id, ["running"], "active", this.now());
+    const now = this.now();
+    // The row was not late when it was picked up. Waiting for the outbound
+    // limiter must not turn that wait into a missed run.
+    const nextRunAt = Math.max(job.nextRunAt, now);
+    if (this.store.release(job.id, job.leaseToken, now, nextRunAt)) return;
+    this.store.setStatus(job.instanceId, job.id, ["running"], "active", now);
   }
 }
 
