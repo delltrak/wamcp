@@ -93,10 +93,14 @@ Tools marked **Baileys only** are not available on Cloud API instances.
   group/server writes that share that gate; member-label tools specifically require
   `WA_GROUP_WRITES_ENABLED=true`.
 - **Group-history digests** -- `wa_send_group_history_to_member` is a Baileys workaround for the
-  unavailable native recent-history sharing feature. It reads local SQLite messages and queues a
-  text digest to the member's DM. `WA_GROUP_HISTORY_ON_JOIN=false` optionally enables the same
-  digest after a direct add by this account, and still requires `WA_GROUP_WRITES_ENABLED=true`.
-  `WA_GROUP_HISTORY_ON_JOIN_COUNT=50` is clamped to 25–100.
+  unavailable native recent-history sharing feature. It reads local SQLite messages, skips revoked
+  and view-once messages, refuses groups with `ephemeralDuration` greater than 0, and queues a
+  text digest to a current member's PN when one is known. `WA_GROUP_HISTORY_ON_JOIN` optionally
+  enables the same digest from a `GROUP_PARTICIPANT_ADD` stub authored by this account, and still
+  requires `WA_GROUP_WRITES_ENABLED=true`. The flag accepts only `true` or `false`.
+  `WA_GROUP_HISTORY_ON_JOIN_COUNT` defaults to 50, must be an integer, and is clamped to 25–100.
+  Any other value fails startup. Approved joins that rc14 stores as a plain add stub cannot be
+  told apart from a direct add.
 - **Message keys for chat patches** -- Unread, archive, delete, and clear operations use up to three
   recent stored raw message keys with numeric Unix-second timestamps. The collection index uses the
   latest raw key's `remoteJid`, preserving the PN/LID address used by that message. Invalid rows are
@@ -1284,38 +1288,60 @@ member labels are self-assigned: these tools can only set or remove the connecte
 label, not another participant's label. Updates are queued and rate limited per instance.
 
 `wa_send_group_history_to_member` sends a readable digest of recent locally stored group messages
-to a participant's direct chat. Baileys rc14 cannot use WhatsApp's native recent-history sharing,
-so this sends plain text as a workaround. It requires `WA_GROUP_WRITES_ENABLED=true`; the app-state
-write flag alone does not enable it. Digest chunks are queued through the per-instance outbound
-message limiter. Optional automatic sending is controlled by `WA_GROUP_HISTORY_ON_JOIN=false` and
-`WA_GROUP_HISTORY_ON_JOIN_COUNT=50` (clamped to 25–100).
+to a current member's direct chat. Baileys rc14 cannot use WhatsApp's native recent-history
+sharing, so this sends plain text as a workaround. It requires `WA_GROUP_WRITES_ENABLED=true`; the
+app-state write flag alone does not enable it. The participant must match a current group
+participant by PN or LID. The direct message is addressed to the member's phone JID when group
+metadata (or, for automatic sends, the stub) has one. Groups with `ephemeralDuration` greater than
+0 are refused entirely, so disappearing messages are never copied into a permanent chat. Revoked
+messages and view-once messages are skipped; the read widens until the requested count of shareable
+messages is reached or 1,000 stored rows have been scanned. Each digest line is truncated to 400
+characters. At most 5 chunks are queued. Chunks are numbered `(2/4)` when there is more than one,
+and messages that do not fit are omitted with a `…mais N` line. If enqueue fails after at least one
+chunk was accepted, the tool still returns that `chunksSent` count. Digest chunks use the
+per-instance outbound message limiter.
 
-Baileys rc14's `group-participants.update` event provides `author` and may provide `authorPn`, but
-its normalized `action: "add"` combines direct adds, invite stubs, and join-request stubs. Automatic
-sends require a matching raw `messages.upsert` message with stub type `GROUP_PARTICIPANT_ADD`, an
-author matching this account's PN or LID, and a non-self participant. `GROUP_PARTICIPANT_INVITE`,
-`GROUP_PARTICIPANT_ADD_REQUEST_JOIN`, other-admin adds, and events without a matching raw stub or
-author are skipped. Errors are logged without interrupting event processing.
+Optional automatic sending is controlled by `WA_GROUP_HISTORY_ON_JOIN` (default `false`, only
+`true` or `false`) and `WA_GROUP_HISTORY_ON_JOIN_COUNT` (default `50`, an integer clamped to
+25–100). Any other value fails startup. Both still require `WA_GROUP_WRITES_ENABLED=true`.
+
+rc14 does not buffer `group-participants.update` (`Utils/event-buffer.js`). `process-message.js`
+emits it immediately, before the buffered `messages.upsert`, so the two events are not in one
+batch. Automatic sends are detected from `messages.upsert` only (live `notify` and offline
+`append`); `messaging-history.set` is not scanned. The stub must be: `messageStubType`
+`GROUP_PARTICIPANT_ADD`, `key.participant` or `key.participantAlt` equal to this account's LID or
+PN, and targets in `messageStubParameters`. The stub `key.id` is inserted into `group_history_sends`
+before queueing, so a stub redelivered after reconnect is not sent twice.
+`GROUP_PARTICIPANT_INVITE` and `GROUP_PARTICIPANT_ADD_REQUEST_JOIN` are ignored, along with stubs
+from other authors and targets that are this account. rc14's `group-participants.update` action
+`add` has no reason: invite, request-join, and direct-add stubs share that action, and the
+notification parser maps an `add` child only to `GROUP_PARTICIPANT_ADD`. An approved join that
+WhatsApp delivers as `GROUP_PARTICIPANT_ADD` authored by this account cannot be distinguished from
+a direct add and will be sent. Errors are logged without interrupting event processing.
 
 #### `wa_send_group_history_to_member`
 
-Send the latest locally stored group messages as a readable, oldest-first digest in a participant's
-direct chat. The sender name uses a stored contact name or message push name, with the JID number as
-fallback. Media is represented by Portuguese placeholders such as `[imagem]`, `[áudio]`, and
-`[documento: nome]`, followed by any caption. Messages are split into queued chunks of at most 4,000
-characters. If no local messages are available, nothing is sent and the response includes a note.
+Send the latest locally stored group messages as a readable, oldest-first digest in a current
+member's direct chat. The sender name uses a stored contact name or message push name, with the JID
+number as fallback. Media is represented by Portuguese placeholders such as `[imagem]`, `[áudio]`,
+and `[documento: nome]`, followed by any caption. Revoked and view-once messages are omitted. Lines
+longer than 400 characters are truncated. The digest is split into at most 5 queued chunks of 4,000
+characters, numbered `(1/N)` when split, with `…mais N` when messages are left out. If no shareable
+local messages are available, nothing is sent and the response includes a note. A group with
+disappearing messages enabled is refused before anything is queued.
 
 | Parameter     | Type   | Required | Description |
 | ------------- | ------ | -------- | ----------- |
 | `instanceId`  | string | Yes      | The instance ID to send from |
 | `groupJid`    | string | Yes      | WhatsApp group JID or bare group ID |
-| `participant` | string | Yes      | New member's individual JID or phone number; bare phone numbers are normalized to a JID |
-| `count`       | number | No       | Requested message count; defaults to 50 and is clamped to 25–100 |
+| `participant` | string | Yes      | Current member's individual JID (PN or LID) or phone number. Bare phone numbers are normalized to a PN JID. The send is refused when this identity is not a current participant |
+| `count`       | number | No       | Requested shareable message count; defaults to 50 and is clamped to 25–100 |
 
 **Channel support:** Baileys only. Requires `WA_GROUP_WRITES_ENABLED=true`.
 
-**Response:** `messagesIncluded`, `chunksSent` (accepted by the outbound queue), `requestedCount`,
-`count` (after clamping), `clamped`, and an optional `note` for empty local history.
+**Response:** `messagesIncluded`, `chunksSent` (accepted by the outbound queue, including a partial
+count when a later enqueue fails), `requestedCount`, `count` (after clamping), `clamped`,
+`omittedMessages`, and an optional `note`.
 
 ```json
 {
@@ -1323,7 +1349,8 @@ characters. If no local messages are available, nothing is sent and the response
   "chunksSent": 2,
   "requestedCount": 50,
   "count": 50,
-  "clamped": false
+  "clamped": false,
+  "omittedMessages": 0
 }
 ```
 

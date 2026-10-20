@@ -131,6 +131,30 @@ function messageContent(msg: WAMessage): MessageRecord | undefined {
   return unwrapMessageContent(msg.message);
 }
 
+const VIEW_ONCE_KEYS = new Set([
+  "viewOnceMessage",
+  "viewOnceMessageV2",
+  "viewOnceMessageV2Extension",
+]);
+
+/** True when the raw Baileys message is view-once, including when a wrapper hides the flag. */
+export function isViewOnceMessage(message: { message?: unknown } | null | undefined): boolean {
+  return containsViewOnce(message?.message, 0);
+}
+
+function containsViewOnce(value: unknown, depth: number): boolean {
+  if (depth > 6 || typeof value !== "object" || value === null) return false;
+  if (Array.isArray(value)) return value.some((item) => containsViewOnce(item, depth + 1));
+  const record = value as Record<string, unknown>;
+  if (record.viewOnce === true) return true;
+  for (const [key, child] of Object.entries(record)) {
+    if (key === "contextInfo" || key === "quotedMessage") continue;
+    if (VIEW_ONCE_KEYS.has(key)) return true;
+    if (containsViewOnce(child, depth + 1)) return true;
+  }
+  return false;
+}
+
 /** Read WhatsApp's forwarded marker from the content field that carries contextInfo. */
 export function isMessageForwarded(msg: WAMessage | undefined): boolean {
   if (!msg) return false;
@@ -842,7 +866,6 @@ export function normalizeGroupsUpdate(
 export function normalizeGroupParticipantsUpdate(
   instanceId: string,
   data: BaileysEventMap["group-participants.update"],
-  directAdd = false,
 ): NormalizedGroupParticipantsEvent {
   const actionMap: Record<string, "add" | "remove" | "promote" | "demote"> = {
     add: "add",
@@ -869,7 +892,6 @@ export function normalizeGroupParticipantsUpdate(
     }),
     ...(typeof data.author === "string" ? { author: data.author } : {}),
     ...(typeof data.authorPn === "string" ? { authorPn: data.authorPn } : {}),
-    ...(directAdd ? { directAdd: true } : {}),
   };
 }
 

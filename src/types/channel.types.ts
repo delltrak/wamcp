@@ -420,6 +420,8 @@ export interface Message {
   isForwarded: boolean;
   status: MessageDeliveryStatus;
   timestamp: number;
+  /** True when the stored raw message is view-once. The digest must not copy it. */
+  viewOnce?: boolean;
   pushName?: string | null;
   starred?: boolean;
   labels?: BusinessLabel[];
@@ -607,8 +609,6 @@ export interface NormalizedGroupParticipantsEvent {
   participantAliases?: string[][];
   author?: string | null;
   authorPn?: string | null;
-  /** True only when the matching rc14 message stub identifies a direct participant add. */
-  directAdd?: boolean;
 }
 
 export interface NormalizedContactUpdateEvent {

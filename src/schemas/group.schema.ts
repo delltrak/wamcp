@@ -33,13 +33,15 @@ export const SendGroupHistoryToMemberSchema = z
       .trim()
       .min(1)
       .refine(isValidStatusRecipient, "Expected an individual WhatsApp phone number or JID")
-      .describe("New member's phone number or individual JID"),
+      .describe(
+        "Current member's phone number or individual JID (PN or LID). The direct message is sent to the member's phone number when group metadata has one.",
+      ),
     count: z
       .number()
       .int()
       .optional()
       .describe(
-        "How many recent messages to include (defaults to 50; values are clamped to 25–100)",
+        "How many recent shareable messages to include (defaults to 50; values are clamped to 25–100). Revoked and view-once messages are skipped.",
       ),
   })
   .strict();

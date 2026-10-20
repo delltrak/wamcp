@@ -1,17 +1,25 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import Database from "better-sqlite3";
 import { UnrecoverableError } from "bullmq";
+import { WAMessageStubType, type WAMessage } from "@whiskeysockets/baileys";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { z } from "zod";
 import type { ChannelAdapter } from "../src/channels/channel.interface.js";
+import { publishOwnDirectParticipantAdds } from "../src/channels/baileys/group-history-event.js";
 import type { InstanceManager } from "../src/services/instance-manager.js";
 import type { MessageQueue } from "../src/services/message-queue.js";
 import {
   chunkGroupHistoryDigest,
   formatGroupHistoryDigest,
   getGroupHistoryOnJoinCount,
+  GROUP_HISTORY_EPHEMERAL_MESSAGE,
+  GROUP_HISTORY_NOT_A_MEMBER_MESSAGE,
   isGroupHistoryOnJoinEnabled,
-  isOwnGroupHistoryJoin,
   isOwnGroupHistoryParticipant,
+  isShareableGroupHistoryMessage,
+  MAX_GROUP_HISTORY_CHUNKS,
+  MAX_GROUP_HISTORY_LINE_CHARS,
+  prepareGroupHistoryChunks,
   registerGroupHistoryOnJoin,
   type GroupHistorySendResult,
 } from "../src/services/group-history.js";
@@ -20,13 +28,14 @@ import {
   GroupHistoryWritesDisabledError,
 } from "../src/utils/group-history-error.js";
 import { registerGroupTools } from "../src/tools/group.tools.js";
-import type { Message, NormalizedGroupParticipantsEvent } from "../src/types/channel.types.js";
+import type { GroupMetadata, Message } from "../src/types/channel.types.js";
 
 const INSTANCE_ID = "history-fixture";
 const GROUP_JID = "120363000000000001@g.us";
 const OWN_PN = "5511000000000@s.whatsapp.net";
 const OWN_LID = "1000000000@lid";
 const MEMBER_JID = "5511000000001@s.whatsapp.net";
+const MEMBER_LID = "1000000001@lid";
 
 type RegisteredTool = {
   inputSchema: z.ZodType;
@@ -37,6 +46,8 @@ type ToolResult = {
   isError?: boolean;
   content: Array<{ text?: string }>;
 };
+
+const cleanups: Array<() => void> = [];
 
 function message(overrides: Partial<Message> & Pick<Message, "id" | "timestamp">): Message {
   return {
@@ -51,6 +62,43 @@ function message(overrides: Partial<Message> & Pick<Message, "id" | "timestamp">
     isForwarded: false,
     status: "received",
     timestamp: overrides.timestamp,
+    ...overrides,
+  };
+}
+
+function groupMetadata(overrides: Partial<GroupMetadata> = {}): GroupMetadata {
+  return {
+    jid: GROUP_JID,
+    subject: "Local group title",
+    description: null,
+    owner: OWN_PN,
+    ownerJid: OWN_PN,
+    creation: null,
+    participants: [
+      {
+        jid: OWN_PN,
+        role: "admin",
+        phone: "5511000000000",
+        isAdmin: true,
+        isSuperAdmin: false,
+      },
+      {
+        jid: MEMBER_JID,
+        role: "member",
+        phone: "5511000000001",
+        isAdmin: false,
+        isSuperAdmin: false,
+      },
+    ],
+    participantCount: 2,
+    size: 2,
+    announce: false,
+    restrict: false,
+    isAnnounce: false,
+    isLocked: false,
+    ephemeralDuration: null,
+    inviteCode: null,
+    createdAt: null,
     ...overrides,
   };
 }
@@ -73,6 +121,7 @@ function createAdapter(overrides: Record<string, unknown> = {}): ChannelAdapter 
       },
     ]),
     getContacts: vi.fn(async () => []),
+    getGroupMetadata: vi.fn(async () => groupMetadata()),
     getLifecycleStatus: vi.fn(() => ({ phone: OWN_PN, lid: OWN_LID, pushName: "Account" })),
     ...overrides,
   } as unknown as ChannelAdapter;
@@ -114,33 +163,80 @@ function responseData(result: ToolResult): GroupHistorySendResult {
   return JSON.parse(result.content[0]?.text ?? "{}") as GroupHistorySendResult;
 }
 
-function autoJoinFixture() {
-  let listener: ((event: string, instanceId: string, payload: unknown) => void) | undefined;
-  const adapter = createAdapter();
+function memoryClaim() {
+  const seen = new Set<string>();
+  return (instanceId: string, messageId: string) => {
+    const key = `${instanceId}:${messageId}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  };
+}
+
+function sqliteClaim() {
+  const sqlite = new Database(":memory:");
+  sqlite.exec(`
+    CREATE TABLE group_history_sends (
+      instance_id TEXT NOT NULL,
+      message_id TEXT NOT NULL,
+      sent_at INTEGER NOT NULL,
+      PRIMARY KEY (instance_id, message_id)
+    );
+  `);
+  const insert = sqlite.prepare(
+    "INSERT OR IGNORE INTO group_history_sends (instance_id, message_id, sent_at) VALUES (?, ?, ?)",
+  );
+  return {
+    sqlite,
+    claim(instanceId: string, messageId: string) {
+      return insert.run(instanceId, messageId, Date.now()).changes > 0;
+    },
+  };
+}
+
+function directAddStub(messageId = "stub-1"): WAMessage {
+  return {
+    key: {
+      remoteJid: GROUP_JID,
+      id: messageId,
+      participant: OWN_LID,
+      participantAlt: OWN_PN,
+    },
+    messageStubType: WAMessageStubType.GROUP_PARTICIPANT_ADD,
+    messageStubParameters: [JSON.stringify({ id: MEMBER_LID, phoneNumber: MEMBER_JID })],
+  } as WAMessage;
+}
+
+function autoJoinFixture(claim = memoryClaim()) {
+  const adapter = createAdapter({
+    getGroupMetadata: vi.fn(async () =>
+      groupMetadata({
+        participants: [
+          {
+            jid: OWN_LID,
+            role: "admin",
+            phone: "5511000000000",
+            isAdmin: true,
+            isSuperAdmin: false,
+          },
+          {
+            jid: MEMBER_LID,
+            role: "member",
+            phone: "5511000000001",
+            isAdmin: false,
+            isSuperAdmin: false,
+          },
+        ],
+      }),
+    ),
+  });
   const queue = createQueue();
   const instanceManager = {
-    onAnyEvent: vi.fn((handler: unknown) => {
-      listener = handler as (event: string, instanceId: string, payload: unknown) => void;
-      return vi.fn();
-    }),
     getAdapter: vi.fn(() => adapter),
     getInstanceChannel: vi.fn(() => "baileys"),
   } as unknown as InstanceManager;
-  registerGroupHistoryOnJoin(instanceManager, queue);
-
-  return {
-    adapter,
-    queue,
-    emit(payload: Partial<NormalizedGroupParticipantsEvent>) {
-      listener?.("group.participants_changed", INSTANCE_ID, {
-        instanceId: INSTANCE_ID,
-        groupId: GROUP_JID,
-        action: "add",
-        participants: [MEMBER_JID],
-        ...payload,
-      });
-    },
-  };
+  cleanups.push(registerGroupHistoryOnJoin(instanceManager, queue, claim));
+  return { adapter, queue };
 }
 
 beforeEach(() => {
@@ -150,6 +246,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  while (cleanups.length) cleanups.pop()?.();
   vi.unstubAllEnvs();
   vi.restoreAllMocks();
 });
@@ -210,25 +307,167 @@ describe("wa_send_group_history_to_member", () => {
     );
   });
 
-  it("queues all chunks under the conservative limit and normalizes a bare phone number", async () => {
-    const longMessage = message({
-      id: "large",
-      timestamp: 1_735_689_600,
-      content: "x".repeat(4_100),
-    });
-    const adapter = createAdapter({ getMessages: vi.fn(async () => [longMessage]) });
+  it("refuses a recipient who is not a current member", async () => {
+    const adapter = createAdapter();
     const queue = createQueue();
     const result = await invoke(registerTool(adapter, queue), {
       instanceId: INSTANCE_ID,
       groupJid: GROUP_JID,
-      participant: "5511000000001",
+      participant: "5511000000009@s.whatsapp.net",
     });
 
-    const chunks = queue.enqueueGroupHistoryMessage.mock.calls.map((call) => call[2] as string);
-    expect(responseData(result)).toMatchObject({ messagesIncluded: 1, chunksSent: 3 });
-    expect(chunks).toHaveLength(3);
-    expect(chunks.every((chunk) => chunk.length <= 4_000)).toBe(true);
-    expect(chunks[0]).toMatch(/^Histórico recente/);
+    expect(result.isError).toBe(true);
+    expect(result.content[0]?.text).toContain(GROUP_HISTORY_NOT_A_MEMBER_MESSAGE);
+    expect(queue.enqueueGroupHistoryMessage).not.toHaveBeenCalled();
+  });
+
+  it("accepts a member by LID and sends the DM to the phone alias", async () => {
+    const adapter = createAdapter({
+      getGroupMetadata: vi.fn(async () =>
+        groupMetadata({
+          participants: [
+            {
+              jid: MEMBER_LID,
+              role: "member",
+              phone: "5511000000001",
+              isAdmin: false,
+              isSuperAdmin: false,
+            },
+          ],
+        }),
+      ),
+    });
+    const queue = createQueue();
+    const result = await invoke(registerTool(adapter, queue), {
+      instanceId: INSTANCE_ID,
+      groupJid: GROUP_JID,
+      participant: MEMBER_LID,
+    });
+
+    expect(result.isError).toBeUndefined();
+    expect(queue.enqueueGroupHistoryMessage).toHaveBeenCalledWith(
+      INSTANCE_ID,
+      MEMBER_JID,
+      expect.stringContaining("hello"),
+      "baileys",
+    );
+  });
+
+  it("refuses groups with disappearing messages", async () => {
+    const adapter = createAdapter({
+      getGroupMetadata: vi.fn(async () => groupMetadata({ ephemeralDuration: 86_400 })),
+    });
+    const queue = createQueue();
+    const result = await invoke(registerTool(adapter, queue), {
+      instanceId: INSTANCE_ID,
+      groupJid: GROUP_JID,
+      participant: MEMBER_JID,
+    });
+
+    expect(result.isError).toBe(true);
+    expect(result.content[0]?.text).toContain(GROUP_HISTORY_EPHEMERAL_MESSAGE);
+    expect(adapter.getMessages).not.toHaveBeenCalled();
+    expect(queue.enqueueGroupHistoryMessage).not.toHaveBeenCalled();
+  });
+
+  it("skips revoked and view-once messages and widens the fetch to keep the requested count", async () => {
+    const revoked = Array.from({ length: 30 }, (_, index) =>
+      message({
+        id: `revoked-${index}`,
+        timestamp: 2_000 + index,
+        content: `secret-${index}`,
+        status: "revoked",
+      }),
+    );
+    const hidden = message({
+      id: "once",
+      timestamp: 1_500,
+      content: "view once secret",
+      type: "image",
+      viewOnce: true,
+    });
+    const visible = Array.from({ length: 25 }, (_, index) =>
+      message({ id: `visible-${index}`, timestamp: index + 1, content: `visible-${index}` }),
+    );
+    const rows = [...revoked].reverse().concat(hidden, [...visible].reverse());
+    const getMessages = vi.fn(async (_jid: string, limit: number) => rows.slice(0, limit));
+    const adapter = createAdapter({ getMessages });
+    const queue = createQueue();
+    const result = await invoke(registerTool(adapter, queue), {
+      instanceId: INSTANCE_ID,
+      groupJid: GROUP_JID,
+      participant: MEMBER_JID,
+      count: 25,
+    });
+
+    expect(getMessages).toHaveBeenLastCalledWith(GROUP_JID, 100);
+    expect(responseData(result).messagesIncluded).toBe(25);
+    const sent = queue.enqueueGroupHistoryMessage.mock.calls
+      .map((call) => call[2] as string)
+      .join("\n");
+    expect(sent).toContain("visible-0");
+    expect(sent).not.toContain("secret-");
+    expect(sent).not.toContain("view once secret");
+    expect(isShareableGroupHistoryMessage(hidden)).toBe(false);
+    expect(isShareableGroupHistoryMessage(revoked[0]!)).toBe(false);
+  });
+
+  it("truncates lines, caps the digest at 5 chunks, and notes the remainder", async () => {
+    const messages = Array.from({ length: 12 }, (_, index) =>
+      message({
+        id: `line-${index}`,
+        timestamp: index + 1,
+        content: `body-${index}-` + "x".repeat(80),
+      }),
+    );
+    const prepared = prepareGroupHistoryChunks(
+      {
+        groupJid: GROUP_JID,
+        groupName: "Equipe",
+        messages,
+        contacts: [],
+        timeZone: "UTC",
+      },
+      { maxChars: 80, maxChunks: MAX_GROUP_HISTORY_CHUNKS, maxLineChars: 40 },
+    );
+    expect(prepared.chunks.length).toBeLessThanOrEqual(5);
+    expect(prepared.chunks.length).toBeGreaterThan(1);
+    expect(prepared.omittedMessages).toBeGreaterThan(0);
+    expect(prepared.chunks.at(-1)).toContain(`…mais ${prepared.omittedMessages}`);
+    expect(prepared.chunks[1]).toMatch(/^\(2\/\d+\)\n/);
+    const body = prepared.chunks.join("\n");
+    expect(body).not.toContain("x".repeat(80));
+    for (const line of body.split("\n")) {
+      if (line.startsWith("(")) continue;
+      expect(line.length).toBeLessThanOrEqual(40);
+    }
+  });
+
+  it("returns the chunks already queued when a later enqueue fails", async () => {
+    const messages = Array.from({ length: 40 }, (_, index) =>
+      message({
+        id: `wide-${index}`,
+        timestamp: index + 1,
+        content: "y".repeat(MAX_GROUP_HISTORY_LINE_CHARS),
+      }),
+    );
+    const adapter = createAdapter({ getMessages: vi.fn(async () => messages) });
+    const queue = createQueue();
+    queue.enqueueGroupHistoryMessage
+      .mockResolvedValueOnce({ status: "queued", jobId: "1" })
+      .mockRejectedValueOnce(new Error("queue unavailable"));
+    const result = await invoke(registerTool(adapter, queue), {
+      instanceId: INSTANCE_ID,
+      groupJid: GROUP_JID,
+      participant: MEMBER_JID,
+      count: 40,
+    });
+
+    expect(result.isError).toBeUndefined();
+    expect(responseData(result).chunksSent).toBe(1);
+    expect(responseData(result).note).toContain("1 trechos foram aceitos");
+    const first = queue.enqueueGroupHistoryMessage.mock.calls[0]?.[2] as string;
+    expect(first).toMatch(/^\(1\/\d+\)\n/);
   });
 
   it("returns a clear empty-history note and sends nothing", async () => {
@@ -340,46 +579,50 @@ describe("group history formatting and chunking", () => {
 });
 
 describe("automatic group history on direct adds", () => {
-  const directAdd: Partial<NormalizedGroupParticipantsEvent> = {
-    action: "add",
-    directAdd: true,
-    author: OWN_PN,
-    authorPn: OWN_LID,
-    participants: [OWN_PN, MEMBER_JID],
-  };
-
   it("stays off by default and requires the group write gate", async () => {
     vi.stubEnv("WA_GROUP_HISTORY_ON_JOIN", undefined);
     const disabledByDefault = autoJoinFixture();
-    disabledByDefault.emit(directAdd);
+    publishOwnDirectParticipantAdds(INSTANCE_ID, [directAddStub()], {
+      phone: OWN_PN,
+      lid: OWN_LID,
+    });
     await new Promise<void>((resolve) => setImmediate(resolve));
     expect(disabledByDefault.queue.enqueueGroupHistoryMessage).not.toHaveBeenCalled();
 
     vi.stubEnv("WA_GROUP_HISTORY_ON_JOIN", "true");
     vi.stubEnv("WA_GROUP_WRITES_ENABLED", "false");
     const disabledByGate = autoJoinFixture();
-    disabledByGate.emit(directAdd);
+    publishOwnDirectParticipantAdds(INSTANCE_ID, [directAddStub("stub-gate")], {
+      phone: OWN_PN,
+      lid: OWN_LID,
+    });
     await new Promise<void>((resolve) => setImmediate(resolve));
     expect(disabledByGate.queue.enqueueGroupHistoryMessage).not.toHaveBeenCalled();
   });
 
-  it("sends only self-authored direct adds, skips self, and uses the configured count", async () => {
+  it("sends a phone-number DM for our own direct add and uses the configured count", async () => {
     vi.stubEnv("WA_GROUP_HISTORY_ON_JOIN", "true");
     vi.stubEnv("WA_GROUP_HISTORY_ON_JOIN_COUNT", "42");
     const fixture = autoJoinFixture();
-
-    fixture.emit({ ...directAdd, directAdd: false });
-    fixture.emit({ ...directAdd, author: "5511000000009@s.whatsapp.net", authorPn: undefined });
-    fixture.emit({ ...directAdd, author: undefined, authorPn: undefined });
-    fixture.emit({
-      ...directAdd,
-      participants: ["other-member@lid"],
-      participantAliases: [[OWN_PN, "other-member@lid"]],
-    });
+    const otherAuthor = directAddStub("other-author");
+    otherAuthor.key.participant = "5511000000009@s.whatsapp.net";
+    otherAuthor.key.participantAlt = "5511000000009@s.whatsapp.net";
+    publishOwnDirectParticipantAdds(INSTANCE_ID, [otherAuthor], { phone: OWN_PN, lid: OWN_LID });
+    publishOwnDirectParticipantAdds(
+      INSTANCE_ID,
+      [directAddStub("self-target") as WAMessage].map((stub) => {
+        stub.messageStubParameters = [JSON.stringify({ id: OWN_LID, phoneNumber: OWN_PN })];
+        return stub;
+      }),
+      { phone: OWN_PN, lid: OWN_LID },
+    );
     await new Promise<void>((resolve) => setImmediate(resolve));
     expect(fixture.queue.enqueueGroupHistoryMessage).not.toHaveBeenCalled();
 
-    fixture.emit(directAdd);
+    publishOwnDirectParticipantAdds(INSTANCE_ID, [directAddStub()], {
+      phone: OWN_PN,
+      lid: OWN_LID,
+    });
     await vi.waitFor(() => expect(fixture.queue.enqueueGroupHistoryMessage).toHaveBeenCalledOnce());
     expect(fixture.adapter.getMessages).toHaveBeenCalledWith(GROUP_JID, 42);
     expect(fixture.queue.enqueueGroupHistoryMessage).toHaveBeenCalledWith(
@@ -388,27 +631,49 @@ describe("automatic group history on direct adds", () => {
       expect.any(String),
       "baileys",
     );
-    expect(
-      isOwnGroupHistoryJoin(
-        { ...directAdd, participants: [MEMBER_JID] },
-        { phone: OWN_PN, lid: OWN_LID },
-      ),
-    ).toBe(true);
     expect(isOwnGroupHistoryParticipant(OWN_PN, { phone: OWN_PN, lid: OWN_LID })).toBe(true);
   });
 
-  it("accepts a configured author PN or LID and clamps the join count", () => {
-    expect(
-      isOwnGroupHistoryJoin(
-        { action: "add", directAdd: true, author: "other@lid", authorPn: OWN_PN, participants: [] },
-        { phone: OWN_PN, lid: OWN_LID },
-      ),
-    ).toBe(true);
+  it("does not send a redelivered stub again after the id was recorded", async () => {
+    vi.stubEnv("WA_GROUP_HISTORY_ON_JOIN", "true");
+    const store = sqliteClaim();
+    const first = autoJoinFixture(store.claim);
+    publishOwnDirectParticipantAdds(INSTANCE_ID, [directAddStub("reconnect-stub")], {
+      phone: OWN_PN,
+      lid: OWN_LID,
+    });
+    await vi.waitFor(() => expect(first.queue.enqueueGroupHistoryMessage).toHaveBeenCalledOnce());
+
+    const restarted = autoJoinFixture(store.claim);
+    publishOwnDirectParticipantAdds(INSTANCE_ID, [directAddStub("reconnect-stub")], {
+      phone: OWN_PN,
+      lid: OWN_LID,
+    });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(restarted.queue.enqueueGroupHistoryMessage).not.toHaveBeenCalled();
+    expect(first.queue.enqueueGroupHistoryMessage).toHaveBeenCalledOnce();
+    store.sqlite.close();
+  });
+
+  it("rejects invalid on-join settings instead of turning them off or using 50", () => {
     expect(isGroupHistoryOnJoinEnabled(undefined)).toBe(false);
     expect(isGroupHistoryOnJoinEnabled("true")).toBe(true);
+    expect(isGroupHistoryOnJoinEnabled("FALSE")).toBe(false);
+    expect(() => isGroupHistoryOnJoinEnabled("yes")).toThrow(/WA_GROUP_HISTORY_ON_JOIN/);
+    expect(() => isGroupHistoryOnJoinEnabled("1")).toThrow(/WA_GROUP_HISTORY_ON_JOIN/);
     expect(getGroupHistoryOnJoinCount("42")).toBe(42);
     expect(getGroupHistoryOnJoinCount("10")).toBe(25);
     expect(getGroupHistoryOnJoinCount("150")).toBe(100);
-    expect(getGroupHistoryOnJoinCount("not-a-count")).toBe(50);
+    expect(getGroupHistoryOnJoinCount(undefined)).toBe(50);
+    expect(() => getGroupHistoryOnJoinCount("not-a-count")).toThrow(
+      /WA_GROUP_HISTORY_ON_JOIN_COUNT/,
+    );
+    expect(() => getGroupHistoryOnJoinCount("1.5")).toThrow(/WA_GROUP_HISTORY_ON_JOIN_COUNT/);
+
+    vi.stubEnv("WA_GROUP_HISTORY_ON_JOIN", "yes");
+    expect(() =>
+      registerGroupHistoryOnJoin({} as InstanceManager, createQueue(), memoryClaim()),
+    ).toThrow(/WA_GROUP_HISTORY_ON_JOIN/);
   });
 });

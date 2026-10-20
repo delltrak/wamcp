@@ -129,6 +129,7 @@ import {
   extractMessageDetails,
   unwrapMessageContent,
   extractQuotedMessageId,
+  isViewOnceMessage,
   isMessageForwarded,
   getChatJid,
   getSenderJid,
@@ -148,7 +149,7 @@ import { scheduleBaileysMessagesRead } from "../../services/auto-read.js";
 import { QuotedMessageResolutionError } from "../../utils/quoted-message.js";
 import { isValidStatusRecipient } from "../../utils/validation.js";
 import { normalizeGroupJid } from "../../utils/group-jid.js";
-import { isDirectGroupParticipantAdd } from "./group-history-event.js";
+import { publishOwnDirectParticipantAdds } from "./group-history-event.js";
 import { MediaService } from "../../services/media.js";
 import {
   isOggContainer,
@@ -1804,6 +1805,14 @@ export class BaileysAdapter implements ChannelAdapter {
 
   getStatus(): ConnectionStatus {
     return this.status;
+  }
+
+  private publishOwnDirectGroupHistoryAdds(messages: WAMessage[]): void {
+    const own = this.getLifecycleStatus();
+    publishOwnDirectParticipantAdds(this.instanceId, messages, {
+      phone: own.phone,
+      lid: own.lid,
+    });
   }
 
   getLifecycleStatus(): InstanceRuntimeStatus {
@@ -4346,9 +4355,11 @@ export class BaileysAdapter implements ChannelAdapter {
 
     return rows.map((r) => {
       let details: ReturnType<typeof extractMessageDetails> | undefined;
+      let raw: WAMessage | undefined;
       if (r.rawData) {
         try {
-          details = extractMessageDetails(JSON.parse(r.rawData, BufferJSON.reviver) as WAMessage);
+          raw = JSON.parse(r.rawData, BufferJSON.reviver) as WAMessage;
+          details = extractMessageDetails(raw);
         } catch {
           // The normalized fields remain available if raw data is malformed.
         }
@@ -4383,6 +4394,7 @@ export class BaileysAdapter implements ChannelAdapter {
         isForwarded: r.isForwarded === 1,
         status: r.status as Message["status"],
         timestamp: r.timestamp,
+        ...(raw && isViewOnceMessage(raw) ? { viewOnce: true } : {}),
         ...(r.pushName ? { pushName: r.pushName } : {}),
         starred: r.starred === 1,
         ...(labels.length ? { labels } : {}),
@@ -6459,6 +6471,8 @@ export class BaileysAdapter implements ChannelAdapter {
             "Notify messages for emission",
           );
         }
+
+        this.publishOwnDirectGroupHistoryAdds(data.messages);
       }
 
       if (events["messages.update"]) {
@@ -6607,14 +6621,9 @@ export class BaileysAdapter implements ChannelAdapter {
       }
 
       if (events["group-participants.update"]) {
-        const directAdd = isDirectGroupParticipantAdd(
-          events["group-participants.update"],
-          events["messages.upsert"]?.messages ?? [],
-        );
         const event = normalizeGroupParticipantsUpdate(
           this.instanceId,
           events["group-participants.update"],
-          directAdd,
         );
         this.emit("group.participants_changed", event);
       }

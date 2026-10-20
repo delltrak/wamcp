@@ -115,6 +115,13 @@ function initializeDatabase(): void {
       PRIMARY KEY (instance_id, message_id)
     );
 
+    CREATE TABLE IF NOT EXISTS group_history_sends (
+      instance_id     TEXT NOT NULL REFERENCES instances(id) ON DELETE CASCADE,
+      message_id      TEXT NOT NULL,
+      sent_at         INTEGER NOT NULL,
+      PRIMARY KEY (instance_id, message_id)
+    );
+
     CREATE TABLE IF NOT EXISTS contacts (
       instance_id     TEXT NOT NULL REFERENCES instances(id) ON DELETE CASCADE,
       jid             TEXT NOT NULL,

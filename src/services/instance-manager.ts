@@ -20,6 +20,7 @@ import type { InstanceEntity } from "../types/db.types.js";
 import { INSTANCE_ID_PREFIX } from "../constants.js";
 import { createChildLogger } from "../utils/logger.js";
 import type { MessageQueue } from "./message-queue.js";
+import { claimGroupHistoryStub } from "./group-history-claim.js";
 import { registerGroupHistoryOnJoin } from "./group-history.js";
 
 const logger = createChildLogger({ service: "instance-manager" });
@@ -62,7 +63,7 @@ export class InstanceManager {
     this.messageQueue = mq;
     mq.setAdapterResolver((id) => this.getAdapter(id));
     this.removeGroupHistoryOnJoin?.();
-    this.removeGroupHistoryOnJoin = registerGroupHistoryOnJoin(this, mq);
+    this.removeGroupHistoryOnJoin = registerGroupHistoryOnJoin(this, mq, claimGroupHistoryStub);
   }
 
   /** Register a global event handler that receives all instance events */
