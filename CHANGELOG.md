@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Added an optional fixed auto-reply, off unless `WA_AUTO_REPLY_ENABLED=true`. It replies with `WA_AUTO_REPLY_TEXT` in private chats, skips the account's own messages, groups unless enabled, status broadcasts, newsletters, ignored JIDs, repeated replies inside `WA_AUTO_REPLY_COOLDOWN_HOURS`, and replies over the per-minute limit.
 - Added Baileys instance lifecycle webhooks for connection, disconnect, pairing-code, and QR events,
   plus the read-only `wa_get_instance_status` tool. Pairing and QR challenge data is omitted from
   webhook payloads and status output.

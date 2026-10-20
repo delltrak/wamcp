@@ -23,6 +23,7 @@ import type { MetaWebhookPayload } from "./channels/cloud-api/cloud.events.js";
 import { installShutdownHandlers, SHUTDOWN_TIMEOUT_MS } from "./utils/shutdown.js";
 import { logger } from "./utils/logger.js";
 import { getAutoReadMode } from "./services/auto-read.js";
+import { loadAutoReplyConfig, startAutoReply } from "./services/auto-reply.js";
 import { bootEventWebhook, type EventWebhookStatus } from "./services/event-webhook-config.js";
 import { buildHealthBody } from "./server/health.js";
 
@@ -68,6 +69,7 @@ function checkApiKey(req: IncomingMessage, res: ServerResponse): boolean {
 }
 
 async function initServices() {
+  const autoReplyConfig = loadAutoReplyConfig();
   getAutoReadMode();
 
   // Initialize services
@@ -86,13 +88,16 @@ async function initServices() {
   const maintenance = new MaintenanceService(instanceManager);
   await maintenance.start();
 
-  logger.info("Services initialized");
+  const autoReply = startAutoReply(instanceManager, messageQueue, autoReplyConfig);
 
-  return { instanceManager, messageQueue, eventWebhook, maintenance };
+  logger.info({ autoReply: autoReplyConfig.enabled }, "Services initialized");
+
+  return { instanceManager, messageQueue, eventWebhook, maintenance, autoReply };
 }
 
 async function startHttp(webhookStatus: EventWebhookStatus): Promise<void> {
-  const { instanceManager, messageQueue, eventWebhook, maintenance } = await initServices();
+  const { instanceManager, messageQueue, eventWebhook, maintenance, autoReply } =
+    await initServices();
   const mcpSessions = new McpHttpSessionManager(instanceManager, messageQueue);
   const startTime = Date.now();
 
@@ -209,6 +214,7 @@ async function startHttp(webhookStatus: EventWebhookStatus): Promise<void> {
 
   let servicesClosePromise: Promise<void> | null = null;
   const closeServices = (): Promise<void> => {
+    autoReply.stop();
     servicesClosePromise ??= Promise.all([
       messageQueue.close(),
       eventWebhook.close(),
@@ -249,11 +255,13 @@ async function startHttp(webhookStatus: EventWebhookStatus): Promise<void> {
 }
 
 async function startStdio(): Promise<void> {
-  const { instanceManager, messageQueue, eventWebhook, maintenance } = await initServices();
+  const { instanceManager, messageQueue, eventWebhook, maintenance, autoReply } =
+    await initServices();
   const { server: mcpServer } = createMcpServer(instanceManager, messageQueue);
   const onServerClose = mcpServer.server.onclose;
   let servicesClosePromise: Promise<void> | null = null;
   const closeServices = (): Promise<void> => {
+    autoReply.stop();
     servicesClosePromise ??= Promise.all([
       messageQueue.close(),
       eventWebhook.close(),

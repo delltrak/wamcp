@@ -729,6 +729,12 @@ Copy `.env.example` to `.env` and configure:
 | `WA_AUTO_REJECT_CALLS`      | `false`                  | Automatically reject incoming one-to-one Baileys call offers |
 | `WA_STATUS_MAX_RECIPIENTS`  | `256`                    | Maximum recipients per Baileys status; excess recipients are truncated and reported |
 | `WA_AUTO_READ`              | `false`                  | `on_fetch` marks incoming messages read when fetched; `on_receive` marks them read on arrival |
+| `WA_AUTO_REPLY_ENABLED`     | `false`                  | Queue one fixed reply for incoming private messages |
+| `WA_AUTO_REPLY_TEXT`        | —                        | Reply text. Required and non-blank when auto-reply is enabled; at most 4000 characters |
+| `WA_AUTO_REPLY_COOLDOWN_HOURS` | `24`                  | Minimum delay between auto-replies to the same chat (1–8760 hours) |
+| `WA_AUTO_REPLY_IGNORE_JIDS` | —                        | Comma-separated chats or senders to skip. Exact JIDs, phone numbers, suffixes such as `@lid`, and `*` wildcards |
+| `WA_AUTO_REPLY_GROUPS`      | `false`                  | Also auto-reply in groups. Status broadcasts are never answered |
+| `WA_AUTO_REPLY_RATE_PER_MINUTE` | `6`                 | Maximum auto-replies per instance each rolling minute (1–30) |
 | `WA_MEDIA_CACHE_MAX_MB`     | `500`                    | Media cache size limit                   |
 | `WA_MEDIA_DOWNLOAD_DIR`     | `data/media-downloads`   | Dedicated directory for downloaded files; separate from Baileys session data |
 | `WA_MEDIA_DOWNLOAD_MAX_BYTES` | `26214400` (25 MB)     | Maximum size for received media downloads; base64 mode is capped at 5 MB |
@@ -874,6 +880,21 @@ directory.
 `WA_AUTO_READ` accepts `false`, `on_fetch`, or `on_receive`. Invalid values disable automatic
 read receipts and produce a warning. Automatic receipts never delay message delivery or tool
 responses; receipt failures are logged.
+
+`WA_AUTO_REPLY_ENABLED` defaults to `false`, which disables auto-reply. Set it to `true` and set
+`WA_AUTO_REPLY_TEXT` to a non-blank text of at most 4000 characters to queue that exact text for
+incoming private messages, including media. `WA_AUTO_REPLY_GROUPS` defaults to `false`; set it to
+`true` to also reply inside groups. Status broadcasts (`status@broadcast` and any `@broadcast`
+chat) and newsletters are never answered. Messages sent by the same account are ignored, and an
+incoming message whose text equals the configured reply is ignored so two accounts with the same
+text cannot loop. `WA_AUTO_REPLY_IGNORE_JIDS` skips matching chats and senders. Entries are
+comma-separated exact JIDs, bare phone numbers, suffixes such as `@lid` or `@g.us`, and `*`
+wildcards such as `5577*@s.whatsapp.net`. The same chat is not answered again until
+`WA_AUTO_REPLY_COOLDOWN_HOURS` has passed (default 24, allowed 1–8760). Each instance also stops
+after `WA_AUTO_REPLY_RATE_PER_MINUTE` replies in a rolling minute (default 6, allowed 1–30).
+Replies go through the normal outbound queue. Invalid enabled, text, cooldown, rate, group, or
+ignore-list values stop startup with an error that names the variable and the accepted range.
+Leaving the feature disabled does not send a reply, even when `WA_AUTO_REPLY_TEXT` is set.
 
 `WA_PRESENCE_MODE` accepts `on_activity` or `always`. In `on_activity`, Baileys sends one global
 `unavailable` update after each connection opens, switches to global `available` before an outgoing
