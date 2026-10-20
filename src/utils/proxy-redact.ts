@@ -24,7 +24,13 @@ function addVariant(
   if (escaped !== value && escaped.length >= 3) variants.set(escaped, replacement);
 }
 
+const BARE_SECRET_MIN_LENGTH = 4;
 const variantCache = new Map<string, Array<[string, string]>>();
+
+function addBareSecret(variants: Map<string, string>, value: string): void {
+  if (value.length < BARE_SECRET_MIN_LENGTH) return;
+  addVariant(variants, value, "***");
+}
 
 function secretVariants(proxyUrl: string): Array<[string, string]> {
   const variants = new Map<string, string>();
@@ -34,12 +40,18 @@ function secretVariants(proxyUrl: string): Array<[string, string]> {
 
   try {
     const url = new URL(proxyUrl);
-    if (url.password) {
-      const encodedPair = `${url.username}:${url.password}`;
-      const decodedPair = `${decodeURIComponent(url.username)}:${decodeURIComponent(url.password)}`;
-      addVariant(variants, encodedPair, "***:***");
-      addVariant(variants, decodedPair, "***:***");
+    const encodedUser = url.username;
+    const encodedPass = url.password;
+    const decodedUser = decodeURIComponent(encodedUser);
+    const decodedPass = decodeURIComponent(encodedPass);
+    if (encodedPass || decodedPass) {
+      addVariant(variants, `${encodedUser}:${encodedPass}`, "***:***");
+      addVariant(variants, `${decodedUser}:${decodedPass}`, "***:***");
     }
+    addBareSecret(variants, encodedUser);
+    addBareSecret(variants, decodedUser);
+    addBareSecret(variants, encodedPass);
+    addBareSecret(variants, decodedPass);
   } catch {
     // The URL regex above still covers well-formed proxy URLs.
   }

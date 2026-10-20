@@ -1739,6 +1739,19 @@ export class BaileysAdapter implements ChannelAdapter {
     }
   }
 
+  private async releaseProxyAgents(): Promise<void> {
+    const agents = this.proxyAgents;
+    this.proxyAgents = undefined;
+    try {
+      await closeBaileysProxyAgents(agents);
+    } catch (error) {
+      logger.warn(
+        { err: redactError(error, this.proxyUrl), instanceId: this.instanceId },
+        "Failed to close outbound proxy agents",
+      );
+    }
+  }
+
   async connect(): Promise<void> {
     if (this.sock) {
       logger.warn({ instanceId: this.instanceId }, "Already connected or connecting");
@@ -1746,6 +1759,7 @@ export class BaileysAdapter implements ChannelAdapter {
     }
 
     this.status = "connecting";
+    await this.releaseProxyAgents();
 
     const { state, saveCreds } = await useSqliteAuthState(this.instanceId);
     this.saveCreds = saveCreds;
@@ -5987,7 +6001,7 @@ export class BaileysAdapter implements ChannelAdapter {
   }
 
   private bindEvents(sock: WASocket): void {
-    sock.ev.on("connection.update", (update) => {
+    sock.ev.on("connection.update", async (update) => {
       const { connection, lastDisconnect, qr } = update;
 
       if (qr) {
@@ -6068,7 +6082,9 @@ export class BaileysAdapter implements ChannelAdapter {
         logger.info({ instanceId: this.instanceId, offlineDurationMs }, "Connected to WhatsApp");
       }
 
+      let releasingProxyAgents: Promise<void> | undefined;
       if (connection === "close") {
+        releasingProxyAgents = this.releaseProxyAgents();
         this.clearHealthWatchdog();
         this.clearEventBufferStallWatchdog();
         this.resetActivityPresence();
@@ -6131,6 +6147,7 @@ export class BaileysAdapter implements ChannelAdapter {
       if (normalized) {
         this.emit("connection.changed", normalized);
       }
+      await releasingProxyAgents;
     });
 
     // creds.update is not buffered — use ev.on directly
@@ -6811,6 +6828,7 @@ export class BaileysAdapter implements ChannelAdapter {
     this.reconnectTimer = setTimeout(async () => {
       try {
         this.sock = null;
+        await this.releaseProxyAgents();
         await this.connect();
       } catch (err) {
         logger.error({ err, instanceId: this.instanceId }, "Reconnect failed");

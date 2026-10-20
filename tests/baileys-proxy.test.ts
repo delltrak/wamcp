@@ -1,12 +1,13 @@
 import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
+import { createServer, type Socket } from "node:net";
 import { Readable } from "node:stream";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { WAMessage } from "@whiskeysockets/baileys";
 import { HttpsProxyAgent } from "https-proxy-agent";
 import pino from "pino";
 import { SocksProxyAgent } from "socks-proxy-agent";
-import { ProxyAgent } from "undici";
+import { fetch as undiciFetch, ProxyAgent, type Dispatcher } from "undici";
 import { sqlite } from "../src/db/client.js";
 import { buildHealthBody, renderHealthBody } from "../src/server/health.js";
 import {
@@ -57,6 +58,108 @@ import { BaileysAdapter } from "../src/channels/baileys/baileys.adapter.js";
 
 function proxyUrl(scheme: string, port: number): string {
   return `${scheme}://user:${SECRET}@127.0.0.1:${port}`;
+}
+
+function listen<T>(
+  attach: (socket: Socket, done: (value: T) => void) => void,
+): Promise<{ port: number; done: Promise<T>; close: () => Promise<void> }> {
+  return new Promise((resolve, reject) => {
+    let finish: (value: T) => void = () => undefined;
+    const done = new Promise<T>((resolveDone) => {
+      finish = resolveDone;
+    });
+    const server = createServer((socket) => attach(socket, finish));
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", () => {
+      const address = server.address();
+      if (!address || typeof address === "string") {
+        reject(new Error("proxy test server is missing a port"));
+        return;
+      }
+      resolve({
+        port: address.port,
+        done,
+        close: () =>
+          new Promise<void>((resolveClose, rejectClose) => {
+            server.close((error) => (error ? rejectClose(error) : resolveClose()));
+          }),
+      });
+    });
+  });
+}
+
+function collectSocksAuth(
+  socket: Socket,
+  done: (value: { username: string; password: string }) => void,
+): void {
+  const chunks: Buffer[] = [];
+  let stage: "greeting" | "auth" | "done" = "greeting";
+  socket.on("data", (data: Buffer) => {
+    chunks.push(data);
+    let pending = Buffer.concat(chunks);
+    chunks.length = 0;
+    if (stage === "greeting") {
+      if (pending.length < 2 || pending.length < 2 + (pending[1] ?? 0)) {
+        chunks.push(pending);
+        return;
+      }
+      socket.write(Buffer.from([0x05, 0x02]));
+      pending = pending.subarray(2 + (pending[1] ?? 0));
+      stage = "auth";
+    }
+    if (stage !== "auth") return;
+    if (pending.length < 2) {
+      chunks.push(pending);
+      return;
+    }
+    const usernameLength = pending[1] ?? 0;
+    if (pending.length < 2 + usernameLength + 1) {
+      chunks.push(pending);
+      return;
+    }
+    const passwordLength = pending[2 + usernameLength] ?? 0;
+    if (pending.length < 3 + usernameLength + passwordLength) {
+      chunks.push(pending);
+      return;
+    }
+    stage = "done";
+    done({
+      username: pending.subarray(2, 2 + usernameLength).toString("utf8"),
+      password: pending
+        .subarray(3 + usernameLength, 3 + usernameLength + passwordLength)
+        .toString("utf8"),
+    });
+    socket.destroy();
+  });
+}
+
+function collectHttpProxyHeader(socket: Socket, done: (value: string) => void): void {
+  let received = "";
+  socket.on("data", (data: Buffer) => {
+    received += data.toString("utf8");
+    if (!received.includes("\r\n\r\n")) return;
+    done(received);
+    socket.destroy();
+  });
+}
+
+async function driveProxy(dispatcher: Dispatcher, done: Promise<unknown>): Promise<void> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 3_000);
+  const request = undiciFetch("http://127.0.0.1:59999/", {
+    dispatcher,
+    signal: controller.signal,
+  }).then(
+    () => undefined,
+    () => undefined,
+  );
+  try {
+    await done;
+  } finally {
+    clearTimeout(timer);
+    controller.abort();
+    await request;
+  }
 }
 
 function expectNoSecret(value: string): void {
@@ -136,6 +239,15 @@ describe("proxy credential redaction", () => {
   it("redacts proxy URLs in text without damaging a host that contains the same word", () => {
     const text = `via socks5://user:${SECRET}@${SECRET}.example:1080`;
     expect(redactProxyCredentials(text)).toBe(`via socks5://***:***@${SECRET}.example:1080`);
+  });
+
+  it("redacts a bare username and password when each is at least 4 characters", () => {
+    const encoded = "socks5://alice:p%40ssw0rd@127.0.0.1:1080";
+    expect(redactProxyCredentials("alice used p@ssw0rd and p%40ssw0rd", encoded)).toBe(
+      "*** used *** and ***",
+    );
+    expect(redactProxyCredentials("abc xyz", "http://abc:xyz@127.0.0.1:8080")).toBe("abc xyz");
+    expect(redactProxyCredentials("abcd wxyz", "http://abcd:wxyz@127.0.0.1:8080")).toBe("*** ***");
   });
 
   it("redacts a credential pair that leaked outside a URL", () => {
@@ -262,6 +374,41 @@ describe("Baileys proxy agents", () => {
     }
   });
 
+  it("decodes percent-encoded credentials before SOCKS5 and HTTP proxy auth", async () => {
+    const username = "us@er";
+    const password = "p@ss:w0rd/x";
+    const userinfo = `${encodeURIComponent(username)}:${encodeURIComponent(password)}`;
+    const token = Buffer.from(`${username}:${password}`).toString("base64");
+
+    const socksAuth = listen((socket, done) => collectSocksAuth(socket, done));
+    const httpAuth = listen((socket, done) => collectHttpProxyHeader(socket, done));
+    const socks = await socksAuth;
+    const http = await httpAuth;
+    const socksAgents = createBaileysProxyAgents(`socks5://${userinfo}@127.0.0.1:${socks.port}`);
+    const httpAgents = createBaileysProxyAgents(`http://${userinfo}@127.0.0.1:${http.port}`);
+    try {
+      await Promise.all([
+        driveProxy(socksAgents.dispatcher, socks.done),
+        driveProxy(httpAgents.dispatcher, http.done),
+      ]);
+      expect(await socks.done).toEqual({ username, password });
+      const header = await http.done;
+      const authorization = header
+        .split("\r\n")
+        .find((line) => line.toLowerCase().startsWith("proxy-authorization:"));
+      expect(authorization?.endsWith(token)).toBe(true);
+      expect(header).not.toContain(encodeURIComponent(password));
+    } finally {
+      socksAgents.agent.destroy();
+      socksAgents.fetchAgent.destroy();
+      httpAgents.agent.destroy();
+      httpAgents.fetchAgent.destroy();
+      await Promise.all([socksAgents.dispatcher.destroy(), httpAgents.dispatcher.destroy()]);
+      await socks.close();
+      await http.close();
+    }
+  });
+
   it("returns the same download options as a direct connection when no proxy is set", () => {
     expect(mediaDownloadOptions(undefined, undefined)).toEqual({});
     const withTimeout = mediaDownloadOptions(1000, undefined);
@@ -321,6 +468,78 @@ describe("BaileysAdapter proxy wiring", () => {
     expect(options).not.toHaveProperty("fetchAgent");
     expect(options.version).toEqual([2, 3000, 0]);
   });
+
+  it("closes proxy agents on every reconnect instead of accumulating them", async () => {
+    vi.stubEnv("WA_PROXY_URL", proxyUrl("socks5", 1080));
+    const adapter = await connectAdapter();
+    const destroyed = new Set<unknown>();
+    const closed = new Set<unknown>();
+    const generations: Array<{ agent: unknown; fetchAgent: unknown; dispatcher: unknown }> = [];
+
+    const track = (): void => {
+      const options = socketOptions();
+      const agent = options.agent as { destroy: () => void };
+      const fetchAgent = options.fetchAgent as { destroy: () => void };
+      const held = (
+        adapter as unknown as {
+          proxyAgents?: { dispatcher: { close: () => Promise<void> } };
+        }
+      ).proxyAgents;
+      expect(held?.dispatcher).toBeInstanceOf(ProxyAgent);
+      const dispatcher = held!.dispatcher;
+      const originalDestroy = agent.destroy.bind(agent);
+      const originalFetchDestroy = fetchAgent.destroy.bind(fetchAgent);
+      agent.destroy = () => {
+        destroyed.add(agent);
+        originalDestroy();
+      };
+      fetchAgent.destroy = () => {
+        destroyed.add(fetchAgent);
+        originalFetchDestroy();
+      };
+      dispatcher.close = async () => {
+        closed.add(dispatcher);
+      };
+      generations.push({ agent, fetchAgent, dispatcher });
+    };
+    track();
+
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      const opened = mocks.makeWASocket.mock.calls.length;
+      const handler = socket.ev.on.mock.calls
+        .filter((call) => call[0] === "connection.update")
+        .at(-1)?.[1] as (update: {
+        connection: string;
+        lastDisconnect?: { error: Error };
+      }) => Promise<void>;
+      const closing = handler({
+        connection: "close",
+        lastDisconnect: { error: new Error("proxy reconnect fixture") },
+      });
+      await vi.waitFor(
+        () => {
+          expect(mocks.makeWASocket.mock.calls.length).toBe(opened + 1);
+        },
+        { timeout: 6_000 },
+      );
+      await closing;
+      track();
+    }
+
+    expect(mocks.makeWASocket).toHaveBeenCalledTimes(4);
+    expect(generations).toHaveLength(4);
+    for (const previous of generations.slice(0, -1)) {
+      expect(destroyed.has(previous.agent)).toBe(true);
+      expect(destroyed.has(previous.fetchAgent)).toBe(true);
+      expect(closed.has(previous.dispatcher)).toBe(true);
+    }
+    const current = generations[3]!;
+    expect(destroyed.has(current.agent)).toBe(false);
+    expect(destroyed.has(current.fetchAgent)).toBe(false);
+    expect(closed.has(current.dispatcher)).toBe(false);
+    expect(destroyed.size).toBe(6);
+    expect(closed.size).toBe(3);
+  }, 20_000);
 
   it("passes SOCKS and HTTP agents to the socket", async () => {
     vi.stubEnv("WA_PROXY_URL", proxyUrl("socks5", 1080));
@@ -442,7 +661,15 @@ describe("proxy documentation", () => {
     expect(readme).not.toContain("WA_BAILEYS_PROXY");
     expect(readme).toContain("from `GET /health`");
     expect(readme).toContain("fetchAgent");
+    expect(readme).toContain("getHttpStream");
+    expect(readme).toContain(
+      "History-sync downloads, app-state blob downloads, and link-preview fetches",
+    );
+    expect(readme).toContain("An invalid value stops startup.");
+    const entry = readFileSync(new URL("../src/index.ts", import.meta.url), "utf8");
+    expect(entry).toContain("parseBaileysProxyUrl(process.env.WA_PROXY_URL)");
     expect(example).toContain("# WA_PROXY_URL=socks5://user:pass@proxy.example:1080");
+    expect(example).toContain("An invalid value stops the process at startup.");
     expect(example).not.toContain("WA_BAILEYS_PROXY");
     expect(example).not.toContain(SECRET);
   });

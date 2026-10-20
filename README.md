@@ -786,16 +786,18 @@ and media transfers through that proxy:
 WA_PROXY_URL=socks5://user:pass@proxy.example:1080
 ```
 
-The URL may include a username and password. Those credentials are removed from logs, from errors
-returned to agents, and from `GET /health`. The value is checked strictly: only the schemes above
-are accepted, and
-a path, query, fragment, or missing port is rejected. `socks5h` asks the proxy to resolve DNS.
+The URL may include a username and password. Percent-encoded credentials are decoded before the
+SOCKS5 handshake. Those credentials are removed from logs, from errors returned to agents, and
+from `GET /health`. The value is checked when the process starts: only the schemes above are
+accepted, and a path, query, fragment, or missing port is rejected. An invalid value stops startup.
+`socks5h` asks the proxy to resolve DNS.
 
 Baileys 7.0.0-rc14 applies the socket `agent` to the WebSocket and `fetchAgent` to media uploads
 made with Node's `https.request`. Media downloads in that release do not read `fetchAgent`. WA MCP
 passes an undici dispatcher into `downloadMediaMessage`, which is the download hook rc14 supports.
-Link-preview image fetches inside Baileys use their own `fetch` call and are not covered by
-`fetchAgent`.
+In that release, `getHttpStream` drops the request `signal`, so media download timeouts do not
+apply. History-sync downloads, app-state blob downloads, and link-preview fetches go out directly
+and are not sent through the proxy.
 
 ### Message history and backups
 

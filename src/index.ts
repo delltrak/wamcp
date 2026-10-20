@@ -25,6 +25,7 @@ import { logger } from "./utils/logger.js";
 import { getAutoReadMode } from "./services/auto-read.js";
 import { bootEventWebhook, type EventWebhookStatus } from "./services/event-webhook-config.js";
 import { buildHealthBody, renderHealthBody } from "./server/health.js";
+import { parseBaileysProxyUrl } from "./channels/baileys/proxy.js";
 
 const CLOUD_WEBHOOK_PATH = "/cloud-webhook";
 
@@ -286,6 +287,7 @@ async function startStdio(): Promise<void> {
 }
 
 async function main(): Promise<void> {
+  parseBaileysProxyUrl(process.env.WA_PROXY_URL);
   logger.info({ transport, version: VERSION }, "Starting WA MCP server");
   const webhookStatus = bootEventWebhook();
 

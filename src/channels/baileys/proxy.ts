@@ -123,12 +123,17 @@ export function proxyDispatcherUrl(proxyUrl: string): string {
 }
 
 export function createBaileysProxyAgents(proxyUrl: string): BaileysProxyAgents {
-  const protocol = new URL(proxyUrl).protocol;
-  const socks = protocol === "socks5:" || protocol === "socks5h:";
+  const parsed = new URL(proxyUrl);
+  const socks = parsed.protocol === "socks5:" || parsed.protocol === "socks5h:";
   const agent = socks ? new SocksProxyAgent(proxyUrl) : new HttpsProxyAgent(proxyUrl);
   const fetchAgent = socks ? new SocksProxyAgent(proxyUrl) : new HttpsProxyAgent(proxyUrl);
   try {
-    const dispatcher = new ProxyAgent(proxyDispatcherUrl(proxyUrl));
+    // undici decodes HTTP proxy userinfo, but forwards SOCKS5 opts.username/password raw.
+    const dispatcher = new ProxyAgent({
+      uri: proxyDispatcherUrl(proxyUrl),
+      username: decodeURIComponent(parsed.username) || undefined,
+      password: decodeURIComponent(parsed.password) || undefined,
+    } as ConstructorParameters<typeof ProxyAgent>[0]);
     return {
       url: proxyUrl,
       redactedUrl: redactProxyUrl(proxyUrl),
