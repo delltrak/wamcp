@@ -889,9 +889,64 @@ describe("full limiter maps and unsettled attempts", () => {
     expect(limiter.beginAttempt("203.0.113.5", "alice").retryAfterMs).toBe(0);
     expect(limiter.retryAfterMs("203.0.113.5", "alice")).toBe(1000);
     limiter.recordSuccess("203.0.113.5", "alice", first.token);
+    expect(limiter.retryAfterMs("203.0.113.5", "alice")).toBe(0);
+    expect(limiter.retryAfterMs("203.0.113.5", "bob")).toBe(1000);
     now += 1000;
-    expect(limiter.beginAttempt("203.0.113.5", "alice").retryAfterMs).toBe(0);
-    expect(limiter.retryAfterMs("203.0.113.5", "alice")).toBe(2000);
+    expect(limiter.beginAttempt("203.0.113.5", "bob").retryAfterMs).toBe(0);
+    expect(limiter.retryAfterMs("203.0.113.5", "bob")).toBe(2000);
+  });
+
+  it("keeps a username above the free-attempt count through a flood of other names", () => {
+    const limiter = new AuthAttemptLimiter({ baseDelayMs: 60_000, now: () => 10_000 });
+    const ipFor = (index: number) => `198.51.${Math.floor(index / 250)}.${(index % 250) + 1}`;
+    for (let index = 0; index < 120; index += 1) {
+      expect(limiter.beginAttempt(ipFor(index), "vic").retryAfterMs).toBe(0);
+    }
+    for (let index = 0; index < 10_000; index += 1) {
+      const waited = limiter.beginAttempt(ipFor(1_000 + index), `junk-${index}`).retryAfterMs;
+      expect(waited).toBe(0);
+    }
+    for (let index = 0; index < 8; index += 1) {
+      expect(limiter.beginAttempt(ipFor(20_000 + index), "vic").retryAfterMs).toBe(0);
+    }
+    expect(limiter.beginAttempt(ipFor(20_008), "vic").retryAfterMs).toBe(0);
+    expect(limiter.beginAttempt(ipFor(20_009), "vic").retryAfterMs).toBeGreaterThan(0);
+  });
+
+  it("counts a new address in one overflow bucket when every address is locked", () => {
+    const limiter = new AuthAttemptLimiter({
+      baseDelayMs: 1000,
+      maxDelayMs: 60_000,
+      now: () => 20_000,
+    });
+    let blocked = 0;
+    for (let net = 0; net < 10_000; net += 1) {
+      const ip = `2001:db8:${net.toString(16)}::1`;
+      const user = `a${net}`;
+      for (let attempt = 0; attempt < 9; attempt += 1) {
+        if (limiter.beginAttempt(ip, user).retryAfterMs !== 0) blocked += 1;
+      }
+    }
+    expect(blocked).toBe(0);
+    const fresh = (index: number) => `2001:db8:ffff:${index.toString(16)}::1`;
+    const undone = limiter.beginAttempt(fresh(1), "undo-me");
+    expect(undone.retryAfterMs).toBe(0);
+    limiter.recordSuccess(fresh(1), "undo-me", undone.token);
+    const first = limiter.beginAttempt(fresh(2), "new-2");
+    expect(first.retryAfterMs).toBe(0);
+    limiter.recordFailure(fresh(2), "new-2", first.token);
+    expect(limiter.beginAttempt(fresh(1), "undo-me").retryAfterMs).toBe(0);
+    for (let index = 3; index <= 9; index += 1) {
+      expect(limiter.beginAttempt(fresh(index), `new-${index}`).retryAfterMs).toBe(0);
+    }
+    expect(limiter.beginAttempt(fresh(10), "new-10").retryAfterMs).toBe(0);
+    const locked = limiter.beginAttempt(fresh(11), "new-11");
+    expect(locked.retryAfterMs).toBeGreaterThan(0);
+    const wait = limiter.retryAfterMs(fresh(12), "new-12");
+    expect(wait).toBe(locked.retryAfterMs);
+    limiter.recordSuccess(fresh(13), "legit");
+    expect(limiter.beginAttempt(fresh(13), "legit").retryAfterMs).toBe(0);
+    expect(limiter.retryAfterMs(fresh(12), "new-12")).toBe(wait);
   });
 });
 
@@ -929,6 +984,28 @@ describe("unknown usernames and bucket eviction", () => {
     expect(await call("alice", PASSWORD, "203.0.113.40")).toBe(429);
   });
 
+  it("does not evict a username above the free-attempt count", () => {
+    const limiter = new AuthAttemptLimiter({
+      freeFailures: 1,
+      globalFreeFailures: 4,
+      baseDelayMs: 1000,
+      now: () => 5_000,
+    });
+    const ipFor = (index: number) => `198.51.${Math.floor(index / 250)}.${(index % 250) + 1}`;
+    let blocked = 0;
+    for (let user = 0; user < 10_000; user += 1) {
+      if (limiter.beginAttempt(ipFor(user), `user-${user}`).retryAfterMs !== 0) blocked += 1;
+      if (limiter.beginAttempt(ipFor(10_000 + user), `user-${user}`).retryAfterMs !== 0)
+        blocked += 1;
+    }
+    expect(blocked).toBe(0);
+    expect(limiter.beginAttempt(ipFor(30_000), "stranger").retryAfterMs).toBe(0);
+    for (let extra = 0; extra < 3; extra += 1) {
+      expect(limiter.beginAttempt(ipFor(40_000 + extra), "user-0").retryAfterMs).toBe(0);
+    }
+    expect(limiter.beginAttempt(ipFor(40_010), "user-0").retryAfterMs).toBeGreaterThan(0);
+  });
+
   it("does not evict a locked bucket to store another username", () => {
     let now = 5_000;
     const limiter = new AuthAttemptLimiter({
@@ -942,7 +1019,9 @@ describe("unknown usernames and bucket eviction", () => {
       expect(limiter.beginAttempt(address(index), `user-${index}`).retryAfterMs).toBe(0);
     }
     expect(limiter.retryAfterMs(address(0), "user-0")).toBe(1000);
-    expect(limiter.beginAttempt("203.0.113.80", "overflow").retryAfterMs).toBe(1000);
+    expect(limiter.beginAttempt("203.0.113.80", "overflow").retryAfterMs).toBe(0);
+    expect(limiter.retryAfterMs(address(0), "user-0")).toBe(1000);
+    expect(limiter.beginAttempt("203.0.113.81", "overflow-2").retryAfterMs).toBe(1000);
     expect(limiter.retryAfterMs(address(0), "user-0")).toBe(1000);
     now += 61_000;
     expect(limiter.beginAttempt("203.0.113.80", "overflow").retryAfterMs).toBe(0);

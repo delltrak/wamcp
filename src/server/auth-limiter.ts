@@ -52,20 +52,32 @@ interface PendingUndo {
   ipLockAfter: number;
   pairLockAfter: number;
   userLockAfter: number;
+  countedIp: boolean;
+  countedPair: boolean;
+  countedUser: boolean;
+  countedOverflow: boolean;
+  overflowLockBefore: number;
+  overflowLockAfter: number;
 }
 
 /**
  * Failed-sign-in backoff.
  * The strict lock is the client address and the address-plus-username pair.
  * A username is also limited across addresses after 128 failures, which takes
- * about 16 distinct /64s or NATs. The wait returned to the caller is a lock
- * that was already in effect. Counting this attempt may lock only the next
- * one. A success removes this attempt's count and the lock it created. A lock
- * keeps its failure count when it expires and doubles on the next failure, up
- * to `maxDelayMs`. Quiet time starts at the later of the last attempt and the
- * end of the lock. The address is an IPv6 /64 or everyone behind the same NAT,
- * so a recent success exempts only that username at that address, and only for
- * a few failures.
+ * about 16 distinct /64s or NATs. About one failure per window keeps that
+ * global lock. While it continues, only a username that signed in from that
+ * address in the last hour is exempt, and only for a few failures. The wait
+ * returned to the caller is a lock that was already in effect. Counting this
+ * attempt may lock only the next one. A success removes this attempt's count
+ * and the lock it created, and still records the exemption when the attempt
+ * token was dropped. A lock keeps its failure count when it expires and
+ * doubles on the next failure, up to `maxDelayMs`. Quiet time starts at the
+ * later of the last attempt and the end of the lock. The address is an IPv6
+ * /64 or everyone behind the same NAT, so a recent success exempts only that
+ * username at that address, and only for a few failures. A full map drops the
+ * unlocked entry with the fewest failures, and never a username above the
+ * free-attempt count. When nothing can be dropped, the new key shares one
+ * overflow bucket, and a recent success does not create a bucket.
  */
 export class AuthAttemptLimiter {
   private readonly freeFailures: number;
@@ -81,6 +93,8 @@ export class AuthAttemptLimiter {
   private readonly exemptions = new Map<string, Exemption>();
   /** Counted attempts that can still be undone, keyed by the token given to the caller. */
   private readonly pending = new Map<string, PendingUndo>();
+  /** Counts a new key when its map is full of entries that cannot be dropped. */
+  private overflow: AttemptBucket = { failures: 0, lockedUntil: 0, lastAttempt: 0 };
   private nextToken = 1;
 
   constructor(options: AuthLimiterOptions = {}) {
@@ -97,8 +111,9 @@ export class AuthAttemptLimiter {
    * Reserve one attempt before verification.
    * A positive `retryAfterMs` is a lock that was already in effect; the password
    * must not be checked and nothing is counted. A zero result may be checked.
-   * The count can lock later attempts. Returns the base delay when every stored
-   * bucket is still locked.
+   * The count can lock later attempts. When a map is full of entries that cannot
+   * be dropped, the new key is counted in one shared overflow bucket. A recent
+   * success in that case does not create a bucket.
    */
   beginAttempt(ip: string, username: string): AuthAttemptResult {
     const now = this.now();
@@ -108,9 +123,17 @@ export class AuthAttemptLimiter {
     this.decay(this.byIp, ipKey, now);
     this.decay(this.byPair, pairKey, now);
     this.decay(this.byUser, userKey, now);
-    const ipWait = this.wait(this.byIp.get(ipKey), now);
-    const pairWait = this.wait(this.byPair.get(pairKey), now);
-    const userWait = this.wait(this.byUser.get(userKey), now);
+    this.decayOverflow(now);
+    const placement = this.placement(ipKey, pairKey, userKey, now);
+    const ipWait = placement.ipOverflow
+      ? this.wait(this.overflow, now)
+      : this.wait(this.byIp.get(ipKey), now);
+    const pairWait = placement.pairOverflow
+      ? this.wait(this.overflow, now)
+      : this.wait(this.byPair.get(pairKey), now);
+    const userWait = placement.userOverflow
+      ? this.wait(this.overflow, now)
+      : this.wait(this.byUser.get(userKey), now);
     const exemption = this.exemptionFor(ipKey, userKey, now);
     const blocked = Math.max(ipWait, pairWait, userWait);
     const bypass = exemption !== undefined && blocked > 0;
@@ -120,17 +143,28 @@ export class AuthAttemptLimiter {
       if (exemption.remaining <= 0) this.exemptions.delete(this.exemptionKey(ipKey, userKey));
       return { retryAfterMs: 0 };
     }
+    if (exemption && placement.sharedOverflow) return { retryAfterMs: 0 };
     const ipBefore = cloneBucket(this.byIp.get(ipKey));
     const pairBefore = cloneBucket(this.byPair.get(pairKey));
     const userBefore = cloneBucket(this.byUser.get(userKey));
     const ipLockBefore = ipBefore?.lockedUntil ?? 0;
     const pairLockBefore = pairBefore?.lockedUntil ?? 0;
     const userLockBefore = userBefore?.lockedUntil ?? 0;
-    const ipBump = this.bump(this.byIp, ipKey, now, this.freeFailures);
-    const pairBump = ipBump ? this.bump(this.byPair, pairKey, now, this.freeFailures) : undefined;
-    const userBump = pairBump
-      ? this.bump(this.byUser, userKey, now, this.globalFreeFailures)
-      : undefined;
+    const overflowLockBefore = this.overflow.lockedUntil;
+    const skipped = { evicted: undefined };
+    const ipBump = placement.ipOverflow
+      ? skipped
+      : this.bump(this.byIp, ipKey, now, this.freeFailures);
+    const pairBump = !ipBump
+      ? undefined
+      : placement.pairOverflow
+        ? skipped
+        : this.bump(this.byPair, pairKey, now, this.freeFailures);
+    const userBump = !pairBump
+      ? undefined
+      : placement.userOverflow
+        ? skipped
+        : this.bump(this.byUser, userKey, now, this.globalFreeFailures, this.freeFailures);
     if (!ipBump || !pairBump || !userBump) {
       restoreBucket(this.byIp, ipKey, ipBefore);
       restoreBucket(this.byPair, pairKey, pairBefore);
@@ -140,6 +174,7 @@ export class AuthAttemptLimiter {
       this.restoreEvicted(this.byUser, userBump?.evicted);
       return { retryAfterMs: this.baseDelayMs };
     }
+    if (placement.sharedOverflow) this.applyFailure(this.overflow, now, this.freeFailures);
     const token = this.notePending({
       ipKey,
       pairKey,
@@ -147,9 +182,19 @@ export class AuthAttemptLimiter {
       ipLockBefore,
       pairLockBefore,
       userLockBefore,
-      ipLockAfter: this.byIp.get(ipKey)?.lockedUntil ?? 0,
-      pairLockAfter: this.byPair.get(pairKey)?.lockedUntil ?? 0,
-      userLockAfter: this.byUser.get(userKey)?.lockedUntil ?? 0,
+      ipLockAfter: placement.ipOverflow ? ipLockBefore : (this.byIp.get(ipKey)?.lockedUntil ?? 0),
+      pairLockAfter: placement.pairOverflow
+        ? pairLockBefore
+        : (this.byPair.get(pairKey)?.lockedUntil ?? 0),
+      userLockAfter: placement.userOverflow
+        ? userLockBefore
+        : (this.byUser.get(userKey)?.lockedUntil ?? 0),
+      countedIp: !placement.ipOverflow,
+      countedPair: !placement.pairOverflow,
+      countedUser: !placement.userOverflow,
+      countedOverflow: placement.sharedOverflow,
+      overflowLockBefore,
+      overflowLockAfter: this.overflow.lockedUntil,
     });
     return { retryAfterMs: 0, token };
   }
@@ -158,34 +203,52 @@ export class AuthAttemptLimiter {
     const now = this.now();
     const ipKey = normalizeClientIp(ip);
     this.decay(this.byIp, ipKey, now);
-    const ipWait = this.wait(this.byIp.get(ipKey), now);
+    this.decayOverflow(now);
+    const ipOverflow = this.needsOverflow(this.byIp, ipKey, now);
+    const ipWait = ipOverflow
+      ? this.wait(this.overflow, now)
+      : this.wait(this.byIp.get(ipKey), now);
     if (!username) return ipWait;
     const userKey = normalizeUser(username);
     const pairKey = this.pairKey(ipKey, userKey);
     this.decay(this.byPair, pairKey, now);
     this.decay(this.byUser, userKey, now);
     if (this.exemptionFor(ipKey, userKey, now)) return 0;
-    return Math.max(
-      ipWait,
-      this.wait(this.byPair.get(pairKey), now),
-      this.wait(this.byUser.get(userKey), now),
-    );
+    const pairOverflow = this.needsOverflow(this.byPair, pairKey, now);
+    const userOverflow = this.needsOverflow(this.byUser, userKey, now, this.freeFailures);
+    const pairWait = pairOverflow
+      ? this.wait(this.overflow, now)
+      : this.wait(this.byPair.get(pairKey), now);
+    const userWait = userOverflow
+      ? this.wait(this.overflow, now)
+      : this.wait(this.byUser.get(userKey), now);
+    return Math.max(ipWait, pairWait, userWait);
   }
 
   /**
-   * Password matched. Undoes this attempt's count and the lock it created.
-   * A lock that was already in effect stays. Other failures on the address stay.
+   * Password matched. Undoes this attempt's count and the lock it created when
+   * the attempt token is still stored. A dropped token skips that undo and still
+   * records the exemption. A lock that was already in effect stays. Other
+   * failures on the address stay.
    */
   recordSuccess(ip: string, username: string, token?: string): void {
     const now = this.now();
     const ipKey = normalizeClientIp(ip);
     const userKey = normalizeUser(username);
     const undo = token ? this.takePending(ipKey, userKey, token) : undefined;
-    if (token && !undo) return;
     if (undo) {
-      this.undo(this.byIp, undo.ipKey, now, undo.ipLockBefore, undo.ipLockAfter);
-      this.undo(this.byPair, undo.pairKey, now, undo.pairLockBefore, undo.pairLockAfter);
-      this.undo(this.byUser, undo.userKey, now, undo.userLockBefore, undo.userLockAfter);
+      if (undo.countedIp) {
+        this.undo(this.byIp, undo.ipKey, now, undo.ipLockBefore, undo.ipLockAfter);
+      }
+      if (undo.countedPair) {
+        this.undo(this.byPair, undo.pairKey, now, undo.pairLockBefore, undo.pairLockAfter);
+      }
+      if (undo.countedUser) {
+        this.undo(this.byUser, undo.userKey, now, undo.userLockBefore, undo.userLockAfter);
+      }
+      if (undo.countedOverflow) {
+        this.undoOverflow(now, undo.overflowLockBefore, undo.overflowLockAfter);
+      }
     }
     this.exemptions.delete(this.exemptionKey(ipKey, userKey));
     this.exemptions.set(this.exemptionKey(ipKey, userKey), {
@@ -288,43 +351,110 @@ export class AuthAttemptLimiter {
     return bucket.lockedUntil - now;
   }
 
-  /** @returns undefined when a new bucket cannot be stored without dropping a live lock. */
+  private placement(
+    ipKey: string,
+    pairKey: string,
+    userKey: string,
+    now: number,
+  ): {
+    ipOverflow: boolean;
+    pairOverflow: boolean;
+    userOverflow: boolean;
+    sharedOverflow: boolean;
+  } {
+    const ipOverflow = this.needsOverflow(this.byIp, ipKey, now);
+    const pairOverflow = this.needsOverflow(this.byPair, pairKey, now);
+    const userOverflow = this.needsOverflow(this.byUser, userKey, now, this.freeFailures);
+    return {
+      ipOverflow,
+      pairOverflow,
+      userOverflow,
+      sharedOverflow: ipOverflow || pairOverflow || userOverflow,
+    };
+  }
+
+  /** @returns undefined when a new bucket cannot be stored without dropping a protected entry. */
   private bump(
     buckets: Map<string, AttemptBucket>,
     key: string,
     now: number,
     freeFailures: number,
+    protectAbove?: number,
   ): { evicted?: EvictedBucket } | undefined {
     let evicted: EvictedBucket | undefined;
     if (!buckets.has(key) && buckets.size >= MAX_BUCKETS) {
-      evicted = this.evictUnlocked(buckets, now);
+      evicted = this.evictUnlocked(buckets, now, protectAbove);
       if (!evicted) return undefined;
     }
     const current = buckets.get(key) ?? { failures: 0, lockedUntil: 0, lastAttempt: now };
-    current.failures += 1;
-    current.lastAttempt = now;
-    if (current.failures > freeFailures) {
-      const exponent = Math.min(current.failures - freeFailures - 1, 20);
-      const delay = Math.min(this.baseDelayMs * 2 ** exponent, this.maxDelayMs);
-      current.lockedUntil = now + delay;
-    }
+    this.applyFailure(current, now, freeFailures);
     buckets.delete(key);
     buckets.set(key, current);
     return { evicted };
   }
 
-  /** Drop the oldest bucket that is not locked right now. */
+  private applyFailure(bucket: AttemptBucket, now: number, freeFailures: number): void {
+    bucket.failures += 1;
+    bucket.lastAttempt = now;
+    if (bucket.failures > freeFailures) {
+      const exponent = Math.min(bucket.failures - freeFailures - 1, 20);
+      const delay = Math.min(this.baseDelayMs * 2 ** exponent, this.maxDelayMs);
+      bucket.lockedUntil = now + delay;
+    }
+  }
+
+  /**
+   * Drop the unlocked bucket with the fewest failures.
+   * The oldest wins a tie. A username above `protectAbove` stays.
+   */
   private evictUnlocked(
     buckets: Map<string, AttemptBucket>,
     now: number,
+    protectAbove?: number,
   ): EvictedBucket | undefined {
+    const best = this.findUnlocked(buckets, now, protectAbove);
+    if (!best) return undefined;
+    buckets.delete(best.key);
+    return best;
+  }
+
+  private findUnlocked(
+    buckets: Map<string, AttemptBucket>,
+    now: number,
+    protectAbove?: number,
+  ): EvictedBucket | undefined {
+    let best: EvictedBucket | undefined;
     for (const [key, bucket] of buckets) {
-      if (bucket.lockedUntil <= now) {
-        buckets.delete(key);
-        return { key, bucket };
-      }
+      if (bucket.lockedUntil > now) continue;
+      if (protectAbove !== undefined && bucket.failures > protectAbove) continue;
+      if (!best || bucket.failures < best.bucket.failures) best = { key, bucket };
     }
-    return undefined;
+    return best;
+  }
+
+  private needsOverflow(
+    buckets: Map<string, AttemptBucket>,
+    key: string,
+    now: number,
+    protectAbove?: number,
+  ): boolean {
+    if (buckets.has(key) || buckets.size < MAX_BUCKETS) return false;
+    return this.findUnlocked(buckets, now, protectAbove) === undefined;
+  }
+
+  private decayOverflow(now: number): void {
+    if (this.overflow.failures === 0 && this.overflow.lockedUntil <= now) return;
+    if (this.idle(this.overflow, now)) {
+      this.overflow = { failures: 0, lockedUntil: 0, lastAttempt: 0 };
+    }
+  }
+
+  private undoOverflow(now: number, lockBefore: number, lockAfter: number): void {
+    this.overflow.failures = Math.max(0, this.overflow.failures - 1);
+    if (this.overflow.lockedUntil === lockAfter) this.overflow.lockedUntil = lockBefore;
+    if (this.overflow.failures === 0 && this.overflow.lockedUntil <= now) {
+      this.overflow = { failures: 0, lockedUntil: 0, lastAttempt: 0 };
+    }
   }
 
   private restoreEvicted(

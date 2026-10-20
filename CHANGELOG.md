@@ -58,15 +58,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Sign-in backoff keeps its failure count when a lock expires and doubles on the next failure, up
   to 15 minutes. Quiet time starts at the later of the last attempt and the end of the lock, so a
   15 minute lock stays at that ceiling. The attempt that crosses a limit is still checked; if it
-  fails, later attempts get 429 with `Retry-After` until the window ends, and the correct password
-  is accepted after that. A successful password removes that request's count and the lock that
-  request created. The strict lock is the client address and the address-plus-username pair. One
+  fails, later attempts get 429 with `Retry-After`. A distributed attacker can keep the global
+  username lock with about one failure per window. While that continues, only that username at an
+  address that signed in during the last hour gets in, and only for a few failures; a wrong
+  password removes the exemption. A successful password removes that request's count and the lock
+  that request created. If the attempt token was already dropped, the count stays and the exemption
+  is still recorded. The strict lock is the client address and the address-plus-username pair. One
   other address cannot lock the name. 128 failures spread across addresses can, for example 16
-  IPv6 /64s or NATs using the free attempts; the user then sees 429 from every address until that
-  global window ends. A recent success exempts only that username at that address (the whole IPv6
-  /64 or NAT) for a few failures, and a wrong password removes the exemption. The presented
-  username is limited whether or not an account exists. A full limiter drops the oldest entry that
-  is not locked, and a live lock is not evicted to make room. An attempt that does not finish is
+  IPv6 /64s or NATs using the free attempts. A recent success exempts only that username at that
+  address (the whole IPv6 /64 or NAT) for a few failures, and a wrong password removes the
+  exemption. The presented username is limited whether or not an account exists. A full limiter
+  drops the unlocked entry with the fewest failures, the oldest on a tie, and never drops a
+  username above the free-attempt count. A live lock is not evicted. When every slot is an active
+  lock, a new key is counted in one shared overflow bucket, and a recent success does not create a
+  bucket. An attempt that does not finish is
   tied to a bounded token, so it cannot undo a later failure. scrypt work uses a short queue, keeps
   one slot for a recent sign-in, and a rejected attempt still counts. The credential key is linked
   into place so it is never read empty. Back up `oauth.db.mac` with `oauth.db`; losing the key
