@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Added opt-in HTTP authentication and routing for remote MCP clients. `WA_MCP_OAUTH_ENABLED=false`
+  embeds an OAuth 2.1 authorization-code server with PKCE, discovery metadata, and dynamic client
+  registration. `WA_BASIC_AUTH` accepts multiple users, `WA_BASE_PATH` prefixes the HTTP routes, and
+  the existing `WA_MCP_API_KEY` behavior is unchanged when the new settings are left unset.
 - Added Baileys instance lifecycle webhooks for connection, disconnect, pairing-code, and QR events,
   plus the read-only `wa_get_instance_status` tool. Pairing and QR challenge data is omitted from
   webhook payloads and status output.

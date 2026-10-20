@@ -8,6 +8,12 @@ services:
     environment:
       - WA_TRANSPORT=http
       - WA_MCP_PORT=3000
+      - WA_BASE_PATH=${WA_BASE_PATH:-}
+      - WA_BASIC_AUTH=${WA_BASIC_AUTH:-}
+      - WA_MCP_OAUTH_ENABLED=${WA_MCP_OAUTH_ENABLED:-false}
+      - WA_MCP_OAUTH_ISSUER_URL=${WA_MCP_OAUTH_ISSUER_URL:-}
+      - WA_MCP_OAUTH_RESOURCE_URL=${WA_MCP_OAUTH_RESOURCE_URL:-}
+      - WA_MCP_OAUTH_DB_PATH=${WA_MCP_OAUTH_DB_PATH:-data/oauth.db}
       - WA_REDIS_URL=redis://redis:6379
       - WA_LOG_LEVEL=info
       - WA_MESSAGE_RETENTION_DAYS=30

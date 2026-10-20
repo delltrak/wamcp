@@ -40,13 +40,22 @@ WA MCP is an MCP (Model Context Protocol) server that exposes WhatsApp capabilit
 
 ### Authentication
 
-All requests require an API key in the `Authorization` header:
+HTTP authentication is optional. With `WA_MCP_API_KEY`, `WA_BASIC_AUTH`, and `WA_MCP_OAUTH_ENABLED` unset, `/mcp` accepts unauthenticated requests and the paths stay `/mcp`, `/health`, and `/cloud-webhook`.
+
+`WA_MCP_API_KEY` accepts either header:
 
 ```
 Authorization: Bearer wamcp_sk_your_key
+X-Api-Key: wamcp_sk_your_key
 ```
 
-The key is configured via the `WA_API_KEY` environment variable on the server.
+`WA_BASIC_AUTH` adds one or more accounts (`alice:replace-me,bob:replace-me`). A password may be a `$scrypt$salt$hash` verifier. Each account can call the MCP endpoint with HTTP Basic authentication. Health and the Cloud API webhook stay on their own checks: health is unauthenticated, and the webhook keeps Meta's signature verification.
+
+`WA_MCP_OAUTH_ENABLED=true` embeds an OAuth 2.1 authorization server for the MCP endpoint: authorization code with PKCE S256, protected-resource and authorization-server metadata, and dynamic client registration. The browser sign-in page uses the same `WA_BASIC_AUTH` accounts. Access tokens are opaque; only their hashes are stored. See `docs/mcp-oauth.md`.
+
+`WA_BASE_PATH` prefixes the HTTP routes. `/wamcp` serves the MCP endpoint at `/wamcp/mcp`. OAuth discovery uses the path-inserted well-known URLs required by the MCP authorization specification, not `/wamcp/.well-known/...`.
+
+`GET /health` remains public so process probes do not need these credentials.
 
 ### Channel Types
 

@@ -700,12 +700,18 @@ Both backends implement the same `ChannelAdapter` interface. Your agent doesn't 
 
 ## ⚙️ Configuration
 
-Copy `.env.example` to `.env` and configure:
+Copy `.env.example` to `.env` and configure. Leave the new HTTP auth settings unset to keep the current URLs and the existing API key behavior. Remote MCP OAuth is documented in [docs/mcp-oauth.md](docs/mcp-oauth.md).
 
 | Variable                    | Default                  | Description                              |
 | --------------------------- | ------------------------ | ---------------------------------------- |
 | `WA_TRANSPORT`              | `http`                   | `http` (Streamable HTTP) or `stdio`      |
-| `WA_MCP_API_KEY`            | —                        | Bearer token auth. Unset = no auth (dev) |
+| `WA_MCP_API_KEY`            | —                        | Bearer token or `x-api-key`. Unset = no API key |
+| `WA_BASIC_AUTH`             | —                        | Comma-separated `user:password` accounts, or a `$scrypt$` verifier. Unset = no Basic Auth |
+| `WA_BASE_PATH`              | —                        | Prefix for `/mcp`, `/health`, `/cloud-webhook`, and OAuth routes, for example `/wamcp` |
+| `WA_MCP_OAUTH_ENABLED`      | `false`                  | Embed an OAuth 2.1 authorization server for the MCP endpoint |
+| `WA_MCP_OAUTH_ISSUER_URL`   | —                        | Public HTTPS issuer. Required when OAuth is enabled; its path must match `WA_BASE_PATH` |
+| `WA_MCP_OAUTH_RESOURCE_URL` | issuer origin + base path + `/mcp` | Canonical MCP resource URL checked on every token |
+| `WA_MCP_OAUTH_DB_PATH`      | `data/oauth.db`          | SQLite file for OAuth clients and token hashes. Separate from the WhatsApp database |
 | `WA_MCP_PORT`               | `3000`                   | HTTP server port                         |
 | `WA_REDIS_URL`              | `redis://localhost:6379` | Redis for BullMQ queues                  |
 | `WA_LOG_LEVEL`              | `info`                   | `debug` \| `info` \| `warn` \| `error`   |
