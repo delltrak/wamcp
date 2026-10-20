@@ -939,6 +939,7 @@ uses the account's own JID and known individual contacts.
 See [Audio transcription](docs/audio-transcription.md) for tool examples and event behavior.
 See [Text-to-speech voice notes](docs/tts.md) for setup, voice selection, model options, and cost notes.
 See [Baileys presence](docs/baileys-presence.md) for online status configuration.
+See [Passkey pairing and ARM images](docs/passkey-and-arm.md) for what Baileys rc14 cannot do yet and how the image is published.
 
 ---
 
@@ -954,6 +955,12 @@ Services:
 
 - **wa-mcp** — The MCP server on port `3000`
 - **redis** — BullMQ backend with AOF persistence
+
+The GitHub Container Registry image is one manifest list for `linux/amd64` and `linux/arm64`.
+Branch, version, and `sha-*` tags are unchanged: a pull on either machine selects its platform.
+The image build loads the `better-sqlite3` musl prebuild and runs `ffmpeg` on each platform.
+Database path, Baileys auth files, and the `wa-data` volume are unchanged. Details and the passkey
+finding are in [Passkey pairing and ARM images](docs/passkey-and-arm.md).
 
 ### Health Check
 
