@@ -25,6 +25,7 @@
 4. [Notifications Reference](#4-notifications-reference)
 5. [Error Handling](#5-error-handling)
 6. [Agent Integration Examples](#6-agent-integration-examples)
+7. [Chatwoot and n8n](#7-chatwoot-and-n8n)
 
 ---
 
@@ -3376,6 +3377,42 @@ toolkit = MCPToolkit(
 tools = toolkit.get_tools()
 # tools now contains all 137 WA MCP tools, ready for any LangChain agent
 ```
+
+---
+
+## 7. Chatwoot and n8n
+
+These integrations are not MCP tools. The tool count stays **137**. Neither path changes `WA_EVENT_WEBHOOK_*`.
+
+### Chatwoot API inbox
+
+`WA_CHATWOOT_ENABLED` defaults to `false`. Inbound sync and WhatsApp delivery of agent replies both stay off until it is `true`.
+
+| Variable | Default | Required when enabled |
+| --- | --- | --- |
+| `WA_CHATWOOT_ENABLED` | `false` | — |
+| `WA_CHATWOOT_URL` | unset | yes |
+| `WA_CHATWOOT_TOKEN` | unset | yes |
+| `WA_CHATWOOT_ACCOUNT_ID` | unset | yes |
+| `WA_CHATWOOT_INBOX_ID` | unset | yes |
+| `WA_CHATWOOT_WEBHOOK_SECRET` | unset | yes, at least 16 characters |
+| `WA_CHATWOOT_IGNORE_JIDS` | unset | no |
+| `WA_CHATWOOT_INSTANCE_ID` | unset | no |
+| `WA_CHATWOOT_ALLOW_HTTP` | `false` | no |
+| `WA_CHATWOOT_ALLOW_PRIVATE_URL` | `false` | no |
+| `WA_CHATWOOT_TIMEOUT_MS` | `10000` | no |
+
+`POST /chatwoot/webhook` accepts `message_created` agent replies. The secret may arrive as `X-Chatwoot-Webhook-Secret`, `X-Wa-Chatwoot-Secret`, `?secret=`, or `X-Hub-Signature-256` (`sha256=` HMAC-SHA256 of the raw body). Messages this server created in Chatwoot use source id `WAID:<whatsapp message id>` and are not sent back to WhatsApp.
+
+`WA_CHATWOOT_IGNORE_JIDS` is a comma-separated list of exact JIDs, `@domain` suffixes, or `*` wildcards. `status@broadcast`, other `@broadcast` chats, and `@newsletter` chats are always ignored.
+
+With more than one instance, set `WA_CHATWOOT_INSTANCE_ID` or let the bridge store `instanceId|chatJid` as the Chatwoot contact source id so the reply returns to the same instance.
+
+Details and the Chatwoot inbox checklist are in [docs/chatwoot.md](chatwoot.md).
+
+### n8n community nodes
+
+`integrations/n8n-nodes-wamcp` is a local package (`private: true`) and is not published to npm. The action node calls the existing `POST /mcp` session (`wa_send_text`, `wa_send_image`, `wa_send_audio`, `wa_send_document`, `wa_get_instance_status`). The trigger is a webhook. Import `integrations/n8n-nodes-wamcp/examples/reply-on-message.json` for a flow that starts on `message.received` and sends a text reply. Set `WA_EVENT_WEBHOOK_URL` to that trigger's production URL.
 
 ---
 

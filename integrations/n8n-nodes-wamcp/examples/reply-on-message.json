@@ -1,0 +1,52 @@
+{
+  "name": "Reply to a WhatsApp message",
+  "active": false,
+  "settings": { "executionOrder": "v1" },
+  "nodes": [
+    {
+      "parameters": { "events": "message.received" },
+      "id": "8f0c1a2e-6b4d-4e1a-9c3f-1a2b3c4d5e6f",
+      "name": "WhatsApp event",
+      "type": "n8n-nodes-wamcp.wamcpTrigger",
+      "typeVersion": 1,
+      "position": [260, 300],
+      "webhookId": "wamcp"
+    },
+    {
+      "parameters": {
+        "operation": "sendText",
+        "instanceId": "={{$json.instanceId}}",
+        "to": "={{$json.chat}}",
+        "text": "=Received: {{$json.text}}"
+      },
+      "id": "9a1b2c3d-4e5f-6789-abcd-ef0123456789",
+      "name": "Send text",
+      "type": "n8n-nodes-wamcp.wamcp",
+      "typeVersion": 1,
+      "position": [560, 300],
+      "credentials": {
+        "wamcpApi": { "id": "replace-me", "name": "WA MCP" }
+      }
+    }
+  ],
+  "connections": {
+    "WhatsApp event": {
+      "main": [[{ "node": "Send text", "type": "main", "index": 0 }]]
+    }
+  },
+  "pinData": {
+    "WhatsApp event": [
+      {
+        "json": {
+          "event": "message.received",
+          "instanceId": "inst_0123abcd",
+          "chat": "15551234567@s.whatsapp.net",
+          "sender": "15551234567@s.whatsapp.net",
+          "type": "text",
+          "text": "Hello",
+          "timestamp": 1700000000
+        }
+      }
+    ]
+  }
+}
