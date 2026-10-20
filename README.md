@@ -141,6 +141,7 @@ Add to your `claude_desktop_config.json`:
 | 🔁  | **Auto-reconnect**     | Automatic reconnection with exponential backoff.                                                          |
 | 🗃️  | **Persistent**         | SQLite storage for sessions, messages, contacts, groups.                                                  |
 | 🐳  | **Single container**   | `docker compose up` — only Redis as external dependency.                                                  |
+| 🖥️  | **Operations dashboard** | Optional read-only `/dashboard` page for status, webhook health, and pairing a new instance. Off by default. |
 
 ---
 
@@ -706,6 +707,8 @@ Copy `.env.example` to `.env` and configure:
 | --------------------------- | ------------------------ | ---------------------------------------- |
 | `WA_TRANSPORT`              | `http`                   | `http` (Streamable HTTP) or `stdio`      |
 | `WA_MCP_API_KEY`            | —                        | Bearer token auth. Unset = no auth (dev) |
+| `WA_DASHBOARD_ENABLED`      | `false`                  | Serve `GET /dashboard`. Requires `WA_TRANSPORT=http` and `WA_DASHBOARD_USERS` |
+| `WA_DASHBOARD_USERS`        | —                        | Required when the dashboard is enabled. Comma-separated `user:password` entries |
 | `WA_MCP_PORT`               | `3000`                   | HTTP server port                         |
 | `WA_REDIS_URL`              | `redis://localhost:6379` | Redis for BullMQ queues                  |
 | `WA_LOG_LEVEL`              | `info`                   | `debug` \| `info` \| `warn` \| `error`   |
@@ -942,6 +945,23 @@ See [Baileys presence](docs/baileys-presence.md) for online status configuration
 
 ---
 
+## Operations dashboard
+
+`WA_DASHBOARD_ENABLED` defaults to `false`. Set it to `true` only with `WA_TRANSPORT=http` and `WA_DASHBOARD_USERS`. The value is one `user:password` pair, or several pairs separated by commas. Passwords may contain colons and cannot contain commas. Leading and trailing spaces are trimmed.
+
+```bash
+WA_DASHBOARD_ENABLED=true
+WA_DASHBOARD_USERS=operator:replace-with-a-long-password
+```
+
+Open `http://<host>:3000/dashboard`. The browser asks for that username and password. Without them the server returns `401`. When the flag is off, `/dashboard` does not exist and returns `404`, the same as any other unknown path.
+
+The page shows connection health, each instance's state, last connect and disconnect, webhook configuration, dropped events, recent delivery successes and failures, and recent channel events. It does not show webhook URLs, tokens, header values, or signing secrets. Cloud webhook settings appear only as yes/no configured flags.
+
+The only write action is starting pairing for a **new** Baileys instance, or for an existing Baileys instance that has never registered. An instance whose stored credentials are already registered, or whose state is `connected`, is left untouched: the dashboard does not connect it, request a pairing code, or load a QR. It also does not send messages, log out, delete, or restart instances. `WA_DATABASE_PATH`, the Baileys auth keys, and the Compose volume stay where they are.
+
+---
+
 ## 🐳 Docker
 
 ### Production
@@ -1000,6 +1020,7 @@ src/
 ├── index.ts                     # Entry point (HTTP/stdio)
 ├── constants.ts                 # Defaults and limits
 ├── server/mcp.ts                # MCP server setup
+├── server/dashboard.ts          # Optional operations dashboard
 ├── tools/                       # 🔧 137 MCP tools (15 files)
 ├── resources/                   # 📖 10 MCP resources (8 files)
 ├── notifications/events.ts      # 📡 15 documented event types

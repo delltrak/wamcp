@@ -8,6 +8,8 @@ services:
     environment:
       - WA_TRANSPORT=http
       - WA_MCP_PORT=3000
+      - WA_DASHBOARD_ENABLED=${WA_DASHBOARD_ENABLED:-false}
+      - WA_DASHBOARD_USERS=${WA_DASHBOARD_USERS:-}
       - WA_REDIS_URL=redis://redis:6379
       - WA_LOG_LEVEL=info
       - WA_MESSAGE_RETENTION_DAYS=30

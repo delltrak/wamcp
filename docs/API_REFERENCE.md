@@ -7,6 +7,7 @@
 ## Table of Contents
 
 1. [Overview](#1-overview)
+   - [Operations dashboard](#operations-dashboard)
 2. [Tools Reference](#2-tools-reference)
    - [Instance Management](#21-instance-management-9-tools)
    - [Messaging](#22-messaging-31-tools)
@@ -47,6 +48,16 @@ Authorization: Bearer wamcp_sk_your_key
 ```
 
 The key is configured via the `WA_API_KEY` environment variable on the server.
+
+### Operations dashboard
+
+`GET /dashboard` is an optional browser page on the same HTTP server. It is absent unless `WA_DASHBOARD_ENABLED=true`. Enabling it also requires `WA_TRANSPORT=http` and `WA_DASHBOARD_USERS` (`user:password`, or several entries separated by commas). A request without a matching `Authorization: Basic` header returns `401` and `WWW-Authenticate`. Wrong credentials also return `401`. With the flag off, `/dashboard` is a normal `404`.
+
+The page shows instance connection state, last connect and disconnect time, disconnect reason, pending pairing method (not the code or QR secret unless pairing is in progress), webhook configuration, dropped event names, and recent delivery successes and failures. It does not show webhook URLs, header names, header values, tokens, or signing secrets. Cloud webhook settings are reported only as configured or not configured.
+
+The page is read-only except `POST /dashboard/api/pairing` (create a new Baileys instance and start pairing) and `POST /dashboard/api/instances/{instanceId}/pairing` (start pairing for an existing instance). Both refuse a non-Baileys instance and any instance whose stored Baileys credentials are registered or whose state is `connected`. That refusal does not connect, request a pairing code, or read a QR. The dashboard does not log out, delete, restart, or send messages, and it does not change `WA_DATABASE_PATH`, the auth store, or Docker volumes.
+
+`GET /dashboard/api/overview` returns the same redacted status as JSON for the signed-in operator.
 
 ### Channel Types
 
