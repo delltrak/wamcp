@@ -414,6 +414,22 @@ export class ChatwootClient {
     );
   }
 
+  /**
+   * The application API cannot mark an already accepted message as failed.
+   * A private note is the supported way to show the agent what did not send.
+   */
+  async postPrivateNote(conversationId: number, content: string): Promise<void> {
+    await this.request(
+      "POST",
+      `/api/v1/accounts/${this.config.accountId}/conversations/${conversationId}/messages`,
+      {
+        content: content.slice(0, 10_000),
+        message_type: "outgoing",
+        private: true,
+      },
+    );
+  }
+
   private async request(
     method: "GET" | "POST",
     path: string,

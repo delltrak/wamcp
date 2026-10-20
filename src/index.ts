@@ -239,8 +239,8 @@ async function startHttp(
 
   let servicesClosePromise: Promise<void> | null = null;
   const closeServices = (): Promise<void> => {
-    chatwoot.stop();
     servicesClosePromise ??= Promise.all([
+      chatwoot.stop(),
       messageQueue.close(),
       eventWebhook.close(),
       maintenance.stop(),
@@ -286,8 +286,8 @@ async function startStdio(chatwootConfig: ChatwootConfig): Promise<void> {
   const onServerClose = mcpServer.server.onclose;
   let servicesClosePromise: Promise<void> | null = null;
   const closeServices = (): Promise<void> => {
-    chatwoot.stop();
     servicesClosePromise ??= Promise.all([
+      chatwoot.stop(),
       messageQueue.close(),
       eventWebhook.close(),
       maintenance.stop(),

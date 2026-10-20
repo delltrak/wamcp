@@ -20,6 +20,7 @@ import { isValidInstanceId, validateMediaUrl } from "../utils/validation.js";
 import { createChildLogger } from "../utils/logger.js";
 import {
   isChatwootJidIgnored,
+  isChatwootNewsletterSource,
   parseChatwootSourceId,
   type ChatwootConfig,
   type EnabledChatwootConfig,
@@ -37,6 +38,10 @@ const MAX_SEEN = 2_000;
 export const CHATWOOT_SIGNATURE_WINDOW_SECONDS = 300;
 export const MAX_REPLY_ATTACHMENTS = 8;
 export const MAX_REPLY_ATTACHMENT_BYTES = 16 * 1024 * 1024;
+/** Memory ceiling for delivery ids. Expiry still walks from the oldest entry only. */
+const MAX_DELIVERIES = 10_000;
+/** Shutdown waits this long for background replies, then continues. */
+export const CHATWOOT_REPLY_DRAIN_TIMEOUT_MS = 5_000;
 
 export interface ChatwootRuntime {
   enqueueMessage(
@@ -94,6 +99,7 @@ interface ParsedChatwootWebhook {
   deleted: boolean;
   senderType: string;
   inboxId: string | null;
+  conversationId: number | null;
   sourceChatId: string;
   attachments: ChatwootAttachment[];
 }
@@ -197,6 +203,15 @@ function isDeleted(value: unknown): boolean {
   return typeof deleted === "string" && deleted.trim().toLowerCase() === "true";
 }
 
+function positiveId(value: unknown): number | null {
+  if (typeof value === "number" && Number.isSafeInteger(value) && value > 0) return value;
+  if (typeof value === "string" && /^[1-9]\d*$/.test(value.trim())) {
+    const parsed = Number(value.trim());
+    if (Number.isSafeInteger(parsed)) return parsed;
+  }
+  return null;
+}
+
 /** Translate the Chatwoot message_created payload into a routing decision. */
 export function parseChatwootWebhook(body: unknown): ChatwootWebhookDecision {
   if (!isRecord(body)) return { action: "ignore", reason: "invalid_payload" };
@@ -229,6 +244,7 @@ export function parseChatwootWebhook(body: unknown): ChatwootWebhookDecision {
       senderType: stringOf(sender.type).toLowerCase(),
       inboxId:
         typeof inboxRaw === "number" || typeof inboxRaw === "string" ? String(inboxRaw) : null,
+      conversationId: positiveId(conversation.id),
       sourceChatId: stringOf(contactInbox.source_id),
       attachments,
     },
@@ -327,15 +343,37 @@ function mimeTypeOf(value: string | null): string {
   return /^[\w!#$&^_.+-]+\/[\w!#$&^_.+-]+$/.test(mime) ? mime : "application/octet-stream";
 }
 
+type DownloadedAttachment =
+  | { status: "ok"; content: MessageContent; bytes: number }
+  | { status: "budget" }
+  | { status: "download_failed" }
+  | { status: "skipped" };
+
+function logAttachmentBudget(fileType: string, remaining: number): void {
+  logger.warn(
+    {
+      reason: "attachment_budget",
+      fileType,
+      remaining,
+      cap: MAX_REPLY_ATTACHMENT_BYTES,
+    },
+    "Chatwoot attachment skipped because the reply byte budget is exhausted",
+  );
+}
+
 async function downloadedAttachment(
   attachment: ChatwootAttachment,
   baseUrl: string,
   fetchAttachment: ChatwootAttachmentFetcher,
   budget: number,
-): Promise<{ content: MessageContent; bytes: number } | null> {
+): Promise<DownloadedAttachment> {
   const typeLimit = attachmentMaxBytes(attachment.fileType);
   const url = absoluteAttachmentUrl(attachment.dataUrl, baseUrl);
-  if (typeLimit === null || !url || budget <= 0) return null;
+  if (typeLimit === null || !url) return { status: "skipped" };
+  if (budget <= 0) {
+    logAttachmentBudget(attachment.fileType, budget);
+    return { status: "budget" };
+  }
   const maxBytes = Math.min(typeLimit, budget);
   let downloaded: ChatwootDownloadedAttachment;
   try {
@@ -345,22 +383,38 @@ async function downloadedAttachment(
       { err: error, fileType: attachment.fileType },
       "Chatwoot attachment was not downloaded",
     );
-    return null;
+    return { status: "download_failed" };
   }
-  if (downloaded.data.length === 0 || downloaded.data.length > maxBytes) return null;
+  if (downloaded.data.length === 0) return { status: "skipped" };
+  if (downloaded.data.length > maxBytes) {
+    logAttachmentBudget(attachment.fileType, budget);
+    return { status: "budget" };
+  }
   const encoded = downloaded.data.toString("base64");
   const kind = attachment.fileType.toLowerCase();
-  if (kind === "image")
-    return { content: { type: "image", image: encoded }, bytes: downloaded.data.length };
-  if (kind === "video")
-    return { content: { type: "video", video: encoded }, bytes: downloaded.data.length };
+  if (kind === "image") {
+    return {
+      status: "ok",
+      content: { type: "image", image: encoded },
+      bytes: downloaded.data.length,
+    };
+  }
+  if (kind === "video") {
+    return {
+      status: "ok",
+      content: { type: "video", video: encoded },
+      bytes: downloaded.data.length,
+    };
+  }
   if (kind === "audio") {
     return {
+      status: "ok",
       content: { type: "audio", audio: encoded, mimeType: mimeTypeOf(downloaded.contentType) },
       bytes: downloaded.data.length,
     };
   }
   return {
+    status: "ok",
     content: {
       type: "document",
       document: encoded,
@@ -371,29 +425,72 @@ async function downloadedAttachment(
   };
 }
 
+export interface ChatwootReplyBuild {
+  contents: MessageContent[];
+  downloadFailed: boolean;
+  budgetSkipped: number;
+}
+
+function budgetSkipReason(count: number): string {
+  return count === 1
+    ? "1 attachment exceeded the 16 MB reply budget and was not sent."
+    : `${count} attachments exceeded the 16 MB reply budget and were not sent.`;
+}
+
 /** WhatsApp messages queued for one agent reply. Attachments are bytes, never remote URLs. */
 export async function buildChatwootReplyContents(
   parsed: ParsedChatwootWebhook,
   baseUrl: string,
   fetchAttachment: ChatwootAttachmentFetcher,
-): Promise<MessageContent[]> {
+): Promise<ChatwootReplyBuild> {
   const text = chatwootMarkdownToWhatsApp(parsed.content).trim().slice(0, 65_536);
   const attachments: MessageContent[] = [];
   let used = 0;
+  let downloadFailed = false;
+  let budgetSkipped = 0;
   for (const attachment of parsed.attachments.slice(0, MAX_REPLY_ATTACHMENTS)) {
     const remaining = MAX_REPLY_ATTACHMENT_BYTES - used;
-    if (remaining <= 0) break;
+    if (remaining <= 0) {
+      budgetSkipped += 1;
+      logAttachmentBudget(attachment.fileType, remaining);
+      continue;
+    }
     const downloaded = await downloadedAttachment(attachment, baseUrl, fetchAttachment, remaining);
-    if (!downloaded) continue;
+    if (downloaded.status === "budget") {
+      budgetSkipped += 1;
+      continue;
+    }
+    if (downloaded.status === "download_failed") {
+      downloadFailed = true;
+      continue;
+    }
+    if (downloaded.status !== "ok") continue;
     attachments.push(downloaded.content);
     used += downloaded.bytes;
   }
-  if (attachments.length === 0) return text ? [{ type: "text", text }] : [];
-  const first = attachments[0];
-  if (first && text && (first.type === "image" || first.type === "video")) {
-    return [{ ...first, caption: text }, ...attachments.slice(1)];
+  let contents: MessageContent[];
+  if (attachments.length === 0) contents = text ? [{ type: "text", text }] : [];
+  else {
+    const first = attachments[0];
+    if (first && text && (first.type === "image" || first.type === "video")) {
+      contents = [{ ...first, caption: text }, ...attachments.slice(1)];
+    } else {
+      contents = [...(text ? [{ type: "text" as const, text }] : []), ...attachments];
+    }
   }
-  return [...(text ? [{ type: "text" as const, text }] : []), ...attachments];
+  return { contents, downloadFailed, budgetSkipped };
+}
+
+function drainReplyJobs(jobs: Set<Promise<void>>, timeoutMs: number): Promise<void> {
+  if (jobs.size === 0) return Promise.resolve();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const pending = Promise.allSettled(jobs).then(() => undefined);
+  const timeout = new Promise<void>((resolve) => {
+    timer = setTimeout(resolve, timeoutMs);
+  });
+  return Promise.race([pending, timeout]).finally(() => {
+    if (timer !== undefined) clearTimeout(timer);
+  });
 }
 
 function headerValue(req: IncomingMessage, name: string): string | undefined {
@@ -442,6 +539,7 @@ export class ChatwootService {
   private readonly seenChatwoot: number[] = [];
   private readonly seenChatwootSet = new Set<number>();
   private readonly deliveries = new Map<string, number>();
+  private readonly replyJobs = new Set<Promise<void>>();
   private readonly client: ChatwootClient | null;
   private readonly fetchAttachment: ChatwootAttachmentFetcher;
 
@@ -491,9 +589,10 @@ export class ChatwootService {
     );
   }
 
-  stop(): void {
+  stop(): Promise<void> {
     this.stopListener?.();
     this.stopListener = null;
+    return drainReplyJobs(this.replyJobs, CHATWOOT_REPLY_DRAIN_TIMEOUT_MS);
   }
 
   /** Mirror one WhatsApp message into Chatwoot. Failures stay inside this listener. */
@@ -566,7 +665,7 @@ export class ChatwootService {
       if (deliveryId && claimed.result.status >= 400) this.forgetDelivery(deliveryId);
       return claimed.result;
     }
-    void this.sendReply(this.config, decision.parsed, claimed.destination, deliveryId);
+    this.trackReply(this.sendReply(this.config, decision.parsed, claimed.destination, deliveryId));
     return { status: 202, body: { status: "accepted" } };
   }
 
@@ -603,6 +702,14 @@ export class ChatwootService {
     }
     this.rememberNumber(parsed.id);
 
+    if (isChatwootNewsletterSource(parsed.sourceChatId)) {
+      logger.info({ reason: "newsletter" }, "Ignoring Chatwoot reply to a newsletter");
+      return {
+        action: "reject",
+        result: { status: 200, body: { status: "ignored", reason: "newsletter" } },
+      };
+    }
+
     const destination = this.resolveDestination(config, parsed);
     if (!destination) {
       this.forgetNumber(parsed.id);
@@ -611,6 +718,16 @@ export class ChatwootService {
         result: {
           status: 422,
           body: { error: "Chatwoot reply destination could not be resolved" },
+        },
+      };
+    }
+    if (!this.runtime.listInstanceIds().includes(destination.instanceId)) {
+      this.forgetNumber(parsed.id);
+      return {
+        action: "reject",
+        result: {
+          status: 422,
+          body: { error: "Chatwoot reply instance does not exist" },
         },
       };
     }
@@ -644,14 +761,24 @@ export class ChatwootService {
     deliveryId?: string,
   ): Promise<void> {
     let queued = 0;
+    let pendingNote: string | null = null;
     try {
-      const contents = await buildChatwootReplyContents(parsed, config.url, this.fetchAttachment);
-      if (contents.length === 0) {
+      const built = await buildChatwootReplyContents(parsed, config.url, this.fetchAttachment);
+      const problems: string[] = [];
+      if (built.budgetSkipped > 0) problems.push(budgetSkipReason(built.budgetSkipped));
+      if (built.downloadFailed) problems.push("An attachment could not be downloaded.");
+      pendingNote = problems.length > 0 ? problems.join(" ") : null;
+      if (built.contents.length === 0) {
         this.releaseReply(parsed.id, deliveryId);
+        await this.reportReplyFailure(
+          parsed,
+          pendingNote ?? "The reply had nothing left to send.",
+          false,
+        );
         return;
       }
       const channel = this.runtime.getInstanceChannel(destination.instanceId);
-      for (const content of contents) {
+      for (const content of built.contents) {
         await this.runtime.enqueueMessage(
           destination.instanceId,
           destination.chatId,
@@ -660,13 +787,47 @@ export class ChatwootService {
         );
         queued += 1;
       }
+      if (pendingNote) await this.reportReplyFailure(parsed, pendingNote, true);
     } catch (error) {
       if (queued === 0) this.releaseReply(parsed.id, deliveryId);
       logger.error(
         { err: error, instanceId: destination.instanceId },
         "Failed to queue Chatwoot reply",
       );
+      const reason = pendingNote
+        ? `${pendingNote} The outbound queue did not accept the WhatsApp reply.`
+        : "The outbound queue did not accept the WhatsApp reply.";
+      await this.reportReplyFailure(parsed, reason, queued > 0);
     }
+  }
+
+  /** Tell the agent. A private note is used because message status cannot be set to failed. */
+  private async reportReplyFailure(
+    parsed: ParsedChatwootWebhook,
+    reason: string,
+    partial: boolean,
+  ): Promise<void> {
+    const lead = partial ? "WhatsApp reply was only partly sent." : "WhatsApp reply was not sent.";
+    if (!this.client || parsed.conversationId === null) {
+      logger.warn({ reason }, "Chatwoot reply failed and was not reported to the conversation");
+      return;
+    }
+    try {
+      await this.client.postPrivateNote(parsed.conversationId, `${lead} ${reason}`);
+    } catch (error) {
+      logger.warn({ err: error }, "Chatwoot failure note was not posted");
+    }
+  }
+
+  private trackReply(job: Promise<void>): void {
+    const tracked = job
+      .catch((error: unknown) => {
+        logger.error({ err: error }, "Chatwoot background reply failed");
+      })
+      .finally(() => {
+        this.replyJobs.delete(tracked);
+      });
+    this.replyJobs.add(tracked);
   }
 
   private releaseReply(messageId: number, deliveryId?: string): void {
@@ -709,9 +870,19 @@ export class ChatwootService {
     this.deliveries.delete(id);
   }
 
+  /**
+   * Map iteration is insertion order. Drop the expired prefix and stop at the
+   * first id that is still inside the window, then enforce the size ceiling.
+   */
   private pruneDeliveries(nowSeconds: number): void {
     for (const [id, expiresAt] of this.deliveries) {
-      if (expiresAt < nowSeconds) this.deliveries.delete(id);
+      if (expiresAt >= nowSeconds) break;
+      this.deliveries.delete(id);
+    }
+    while (this.deliveries.size > MAX_DELIVERIES) {
+      const oldest = this.deliveries.keys().next().value;
+      if (oldest === undefined) break;
+      this.deliveries.delete(oldest);
     }
   }
 

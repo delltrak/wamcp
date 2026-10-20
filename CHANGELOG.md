@@ -78,6 +78,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Chatwoot replies accept `@lid` chats again, ignore `@newsletter` destinations with HTTP 200,
+  and return `422` when the instance does not exist before accepting the webhook. A background
+  download or queue failure posts a private note. Attachments past the 16 MB budget are reported
+  instead of dropped quietly. Shutdown waits up to 5 seconds for those replies.
 - The n8n WA MCP Trigger now requires Webhook Secret. An unsigned delivery is answered HTTP 401
   and does not start a workflow. Existing flows that left the secret empty stop receiving events
   until the node secret matches `WA_EVENT_WEBHOOK_SECRET`.

@@ -13,6 +13,7 @@ import {
 import { loadEventWebhookConfig } from "../src/services/event-webhook-config.js";
 import {
   isChatwootJidIgnored,
+  isChatwootNewsletterSource,
   loadChatwootConfig,
   parseChatwootSourceId,
   type EnabledChatwootConfig,
@@ -26,7 +27,10 @@ import {
   type ChatwootTransport,
 } from "../src/services/chatwoot-client.js";
 import {
+  CHATWOOT_REPLY_DRAIN_TIMEOUT_MS,
+  CHATWOOT_SIGNATURE_WINDOW_SECONDS,
   ChatwootService,
+  MAX_REPLY_ATTACHMENT_BYTES,
   authorizeChatwootWebhook,
   handleChatwootHttpRequest,
   renderChatwootText,
@@ -126,6 +130,18 @@ function recordingTransport(): { transport: ChatwootTransport; calls: ChatwootRe
     },
   };
   return { transport, calls };
+}
+
+function privateNotes(calls: ChatwootRequest[], conversationId: number): string[] {
+  return calls.flatMap((call) => {
+    if (call.method !== "POST") return [];
+    if (call.path !== `/api/v1/accounts/12/conversations/${conversationId}/messages`) return [];
+    const body = call.body;
+    if (typeof body !== "object" || body === null) return [];
+    const note = body as { private?: unknown; content?: unknown; source_id?: unknown };
+    if (note.private !== true || typeof note.content !== "string") return [];
+    return [note.content];
+  });
 }
 
 function signedWebhook(
@@ -664,6 +680,19 @@ describe("Chatwoot agent replies", () => {
     expect(
       parseChatwootSourceId("inst_89abcdef|15551234567@s.whatsapp.net", "inst_0123abcd").chatId,
     ).toBe("");
+    expect(parseChatwootSourceId("123456789012345@lid")).toEqual({
+      chatId: "123456789012345@lid",
+    });
+    expect(parseChatwootSourceId("inst_0123abcd|123456789012345@lid")).toEqual({
+      instanceId: "inst_0123abcd",
+      chatId: "123456789012345@lid",
+    });
+    expect(parseChatwootSourceId("123456789012345@lid", "inst_0123abcd")).toEqual({
+      instanceId: "inst_0123abcd",
+      chatId: "123456789012345@lid",
+    });
+    expect(parseChatwootSourceId("1234@lid").chatId).toBe("");
+    expect(parseChatwootSourceId("inst_0123abcd|abc@lid").chatId).toBe("");
   });
 
   it("does not enqueue an invalid destination or a group when group replies are blocked", async () => {
@@ -698,6 +727,290 @@ describe("Chatwoot agent replies", () => {
     });
     expect(group.body).toMatchObject({ reason: "group" });
     expect(queue.enqueueMessage).not.toHaveBeenCalled();
+  });
+
+  it("queues replies to LID chats in both source id formats", async () => {
+    const queue = runtime();
+    const service = new ChatwootService(legacyConfig(), queue);
+    const bare = await service.handleWebhook({
+      rawBody: webhookBody({
+        id: 101,
+        conversation: {
+          inbox_id: 34,
+          contact_inbox: { source_id: "123456789012345@lid" },
+        },
+      }),
+      headerSecret: SECRET,
+    });
+    expect(bare.status).toBe(202);
+    await waitQueued(queue);
+    expect(queue.enqueueMessage).toHaveBeenCalledWith(
+      "inst_0123abcd",
+      "123456789012345@lid",
+      expect.objectContaining({ type: "text" }),
+      "baileys",
+    );
+
+    const encoded = await service.handleWebhook({
+      rawBody: webhookBody({
+        id: 102,
+        conversation: {
+          inbox_id: 34,
+          contact_inbox: { source_id: "inst_0123abcd|123456789012345@lid" },
+        },
+      }),
+      headerSecret: SECRET,
+    });
+    expect(encoded.status).toBe(202);
+    await waitQueued(queue, 2);
+    expect(queue.enqueueMessage).toHaveBeenLastCalledWith(
+      "inst_0123abcd",
+      "123456789012345@lid",
+      expect.objectContaining({ type: "text" }),
+      "baileys",
+    );
+  });
+
+  it("returns 422 before accepting a reply for an instance that does not exist", async () => {
+    const queue = runtime(["inst_89abcdef"]);
+    const service = new ChatwootService(legacyConfig(), queue);
+    const missing = await service.handleWebhook({
+      rawBody: webhookBody({
+        id: 103,
+        conversation: {
+          inbox_id: 34,
+          contact_inbox: { source_id: "inst_0123abcd|15551234567@s.whatsapp.net" },
+        },
+      }),
+      headerSecret: SECRET,
+    });
+    expect(missing.status).toBe(422);
+    expect(missing.body).toMatchObject({ error: "Chatwoot reply instance does not exist" });
+    expect(queue.enqueueMessage).not.toHaveBeenCalled();
+  });
+
+  it("posts a private note when the queue or a download fails after 202", async () => {
+    const queue = runtime();
+    queue.enqueueMessage.mockRejectedValueOnce(new Error("queue down"));
+    const recorded = recordingTransport();
+    const service = new ChatwootService(enabledConfig(), queue, recorded.transport);
+    const now = 1_700_000_900;
+    const failed = await service.handleWebhook(
+      signedWebhook(
+        webhookBody({
+          id: 120,
+          content: "send me",
+          conversation: {
+            id: 77,
+            inbox_id: 34,
+            contact_inbox: { source_id: "15551234567@s.whatsapp.net" },
+          },
+        }),
+        now,
+        "delivery-queue-fail",
+      ),
+    );
+    expect(failed.status).toBe(202);
+    await vi.waitFor(() => {
+      expect(privateNotes(recorded.calls, 77).join(" ")).toContain("was not sent");
+    });
+    expect(privateNotes(recorded.calls, 77).join(" ")).toContain("queue");
+    expect(JSON.stringify(recorded.calls)).not.toContain("token-token-token");
+
+    const fetchAttachment = vi.fn(async () => {
+      throw new Error("download failed");
+    });
+    const downloads = recordingTransport();
+    const downloader = new ChatwootService(
+      enabledConfig(),
+      runtime(),
+      downloads.transport,
+      fetchAttachment,
+    );
+    const downloaded = await downloader.handleWebhook(
+      signedWebhook(
+        webhookBody({
+          id: 121,
+          content: "",
+          attachments: [{ file_type: "image", data_url: "https://files.example.com/a.png" }],
+          conversation: {
+            id: 78,
+            inbox_id: 34,
+            contact_inbox: { source_id: "15551234567@s.whatsapp.net" },
+          },
+        }),
+        now,
+        "delivery-download-fail",
+      ),
+    );
+    expect(downloaded.status).toBe(202);
+    await vi.waitFor(() => expect(fetchAttachment).toHaveBeenCalled());
+    await vi.waitFor(() => {
+      expect(privateNotes(downloads.calls, 78).join(" ")).toContain("could not be downloaded");
+    });
+    expect(downloads.calls.some((call) => call.path.includes("/conversations/78/messages"))).toBe(
+      true,
+    );
+  });
+
+  it("reports an attachment that exceeds the 16 MB reply budget", async () => {
+    const queue = runtime();
+    const recorded = recordingTransport();
+    const fetchAttachment = vi.fn(async () => ({
+      data: Buffer.alloc(MAX_REPLY_ATTACHMENT_BYTES),
+      contentType: "image/png",
+    }));
+    const service = new ChatwootService(
+      enabledConfig(),
+      queue,
+      recorded.transport,
+      fetchAttachment,
+    );
+    const result = await service.handleWebhook(
+      signedWebhook(
+        webhookBody({
+          id: 130,
+          content: "caption",
+          attachments: [
+            { file_type: "image", data_url: "https://files.example.com/big.png" },
+            { file_type: "image", data_url: "https://files.example.com/next.png" },
+          ],
+          conversation: {
+            id: 79,
+            inbox_id: 34,
+            contact_inbox: { source_id: "15551234567@s.whatsapp.net" },
+          },
+        }),
+        1_700_001_000,
+        "delivery-budget",
+      ),
+    );
+    expect(result.status).toBe(202);
+    await waitQueued(queue);
+    expect(fetchAttachment).toHaveBeenCalledTimes(1);
+    await vi.waitFor(() => {
+      const note = privateNotes(recorded.calls, 79).join(" ");
+      expect(note).toContain("16 MB");
+      expect(note).toContain("budget");
+    });
+  });
+
+  it("ignores newsletter destinations with 200 instead of 422", async () => {
+    const queue = runtime();
+    const service = new ChatwootService(legacyConfig(), queue);
+    expect(isChatwootNewsletterSource("inst_0123abcd|not-a-jid@newsletter")).toBe(true);
+    const valid = await service.handleWebhook({
+      rawBody: webhookBody({
+        id: 110,
+        conversation: {
+          inbox_id: 34,
+          contact_inbox: { source_id: "123456789012345@newsletter" },
+        },
+      }),
+      headerSecret: SECRET,
+    });
+    expect(valid.status).toBe(200);
+    expect(valid.body).toMatchObject({ status: "ignored", reason: "newsletter" });
+
+    const odd = await service.handleWebhook({
+      rawBody: webhookBody({
+        id: 111,
+        conversation: {
+          inbox_id: 34,
+          contact_inbox: { source_id: "inst_0123abcd|not-a-jid@newsletter" },
+        },
+      }),
+      headerSecret: SECRET,
+    });
+    expect(odd.status).toBe(200);
+    expect(odd.body).toMatchObject({ reason: "newsletter" });
+    expect(queue.enqueueMessage).not.toHaveBeenCalled();
+  });
+
+  it("drops expired deliveries from the front and keeps a newer id in the same map", async () => {
+    const queue = runtime();
+    const service = new ChatwootService(enabledConfig(), queue);
+    const start = 1_700_002_000;
+    const first = await service.handleWebhook(
+      signedWebhook(webhookBody({ id: 201 }), start, "old-delivery"),
+    );
+    expect(first.status).toBe(202);
+    const later = await service.handleWebhook(
+      signedWebhook(webhookBody({ id: 202 }), start + 10, "new-delivery"),
+    );
+    expect(later.status).toBe(202);
+    const now = start + CHATWOOT_SIGNATURE_WINDOW_SECONDS + 1;
+    const replayOld = await service.handleWebhook(
+      signedWebhook(webhookBody({ id: 203 }), now, "old-delivery"),
+    );
+    expect(replayOld.status).toBe(202);
+    const replayNew = await service.handleWebhook(
+      signedWebhook(webhookBody({ id: 204 }), now, "new-delivery"),
+    );
+    expect(replayNew.body).toMatchObject({ reason: "duplicate" });
+  });
+
+  it("waits for background replies on stop and times out when they stall", async () => {
+    let release: () => void = () => undefined;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const queue = runtime();
+    queue.enqueueMessage.mockImplementation(() =>
+      gate.then(() => ({ status: "queued", jobId: "job-drain" })),
+    );
+    const service = new ChatwootService(enabledConfig(), queue);
+    const accepted = await service.handleWebhook(
+      signedWebhook(webhookBody({ id: 150 }), 1_700_001_200, "delivery-drain"),
+    );
+    expect(accepted.status).toBe(202);
+    await vi.waitFor(() => expect(queue.enqueueMessage).toHaveBeenCalledTimes(1));
+
+    vi.useFakeTimers();
+    try {
+      const stopping = service.stop();
+      let done = false;
+      void stopping.then(() => {
+        done = true;
+      });
+      await vi.advanceTimersByTimeAsync(CHATWOOT_REPLY_DRAIN_TIMEOUT_MS - 1);
+      expect(done).toBe(false);
+      release();
+      await stopping;
+      expect(done).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+
+    let stalledCalled = false;
+    const stalled = runtime();
+    stalled.enqueueMessage.mockImplementation(
+      () =>
+        new Promise(() => {
+          stalledCalled = true;
+        }),
+    );
+    const hanging = new ChatwootService(enabledConfig(), stalled);
+    const hung = await hanging.handleWebhook(
+      signedWebhook(webhookBody({ id: 151 }), 1_700_001_300, "delivery-hang"),
+    );
+    expect(hung.status).toBe(202);
+    await vi.waitFor(() => expect(stalledCalled).toBe(true));
+    vi.useFakeTimers();
+    try {
+      const stopping = hanging.stop();
+      let done = false;
+      void stopping.then(() => {
+        done = true;
+      });
+      await vi.advanceTimersByTimeAsync(CHATWOOT_REPLY_DRAIN_TIMEOUT_MS - 1);
+      expect(done).toBe(false);
+      await vi.advanceTimersByTimeAsync(1);
+      await stopping;
+      expect(done).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("still recognizes a delivery id after thousands of newer deliveries in the same window", async () => {

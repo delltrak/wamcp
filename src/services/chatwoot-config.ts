@@ -176,9 +176,24 @@ export function validateChatwootUrl(
   return parsed.toString().replace(/\/$/, "");
 }
 
+const LID_REPLY_JID_RE = /^\d{5,20}@lid$/;
+
 /** Destination chats this bridge will queue. Groups use the group-id check. */
 export function isChatwootReplyJid(value: string): boolean {
-  return isValidJid(value) || (value.endsWith("@g.us") && isValidGroupId(value));
+  return (
+    isValidJid(value) ||
+    LID_REPLY_JID_RE.test(value) ||
+    (value.endsWith("@g.us") && isValidGroupId(value))
+  );
+}
+
+/** True when the contact source id addresses a newsletter, including `inst_<id>|…@newsletter`. */
+export function isChatwootNewsletterSource(sourceId: string): boolean {
+  const value = sourceId.trim();
+  if (!value) return false;
+  const separator = value.indexOf("|");
+  const chatId = (separator > 0 ? value.slice(separator + 1) : value).trim().toLowerCase();
+  return chatId.endsWith("@newsletter");
 }
 
 /** Contact-inbox source id. A pinned instance stores the bare chat JID. */

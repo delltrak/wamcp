@@ -85,11 +85,14 @@ Chatwoot `message_created` events are sent only when all of the following are tr
 - `source_id` does not start with `WAID:`
 - the sender is not a contact
 - `conversation.inbox_id` is present and equal to `WA_CHATWOOT_INBOX_ID`
-- the contact-inbox `source_id` is a WhatsApp JID, or `inst_<id>|<jid>` with a real instance id
+- the contact-inbox `source_id` is a WhatsApp JID (`…@s.whatsapp.net`, `…@g.us`, or `…@lid`), or `inst_<id>|<jid>` with a real instance id
+- that instance already exists
 - the destination chat is not filtered
 - the destination is not a group when `WA_CHATWOOT_BLOCK_GROUP_REPLIES=true`
 
-The webhook returns `202` after authentication and deduplication. Text and attachments are queued afterwards. At most 8 attachments are downloaded, and their bytes together stay within 16 MB. Each download resolves DNS, pins that address, refuses redirects, and always blocks link-local and metadata addresses. `WA_CHATWOOT_ALLOW_PRIVATE_URL` does not allow a private attachment host other than the configured Chatwoot origin. A URL that fails those checks is dropped and is not passed to WhatsApp. The Chatwoot API token is sent only when the attachment URL is on that origin.
+`@lid` is accepted because Baileys keeps that remote JID when the chat has no phone alternate. A destination ending in `@newsletter` is ignored with HTTP 200 and a log line. A missing instance returns `422` before the reply is accepted.
+
+The webhook returns `202` after authentication and deduplication. Text and attachments are queued afterwards. At most 8 attachments are downloaded, and their bytes together stay within 16 MB. An attachment that does not fit in that budget is skipped and reported, both in the log (`attachment_budget`) and as a private note when the conversation id is known. Each download resolves DNS, pins that address, refuses redirects, and always blocks link-local and metadata addresses. `WA_CHATWOOT_ALLOW_PRIVATE_URL` does not allow a private attachment host other than the configured Chatwoot origin. A URL that fails those checks is not passed to WhatsApp. If the download or the outbound queue fails after the `202`, the bridge posts a private note on the conversation. The Chatwoot application API has no call to mark that accepted message as failed. The Chatwoot API token is sent only when the attachment URL is on that origin. Shutdown waits up to 5 seconds for those background replies.
 
 The reply target is the contact-inbox `source_id` written by this bridge. Conversation `additional_attributes` are not used, because an agent can edit them. The instance is then:
 
