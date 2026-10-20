@@ -313,6 +313,8 @@ export class InstanceManager {
           const connectedPayload = payload as ChannelEventPayload["instance.connected"];
           db.update(instances)
             .set({
+              status: "connected",
+              lastConnected: connectedPayload.connectedAt,
               ...(connectedPayload.phone ? { phoneNumber: connectedPayload.phone } : {}),
               updatedAt: connectedPayload.connectedAt,
             })

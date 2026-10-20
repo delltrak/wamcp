@@ -6021,6 +6021,22 @@ export class BaileysAdapter implements ChannelAdapter {
     }
   }
 
+  private persistInstanceLifecycle(fields: {
+    status: "connected" | "disconnected";
+    updatedAt: number;
+    lastConnected?: number;
+    lastDisconnected?: number;
+  }): void {
+    try {
+      db.update(instancesTable).set(fields).where(eq(instancesTable.id, this.instanceId)).run();
+    } catch (error) {
+      logger.error(
+        { err: error, instanceId: this.instanceId, status: fields.status },
+        "Failed to persist instance connection lifecycle",
+      );
+    }
+  }
+
   private bindEvents(sock: WASocket): void {
     sock.ev.on("connection.update", (update) => {
       if (this.sock !== null && this.sock !== sock) return;
@@ -6104,6 +6120,13 @@ export class BaileysAdapter implements ChannelAdapter {
           });
         }
         const user = sock.user as { lid?: string; name?: string } | undefined;
+        // Persist before emitting so a fast reconnect records this open even when a later
+        // connection.changed dedupe would treat the previous outage as still open.
+        this.persistInstanceLifecycle({
+          status: "connected",
+          lastConnected: connectedAt,
+          updatedAt: connectedAt,
+        });
         this.emit("instance.connected", {
           instanceId: this.instanceId,
           phone: this.ownPhoneJid(sock),
@@ -6127,10 +6150,16 @@ export class BaileysAdapter implements ChannelAdapter {
         const loggedOut = statusCode === DisconnectReason.loggedOut;
         const closedAt = Date.now();
         const priorDisconnectedAt = this.disconnectedAtMs;
+        const recordOutage = this.connectedAtMs !== null;
         const connectedDurationMs =
           this.connectedAtMs !== null ? Math.max(0, closedAt - this.connectedAtMs) : undefined;
         this.connectedAtMs = null;
         if (this.disconnectedAtMs === null) this.disconnectedAtMs = closedAt;
+        this.persistInstanceLifecycle({
+          status: "disconnected",
+          updatedAt: closedAt,
+          ...(recordOutage ? { lastDisconnected: closedAt } : {}),
+        });
         this.lastDisconnectReason = reason;
         this.lastDisconnectStatusCode = statusCode ?? null;
         this.clearAuthChallenges(closedAt);

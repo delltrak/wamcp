@@ -34,6 +34,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Fast Baileys reconnects now persist `status`, `last_connected`, and `last_disconnected`.
+  Each socket open stores `connected` and `last_connected`. A close that ends that open stores
+  `disconnected` and `last_disconnected`, including automatic reconnects after `408` and `428`.
+  Repeated closes that never reach open still keep the original outage start, and a close from a
+  replaced socket does not move either timestamp. `wa_get_instance_status` and `GET /health` read
+  those stored values. Lifecycle webhook emission is unchanged.
 - Baileys keeps reconnecting after a non-logout close such as `unavailableService` (503). The
   current socket is cleared, retries continue every 30s after the exponential cap for a paired
   session, and only one reconnect timer and one connect attempt are pending. A session that never

@@ -116,11 +116,25 @@ function openSocket(index: number): void {
 }
 
 function instanceStatus(id: string): string {
-  const row = sqlite.prepare("SELECT status FROM instances WHERE id = ?").get(id) as
-    | { status: string }
-    | undefined;
+  return instanceLifecycle(id).status;
+}
+
+function instanceLifecycle(id: string): {
+  status: string;
+  lastConnected: number | null;
+  lastDisconnected: number | null;
+} {
+  const row = sqlite
+    .prepare(
+      `SELECT status,
+              last_connected AS lastConnected,
+              last_disconnected AS lastDisconnected
+       FROM instances WHERE id = ?`,
+    )
+    .get(id) as
+    { status: string; lastConnected: number | null; lastDisconnected: number | null } | undefined;
   if (!row) throw new Error(`Missing instance ${id}`);
-  return row.status;
+  return row;
 }
 
 function authKeyCount(id: string): number {
@@ -154,9 +168,7 @@ async function createConnectedInstance(paired = true): Promise<{
 
 async function runHealthCheck(manager: InstanceManager): Promise<void> {
   const service = new MaintenanceService(manager);
-  await (
-    service as unknown as { runHealthCheck: () => Promise<void> }
-  ).runHealthCheck();
+  await (service as unknown as { runHealthCheck: () => Promise<void> }).runHealthCheck();
 }
 
 describe("Baileys reconnect after unavailable service", () => {
@@ -213,7 +225,9 @@ describe("Baileys reconnect after unavailable service", () => {
     }
 
     expect(mocks.makeWASocket.mock.calls.length).toBeGreaterThan(RECONNECT_MAX_ATTEMPTS + 1);
-    const exhausted = disconnected.filter((event) => event.reconnectInMs === RECONNECT_MAX_DELAY_MS);
+    const exhausted = disconnected.filter(
+      (event) => event.reconnectInMs === RECONNECT_MAX_DELAY_MS,
+    );
     expect(exhausted).toEqual([
       expect.objectContaining({
         reason: "unavailableService",
@@ -333,6 +347,97 @@ describe("Baileys reconnect after unavailable service", () => {
     expect(instanceStatus(stuck.id)).toBe("connecting");
     expect(instanceStatus(recent.id)).toBe("connecting");
     expect(manager.hasLiveSocket(unpaired.id)).toBe(false);
+  });
+
+  it("persists timestamps when a 408 close reconnects and opens again", async () => {
+    vi.useFakeTimers();
+    const { manager, id, adapter } = await createConnectedInstance();
+    const connected: ChannelEventPayload["instance.connected"][] = [];
+    const disconnected: ChannelEventPayload["instance.disconnected"][] = [];
+    adapter.on("instance.connected", (payload) => connected.push(payload));
+    adapter.on("instance.disconnected", (payload) => disconnected.push(payload));
+
+    const initial = instanceLifecycle(id);
+    expect(initial.status).toBe("connected");
+    expect(initial.lastConnected).not.toBeNull();
+
+    await vi.advanceTimersByTimeAsync(60_000);
+    closeSocket(0, DisconnectReason.timedOut);
+    const dropped = instanceLifecycle(id);
+    expect(dropped.status).toBe("disconnected");
+    expect(dropped.lastDisconnected).toBeGreaterThan(initial.lastConnected ?? 0);
+    expect(disconnected).toHaveLength(1);
+    expect(connected).toHaveLength(0);
+
+    const staleBeforeReconnect = instanceLifecycle(id);
+    closeSocket(0, DisconnectReason.timedOut);
+    expect(instanceLifecycle(id)).toEqual(staleBeforeReconnect);
+    expect(disconnected).toHaveLength(1);
+
+    await vi.advanceTimersByTimeAsync(RECONNECT_INITIAL_DELAY_MS);
+    expect(mocks.makeWASocket).toHaveBeenCalledTimes(2);
+    await vi.advanceTimersByTimeAsync(60_000);
+    openSocket(sockets.length - 1);
+    const restored = instanceLifecycle(id);
+    expect(restored.status).toBe("connected");
+    expect(restored.lastDisconnected).toBe(dropped.lastDisconnected);
+    expect(restored.lastConnected).toBeGreaterThan(dropped.lastDisconnected ?? 0);
+    expect(connected).toHaveLength(1);
+    expect(manager.getInstanceLifecycleStatuses(id)[0]).toMatchObject({
+      state: "connected",
+      lastConnectedAt: restored.lastConnected,
+      lastDisconnectedAt: restored.lastDisconnected,
+    });
+  });
+
+  it("keeps advancing persisted timestamps across repeated automatic reconnects", async () => {
+    vi.useFakeTimers();
+    const { id } = await createConnectedInstance();
+    let previousConnected = instanceLifecycle(id).lastConnected ?? 0;
+
+    for (let cycle = 0; cycle < 3; cycle++) {
+      await vi.advanceTimersByTimeAsync(60_000);
+      closeSocket(sockets.length - 1, DisconnectReason.timedOut);
+      const dropped = instanceLifecycle(id);
+      expect(dropped.status).toBe("disconnected");
+      expect(dropped.lastDisconnected).toBeGreaterThan(previousConnected);
+
+      await vi.advanceTimersByTimeAsync(RECONNECT_INITIAL_DELAY_MS + 60_000);
+      openSocket(sockets.length - 1);
+      const restored = instanceLifecycle(id);
+      expect(restored.status).toBe("connected");
+      expect(restored.lastDisconnected).toBe(dropped.lastDisconnected);
+      expect(restored.lastConnected).toBeGreaterThan(dropped.lastDisconnected ?? 0);
+      previousConnected = restored.lastConnected ?? 0;
+    }
+  });
+
+  it("does not move persisted timestamps when a replaced socket closes", async () => {
+    vi.useFakeTimers();
+    const { manager, id } = await createConnectedInstance();
+    await vi.advanceTimersByTimeAsync(60_000);
+    closeSocket(0, DisconnectReason.timedOut);
+    await vi.advanceTimersByTimeAsync(RECONNECT_INITIAL_DELAY_MS + 60_000);
+    openSocket(sockets.length - 1);
+
+    const current = instanceLifecycle(id);
+    expect(current.status).toBe("connected");
+    const replaced = sockets[0];
+    if (!replaced) throw new Error("Missing the replaced socket");
+    replaced.emit({
+      connection: "close",
+      lastDisconnect: { error: { output: { statusCode: DisconnectReason.timedOut } } },
+    });
+
+    expect(instanceLifecycle(id)).toEqual(current);
+    expect(manager.getInstanceLifecycleStatuses(id)[0]).toMatchObject({
+      state: "connected",
+      lastConnectedAt: current.lastConnected,
+      lastDisconnectedAt: current.lastDisconnected,
+    });
+    await vi.advanceTimersByTimeAsync(RECONNECT_MAX_DELAY_MS);
+    expect(mocks.makeWASocket).toHaveBeenCalledTimes(2);
+    expect(instanceLifecycle(id)).toEqual(current);
   });
 
   it("opens one socket when connect() runs concurrently", async () => {
