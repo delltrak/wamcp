@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Added optional `WA_BAILEYS_PROXY` for a SOCKS5 or HTTP(S) proxy on the Baileys WebSocket and media
+  transfers. The connection stays direct when the variable is unset. Proxy credentials are redacted
+  from logs and tool errors.
 - Added Baileys instance lifecycle webhooks for connection, disconnect, pairing-code, and QR events,
   plus the read-only `wa_get_instance_status` tool. Pairing and QR challenge data is omitted from
   webhook payloads and status output.

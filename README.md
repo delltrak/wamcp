@@ -713,6 +713,7 @@ Copy `.env.example` to `.env` and configure:
 | `WA_BAILEYS_HISTORY_SYNC_MAX_MESSAGES` | `100` | Maximum messages requested per chat by automatic and on-demand history fetches (1–10000) |
 | `WA_DATA_DIR`               | `wa-data` in Compose     | Optional absolute host directory mounted at `/app/data`; unset preserves the existing named volume |
 | `WA_BAILEYS_RATE_LIMIT`     | `20`                     | Messages/min per Baileys instance        |
+| `WA_BAILEYS_PROXY` | — | Optional Baileys outbound proxy URL (`socks5`, `socks5h`, `http`, or `https`) with an explicit port. Unset keeps a direct connection |
 | `WA_CLOUD_RATE_LIMIT`       | `80`                     | Messages/min per Cloud API instance      |
 | `WA_MESSAGE_RETENTION_DAYS` | `30`                     | Auto-delete old messages                 |
 | `WA_AUTO_RECONNECT`         | `true`                   | Auto-reconnect on disconnect             |
@@ -774,6 +775,26 @@ Copy `.env.example` to `.env` and configure:
 | `WA_EVENT_WEBHOOK_RETRY_DELAY_MS` | `1000` | Initial exponential retry delay in milliseconds |
 | `WA_REQUIRE_EVENT_WEBHOOK` | `false` | Exit on startup when no event webhook destination is configured or the event set is empty |
 | `WA_VERSION_CHECK`          | `true`                   | Daily WhatsApp Web version check         |
+
+### Baileys outbound proxy
+
+`WA_BAILEYS_PROXY` is optional. Leave it unset or empty and Baileys connects directly. Set a
+`socks5`, `socks5h`, `http`, or `https` URL with an explicit port to send the WhatsApp WebSocket
+and media transfers through that proxy:
+
+```bash
+WA_BAILEYS_PROXY=socks5://user:pass@proxy.example:1080
+```
+
+The URL may include a username and password. Those credentials are removed from logs and from
+errors returned to agents. The value is checked strictly: only the schemes above are accepted, and
+a path, query, fragment, or missing port is rejected. `socks5h` asks the proxy to resolve DNS.
+
+Baileys 7.0.0-rc14 applies the socket `agent` to the WebSocket and `fetchAgent` to media uploads
+made with Node's `https.request`. Media downloads in that release do not read `fetchAgent`. WA MCP
+passes an undici dispatcher into `downloadMediaMessage`, which is the download hook rc14 supports.
+Link-preview image fetches inside Baileys use their own `fetch` call and are not covered by
+`fetchAgent`.
 
 ### Message history and backups
 

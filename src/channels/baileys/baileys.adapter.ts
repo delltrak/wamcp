@@ -42,6 +42,14 @@ import makeWASocket, {
   type WAPatchName,
 } from "@whiskeysockets/baileys";
 import { randomUUID } from "node:crypto";
+import {
+  closeBaileysProxyAgents,
+  createBaileysProxyAgents,
+  mediaDownloadOptions,
+  parseBaileysProxyUrl,
+  type BaileysProxyAgents,
+} from "./proxy.js";
+import { redactError } from "../../utils/proxy-redact.js";
 import { Boom } from "@hapi/boom";
 import type { ChannelAdapter, ChannelEventHandler } from "../channel.interface.js";
 import type {
@@ -974,6 +982,8 @@ export class BaileysAdapter implements ChannelAdapter {
   private terminalDisconnectEventEmittedSinceOpen = false;
   private consecutiveHealthProbeFailures = 0;
   private healthActivityGeneration = 0;
+  private readonly proxyUrl: string | undefined;
+  private proxyAgents: BaileysProxyAgents | undefined;
 
   constructor(
     private readonly instanceId: string,
@@ -1053,6 +1063,7 @@ export class BaileysAdapter implements ChannelAdapter {
       "WA_AUTO_REJECT_CALLS",
       false,
     );
+    this.proxyUrl = parseBaileysProxyUrl(process.env.WA_BAILEYS_PROXY);
   }
 
   // ---- Private helpers ----
@@ -1713,6 +1724,20 @@ export class BaileysAdapter implements ChannelAdapter {
 
   // ---- Lifecycle ----
 
+  private openProxyAgents(): BaileysProxyAgents | undefined {
+    if (!this.proxyUrl) return undefined;
+    try {
+      const agents = createBaileysProxyAgents(this.proxyUrl);
+      logger.info(
+        { instanceId: this.instanceId, proxy: agents.redactedUrl },
+        "Routing the WhatsApp connection through an outbound proxy",
+      );
+      return agents;
+    } catch (error) {
+      throw redactError(error, this.proxyUrl);
+    }
+  }
+
   async connect(): Promise<void> {
     if (this.sock) {
       logger.warn({ instanceId: this.instanceId }, "Already connected or connecting");
@@ -1728,56 +1753,65 @@ export class BaileysAdapter implements ChannelAdapter {
 
     const { version } = await getWaVersion();
     const requestFullHistory = !this.hasStoredMessages();
+    const proxyAgents = this.openProxyAgents();
 
-    const sock = makeWASocket({
-      version,
-      auth: {
-        creds: state.creds,
-        keys: makeCacheableSignalKeyStore(state.keys, logger),
-      },
-      printQRInTerminal: false,
-      logger: observeAppStateResyncLogs(
-        logger.child({ instanceId: this.instanceId }),
-        this.appStateResyncLogObserver,
-      ),
-      generateHighQualityLinkPreview: true,
-      keepAliveIntervalMs: BAILEYS_KEEP_ALIVE_INTERVAL_MS,
-      syncFullHistory: requestFullHistory,
-      shouldSyncHistoryMessage: ({ syncType }) =>
-        syncType !== proto.HistorySync.HistorySyncType.FULL || requestFullHistory,
-      markOnlineOnConnect: this.markOnlineOnConnect,
-      getMessage: async (key: WAMessageKey): Promise<proto.IMessage | undefined> => {
-        if (!key.id) return undefined;
-        const conditions = [
-          eq(messagesTable.instanceId, this.instanceId),
-          eq(messagesTable.id, key.id),
-        ];
-        const remoteJids = new Set<string>();
-        for (const jid of [key.remoteJid, key.remoteJidAlt]) {
-          if (!jid) continue;
-          remoteJids.add(jidNormalizedUser(jid));
-          remoteJids.add(await this.resolveJidToPn(jid));
-        }
-        if (remoteJids.size > 0) {
-          conditions.push(inArray(messagesTable.chatId, [...remoteJids]));
-        }
-        const row = db
-          .select({ rawData: messagesTable.rawData })
-          .from(messagesTable)
-          .where(and(...conditions))
-          .get();
-        if (!row?.rawData) return undefined;
+    let sock: WASocket;
+    try {
+      sock = makeWASocket({
+        version,
+        auth: {
+          creds: state.creds,
+          keys: makeCacheableSignalKeyStore(state.keys, logger),
+        },
+        printQRInTerminal: false,
+        logger: observeAppStateResyncLogs(
+          logger.child({ instanceId: this.instanceId }),
+          this.appStateResyncLogObserver,
+        ),
+        generateHighQualityLinkPreview: true,
+        keepAliveIntervalMs: BAILEYS_KEEP_ALIVE_INTERVAL_MS,
+        syncFullHistory: requestFullHistory,
+        shouldSyncHistoryMessage: ({ syncType }) =>
+          syncType !== proto.HistorySync.HistorySyncType.FULL || requestFullHistory,
+        markOnlineOnConnect: this.markOnlineOnConnect,
+        ...(proxyAgents ? { agent: proxyAgents.agent, fetchAgent: proxyAgents.fetchAgent } : {}),
+        getMessage: async (key: WAMessageKey): Promise<proto.IMessage | undefined> => {
+          if (!key.id) return undefined;
+          const conditions = [
+            eq(messagesTable.instanceId, this.instanceId),
+            eq(messagesTable.id, key.id),
+          ];
+          const remoteJids = new Set<string>();
+          for (const jid of [key.remoteJid, key.remoteJidAlt]) {
+            if (!jid) continue;
+            remoteJids.add(jidNormalizedUser(jid));
+            remoteJids.add(await this.resolveJidToPn(jid));
+          }
+          if (remoteJids.size > 0) {
+            conditions.push(inArray(messagesTable.chatId, [...remoteJids]));
+          }
+          const row = db
+            .select({ rawData: messagesTable.rawData })
+            .from(messagesTable)
+            .where(and(...conditions))
+            .get();
+          if (!row?.rawData) return undefined;
 
-        try {
-          const stored = JSON.parse(row.rawData, BufferJSON.reviver) as WAMessage;
-          normalizeStoredMessageSecret(stored);
-          return stored.message ?? undefined;
-        } catch {
-          return undefined;
-        }
-      },
-    });
+          try {
+            const stored = JSON.parse(row.rawData, BufferJSON.reviver) as WAMessage;
+            normalizeStoredMessageSecret(stored);
+            return stored.message ?? undefined;
+          } catch {
+            return undefined;
+          }
+        },
+      });
+    } catch (error) {
+      await closeBaileysProxyAgents(proxyAgents);
+      throw redactError(error, this.proxyUrl);
+    }
 
+    this.proxyAgents = proxyAgents;
     this.resetActivityPresence();
     this.sock = sock;
     this.lastPresenceUpdateAt.clear();
@@ -1799,6 +1833,9 @@ export class BaileysAdapter implements ChannelAdapter {
     this.automaticHistoryRecoveryQueue.clear();
     this.finishHistoryFetch(true);
     this.status = "disconnected";
+    const proxyAgents = this.proxyAgents;
+    this.proxyAgents = undefined;
+    await closeBaileysProxyAgents(proxyAgents);
   }
 
   getStatus(): ConnectionStatus {
@@ -4644,9 +4681,7 @@ export class BaileysAdapter implements ChannelAdapter {
     }
 
     const sock = this.getSock();
-    const downloadOptions = timeoutMs
-      ? { options: { signal: AbortSignal.timeout(timeoutMs) } }
-      : {};
+    const downloadOptions = mediaDownloadOptions(timeoutMs, this.proxyAgents?.dispatcher);
     const stream = await downloadMediaMessage(message, "stream", downloadOptions, {
       logger: logger.child({ instanceId: this.instanceId, messageId }),
       reuploadRequest: sock.updateMediaMessage,
@@ -4721,9 +4756,7 @@ export class BaileysAdapter implements ChannelAdapter {
     }
 
     const sock = this.getSock();
-    const downloadOptions = timeoutMs
-      ? { options: { signal: AbortSignal.timeout(timeoutMs) } }
-      : {};
+    const downloadOptions = mediaDownloadOptions(timeoutMs, this.proxyAgents?.dispatcher);
     const stream = await downloadMediaMessage(message, "stream", downloadOptions, {
       logger: logger.child({ instanceId: this.instanceId, messageId }),
       reuploadRequest: sock.updateMediaMessage,

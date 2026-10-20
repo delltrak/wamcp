@@ -2,6 +2,8 @@
 // WA MCP — MCP Tool Response Types
 // ============================================================
 
+import { redactProxyCredentials } from "../utils/proxy-redact.js";
+
 export interface ToolTextContent {
   type: "text";
   text: string;
@@ -39,8 +41,8 @@ export function toolSuccess(data: unknown): ToolSuccessResponse {
 
 // Helper to create an error text response (sanitized for agent consumption)
 export function toolError(message: string): ToolErrorResponse {
-  // Strip internal paths and stack traces from error messages
-  let sanitized = message;
+  // Strip internal paths, stack traces, and proxy credentials from error messages
+  let sanitized = redactProxyCredentials(message, process.env.WA_BAILEYS_PROXY);
   sanitized = sanitized.replace(/\/[^\s:]+\.(ts|js|mjs|cjs)/g, "[internal]");
   sanitized = sanitized.replace(/\s+at\s+.+/g, "");
   return {
