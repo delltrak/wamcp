@@ -72,6 +72,10 @@ function handlerFor(input: {
     getPairingCode: (phone: string) => Promise<string | null>;
   };
   events?: DashboardEventLog;
+  mountPath?: string;
+  maxLoginFailures?: number;
+  loginWindowMs?: number;
+  now?: () => number;
 }): { handle: DashboardHandler; calls: string[] } {
   const calls = input.calls ?? [];
   const rows = input.rows ?? [snapshot()];
@@ -81,21 +85,6 @@ function handlerFor(input: {
       const row = rows.find((item) => item.instanceId === id);
       if (!row) throw new Error(`Instance ${id} not found`);
       return [row];
-    },
-    async createInstance(name, channel) {
-      calls.push(`create:${name}:${channel ?? "baileys"}`);
-      const created = snapshot({
-        instanceId: "inst_11223344",
-        name,
-        channel: channel ?? "baileys",
-        state: "disconnected",
-        lastConnectedAt: null,
-        lastDisconnectedAt: null,
-        disconnectReason: null,
-        disconnectStatusCode: null,
-      });
-      rows.push(created);
-      return { id: created.instanceId };
     },
     async connectInstance(id) {
       calls.push(`connect:${id}`);
@@ -148,12 +137,17 @@ function handlerFor(input: {
         }),
       renderQr: async (text) => `data:image/svg+xml;charset=utf-8,${encodeURIComponent(text)}`,
       version: "2.0.0",
-      now: () => 6_000,
+      ...(input.mountPath ? { mountPath: input.mountPath } : {}),
+      ...(input.maxLoginFailures ? { maxLoginFailures: input.maxLoginFailures } : {}),
+      ...(input.loginWindowMs ? { loginWindowMs: input.loginWindowMs } : {}),
+      now: input.now ?? (() => 6_000),
     }),
   };
 }
 
-async function listen(handle: DashboardHandler): Promise<{ base: string; close: () => Promise<void> }> {
+async function listen(
+  handle: DashboardHandler,
+): Promise<{ base: string; close: () => Promise<void> }> {
   const server: Server = createServer((req, res) => {
     const url = new URL(req.url ?? "/", "http://127.0.0.1");
     void handle(req, res, url).then((handled) => {
@@ -200,9 +194,9 @@ describe("dashboard configuration", () => {
     expect(() => loadDashboardConfig({ WA_DASHBOARD_USERS: "ops:" })).toThrow(
       /Invalid WA_DASHBOARD_USERS/,
     );
-    expect(() =>
-      loadDashboardConfig({ WA_DASHBOARD_USERS: "ops:one,ops:two" }),
-    ).toThrow(/usernames must be unique/);
+    expect(() => loadDashboardConfig({ WA_DASHBOARD_USERS: "ops:one,ops:two" })).toThrow(
+      /usernames must be unique/,
+    );
   });
 
   it("parses one or more user:password entries", () => {
@@ -215,9 +209,7 @@ describe("dashboard configuration", () => {
       { username: "ops", password: "correct-horse" },
       { username: "night", password: "pass:word" },
     ]);
-    expect(
-      assertDashboardTransport(config, "http"),
-    ).toBeUndefined();
+    expect(assertDashboardTransport(config, "http")).toBeUndefined();
     expect(() => assertDashboardTransport(config, "stdio")).toThrow(/requires WA_TRANSPORT=http/);
   });
 
@@ -250,6 +242,8 @@ describe("pairing safety", () => {
     expect(baileysCredsArePaired('{"registered":true,"me":{"id":"15551212@s.whatsapp.net"}}')).toBe(
       true,
     );
+    expect(baileysCredsArePaired("{}")).toBe(true);
+    expect(baileysCredsArePaired('{"registered":"false"}')).toBe(true);
     expect(baileysCredsArePaired("not-json")).toBe(true);
     expect(baileysCredsArePaired("[]")).toBe(true);
   });
@@ -412,7 +406,10 @@ describe("dashboard HTTP", () => {
     });
     noteWebhookJobOutcome("delivered", {
       attemptsMade: 1,
-      data: { destinationId: "owner-routine", payload: { event: "instance.connected", text: SECRET_TOKEN } },
+      data: {
+        destinationId: "owner-routine",
+        payload: { event: "instance.connected", text: SECRET_TOKEN },
+      },
     });
     const base = await serve(handle);
     const page = await fetch(`${base}/dashboard`, {
@@ -431,8 +428,18 @@ describe("dashboard HTTP", () => {
     const body = (await response.json()) as {
       uptimeSeconds: number;
       health: { connected: number; qrPending: number };
-      instances: Array<{ instanceId: string; paired: boolean; qrImage: string | null; phone: string | null }>;
-      webhook: { droppedEvents: string[]; authConfigured: boolean; deliveries: unknown[]; cloud: unknown };
+      instances: Array<{
+        instanceId: string;
+        paired: boolean;
+        qrImage: string | null;
+        phone: string | null;
+      }>;
+      webhook: {
+        droppedEvents: string[];
+        authConfigured: boolean;
+        deliveries: unknown[];
+        cloud: unknown;
+      };
       events: unknown[];
     };
     const serialized = JSON.stringify(body);
@@ -498,7 +505,7 @@ describe("dashboard HTTP", () => {
     expect(calls.some((call) => call.startsWith("code:") || call.startsWith("qr:"))).toBe(false);
   });
 
-  it("starts pairing for a new instance and an unpaired existing instance", async () => {
+  it("starts pairing only for an existing unpaired instance", async () => {
     const { handle, calls } = handlerFor({});
     const base = await serve(handle);
     const created = await fetch(`${base}/dashboard/api/pairing`, {
@@ -506,19 +513,12 @@ describe("dashboard HTTP", () => {
       headers: {
         Authorization: basic("ops", "correct-horse"),
         "Content-Type": "application/json",
+        Origin: new URL(base).origin,
       },
       body: JSON.stringify({ name: "Front desk", phone: "+1 (555) 123-4567" }),
     });
-    expect(created.status).toBe(200);
-    const createdBody = (await created.json()) as { instanceId: string; pairingCode: string };
-    expect(createdBody.instanceId).toBe("inst_11223344");
-    expect(createdBody.pairingCode).toBe("ABCD-1234");
-    expect(calls).toContain("create:Front desk:baileys");
-    expect(calls).toContain("connect:inst_11223344");
-    expect(calls).toContain("code:inst_11223344:15551234567");
-    expect(calls.some((call) => call.includes("inst_aabbccdd") && call.startsWith("connect"))).toBe(
-      false,
-    );
+    expect(created.status).toBe(404);
+    expect(calls).toEqual([]);
 
     const existing = await fetch(`${base}/dashboard/api/instances/inst_aabbccdd/pairing`, {
       method: "POST",
@@ -526,11 +526,119 @@ describe("dashboard HTTP", () => {
         Authorization: basic("ops", "correct-horse"),
         "Content-Type": "application/json",
       },
-      body: "{}",
+      body: JSON.stringify({ phone: "+1 (555) 123-4567" }),
     });
     expect(existing.status).toBe(200);
+    const body = (await existing.json()) as { instanceId: string; pairingCode: string };
+    expect(body.instanceId).toBe("inst_aabbccdd");
+    expect(body.pairingCode).toBe("ABCD-1234");
     expect(calls).toContain("connect:inst_aabbccdd");
-    expect(calls).not.toContain("code:inst_aabbccdd:15551234567");
+    expect(calls).toContain("code:inst_aabbccdd:15551234567");
+  });
+
+  it("rejects a cross-site or non-JSON pairing request before connecting", async () => {
+    const { handle, calls } = handlerFor({});
+    const base = await serve(handle);
+    const headers = { Authorization: basic("ops", "correct-horse") };
+    const url = `${base}/dashboard/api/instances/inst_aabbccdd/pairing`;
+    const crossSite = await fetch(url, {
+      method: "POST",
+      headers: { ...headers, "Content-Type": "text/plain", "Sec-Fetch-Site": "cross-site" },
+      body: "",
+    });
+    expect(crossSite.status).toBe(403);
+    expect(await crossSite.json()).toEqual({ error: "Cross-site request rejected" });
+
+    const foreignOrigin = await fetch(url, {
+      method: "POST",
+      headers: {
+        ...headers,
+        "Content-Type": "application/json",
+        "Sec-Fetch-Site": "same-site",
+        Origin: "https://evil.example",
+      },
+      body: "{}",
+    });
+    expect(foreignOrigin.status).toBe(403);
+
+    const plain = await fetch(url, {
+      method: "POST",
+      headers: { ...headers, "Content-Type": "text/plain", "Sec-Fetch-Site": "same-origin" },
+      body: "",
+    });
+    expect(plain.status).toBe(415);
+    expect(calls).toEqual([]);
+
+    const emptyJson = await fetch(url, {
+      method: "POST",
+      headers: {
+        ...headers,
+        "Content-Type": "application/json",
+        Origin: new URL(base).origin,
+        "Sec-Fetch-Site": "same-origin",
+      },
+      body: "",
+    });
+    expect(emptyJson.status).toBe(200);
+    expect(calls).toContain("connect:inst_aabbccdd");
+  });
+
+  it("limits repeated failed logins from one address", async () => {
+    let clock = 10_000;
+    const { handle } = handlerFor({
+      maxLoginFailures: 2,
+      loginWindowMs: 1_000,
+      now: () => clock,
+    });
+    const base = await serve(handle);
+    const first = await fetch(`${base}/dashboard/`);
+    expect(first.status).toBe(401);
+    expect(first.headers.get("www-authenticate")).toContain("Basic");
+    const second = await fetch(`${base}/dashboard/`);
+    expect(second.status).toBe(429);
+    expect(second.headers.get("www-authenticate")).toBeNull();
+    expect(await second.json()).toEqual({ error: "Too many login attempts" });
+    const locked = await fetch(`${base}/dashboard/`, {
+      headers: { Authorization: basic("ops", "correct-horse") },
+    });
+    expect(locked.status).toBe(429);
+    clock += 1_001;
+    const retry = await fetch(`${base}/dashboard/`);
+    expect(retry.status).toBe(401);
+  });
+
+  it("uses relative API URLs under its mount path", async () => {
+    const { handle, calls } = handlerFor({ mountPath: "/wamcp/dashboard" });
+    const base = await serve(handle);
+    const absent = await fetch(`${base}/dashboard`, {
+      headers: { Authorization: basic("ops", "correct-horse") },
+    });
+    expect(absent.status).toBe(404);
+    const redirect = await fetch(`${base}/wamcp/dashboard`, {
+      headers: { Authorization: basic("ops", "correct-horse") },
+      redirect: "manual",
+    });
+    expect(redirect.status).toBe(302);
+    expect(redirect.headers.get("location")).toBe("/wamcp/dashboard/");
+    const page = await fetch(`${base}/wamcp/dashboard/`, {
+      headers: { Authorization: basic("ops", "correct-horse") },
+    });
+    expect(page.status).toBe(200);
+    const html = await page.text();
+    const csp = page.headers.get("content-security-policy") ?? "";
+    const nonce = /script-src 'nonce-([A-Za-z0-9_-]+)'/.exec(csp)?.[1];
+    expect(nonce).toBeTruthy();
+    expect(csp).not.toContain("script-src 'unsafe-inline'");
+    expect(html).toContain(`nonce="${nonce}"`);
+    expect(html).toContain('const overviewUrl = "api/overview"');
+    expect(html).toContain('"api/instances/"');
+    expect(html).not.toContain("/dashboard/api/");
+    expect(html).not.toContain("/api/pairing");
+    const overview = await fetch(`${base}/wamcp/dashboard/api/overview`, {
+      headers: { Authorization: basic("ops", "correct-horse") },
+    });
+    expect(overview.status).toBe(200);
+    expect(calls).toEqual([]);
   });
 
   it("rejects cloud instances and bad ids without connecting", async () => {
@@ -587,6 +695,7 @@ describe("dashboard source boundaries", () => {
     expect(source).not.toContain("clearAuthState");
     expect(source).not.toContain("deleteInstance");
     expect(source).not.toContain("WA_DATABASE_PATH");
-    expect(dashboardPage()).not.toContain("/api/send");
+    expect(dashboardPage("noncevalue12345678")).not.toContain("/api/send");
+    expect(dashboardPage("noncevalue12345678")).not.toContain("/dashboard/api/");
   });
 });

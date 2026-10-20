@@ -3,7 +3,10 @@
 // Static shell. Instance data is loaded from the JSON API.
 // ============================================================
 
-export function dashboardPage(): string {
+export function dashboardPage(nonce: string): string {
+  if (!/^[A-Za-z0-9_-]{16,128}$/.test(nonce)) {
+    throw new Error("Invalid dashboard page nonce");
+  }
   return `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -22,7 +25,6 @@ export function dashboardPage(): string {
   p { margin: 0 0 8px; }
   .muted { color: var(--muted); }
   section { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 16px; margin: 0 0 16px; }
-  form { display: flex; flex-wrap: wrap; gap: 10px; align-items: end; }
   label { display: flex; flex-direction: column; gap: 4px; font-size: 0.85rem; color: var(--muted); }
   input { font: inherit; color: var(--ink); border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; min-width: 12rem; }
   button { font: inherit; border: 0; border-radius: 8px; padding: 8px 12px; background: #1c1917; color: #fff; cursor: pointer; }
@@ -44,26 +46,23 @@ export function dashboardPage(): string {
 <body>
 <header>
   <h1>WA MCP operations</h1>
-  <p class="muted">Read-only, except starting pairing for an instance that is not already paired. Webhook secrets are not shown.</p>
+  <p class="muted">Read-only, except starting pairing for an existing instance that is not already paired. Webhook secrets are not shown.</p>
 </header>
 <main>
   <p id="notice" class="muted"></p>
   <p id="pairing-code"></p>
   <section>
     <h2>Start pairing</h2>
-    <form id="pairing-form">
-      <label>New instance name <input name="name" maxlength="64" autocomplete="off" required></label>
-      <label>Phone for a pairing code <input name="phone" inputmode="numeric" maxlength="20" autocomplete="off" placeholder="15551234567"></label>
-      <button type="submit">Start pairing for a new instance</button>
-    </form>
+    <p class="muted">Use Start pairing on an existing Baileys instance. This page does not create instances.</p>
+    <label>Phone for a pairing code <input id="pairing-phone" inputmode="numeric" maxlength="20" autocomplete="off" placeholder="15551234567"></label>
   </section>
   <section id="health"></section>
   <section id="instances"></section>
   <section id="webhook"></section>
   <section id="events"></section>
 </main>
-<script>
-const overviewUrl = "/dashboard/api/overview";
+<script nonce="${nonce}">
+const overviewUrl = "api/overview";
 
 function el(tag, value, className) {
   const node = document.createElement(tag);
@@ -142,7 +141,7 @@ function renderInstances(data) {
       button.type = "button";
       button.textContent = "Start pairing";
       button.addEventListener("click", function () {
-        const phone = document.getElementById("pairing-form").elements.phone.value.trim();
+        const phone = document.getElementById("pairing-phone").value.trim();
         const body = {};
         if (phone) body.phone = phone;
         void startPairing(body, item.instanceId);
@@ -229,7 +228,7 @@ async function load() {
 async function startPairing(body, instanceId) {
   const notice = document.getElementById("notice");
   notice.textContent = "Starting pairing";
-  const url = instanceId ? "/dashboard/api/instances/" + encodeURIComponent(instanceId) + "/pairing" : "/dashboard/api/pairing";
+  const url = "api/instances/" + encodeURIComponent(instanceId) + "/pairing";
   const response = await fetch(url, {
     method: "POST",
     headers: { "Content-Type": "application/json", Accept: "application/json" },
@@ -245,15 +244,6 @@ async function startPairing(body, instanceId) {
   notice.textContent = payload.pairingCode ? "Pairing code ready" : "Pairing started";
   await load();
 }
-
-document.getElementById("pairing-form").addEventListener("submit", function (event) {
-  event.preventDefault();
-  const form = event.currentTarget;
-  const body = { name: form.elements.name.value };
-  const phone = form.elements.phone.value.trim();
-  if (phone) body.phone = phone;
-  void startPairing(body);
-});
 
 void load();
 setInterval(function () { void load(); }, 3000);

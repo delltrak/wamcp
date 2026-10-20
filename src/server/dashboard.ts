@@ -5,6 +5,7 @@
 // Read-only except starting pairing for an unpaired Baileys instance.
 // ============================================================
 
+import { randomBytes } from "node:crypto";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { pairingRefusal } from "../channels/baileys/pairing-state.js";
 import type { InstanceLifecycleStatusSnapshot } from "../services/instance-manager.js";
@@ -17,8 +18,11 @@ import { dashboardPage } from "./dashboard-page.js";
 const logger = createChildLogger({ service: "dashboard" });
 
 const JSON_LIMIT = 4096;
+const DEFAULT_MOUNT = "/dashboard";
+const LOGIN_FAILURE_LIMIT = 8;
+const LOGIN_WINDOW_MS = 15 * 60 * 1000;
+const LOGIN_TRACKED_ADDRESSES = 1024;
 const INSTANCE_ID_RE = /^inst_[0-9a-f]{8}$/;
-const NAME_RE = /^[\p{L}\p{N}][\p{L}\p{N} ._-]{0,63}$/u;
 const SAFE_EVENT = /^[a-z][a-z0-9._-]{0,63}$/i;
 const SAFE_ID = /^[A-Za-z0-9_-]{1,64}$/;
 const SAFE_CODE = /^[A-Za-z0-9_.-]{1,80}$/;
@@ -42,7 +46,6 @@ export interface DashboardAdapter {
 
 export interface DashboardInstances {
   getInstanceLifecycleStatuses(id?: string): InstanceLifecycleStatusSnapshot[];
-  createInstance(name: string, channel?: "baileys" | "cloud"): Promise<{ id: string }>;
   connectInstance(id: string): Promise<void>;
   getAdapter(id: string): DashboardAdapter;
 }
@@ -77,6 +80,10 @@ export interface DashboardHandlerOptions {
   cloudWebhook: () => CloudWebhookFlags;
   renderQr: (text: string) => Promise<string | null>;
   version: string;
+  /** Absolute mount, such as `/dashboard` or `/wamcp/dashboard`. The page uses relative URLs under it. */
+  mountPath?: string;
+  maxLoginFailures?: number;
+  loginWindowMs?: number;
   now?: () => number;
 }
 
@@ -107,8 +114,26 @@ function publicPhone(value: string | null): string | null {
   return null;
 }
 
-function isDashboardPath(pathname: string): boolean {
-  return pathname === "/dashboard" || pathname.startsWith("/dashboard/");
+export function normalizeDashboardMount(mount: string | undefined): string {
+  const value = mount && mount.length > 0 ? mount : DEFAULT_MOUNT;
+  if (
+    !value.startsWith("/") ||
+    value.includes("//") ||
+    value.includes("?") ||
+    value.includes("#") ||
+    value.includes("\\")
+  ) {
+    throw new Error("Dashboard mount path must be an absolute path");
+  }
+  return value.length > 1 && value.endsWith("/") ? value.slice(0, -1) : value;
+}
+
+/** Subpath under the mount, or null when the request is outside the dashboard. */
+export function dashboardSubpath(pathname: string, mount: string): string | null {
+  if (pathname === mount) return "";
+  const prefix = `${mount}/`;
+  if (!pathname.startsWith(prefix)) return null;
+  return pathname.slice(mount.length);
 }
 
 function sendJson(
@@ -131,17 +156,33 @@ function sendJson(
   res.end(payload);
 }
 
-function sendHtml(res: ServerResponse, html: string): void {
+function pageNonce(): string {
+  return randomBytes(16).toString("base64url");
+}
+
+function sendHtml(res: ServerResponse): void {
+  const nonce = pageNonce();
+  const html = dashboardPage(nonce);
   res.writeHead(200, {
     "Content-Type": "text/html; charset=utf-8",
     "Cache-Control": "no-store",
     "X-Content-Type-Options": "nosniff",
     "Referrer-Policy": "no-referrer",
     "X-Frame-Options": "DENY",
-    "Content-Security-Policy":
-      "default-src 'none'; style-src 'unsafe-inline'; img-src data:; script-src 'unsafe-inline'; connect-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'",
+    "Content-Security-Policy": `default-src 'none'; style-src 'unsafe-inline'; img-src data:; script-src 'nonce-${nonce}'; connect-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'`,
   });
   res.end(html);
+}
+
+function sendRedirect(res: ServerResponse, location: string): void {
+  res.writeHead(302, {
+    Location: location,
+    "Content-Length": "0",
+    "Cache-Control": "no-store",
+    "X-Content-Type-Options": "nosniff",
+    "Referrer-Policy": "no-referrer",
+  });
+  res.end();
 }
 
 function unauthorized(res: ServerResponse): void {
@@ -167,14 +208,58 @@ async function readBody(req: IncomingMessage): Promise<Buffer> {
   return Buffer.concat(chunks);
 }
 
-async function readJson(req: IncomingMessage): Promise<Record<string, unknown>> {
-  const body = await readBody(req);
-  if (body.length === 0) return {};
-  const contentType = req.headers["content-type"];
-  const mediaType = typeof contentType === "string" ? contentType.split(";")[0]?.trim() : "";
-  if (mediaType.toLowerCase() !== "application/json") {
+function headerToken(value: string | string[] | undefined): string {
+  const raw = Array.isArray(value) ? value[0] : value;
+  return typeof raw === "string" ? raw.trim() : "";
+}
+
+function clientAddress(req: IncomingMessage): string {
+  const raw = req.socket.remoteAddress ?? "unknown";
+  return raw.startsWith("::ffff:") ? raw.slice("::ffff:".length) : raw;
+}
+
+/**
+ * Browsers resend cached Basic credentials on a cross-site POST. Reject that
+ * before any pairing work. A missing Sec-Fetch-Site or Origin is allowed so
+ * non-browser clients can call the API; a present Origin must match Host.
+ */
+function assertSameOriginMutation(req: IncomingMessage): void {
+  const site = headerToken(req.headers["sec-fetch-site"]).toLowerCase();
+  if (site !== "" && site !== "same-origin" && site !== "same-site" && site !== "none") {
+    throw new DashboardHttpError(403, "Cross-site request rejected");
+  }
+  const origin = headerToken(req.headers.origin);
+  if (origin === "") return;
+  if (origin.toLowerCase() === "null") {
+    throw new DashboardHttpError(403, "Cross-site request rejected");
+  }
+  let originHost: string;
+  try {
+    const parsed = new URL(origin);
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+      throw new Error("unsupported origin");
+    }
+    originHost = parsed.host.toLowerCase();
+  } catch {
+    throw new DashboardHttpError(403, "Cross-site request rejected");
+  }
+  const host = headerToken(req.headers.host).toLowerCase();
+  if (host === "" || originHost !== host) {
+    throw new DashboardHttpError(403, "Cross-site request rejected");
+  }
+}
+
+function requireJsonContentType(req: IncomingMessage): void {
+  const mediaType = headerToken(req.headers["content-type"]).split(";")[0]?.trim().toLowerCase();
+  if (mediaType !== "application/json") {
     throw new DashboardHttpError(415, "Content-Type must be application/json");
   }
+}
+
+async function readJson(req: IncomingMessage): Promise<Record<string, unknown>> {
+  requireJsonContentType(req);
+  const body = await readBody(req);
+  if (body.length === 0) return {};
   try {
     const parsed: unknown = JSON.parse(body.toString("utf8"));
     if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
@@ -185,13 +270,6 @@ async function readJson(req: IncomingMessage): Promise<Record<string, unknown>> 
     if (err instanceof DashboardHttpError) throw err;
     throw new DashboardHttpError(400, "Invalid JSON");
   }
-}
-
-function normalizeName(value: unknown): string {
-  if (typeof value !== "string" || !NAME_RE.test(value.trim())) {
-    throw new DashboardHttpError(400, "Instance name must be 1 to 64 characters");
-  }
-  return value.trim();
 }
 
 function normalizeOptionalPhone(value: unknown): string | undefined {
@@ -206,9 +284,55 @@ function normalizeOptionalPhone(value: unknown): string | undefined {
   return digits;
 }
 
+class LoginAttemptLimiter {
+  private readonly failures = new Map<string, number[]>();
+
+  constructor(
+    private readonly maxFailures: number,
+    private readonly windowMs: number,
+    private readonly now: () => number,
+  ) {}
+
+  isLimited(address: string): boolean {
+    return this.recent(address).length >= this.maxFailures;
+  }
+
+  /** Returns true when this failure reaches the limit. */
+  recordFailure(address: string): boolean {
+    const recent = this.recent(address);
+    recent.push(this.now());
+    this.failures.delete(address);
+    this.failures.set(address, recent);
+    while (this.failures.size > LOGIN_TRACKED_ADDRESSES) {
+      const oldest = this.failures.keys().next().value;
+      if (oldest === undefined) break;
+      this.failures.delete(oldest);
+    }
+    return recent.length >= this.maxFailures;
+  }
+
+  recordSuccess(address: string): void {
+    this.failures.delete(address);
+  }
+
+  private recent(address: string): number[] {
+    const cutoff = this.now() - this.windowMs;
+    const kept = (this.failures.get(address) ?? []).filter((at) => at > cutoff);
+    if (kept.length === 0) this.failures.delete(address);
+    else this.failures.set(address, kept);
+    return kept;
+  }
+}
+
 export function createDashboardHandler(options: DashboardHandlerOptions): DashboardHandler {
   const locks = new Set<string>();
+  const mount = normalizeDashboardMount(options.mountPath);
   const now = (): number => options.now?.() ?? Date.now();
+  const loginAttempts = new LoginAttemptLimiter(
+    options.maxLoginFailures ?? LOGIN_FAILURE_LIMIT,
+    options.loginWindowMs ?? LOGIN_WINDOW_MS,
+    now,
+  );
 
   function readSnapshot(instanceId: string): InstanceLifecycleStatusSnapshot {
     try {
@@ -416,33 +540,41 @@ export function createDashboardHandler(options: DashboardHandlerOptions): Dashbo
     }
   }
 
+  function retryAfterSeconds(): string {
+    const windowMs = options.loginWindowMs ?? LOGIN_WINDOW_MS;
+    return String(Math.max(1, Math.ceil(windowMs / 1000)));
+  }
+
+  function tooManyLogins(res: ServerResponse): void {
+    sendJson(
+      res,
+      429,
+      { error: "Too many login attempts" },
+      { "Retry-After": retryAfterSeconds() },
+    );
+  }
+
   async function route(req: IncomingMessage, res: ServerResponse, url: URL): Promise<void> {
-    const path = url.pathname;
-    if ((path === "/dashboard" || path === "/dashboard/") && req.method === "GET") {
-      sendHtml(res, dashboardPage());
+    const path = dashboardSubpath(url.pathname, mount);
+    if (path === null) {
+      sendJson(res, 404, { error: "Not found" });
       return;
     }
-    if (path === "/dashboard/api/overview" && req.method === "GET") {
+    if (path === "" && req.method === "GET") {
+      sendRedirect(res, `${mount}/`);
+      return;
+    }
+    if (path === "/" && req.method === "GET") {
+      sendHtml(res);
+      return;
+    }
+    if (path === "/api/overview" && req.method === "GET") {
       sendJson(res, 200, await overview());
       return;
     }
-    if (path === "/dashboard/api/pairing" && req.method === "POST") {
-      const body = await readJson(req);
-      const name = normalizeName(body.name);
-      const phone = normalizeOptionalPhone(body.phone);
-      let created: { id: string };
-      try {
-        created = await options.instances.createInstance(name, "baileys");
-      } catch (err) {
-        if (err instanceof DashboardHttpError) throw err;
-        logger.error({ err }, "Dashboard instance creation failed");
-        throw new DashboardHttpError(500, "Unable to start pairing");
-      }
-      sendJson(res, 200, await startPairing(created.id, phone));
-      return;
-    }
-    const pairingMatch = /^\/dashboard\/api\/instances\/([^/]+)\/pairing$/.exec(path);
+    const pairingMatch = /^\/api\/instances\/([^/]+)\/pairing$/.exec(path);
     if (pairingMatch && req.method === "POST") {
+      assertSameOriginMutation(req);
       const instanceId = decodeURIComponent(pairingMatch[1] ?? "");
       if (!INSTANCE_ID_RE.test(instanceId)) {
         throw new DashboardHttpError(400, "Invalid instance id");
@@ -451,13 +583,7 @@ export function createDashboardHandler(options: DashboardHandlerOptions): Dashbo
       sendJson(res, 200, await startPairing(instanceId, normalizeOptionalPhone(body.phone)));
       return;
     }
-    if (
-      path === "/dashboard" ||
-      path === "/dashboard/" ||
-      path === "/dashboard/api/overview" ||
-      path === "/dashboard/api/pairing" ||
-      pairingMatch
-    ) {
+    if (path === "" || path === "/" || path === "/api/overview" || pairingMatch) {
       sendJson(res, 405, { error: "Method not allowed" });
       return;
     }
@@ -465,8 +591,13 @@ export function createDashboardHandler(options: DashboardHandlerOptions): Dashbo
   }
 
   return async (req, res, url) => {
-    if (!options.config.enabled || !isDashboardPath(url.pathname)) return false;
+    if (!options.config.enabled || dashboardSubpath(url.pathname, mount) === null) return false;
     try {
+      const address = clientAddress(req);
+      if (loginAttempts.isLimited(address)) {
+        tooManyLogins(res);
+        return true;
+      }
       const header = req.headers.authorization;
       const parsed = typeof header === "string" ? parseBasicAuthorization(header) : null;
       const allowed =
@@ -474,9 +605,14 @@ export function createDashboardHandler(options: DashboardHandlerOptions): Dashbo
         parsed !== null &&
         dashboardCredentialsMatch(options.config.users, parsed.username, parsed.password);
       if (!allowed) {
-        unauthorized(res);
+        if (loginAttempts.recordFailure(address)) {
+          tooManyLogins(res);
+        } else {
+          unauthorized(res);
+        }
         return true;
       }
+      loginAttempts.recordSuccess(address);
       await route(req, res, url);
     } catch (err) {
       const httpError = err instanceof DashboardHttpError ? err : null;

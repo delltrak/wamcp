@@ -141,7 +141,7 @@ Add to your `claude_desktop_config.json`:
 | 🔁  | **Auto-reconnect**     | Automatic reconnection with exponential backoff.                                                          |
 | 🗃️  | **Persistent**         | SQLite storage for sessions, messages, contacts, groups.                                                  |
 | 🐳  | **Single container**   | `docker compose up` — only Redis as external dependency.                                                  |
-| 🖥️  | **Operations dashboard** | Optional read-only `/dashboard` page for status, webhook health, and pairing a new instance. Off by default. |
+| 🖥️  | **Operations dashboard** | Optional read-only `/dashboard` page for status, webhook health, and pairing an existing unpaired instance. Off by default. |
 
 ---
 
@@ -954,11 +954,11 @@ WA_DASHBOARD_ENABLED=true
 WA_DASHBOARD_USERS=operator:replace-with-a-long-password
 ```
 
-Open `http://<host>:3000/dashboard`. The browser asks for that username and password. Without them the server returns `401`. When the flag is off, `/dashboard` does not exist and returns `404`, the same as any other unknown path.
+Open `http://<host>:3000/dashboard`. The browser asks for that username and password. Without them the server returns `401`. When the flag is off, `/dashboard` does not exist and returns `404`, the same as any other unknown path. Basic authentication repeats the password on every request, so terminate TLS in front of the server before exposing the page. The process does not redirect to HTTPS by itself. Failed logins are limited to 8 attempts per connecting IP in 15 minutes. The limit uses the socket address, so clients that share a proxy share that counter.
 
-The page shows connection health, each instance's state, last connect and disconnect, webhook configuration, dropped events, recent delivery successes and failures, and recent channel events. It does not show webhook URLs, tokens, header values, or signing secrets. Cloud webhook settings appear only as yes/no configured flags.
+The page shows connection health, each instance's state, last connect and disconnect, webhook configuration, dropped events, recent delivery successes and failures, and recent channel events. It does not show webhook URLs, tokens, header values, or signing secrets. Cloud webhook settings appear only as yes/no configured flags. Its API calls are relative to the page URL, so the same handler can be mounted under a path prefix.
 
-The only write action is starting pairing for a **new** Baileys instance, or for an existing Baileys instance that has never registered. An instance whose stored credentials are already registered, or whose state is `connected`, is left untouched: the dashboard does not connect it, request a pairing code, or load a QR. It also does not send messages, log out, delete, or restart instances. `WA_DATABASE_PATH`, the Baileys auth keys, and the Compose volume stay where they are.
+The only write action is `POST /dashboard/api/instances/{instanceId}/pairing` for an existing Baileys instance that has never registered. The dashboard does not create instances. An instance whose stored credentials are already registered, whose credential record does not say `registered: false`, or whose state is `connected`, is left untouched: the dashboard does not connect it, request a pairing code, or load a QR. Pairing requires `Content-Type: application/json` even when the body is empty, and the server rejects a cross-site `Sec-Fetch-Site` or an `Origin` whose host does not match `Host`. It also does not send messages, log out, delete, or restart instances. `WA_DATABASE_PATH`, the Baileys auth keys, and the Compose volume stay where they are.
 
 ---
 
