@@ -28,3 +28,22 @@ do not prevent a send. Incoming messages and webhook delivery do not alter
 presence.
 
 Invalid mode or idle values are rejected when a Baileys adapter is created.
+
+`WA_PRESENCE_PULSE_ENABLED` defaults to `false`. When it is `true`, each connected Baileys
+account is marked globally available, stays available for `WA_PRESENCE_PULSE_DURATION_MS`
+(default 300000, five minutes), then returns to unavailable. The following pulse starts no
+sooner than `WA_PRESENCE_PULSE_INTERVAL_MS` (default 86400000, 24 hours) after the previous
+pulse finishes. A check runs about once a minute. The first enabled pulse runs as soon as a
+connected Baileys adapter exists.
+
+The interval must be an integer from 900000 milliseconds (15 minutes) to 604800000 (7 days).
+The duration must be an integer from 5000 milliseconds (5 seconds) to 900000 (15 minutes),
+and it must be less than the interval. Blank values use the defaults. Any other value is
+rejected at startup with an error that names the variable and the accepted range.
+
+In `on_activity`, the idle timer does not send unavailable while a pulse is holding
+presence. An explicit `unavailable` request cancels that hold. If a send or typing
+indicator is still in flight, or its idle timer is still pending, when the pulse duration
+ends, the pulse leaves that activity in control. In `always`, the pulse still sends global
+available and then unavailable. The pulse does not read or write app state. Cloud API
+instances have no presence channel and are skipped.

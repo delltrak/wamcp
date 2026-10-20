@@ -186,6 +186,17 @@ export class InstanceManager {
 
   // ---- Adapter access ----
 
+  /** Connected or created Baileys adapters. Cloud API instances are omitted. */
+  listBaileysAdapters(): Array<{ instanceId: string; adapter: BaileysAdapter }> {
+    const adapters: Array<{ instanceId: string; adapter: BaileysAdapter }> = [];
+    for (const [instanceId, managed] of this.adapters) {
+      if (managed.channel === "baileys") {
+        adapters.push({ instanceId, adapter: managed.adapter as BaileysAdapter });
+      }
+    }
+    return adapters;
+  }
+
   getAdapter(id: string): ChannelAdapter {
     const managed = this.adapters.get(id);
     if (!managed) {

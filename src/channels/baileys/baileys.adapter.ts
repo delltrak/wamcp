@@ -942,6 +942,11 @@ export class BaileysAdapter implements ChannelAdapter {
   private activityPresenceStatus: GlobalPresenceStatus | null = null;
   private activityPresenceTimer: ReturnType<typeof setTimeout> | null = null;
   private activityPresenceUpdate: Promise<void> | null = null;
+  private presencePulseHoldUntilMs = 0;
+  private presencePulseToken = 0;
+  private presencePulseRunning = false;
+  private presencePulseTimer: ReturnType<typeof setTimeout> | null = null;
+  private presencePulseWaiter: ((completed: boolean) => void) | null = null;
   private readonly activityInFlight = new Map<WASocket, number>();
   private readonly maxStatusRecipients: number;
   private readonly autoRejectCalls: boolean;
@@ -1335,6 +1340,9 @@ export class BaileysAdapter implements ChannelAdapter {
     if (this.presenceMode !== "on_activity" || this.sock !== sock || this.status !== "connected") {
       return;
     }
+    if (status === "unavailable" && Date.now() < this.presencePulseHoldUntilMs) {
+      return;
+    }
 
     while (this.activityPresenceUpdate) {
       try {
@@ -1376,6 +1384,85 @@ export class BaileysAdapter implements ChannelAdapter {
     this.clearActivityPresenceTimer();
     this.activityPresenceStatus = null;
     this.activityPresenceUpdate = null;
+    this.presencePulseHoldUntilMs = 0;
+    this.presencePulseToken += 1;
+    this.clearPresencePulseWait(false);
+  }
+
+  private clearPresencePulseWait(completed: boolean): void {
+    if (this.presencePulseTimer) {
+      clearTimeout(this.presencePulseTimer);
+      this.presencePulseTimer = null;
+    }
+    const waiter = this.presencePulseWaiter;
+    this.presencePulseWaiter = null;
+    waiter?.(completed);
+  }
+
+  private waitForPresencePulse(durationMs: number): Promise<boolean> {
+    return new Promise((resolve) => {
+      this.presencePulseWaiter = resolve;
+      this.presencePulseTimer = setTimeout(() => {
+        this.presencePulseTimer = null;
+        this.presencePulseWaiter = null;
+        resolve(true);
+      }, durationMs);
+    });
+  }
+
+  /**
+   * Mark the account available, keep it available for durationMs, then send unavailable
+   * unless send or typing activity is still holding presence. Resolves true when the
+   * available update was sent, including when the wait is cancelled. Resolves false when
+   * no pulse starts.
+   */
+  async runPresencePulse(durationMs: number): Promise<boolean> {
+    if (this.presencePulseRunning || this.status !== "connected" || !this.sock) return false;
+    if (!Number.isSafeInteger(durationMs) || durationMs < 1) {
+      throw new Error("Presence pulse duration must be a positive integer number of milliseconds");
+    }
+
+    const sock = this.sock;
+    const token = ++this.presencePulseToken;
+    this.presencePulseRunning = true;
+    this.presencePulseHoldUntilMs = Date.now() + durationMs;
+    try {
+      await this.applyPulsePresence(sock, "available");
+      const completed = await this.waitForPresencePulse(durationMs);
+      if (token !== this.presencePulseToken || this.sock !== sock || this.status !== "connected") {
+        return true;
+      }
+      this.presencePulseHoldUntilMs = 0;
+      if (!completed) return true;
+      if ((this.activityInFlight.get(sock) ?? 0) > 0 || this.activityPresenceTimer !== null) {
+        return true;
+      }
+      try {
+        await this.applyPulsePresence(sock, "unavailable");
+      } catch (error) {
+        this.logGlobalPresenceFailure(error);
+      }
+      return true;
+    } catch (error) {
+      if (token === this.presencePulseToken) this.presencePulseHoldUntilMs = 0;
+      throw error;
+    } finally {
+      this.presencePulseRunning = false;
+    }
+  }
+
+  private async applyPulsePresence(sock: WASocket, status: GlobalPresenceStatus): Promise<void> {
+    if (this.sock !== sock || this.status !== "connected") {
+      throw new Error("Instance not connected");
+    }
+    if (this.presenceMode === "on_activity") {
+      await this.setGlobalPresence(sock, status);
+      if (this.activityPresenceStatus !== status) {
+        throw new Error("Presence pulse could not update global presence");
+      }
+      return;
+    }
+    await sock.sendPresenceUpdate(status);
   }
 
   private logGlobalPresenceFailure(error: unknown): void {
@@ -2788,6 +2875,9 @@ export class BaileysAdapter implements ChannelAdapter {
   ): Promise<void> {
     const sock = this.getSock();
     if (this.presenceMode === "on_activity" && presenceStatus === "unavailable") {
+      this.presencePulseHoldUntilMs = 0;
+      this.presencePulseToken += 1;
+      this.clearPresencePulseWait(false);
       this.clearActivityPresenceTimer();
       await this.setGlobalPresence(sock, "unavailable");
       return;

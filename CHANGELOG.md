@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Added an optional Baileys presence pulse, off unless `WA_PRESENCE_PULSE_ENABLED=true`. It marks a connected account available for a bounded duration, then unavailable, and rejects intervals shorter than 15 minutes.
 - Added Baileys instance lifecycle webhooks for connection, disconnect, pairing-code, and QR events,
   plus the read-only `wa_get_instance_status` tool. Pairing and QR challenge data is omitted from
   webhook payloads and status output.
