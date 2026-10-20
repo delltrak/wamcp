@@ -2,14 +2,17 @@
 // WA MCP — Scheduled message table
 // Created in the existing SQLite database. The file path does not change.
 //
-// Millisecond timestamps and the insert sequence are BIGINT. SQLite gives
+// Millisecond timestamps and the tie-break sequence are BIGINT. SQLite gives
 // any declared type that contains "INT" INTEGER affinity and stores values
 // in 64 bits, so BIGINT is a normal integer column here. Postgres INTEGER
 // is int4 and overflows a millisecond timestamp; BIGINT is int8.
 //
-// SCHEDULED_MESSAGES_DDL is the script to append to SCHEMA_SQL. The Postgres
-// applier rewrites the INTEGER keyword to BIGINT and leaves BIGINT in place,
-// so pasting this constant does not narrow timestamps back to 32 bits.
+// Fold-in order for the shared schema:
+// 1. SCHEDULED_MESSAGES_UPGRADE_SQL in ADDITIVE_COLUMNS_BEFORE_SCHEMA.
+// 2. SCHEDULED_MESSAGES_TABLE_DDL, then SCHEDULED_MESSAGES_INDEX_DDL, in SCHEMA_SQL.
+// An older table has no seq column. The upgrade runs before the index that
+// names seq. CREATE TABLE IF NOT EXISTS does not add that column itself.
+// The INTEGER keyword rewrite leaves BIGINT unchanged.
 // Queries use positional `?`.
 // ============================================================
 
@@ -44,23 +47,38 @@ CREATE TABLE IF NOT EXISTS scheduled_messages (
 );
 `;
 
+/**
+ * Adds columns missing from tables created before seq existed.
+ * Run this before SCHEDULED_MESSAGES_INDEX_DDL. On SQLite, check
+ * PRAGMA table_info first. On Postgres, check information_schema.columns.
+ * The only expected repeat is "duplicate column".
+ */
+export const SCHEDULED_MESSAGES_UPGRADE_SQL = `ALTER TABLE scheduled_messages ADD COLUMN seq BIGINT NOT NULL DEFAULT 0`;
+
 export const SCHEDULED_MESSAGES_INDEX_DDL = `
 CREATE INDEX IF NOT EXISTS idx_scheduled_messages_instance
   ON scheduled_messages(instance_id, status);
 DROP INDEX IF EXISTS idx_scheduled_messages_due;
-CREATE INDEX idx_scheduled_messages_due
+CREATE INDEX IF NOT EXISTS idx_scheduled_messages_due_v2
   ON scheduled_messages(status, next_run_at, created_at, seq);
 `;
 
-/** Fresh-database script. Append to SCHEMA_SQL; do not run the upgrade ALTER with it. */
-export const SCHEDULED_MESSAGES_DDL = `${SCHEDULED_MESSAGES_TABLE_DDL}${SCHEDULED_MESSAGES_INDEX_DDL}`;
-
 export function createScheduledMessagesTable(sqlite: Database.Database): void {
   sqlite.exec(SCHEDULED_MESSAGES_TABLE_DDL);
-  try {
-    sqlite.exec(`ALTER TABLE scheduled_messages ADD COLUMN seq BIGINT NOT NULL DEFAULT 0`);
-  } catch {
-    // The CREATE TABLE above already includes seq.
-  }
+  ensureScheduledMessageColumns(sqlite);
   sqlite.exec(SCHEDULED_MESSAGES_INDEX_DDL);
+}
+
+function ensureScheduledMessageColumns(sqlite: Database.Database): void {
+  const table = sqlite
+    .prepare(
+      `SELECT 1 AS present FROM sqlite_master WHERE type = 'table' AND name = 'scheduled_messages'`,
+    )
+    .get() as { present: number } | undefined;
+  if (!table) return;
+  const columns = sqlite.prepare(`PRAGMA table_info(scheduled_messages)`).all() as Array<{
+    name: string;
+  }>;
+  if (columns.some((column) => column.name === "seq")) return;
+  sqlite.exec(SCHEDULED_MESSAGES_UPGRADE_SQL);
 }

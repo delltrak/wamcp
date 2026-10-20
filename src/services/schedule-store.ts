@@ -117,6 +117,7 @@ export class ScheduleStore {
         row.occurrenceLimit,
         row.now,
         row.now,
+        nextScheduleSeq(),
       );
     const stored = this.get(row.instanceId, row.id);
     if (!stored) throw new Error("Invalid scheduled send; it could not be stored");
@@ -283,19 +284,28 @@ function mapRow(row: ScheduleRow): ScheduleRecord {
 
 const DUE_ORDER = "next_run_at ASC, created_at ASC, seq ASC";
 
-/** Insert one row. `seq` is one past the current maximum, including on an empty table. */
+/**
+ * Tie-break for rows that share a due time and created_at.
+ * Not unique: there is no unique index, a restarted process starts again at 1,
+ * and two processes can store the same value. It does not scan the table.
+ */
+let scheduleSeqTie = 0;
+
+export function nextScheduleSeq(): number {
+  scheduleSeqTie += 1;
+  return scheduleSeqTie;
+}
+
 export function insertScheduleSql(): string {
   return `INSERT INTO scheduled_messages (
           id, instance_id, recipient, message_type, payload_json, timezone, recurrence,
           scheduled_at, next_run_at, weekdays_json, day_of_month, end_at, occurrence_limit,
           occurrence_count, attempts, status, created_at, updated_at, seq
-        )
-        SELECT
+        ) VALUES (
           ?, ?, ?, ?, ?, ?, ?,
           ?, ?, ?, ?, ?, ?,
-          0, 0, 'active', ?, ?,
-          COALESCE(MAX(seq), 0) + 1
-        FROM scheduled_messages`;
+          0, 0, 'active', ?, ?, ?
+        )`;
 }
 
 export function listScheduleCountSql(status: ScheduleStatus | null): string {
@@ -312,11 +322,17 @@ export function listScheduleRowsSql(status: ScheduleStatus | null): string {
          LIMIT ? OFFSET ?`;
 }
 
-export function claimNextScheduleSql(excludeCount: number): string {
+export type ScheduleSqlDialect = "sqlite" | "postgres";
+
+export function claimNextScheduleSql(
+  excludeCount: number,
+  dialect: ScheduleSqlDialect = "sqlite",
+): string {
   const excludeSql =
     excludeCount > 0
       ? `AND instance_id NOT IN (${Array.from({ length: excludeCount }, () => "?").join(", ")})`
       : "";
+  const lockSql = dialect === "postgres" ? " FOR UPDATE SKIP LOCKED" : "";
   return `UPDATE scheduled_messages
          SET status = 'running', lease_token = ?, lease_until = ?, updated_at = ?
          WHERE id = (
@@ -324,8 +340,9 @@ export function claimNextScheduleSql(excludeCount: number): string {
            WHERE status = 'active' AND next_run_at <= ?
            ${excludeSql}
            ORDER BY ${DUE_ORDER}
-           LIMIT 1
+           LIMIT 1${lockSql}
          )
+         AND status = 'active'
          RETURNING *`;
 }
 

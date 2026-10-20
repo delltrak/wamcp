@@ -22,10 +22,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   run is the first matching slot at or after `scheduledAt`. Due sends use the existing outbound
   rate limiter. A row that was on time when the limiter held it is not later skipped. Sends that
   share a due time are claimed in `next_run_at`, `created_at`, then insert-sequence order.
-  Scheduled-send queries use positional `?` parameters. The exported table DDL declares
-  millisecond timestamps and that sequence as `BIGINT`. SQLite stores `BIGINT` as a 64-bit
-  integer. The shared schema can append that constant directly; on Postgres those columns stay
-  64-bit instead of overflowing 32-bit `INTEGER`.
+  Scheduled-send queries use positional `?` parameters. Millisecond timestamps are `BIGINT`
+  in `SCHEDULED_MESSAGES_TABLE_DDL`. `SCHEDULED_MESSAGES_UPGRADE_SQL` adds `seq` on older
+  tables and belongs with the additive columns that run before the shared schema.
+  `SCHEDULED_MESSAGES_INDEX_DDL` runs after that upgrade. `seq` only breaks ties; it is not
+  unique. A claim updates a row only while it is still `active`.
 
 - Added Baileys instance lifecycle webhooks for connection, disconnect, pairing-code, and QR events,
   plus the read-only `wa_get_instance_status` tool. Pairing and QR challenge data is omitted from

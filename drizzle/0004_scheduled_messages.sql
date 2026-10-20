@@ -29,5 +29,5 @@ CREATE TABLE `scheduled_messages` (
 	FOREIGN KEY (`instance_id`) REFERENCES `instances`(`id`) ON UPDATE no action ON DELETE cascade
 );
 --> statement-breakpoint
-CREATE INDEX `idx_scheduled_messages_due` ON `scheduled_messages` (`status`,`next_run_at`,`created_at`,`seq`);--> statement-breakpoint
+CREATE INDEX `idx_scheduled_messages_due_v2` ON `scheduled_messages` (`status`,`next_run_at`,`created_at`,`seq`);--> statement-breakpoint
 CREATE INDEX `idx_scheduled_messages_instance` ON `scheduled_messages` (`instance_id`,`status`);

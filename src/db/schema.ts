@@ -405,7 +405,7 @@ export const scheduledMessages = sqliteTable(
     seq: integer("seq").notNull().default(0),
   },
   (table) => [
-    index("idx_scheduled_messages_due").on(
+    index("idx_scheduled_messages_due_v2").on(
       table.status,
       table.nextRunAt,
       table.createdAt,

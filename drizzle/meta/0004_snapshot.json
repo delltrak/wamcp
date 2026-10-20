@@ -1633,8 +1633,8 @@
         }
       },
       "indexes": {
-        "idx_scheduled_messages_due": {
-          "name": "idx_scheduled_messages_due",
+        "idx_scheduled_messages_due_v2": {
+          "name": "idx_scheduled_messages_due_v2",
           "columns": [
             "status",
             "next_run_at",

@@ -58,13 +58,14 @@
     "zod": "^4.6.5"
   },
   "devDependencies": {
-    "@electric-sql/pglite": "^0.5.10",
     "@eslint/js": "^10.0.1",
     "@types/better-sqlite3": "^9.6.0",
     "@types/node": "^24.19.2",
+    "@types/pg": "^8.23.1",
     "@vitest/coverage-v8": "^5.0.4",
     "drizzle-kit": "^0.31.11",
     "eslint": "^10.12.0",
+    "pg": "^8.23.1",
     "prettier": "^3.9.10",
     "tsx": "^4.23.15",
     "typescript": "^6.0.3",
