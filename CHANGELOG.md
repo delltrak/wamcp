@@ -78,6 +78,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- The n8n WA MCP Trigger now requires Webhook Secret. An unsigned delivery is answered HTTP 401
+  and does not start a workflow. Existing flows that left the secret empty stop receiving events
+  until the node secret matches `WA_EVENT_WEBHOOK_SECRET`.
+- `WA_CHATWOOT_ALLOW_LEGACY_SECRET` defaults to `false`. `?secret=` and the older Chatwoot secret
+  headers are ignored unless it is `true`. `WA_CHATWOOT_BLOCK_GROUP_REPLIES` defaults to `false`
+  and drops agent replies whose destination is a group.
 - Gate private disappearing-message timers and all Baileys group creation, settings, membership,
   picture, invite, join, and join-request changes behind `WA_APP_STATE_WRITES_ENABLED`.
 - Added `WA_MARK_ONLINE_ON_CONNECT` to control whether Baileys marks the linked account online

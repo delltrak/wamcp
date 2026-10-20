@@ -35,6 +35,8 @@ const logger = createChildLogger({ service: "chatwoot" });
 const MAX_WEBHOOK_BYTES = 1_048_576;
 const MAX_SEEN = 2_000;
 export const CHATWOOT_SIGNATURE_WINDOW_SECONDS = 300;
+export const MAX_REPLY_ATTACHMENTS = 8;
+export const MAX_REPLY_ATTACHMENT_BYTES = 16 * 1024 * 1024;
 
 export interface ChatwootRuntime {
   enqueueMessage(
@@ -144,7 +146,8 @@ function signatureTimestamp(value: string | undefined, nowSeconds: number): stri
 
 /**
  * Chatwoot v4.13+ sends X-Chatwoot-Signature: sha256=HMAC(secret, "<timestamp>.<raw body>").
- * A header secret or ?secret= is accepted only when those signature headers are absent.
+ * Header and query secrets are accepted only when WA_CHATWOOT_ALLOW_LEGACY_SECRET is on
+ * and the signature headers are absent.
  */
 export function authorizeChatwootWebhook(input: {
   secret: string;
@@ -155,6 +158,7 @@ export function authorizeChatwootWebhook(input: {
   timestamp?: string;
   deliveryId?: string;
   nowSeconds?: number;
+  allowLegacySecret?: boolean;
 }): ChatwootAuthResult {
   const nowSeconds = input.nowSeconds ?? Math.floor(Date.now() / 1000);
   const timestamp = signatureTimestamp(input.timestamp, nowSeconds);
@@ -170,7 +174,10 @@ export function authorizeChatwootWebhook(input: {
     if (!digestMatches(digest, input.signature)) return { ok: false };
     return { ok: true, method: "signature", deliveryId };
   }
-  if (sameSecret(input.secret, input.headerSecret) || sameSecret(input.secret, input.querySecret)) {
+  if (
+    input.allowLegacySecret &&
+    (sameSecret(input.secret, input.headerSecret) || sameSecret(input.secret, input.querySecret))
+  ) {
     return { ok: true, method: "legacy" };
   }
   return { ok: false };
@@ -324,10 +331,12 @@ async function downloadedAttachment(
   attachment: ChatwootAttachment,
   baseUrl: string,
   fetchAttachment: ChatwootAttachmentFetcher,
-): Promise<MessageContent | null> {
-  const maxBytes = attachmentMaxBytes(attachment.fileType);
+  budget: number,
+): Promise<{ content: MessageContent; bytes: number } | null> {
+  const typeLimit = attachmentMaxBytes(attachment.fileType);
   const url = absoluteAttachmentUrl(attachment.dataUrl, baseUrl);
-  if (maxBytes === null || !url) return null;
+  if (typeLimit === null || !url || budget <= 0) return null;
+  const maxBytes = Math.min(typeLimit, budget);
   let downloaded: ChatwootDownloadedAttachment;
   try {
     downloaded = await fetchAttachment(url, maxBytes);
@@ -341,16 +350,24 @@ async function downloadedAttachment(
   if (downloaded.data.length === 0 || downloaded.data.length > maxBytes) return null;
   const encoded = downloaded.data.toString("base64");
   const kind = attachment.fileType.toLowerCase();
-  if (kind === "image") return { type: "image", image: encoded };
-  if (kind === "video") return { type: "video", video: encoded };
+  if (kind === "image")
+    return { content: { type: "image", image: encoded }, bytes: downloaded.data.length };
+  if (kind === "video")
+    return { content: { type: "video", video: encoded }, bytes: downloaded.data.length };
   if (kind === "audio") {
-    return { type: "audio", audio: encoded, mimeType: mimeTypeOf(downloaded.contentType) };
+    return {
+      content: { type: "audio", audio: encoded, mimeType: mimeTypeOf(downloaded.contentType) },
+      bytes: downloaded.data.length,
+    };
   }
   return {
-    type: "document",
-    document: encoded,
-    fileName: fileNameFromUrl(url),
-    mimeType: mimeTypeOf(downloaded.contentType),
+    content: {
+      type: "document",
+      document: encoded,
+      fileName: fileNameFromUrl(url),
+      mimeType: mimeTypeOf(downloaded.contentType),
+    },
+    bytes: downloaded.data.length,
   };
 }
 
@@ -362,9 +379,14 @@ export async function buildChatwootReplyContents(
 ): Promise<MessageContent[]> {
   const text = chatwootMarkdownToWhatsApp(parsed.content).trim().slice(0, 65_536);
   const attachments: MessageContent[] = [];
-  for (const attachment of parsed.attachments) {
-    const content = await downloadedAttachment(attachment, baseUrl, fetchAttachment);
-    if (content) attachments.push(content);
+  let used = 0;
+  for (const attachment of parsed.attachments.slice(0, MAX_REPLY_ATTACHMENTS)) {
+    const remaining = MAX_REPLY_ATTACHMENT_BYTES - used;
+    if (remaining <= 0) break;
+    const downloaded = await downloadedAttachment(attachment, baseUrl, fetchAttachment, remaining);
+    if (!downloaded) continue;
+    attachments.push(downloaded.content);
+    used += downloaded.bytes;
   }
   if (attachments.length === 0) return text ? [{ type: "text", text }] : [];
   const first = attachments[0];
@@ -419,8 +441,7 @@ export class ChatwootService {
   private readonly seenWaSet = new Set<string>();
   private readonly seenChatwoot: number[] = [];
   private readonly seenChatwootSet = new Set<number>();
-  private readonly seenDelivery: string[] = [];
-  private readonly seenDeliverySet = new Set<string>();
+  private readonly deliveries = new Map<string, number>();
   private readonly client: ChatwootClient | null;
   private readonly fetchAttachment: ChatwootAttachmentFetcher;
 
@@ -507,90 +528,129 @@ export class ChatwootService {
     if (!this.config.enabled || !this.client) {
       return { status: 404, body: { error: "Not found" } };
     }
+    const nowSeconds = input.nowSeconds ?? Math.floor(Date.now() / 1000);
     const auth = authorizeChatwootWebhook({
       secret: this.config.webhookSecret,
       rawBody: input.rawBody,
+      allowLegacySecret: this.config.allowLegacySecret,
       ...(input.headerSecret === undefined ? {} : { headerSecret: input.headerSecret }),
       ...(input.querySecret === undefined ? {} : { querySecret: input.querySecret }),
       ...(input.signature === undefined ? {} : { signature: input.signature }),
       ...(input.timestamp === undefined ? {} : { timestamp: input.timestamp }),
       ...(input.deliveryId === undefined ? {} : { deliveryId: input.deliveryId }),
-      ...(input.nowSeconds === undefined ? {} : { nowSeconds: input.nowSeconds }),
+      nowSeconds,
     });
     if (!auth.ok) return { status: 401, body: { error: "Unauthorized" } };
-    if (auth.method === "signature" && this.seenDeliverySet.has(auth.deliveryId)) {
+    const deliveryId = auth.method === "signature" ? auth.deliveryId : undefined;
+    if (deliveryId && this.deliverySeen(deliveryId, nowSeconds)) {
       return { status: 200, body: { status: "ignored", reason: "duplicate" } };
     }
-    if (auth.method === "signature") {
-      this.remember(this.seenDeliverySet, this.seenDelivery, auth.deliveryId);
+    if (deliveryId) {
+      const signedAt = Number(input.timestamp);
+      this.rememberDelivery(deliveryId, signedAt + CHATWOOT_SIGNATURE_WINDOW_SECONDS);
     }
 
+    let parsedJson: unknown;
     try {
-      let parsedJson: unknown;
-      try {
-        parsedJson = JSON.parse(input.rawBody.toString("utf8")) as unknown;
-      } catch {
-        if (auth.method === "signature") {
-          this.forget(this.seenDeliverySet, this.seenDelivery, auth.deliveryId);
-        }
-        return { status: 400, body: { error: "Invalid JSON" } };
-      }
-      const decision = parseChatwootWebhook(parsedJson);
-      if (decision.action === "ignore") {
-        return { status: 200, body: { status: "ignored", reason: decision.reason } };
-      }
-      // A non-2xx result drops the delivery id so Chatwoot can retry.
-      const result = await this.deliverReply(this.config, decision.parsed);
-      if (auth.method === "signature" && (result.status < 200 || result.status >= 300)) {
-        this.forget(this.seenDeliverySet, this.seenDelivery, auth.deliveryId);
-      }
-      return result;
-    } catch (error) {
-      if (auth.method === "signature") {
-        this.forget(this.seenDeliverySet, this.seenDelivery, auth.deliveryId);
-      }
-      throw error;
+      parsedJson = JSON.parse(input.rawBody.toString("utf8")) as unknown;
+    } catch {
+      if (deliveryId) this.forgetDelivery(deliveryId);
+      return { status: 400, body: { error: "Invalid JSON" } };
     }
+    const decision = parseChatwootWebhook(parsedJson);
+    if (decision.action === "ignore") {
+      return { status: 200, body: { status: "ignored", reason: decision.reason } };
+    }
+    const claimed = this.claimReply(this.config, decision.parsed);
+    if (claimed.action === "reject") {
+      if (deliveryId && claimed.result.status >= 400) this.forgetDelivery(deliveryId);
+      return claimed.result;
+    }
+    void this.sendReply(this.config, decision.parsed, claimed.destination, deliveryId);
+    return { status: 202, body: { status: "accepted" } };
   }
 
-  private async deliverReply(
+  /** Synchronous gate. The Chatwoot message id is reserved before any await. */
+  private claimReply(
     config: EnabledChatwootConfig,
     parsed: ParsedChatwootWebhook,
-  ): Promise<ChatwootWebhookResult> {
+  ):
+    | { action: "reject"; result: ChatwootWebhookResult }
+    | { action: "accept"; destination: { instanceId: string; chatId: string } } {
     if (parsed.privateNote || parsed.deleted || parsed.sourceId.startsWith("WAID:")) {
-      return { status: 200, body: { status: "ignored", reason: "echo" } };
+      return {
+        action: "reject",
+        result: { status: 200, body: { status: "ignored", reason: "echo" } },
+      };
     }
     if (parsed.messageType !== "outgoing" || parsed.senderType === "contact") {
-      return { status: 200, body: { status: "ignored", reason: "not_agent_reply" } };
+      return {
+        action: "reject",
+        result: { status: 200, body: { status: "ignored", reason: "not_agent_reply" } },
+      };
     }
     if (parsed.inboxId !== config.inboxId) {
-      return { status: 200, body: { status: "ignored", reason: "inbox" } };
+      return {
+        action: "reject",
+        result: { status: 200, body: { status: "ignored", reason: "inbox" } },
+      };
     }
     if (this.seenChatwootSet.has(parsed.id)) {
-      return { status: 200, body: { status: "ignored", reason: "duplicate" } };
+      return {
+        action: "reject",
+        result: { status: 200, body: { status: "ignored", reason: "duplicate" } },
+      };
     }
+    this.rememberNumber(parsed.id);
 
     const destination = this.resolveDestination(config, parsed);
     if (!destination) {
-      return { status: 422, body: { error: "Chatwoot reply destination could not be resolved" } };
+      this.forgetNumber(parsed.id);
+      return {
+        action: "reject",
+        result: {
+          status: 422,
+          body: { error: "Chatwoot reply destination could not be resolved" },
+        },
+      };
+    }
+    if (config.blockGroupReplies && destination.chatId.endsWith("@g.us")) {
+      return {
+        action: "reject",
+        result: { status: 200, body: { status: "ignored", reason: "group" } },
+      };
     }
     if (isChatwootJidIgnored(destination.chatId, config.ignoreJids)) {
-      return { status: 200, body: { status: "ignored", reason: "jid_filter" } };
+      return {
+        action: "reject",
+        result: { status: 200, body: { status: "ignored", reason: "jid_filter" } },
+      };
     }
-    const contents = await buildChatwootReplyContents(parsed, config.url, this.fetchAttachment);
-    if (contents.length === 0) {
-      return { status: 200, body: { status: "ignored", reason: "empty" } };
+    const text = chatwootMarkdownToWhatsApp(parsed.content).trim();
+    if (!text && parsed.attachments.length === 0) {
+      return {
+        action: "reject",
+        result: { status: 200, body: { status: "ignored", reason: "empty" } },
+      };
     }
+    return { action: "accept", destination };
+  }
 
-    let channel: ChannelType;
+  /** Downloads and queues after the webhook has already been answered. */
+  private async sendReply(
+    config: EnabledChatwootConfig,
+    parsed: ParsedChatwootWebhook,
+    destination: { instanceId: string; chatId: string },
+    deliveryId?: string,
+  ): Promise<void> {
+    let queued = 0;
     try {
-      channel = this.runtime.getInstanceChannel(destination.instanceId);
-    } catch {
-      return { status: 422, body: { error: "Chatwoot reply destination could not be resolved" } };
-    }
-
-    this.rememberNumber(parsed.id);
-    try {
+      const contents = await buildChatwootReplyContents(parsed, config.url, this.fetchAttachment);
+      if (contents.length === 0) {
+        this.releaseReply(parsed.id, deliveryId);
+        return;
+      }
+      const channel = this.runtime.getInstanceChannel(destination.instanceId);
       for (const content of contents) {
         await this.runtime.enqueueMessage(
           destination.instanceId,
@@ -598,16 +658,20 @@ export class ChatwootService {
           content,
           channel,
         );
+        queued += 1;
       }
     } catch (error) {
-      this.forgetNumber(parsed.id);
+      if (queued === 0) this.releaseReply(parsed.id, deliveryId);
       logger.error(
         { err: error, instanceId: destination.instanceId },
         "Failed to queue Chatwoot reply",
       );
-      return { status: 500, body: { error: "Failed to queue WhatsApp message" } };
     }
-    return { status: 202, body: { status: "accepted" } };
+  }
+
+  private releaseReply(messageId: number, deliveryId?: string): void {
+    this.forgetNumber(messageId);
+    if (deliveryId) this.forgetDelivery(deliveryId);
   }
 
   private resolveDestination(
@@ -628,6 +692,27 @@ export class ChatwootService {
   private onlyInstanceId(): string | undefined {
     const ids = this.runtime.listInstanceIds();
     return ids.length === 1 ? ids[0] : undefined;
+  }
+
+  private deliverySeen(id: string, nowSeconds: number): boolean {
+    this.pruneDeliveries(nowSeconds);
+    const expiresAt = this.deliveries.get(id);
+    return expiresAt !== undefined && expiresAt >= nowSeconds;
+  }
+
+  private rememberDelivery(id: string, expiresAt: number): void {
+    this.pruneDeliveries(expiresAt - CHATWOOT_SIGNATURE_WINDOW_SECONDS);
+    this.deliveries.set(id, expiresAt);
+  }
+
+  private forgetDelivery(id: string): void {
+    this.deliveries.delete(id);
+  }
+
+  private pruneDeliveries(nowSeconds: number): void {
+    for (const [id, expiresAt] of this.deliveries) {
+      if (expiresAt < nowSeconds) this.deliveries.delete(id);
+    }
   }
 
   private remember(set: Set<string>, order: string[], key: string): void {
@@ -684,7 +769,7 @@ export async function handleChatwootHttpRequest(
   const url = new URL(req.url ?? "/", "http://localhost");
   const headerSecret =
     headerValue(req, "x-chatwoot-webhook-secret") ?? headerValue(req, "x-wa-chatwoot-secret");
-  // ?secret= remains only so older inboxes keep working. It shows up in proxy logs.
+  // ?secret= is ignored unless WA_CHATWOOT_ALLOW_LEGACY_SECRET=true. It shows up in proxy logs.
   const querySecret = url.searchParams.get("secret");
   const result = await service.handleWebhook({
     rawBody,

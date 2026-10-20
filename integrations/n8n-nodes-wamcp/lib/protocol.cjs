@@ -199,7 +199,8 @@ function isDirectIncomingEvent(item) {
   const fromMe = item.isFromMe === true || item.fromMe === true;
   const group = chat.endsWith("@g.us");
   const status = chat === "status@broadcast" || chat.endsWith("@broadcast");
-  return Boolean(chat) && !fromMe && !group && !status;
+  const newsletter = chat.endsWith("@newsletter");
+  return Boolean(chat) && !fromMe && !group && !status && !newsletter;
 }
 
 /** Keep webhook deliveries whose event is selected on the trigger. */

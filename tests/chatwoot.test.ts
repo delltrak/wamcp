@@ -14,6 +14,7 @@ import { loadEventWebhookConfig } from "../src/services/event-webhook-config.js"
 import {
   isChatwootJidIgnored,
   loadChatwootConfig,
+  parseChatwootSourceId,
   type EnabledChatwootConfig,
 } from "../src/services/chatwoot-config.js";
 import {
@@ -57,6 +58,17 @@ function enabledConfig(overrides: Record<string, string> = {}): EnabledChatwootC
   const config = loadChatwootConfig(enabledEnv(overrides));
   if (!config.enabled) throw new Error("expected Chatwoot to be enabled");
   return config;
+}
+
+function legacyConfig(overrides: Record<string, string> = {}): EnabledChatwootConfig {
+  return enabledConfig({ WA_CHATWOOT_ALLOW_LEGACY_SECRET: "true", ...overrides });
+}
+
+async function waitQueued(
+  queue: { enqueueMessage: { mock: { calls: unknown[][] } } },
+  times = 1,
+): Promise<void> {
+  await vi.waitFor(() => expect(queue.enqueueMessage.mock.calls.length).toBe(times));
 }
 
 function messageEvent(overrides: Partial<NormalizedMessageEvent> = {}): NormalizedMessageEvent {
@@ -298,7 +310,7 @@ describe("Chatwoot inbound sync", () => {
 describe("Chatwoot agent replies", () => {
   it("queues an agent reply only when the webhook secret matches", async () => {
     const queue = runtime();
-    const service = new ChatwootService(enabledConfig(), queue);
+    const service = new ChatwootService(legacyConfig(), queue);
     const body = webhookBody();
     const denied = await service.handleWebhook({
       rawBody: body,
@@ -309,6 +321,7 @@ describe("Chatwoot agent replies", () => {
 
     const accepted = await service.handleWebhook({ rawBody: body, headerSecret: SECRET });
     expect(accepted).toEqual({ status: 202, body: { status: "accepted" } });
+    await waitQueued(queue);
     expect(queue.enqueueMessage).toHaveBeenCalledWith(
       "inst_0123abcd",
       "15551234567@s.whatsapp.net",
@@ -352,7 +365,7 @@ describe("Chatwoot agent replies", () => {
 
     const queue = runtime();
     const service = new ChatwootService(
-      enabledConfig({ WA_CHATWOOT_IGNORE_JIDS: "15559999999@s.whatsapp.net" }),
+      legacyConfig({ WA_CHATWOOT_IGNORE_JIDS: "15559999999@s.whatsapp.net" }),
       queue,
     );
     const echo = await service.handleWebhook({
@@ -382,7 +395,7 @@ describe("Chatwoot agent replies", () => {
     ).toBe(404);
 
     const ambiguous = runtime(["inst_0123abcd", "inst_89abcdef"]);
-    const service = new ChatwootService(enabledConfig(), ambiguous);
+    const service = new ChatwootService(legacyConfig(), ambiguous);
     const result = await service.handleWebhook({ rawBody: webhookBody(), headerSecret: SECRET });
     expect(result.status).toBe(422);
     expect(ambiguous.enqueueMessage).not.toHaveBeenCalled();
@@ -390,7 +403,7 @@ describe("Chatwoot agent replies", () => {
 
   it("routes a multi-instance reply from the encoded source id", async () => {
     const queue = runtime(["inst_0123abcd", "inst_89abcdef"]);
-    const service = new ChatwootService(enabledConfig(), queue);
+    const service = new ChatwootService(legacyConfig(), queue);
     const result = await service.handleWebhook({
       rawBody: webhookBody({
         conversation: {
@@ -401,6 +414,7 @@ describe("Chatwoot agent replies", () => {
       headerSecret: SECRET,
     });
     expect(result.status).toBe(202);
+    await waitQueued(queue);
     expect(queue.enqueueMessage).toHaveBeenCalledWith(
       "inst_89abcdef",
       "15551234567@s.whatsapp.net",
@@ -411,7 +425,7 @@ describe("Chatwoot agent replies", () => {
 
   it("requires the configured inbox and ignores agent-edited chat attributes", async () => {
     const queue = runtime(["inst_0123abcd", "inst_89abcdef"]);
-    const service = new ChatwootService(enabledConfig(), queue);
+    const service = new ChatwootService(legacyConfig(), queue);
     const missingInbox = await service.handleWebhook({
       rawBody: webhookBody({
         conversation: { contact_inbox: { source_id: "15551234567@s.whatsapp.net" } },
@@ -435,6 +449,7 @@ describe("Chatwoot agent replies", () => {
       headerSecret: SECRET,
     });
     expect(edited.status).toBe(202);
+    await waitQueued(queue);
     expect(queue.enqueueMessage).toHaveBeenCalledWith(
       "inst_0123abcd",
       "15551234567@s.whatsapp.net",
@@ -457,6 +472,7 @@ describe("Chatwoot agent replies", () => {
     });
     const first = await service.handleWebhook(signedWebhook(body, 1_700_000_100, "delivery-80"));
     expect(first.status).toBe(202);
+    await waitQueued(queue);
     expect(fetchAttachment).toHaveBeenCalledWith(
       "https://files.example.com/a.png",
       16 * 1024 * 1024,
@@ -482,18 +498,24 @@ describe("Chatwoot agent replies", () => {
 
   it("does not queue an attachment URL when the pinned download fails", async () => {
     const queue = runtime();
+    let downloaded = false;
     const service = new ChatwootService(enabledConfig(), queue, undefined, async () => {
+      downloaded = true;
       throw new Error("blocked");
     });
-    const result = await service.handleWebhook({
-      rawBody: webhookBody({
-        id: 82,
-        content: "",
-        attachments: [{ file_type: "image", data_url: "https://localtest.me/secret" }],
-      }),
-      headerSecret: SECRET,
-    });
-    expect(result.body).toMatchObject({ reason: "empty" });
+    const result = await service.handleWebhook(
+      signedWebhook(
+        webhookBody({
+          id: 82,
+          content: "",
+          attachments: [{ file_type: "image", data_url: "https://localtest.me/secret" }],
+        }),
+        1_700_000_300,
+        "delivery-82",
+      ),
+    );
+    expect(result).toEqual({ status: 202, body: { status: "accepted" } });
+    await vi.waitFor(() => expect(downloaded).toBe(true));
     expect(queue.enqueueMessage).not.toHaveBeenCalled();
   });
 
@@ -524,7 +546,173 @@ describe("Chatwoot agent replies", () => {
     await handleChatwootHttpRequest(req, res, service);
     expect(statusCode).toBe(202);
     expect(JSON.parse(chunks.join(""))).toEqual({ status: "accepted" });
+    await waitQueued(queue);
+  });
+
+  it("rejects legacy secrets unless WA_CHATWOOT_ALLOW_LEGACY_SECRET is true", async () => {
+    expect(enabledConfig().allowLegacySecret).toBe(false);
+    expect(enabledConfig().blockGroupReplies).toBe(false);
+    const queue = runtime();
+    const service = new ChatwootService(enabledConfig(), queue);
+    const header = await service.handleWebhook({ rawBody: webhookBody(), headerSecret: SECRET });
+    const query = await service.handleWebhook({
+      rawBody: webhookBody({ id: 91 }),
+      querySecret: SECRET,
+    });
+    expect(header.status).toBe(401);
+    expect(query.status).toBe(401);
+    expect(queue.enqueueMessage).not.toHaveBeenCalled();
+
+    const allowed = new ChatwootService(legacyConfig(), queue);
+    const accepted = await allowed.handleWebhook({ rawBody: webhookBody({ id: 92 }), headerSecret: SECRET });
+    expect(accepted.status).toBe(202);
+  });
+
+  it("reserves the message id before a slow send and answers before attachments download", async () => {
+    let releaseEnqueue: () => void = () => undefined;
+    const enqueueGate = new Promise<void>((resolve) => {
+      releaseEnqueue = resolve;
+    });
+    const queue = runtime();
+    queue.enqueueMessage.mockImplementation(() =>
+      enqueueGate.then(() => ({ status: "queued", jobId: "job-1" })),
+    );
+    const service = new ChatwootService(enabledConfig(), queue);
+    const now = 1_700_000_500;
+    const firstBody = webhookBody({ id: 60, content: "one" });
+    const secondBody = webhookBody({
+      id: 60,
+      content: "two",
+      attachments: [{ file_type: "image", data_url: "https://files.example.com/a.png" }],
+    });
+    const results = await Promise.all([
+      service.handleWebhook(signedWebhook(firstBody, now, "delivery-a")),
+      service.handleWebhook(signedWebhook(secondBody, now, "delivery-b")),
+    ]);
+    expect(results.map((result) => result.body)).toEqual([
+      { status: "accepted" },
+      { status: "ignored", reason: "duplicate" },
+    ]);
+    await waitQueued(queue);
     expect(queue.enqueueMessage).toHaveBeenCalledTimes(1);
+    releaseEnqueue();
+    await enqueueGate;
+
+    queue.enqueueMessage.mockReset();
+    queue.enqueueMessage.mockRejectedValueOnce(new Error("queue down"));
+    queue.enqueueMessage.mockResolvedValue({ status: "queued", jobId: "job-2" });
+    const failed = await service.handleWebhook(
+      signedWebhook(webhookBody({ id: 61, content: "retry me" }), now, "delivery-fail"),
+    );
+    expect(failed.status).toBe(202);
+    await vi.waitFor(() => expect(queue.enqueueMessage).toHaveBeenCalledTimes(1));
+    const retried = await service.handleWebhook(
+      signedWebhook(webhookBody({ id: 61, content: "retry me" }), now + 1, "delivery-retry"),
+    );
+    expect(retried.status).toBe(202);
+    await waitQueued(queue, 2);
+  });
+
+  it("returns 202 before a hanging attachment download", async () => {
+    let releaseDownload: (value: { data: Buffer; contentType: string }) => void = () => undefined;
+    const download = new Promise<{ data: Buffer; contentType: string }>((resolve) => {
+      releaseDownload = resolve;
+    });
+    const queue = runtime();
+    const fetchAttachment = vi.fn(() => download);
+    const service = new ChatwootService(enabledConfig(), queue, undefined, fetchAttachment);
+    const pending = service.handleWebhook(
+      signedWebhook(
+        webhookBody({
+          id: 70,
+          content: "later",
+          attachments: [{ file_type: "image", data_url: "https://files.example.com/late.png" }],
+        }),
+        1_700_000_700,
+        "delivery-late",
+      ),
+    );
+    const result = await Promise.race([
+      pending,
+      new Promise<never>((_resolve, reject) => {
+        setTimeout(() => reject(new Error("webhook waited on the attachment")), 50);
+      }),
+    ]);
+    expect(result).toEqual({ status: 202, body: { status: "accepted" } });
+    expect(queue.enqueueMessage).not.toHaveBeenCalled();
+    releaseDownload({ data: Buffer.from("late"), contentType: "image/png" });
+    await waitQueued(queue);
+  });
+
+  it("rejects source ids that are not JIDs and accepts both pinned formats", () => {
+    expect(parseChatwootSourceId("garbage").chatId).toBe("");
+    expect(parseChatwootSourceId("../../etc").chatId).toBe("");
+    expect(parseChatwootSourceId("+15551234567").chatId).toBe("");
+    expect(parseChatwootSourceId("nope|15551234567@s.whatsapp.net").chatId).toBe("");
+    expect(parseChatwootSourceId("inst_zzzzzzzz|15551234567@s.whatsapp.net").chatId).toBe("");
+    expect(parseChatwootSourceId("inst_0123abcd|not-a-jid").chatId).toBe("");
+    expect(
+      parseChatwootSourceId("inst_0123abcd|15551234567@s.whatsapp.net", "inst_0123abcd"),
+    ).toEqual({
+      instanceId: "inst_0123abcd",
+      chatId: "15551234567@s.whatsapp.net",
+    });
+    expect(parseChatwootSourceId("15551234567@s.whatsapp.net", "inst_0123abcd")).toEqual({
+      instanceId: "inst_0123abcd",
+      chatId: "15551234567@s.whatsapp.net",
+    });
+    expect(
+      parseChatwootSourceId("inst_89abcdef|15551234567@s.whatsapp.net", "inst_0123abcd").chatId,
+    ).toBe("");
+  });
+
+  it("does not enqueue an invalid destination or a group when group replies are blocked", async () => {
+    const queue = runtime();
+    const service = new ChatwootService(legacyConfig(), queue);
+    const invalid = await service.handleWebhook({
+      rawBody: webhookBody({
+        id: 93,
+        conversation: {
+          inbox_id: 34,
+          contact_inbox: { source_id: "inst_zzzzzzzz|15551234567@s.whatsapp.net" },
+        },
+      }),
+      headerSecret: SECRET,
+    });
+    expect(invalid.status).toBe(422);
+    expect(queue.enqueueMessage).not.toHaveBeenCalled();
+
+    const blocked = new ChatwootService(
+      legacyConfig({ WA_CHATWOOT_BLOCK_GROUP_REPLIES: "true" }),
+      queue,
+    );
+    const group = await blocked.handleWebhook({
+      rawBody: webhookBody({
+        id: 94,
+        conversation: {
+          inbox_id: 34,
+          contact_inbox: { source_id: "120363000000000001@g.us" },
+        },
+      }),
+      headerSecret: SECRET,
+    });
+    expect(group.body).toMatchObject({ reason: "group" });
+    expect(queue.enqueueMessage).not.toHaveBeenCalled();
+  });
+
+  it("still recognizes a delivery id after thousands of newer deliveries in the same window", async () => {
+    const queue = runtime();
+    const service = new ChatwootService(enabledConfig(), queue);
+    const now = 1_700_000_800;
+    for (let index = 0; index <= 2001; index += 1) {
+      const body = webhookBody({ id: 1_000 + index, content: `m${index}` });
+      const result = await service.handleWebhook(signedWebhook(body, now, `delivery-${index}`));
+      expect(result.status).toBe(202);
+    }
+    const replay = await service.handleWebhook(
+      signedWebhook(webhookBody({ id: 9_999, content: "replay" }), now, "delivery-0"),
+    );
+    expect(replay.body).toMatchObject({ reason: "duplicate" });
   });
 });
 
@@ -635,6 +823,26 @@ describe("Chatwoot transport", () => {
       }),
     ).rejects.toBeInstanceOf(ChatwootRequestError);
     expect(blocked).not.toHaveBeenCalled();
+  });
+
+  it("allows a private address only for the configured Chatwoot origin", async () => {
+    const config = enabledConfig({ WA_CHATWOOT_ALLOW_PRIVATE_URL: "true" });
+    const fetchImpl = vi.fn(async () => new Response(Buffer.from("blob"), { status: 200 }));
+    await expect(
+      fetchPinnedResource(new URL("https://chatwoot.example.com/rails/active_storage/a"), config, 1024, {
+        fetchImpl: fetchImpl as typeof fetch,
+        resolveDns: async () => [{ address: "10.1.1.1", family: 4 }],
+      }),
+    ).resolves.toMatchObject({ data: Buffer.from("blob") });
+
+    const other = vi.fn(async () => new Response(Buffer.from("nope")));
+    await expect(
+      fetchPinnedResource(new URL("https://files.example.com/a.png"), config, 1024, {
+        fetchImpl: other as typeof fetch,
+        resolveDns: async () => [{ address: "10.1.1.1", family: 4 }],
+      }),
+    ).rejects.toBeInstanceOf(ChatwootRequestError);
+    expect(other).not.toHaveBeenCalled();
   });
 });
 

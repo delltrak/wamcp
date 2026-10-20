@@ -213,6 +213,7 @@ async function pinAddress(
   url: URL,
   config: EnabledChatwootConfig,
   resolveDns: (hostname: string) => Promise<ChatwootDnsRecord[]>,
+  allowPrivate: boolean,
 ): Promise<{ address: string; family: 4 | 6 }> {
   const hostname = url.hostname.replace(/^\[|\]$/g, "");
   if (isChatwootMetadataAddress(hostname)) throw new ChatwootRequestError(0);
@@ -228,7 +229,7 @@ async function pinAddress(
   const blocked = normalized.some((record) => {
     if (record.family !== 4 && record.family !== 6) return true;
     if (isChatwootMetadataAddress(record.address)) return true;
-    return !config.allowPrivateUrl && isNonPublicIp(record.address);
+    return !allowPrivate && isNonPublicIp(record.address);
   });
   const selected = normalized[0];
   if (blocked || !selected || (selected.family !== 4 && selected.family !== 6)) {
@@ -261,7 +262,7 @@ export function createChatwootTransport(
   return {
     async request(input) {
       const url = endpoint(config, input.path, input.query);
-      const pinned = await pinAddress(url, config, resolveDns);
+      const pinned = await pinAddress(url, config, resolveDns, config.allowPrivateUrl);
       const agent = new Agent({
         connect: pinnedConnect(url.hostname, pinned.address, pinned.family, url.protocol),
       });
@@ -359,7 +360,8 @@ export async function fetchPinnedResource(
   }
   if (target.username || target.password) throw new ChatwootRequestError(0);
   const fetchImpl = deps.fetchImpl ?? fetch;
-  const pinned = await pinAddress(target, config, deps.resolveDns ?? defaultResolve);
+  const allowPrivate = config.allowPrivateUrl && sharesChatwootOrigin(target, config);
+  const pinned = await pinAddress(target, config, deps.resolveDns ?? defaultResolve, allowPrivate);
   const agent = new Agent({
     connect: pinnedConnect(target.hostname, pinned.address, pinned.family, target.protocol),
   });

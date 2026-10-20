@@ -4,7 +4,8 @@
 // ============================================================
 
 import { isIP } from "node:net";
-import { isNonPublicIp, isValidInstanceId } from "../utils/validation.js";
+import { isValidGroupId } from "../utils/group-jid.js";
+import { isNonPublicIp, isValidInstanceId, isValidJid } from "../utils/validation.js";
 
 type Environment = Record<string, string | undefined>;
 
@@ -23,6 +24,8 @@ export interface EnabledChatwootConfig {
   instanceId?: string;
   allowHttp: boolean;
   allowPrivateUrl: boolean;
+  allowLegacySecret: boolean;
+  blockGroupReplies: boolean;
   timeoutMs: number;
 }
 
@@ -173,6 +176,11 @@ export function validateChatwootUrl(
   return parsed.toString().replace(/\/$/, "");
 }
 
+/** Destination chats this bridge will queue. Groups use the group-id check. */
+export function isChatwootReplyJid(value: string): boolean {
+  return isValidJid(value) || (value.endsWith("@g.us") && isValidGroupId(value));
+}
+
 /** Contact-inbox source id. A pinned instance stores the bare chat JID. */
 export function chatwootSourceId(
   instanceId: string,
@@ -189,13 +197,16 @@ export function parseChatwootSourceId(
 ): { instanceId?: string; chatId: string } {
   const value = sourceId.trim();
   if (!value) return { chatId: "" };
-  if (pinnedInstanceId) return { instanceId: pinnedInstanceId, chatId: value };
   const separator = value.indexOf("|");
   if (separator > 0) {
     const instanceId = value.slice(0, separator);
     const chatId = value.slice(separator + 1);
-    if (isValidInstanceId(instanceId) && chatId) return { instanceId, chatId };
+    if (!isValidInstanceId(instanceId) || !isChatwootReplyJid(chatId)) return { chatId: "" };
+    if (pinnedInstanceId && instanceId !== pinnedInstanceId) return { chatId: "" };
+    return { instanceId, chatId };
   }
+  if (!isChatwootReplyJid(value)) return { chatId: "" };
+  if (pinnedInstanceId) return { instanceId: pinnedInstanceId, chatId: value };
   return { chatId: value };
 }
 
@@ -204,6 +215,8 @@ export function loadChatwootConfig(env: Environment = process.env): ChatwootConf
   const enabled = parseBoolean(env, "WA_CHATWOOT_ENABLED", false);
   const allowHttp = parseBoolean(env, "WA_CHATWOOT_ALLOW_HTTP", false);
   const allowPrivateUrl = parseBoolean(env, "WA_CHATWOOT_ALLOW_PRIVATE_URL", false);
+  const allowLegacySecret = parseBoolean(env, "WA_CHATWOOT_ALLOW_LEGACY_SECRET", false);
+  const blockGroupReplies = parseBoolean(env, "WA_CHATWOOT_BLOCK_GROUP_REPLIES", false);
   const timeoutMs = parsePositiveInteger(env, "WA_CHATWOOT_TIMEOUT_MS", 10_000, 120_000);
   const ignoreJids = parseChatwootIgnoreJids(read(env, "WA_CHATWOOT_IGNORE_JIDS"));
   const instanceValue = read(env, "WA_CHATWOOT_INSTANCE_ID");
@@ -239,6 +252,8 @@ export function loadChatwootConfig(env: Environment = process.env): ChatwootConf
     ...(instanceValue ? { instanceId: instanceValue } : {}),
     allowHttp,
     allowPrivateUrl,
+    allowLegacySecret,
+    blockGroupReplies,
     timeoutMs,
   };
 }

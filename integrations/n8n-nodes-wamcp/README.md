@@ -36,7 +36,7 @@ WA_EVENT_WEBHOOK_EVENTS=message.received
 WA_EVENT_WEBHOOK_SECRET=replace-with-a-long-random-secret
 ```
 
-The trigger checks `x-wa-event-timestamp` and `x-wa-event-signature`. The signature is HMAC-SHA256 of `<timestamp>.<raw body>` using the node secret, compared with `timingSafeEqual`, and the timestamp must be within 300 seconds. A missing raw body or a bad signature returns HTTP 401 and does not start the workflow. The node does not rebuild the signed payload from the parsed JSON.
+The trigger checks `x-wa-event-timestamp` and `x-wa-event-signature`. The signature is HMAC-SHA256 of `<timestamp>.<raw body>` using the node secret, compared with `timingSafeEqual`, and the timestamp must be within 300 seconds. A missing raw body or a bad signature is answered with HTTP 401 from the webhook response object and does not start the workflow. Webhook Secret is required. Flows that were saved without it stop receiving events until the secret is set. The node does not rebuild the signed payload from the parsed JSON.
 
 The trigger emits one item per event. Batches posted as `{ "events": [...] }` or `{ "messages": [...] }` are expanded. Each item includes `event`, `instanceId`, `chat` (copied from `chatId` when needed), and `text`. `message.received` from WA MCP also includes `isFromMe`.
 
@@ -59,7 +59,9 @@ Sends go through the normal WA MCP queue and return `{ "status": "queued", "jobI
 Import [`examples/reply-on-message.json`](examples/reply-on-message.json).
 
 1. The trigger receives `message.received` after the signature check.
-2. **Direct chats only** drops groups (`@g.us`), status broadcasts (`status@broadcast` and other `@broadcast` chats), and events with `isFromMe` or `fromMe`.
+2. **Direct chats only** drops groups (`@g.us`), newsletters (`@newsletter`), status broadcasts (`status@broadcast` and other `@broadcast` chats), and events with `isFromMe` or `fromMe`.
 3. **Send text** replies in the remaining direct chat.
+
+If two automations both reply, they can loop. Add a per-chat cooldown in the workflow, and skip a chat that was already answered in the last few minutes, before Send text.
 
 Replace the credential placeholder and the trigger secret, set `WA_EVENT_WEBHOOK_URL` and `WA_EVENT_WEBHOOK_SECRET`, and activate the workflow. A pinned sample item is included so the send node can be inspected before a live event arrives.

@@ -47,6 +47,9 @@ const { WamcpTrigger } =
       getNodeParameter: (name: string) => string;
       getHeaderData: () => Record<string, string>;
       getRequestObject: () => { rawBody?: Buffer };
+      getResponseObject: () => {
+        status: (code: number) => { json: (body: unknown) => unknown };
+      };
       getBodyData: () => unknown;
     };
   };
@@ -132,6 +135,7 @@ describe("n8n WA MCP nodes", () => {
     expect(filter?.parameters.jsCode).toContain("@g.us");
     expect(filter?.parameters.jsCode).toContain("isFromMe");
     expect(filter?.parameters.jsCode).toContain("@broadcast");
+    expect(filter?.parameters.jsCode).toContain("@newsletter");
     expect(send?.parameters).toMatchObject({
       operation: "sendText",
       instanceId: "={{$json.instanceId}}",
@@ -177,6 +181,9 @@ describe("n8n WA MCP nodes", () => {
     ).toBe(false);
     expect(
       protocol.isDirectIncomingEvent({ chat: "status@broadcast", isFromMe: false }),
+    ).toBe(false);
+    expect(
+      protocol.isDirectIncomingEvent({ chat: "123456789012345@newsletter", isFromMe: false }),
     ).toBe(false);
     expect(
       protocol.isDirectIncomingEvent({
@@ -236,9 +243,24 @@ describe("n8n WA MCP nodes", () => {
     const accepted = await trigger.webhook();
     expect(accepted.workflowData[0]?.[0]?.json).toMatchObject({ text: "Hello" });
 
+    const response = {
+      statusCode: 0,
+      body: undefined as unknown,
+      status(code: number) {
+        this.statusCode = code;
+        return this;
+      },
+      json(payload: unknown) {
+        this.body = payload;
+        return this;
+      },
+    };
+    trigger.getResponseObject = () => response;
     trigger.getRequestObject = () => ({});
     const rejected = await trigger.webhook();
-    expect(rejected.webhookResponse?.statusCode).toBe(401);
-    expect(rejected.workflowData).toEqual([[]]);
+    expect(response.statusCode).toBe(401);
+    expect(response.body).toEqual({ error: "Unauthorized" });
+    expect(rejected).toEqual({ noWebhookResponse: true });
+    expect("workflowData" in rejected).toBe(false);
   });
 });

@@ -57,10 +57,9 @@ class WamcpTrigger {
       signature: headerValue(headers, "x-wa-event-signature"),
     });
     if (!authorized) {
-      return {
-        webhookResponse: { statusCode: 401, body: { error: "Unauthorized" } },
-        workflowData: [[]],
-      };
+      const response = this.getResponseObject();
+      response.status(401).json({ error: "Unauthorized" });
+      return { noWebhookResponse: true };
     }
     const events = this.getNodeParameter("events");
     const matched = filterTriggerEvents(this.getBodyData(), events);

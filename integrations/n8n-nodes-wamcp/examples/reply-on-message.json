@@ -17,7 +17,7 @@
     },
     {
       "parameters": {
-        "jsCode": "const items = $input.all();\nreturn items.filter((item) => {\n  const chat = String(item.json.chat || item.json.chatId || '').toLowerCase();\n  const fromMe = item.json.isFromMe === true || item.json.fromMe === true;\n  const group = chat.endsWith('@g.us');\n  const status = chat === 'status@broadcast' || chat.endsWith('@broadcast');\n  return Boolean(chat) && !fromMe && !group && !status;\n});"
+        "jsCode": "const items = $input.all();\nreturn items.filter((item) => {\n  const chat = String(item.json.chat || item.json.chatId || '').toLowerCase();\n  const fromMe = item.json.isFromMe === true || item.json.fromMe === true;\n  const group = chat.endsWith('@g.us');\n  const status = chat === 'status@broadcast' || chat.endsWith('@broadcast');\n  const newsletter = chat.endsWith('@newsletter');\n  return Boolean(chat) && !fromMe && !group && !status && !newsletter;\n});"
       },
       "id": "7e6d5c4b-3a29-4810-9f8e-7d6c5b4a3928",
       "name": "Direct chats only",

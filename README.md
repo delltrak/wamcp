@@ -798,7 +798,9 @@ Copy `.env.example` to `.env` and configure:
 | `WA_CHATWOOT_IGNORE_JIDS` | — | Comma-separated JID filter (exact, `@domain`, or `*` wildcard) |
 | `WA_CHATWOOT_INSTANCE_ID` | — | Limit sync and agent replies to one instance |
 | `WA_CHATWOOT_ALLOW_HTTP` | `false` | Permit an `http` Chatwoot URL. Private hosts stay blocked |
-| `WA_CHATWOOT_ALLOW_PRIVATE_URL` | `false` | Permit a private Chatwoot host. Metadata and link-local addresses stay blocked |
+| `WA_CHATWOOT_ALLOW_PRIVATE_URL` | `false` | Permit a private Chatwoot host. Metadata and link-local addresses stay blocked. Attachment downloads still only use that host |
+| `WA_CHATWOOT_ALLOW_LEGACY_SECRET` | `false` | Accept `?secret=` and the older Chatwoot secret headers |
+| `WA_CHATWOOT_BLOCK_GROUP_REPLIES` | `false` | Drop agent replies whose destination is a group |
 | `WA_CHATWOOT_TIMEOUT_MS` | `10000` | Chatwoot HTTP timeout, from 1 to 120000 ms |
 | `WA_VERSION_CHECK`          | `true`                   | Daily WhatsApp Web version check         |
 
