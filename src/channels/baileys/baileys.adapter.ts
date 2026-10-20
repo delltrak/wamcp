@@ -1418,6 +1418,7 @@ export class BaileysAdapter implements ChannelAdapter {
         this.presencePulseWaiter = null;
         resolve(true);
       }, durationMs);
+      this.presencePulseTimer.unref?.();
     });
   }
 

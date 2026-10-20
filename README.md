@@ -905,8 +905,11 @@ Minutes must be an integer from 1 to 15. The window must be `HH:MM-HH:MM` and en
 on the same day. A schedule that cannot fit those pulses and gaps is rejected. Invalid values stop
 startup with an error that names the variable and the accepted range. The scheduler checks about
 once a minute and logs one short line when a pulse starts. An instance that disappears is removed
-from that day's plan on the next check. Restarting the process plans the day again, which can add
-extra pulses that day. It does not change `WA_MARK_ONLINE_ON_CONNECT`. In `on_activity`, that
+from that day's plan on the next check. A spring-forward day whose real span can no longer hold
+the pulses is skipped with a warning, and the next day is planned again. Restarting the process
+plans the day again. Slots that start within 3 minutes of startup are skipped, so a restart does
+not immediately repeat a pulse; later slots in the new plan can still run. It does not change
+`WA_MARK_ONLINE_ON_CONNECT`. In `on_activity`, that
 option stays forced off and the idle timeout does not end a pulse early; an explicit `unavailable`
 presence request does. A send or typing indicator that is still active when the pulse ends keeps
 the existing idle timer, which then returns the account to unavailable. Otherwise the pulse sends

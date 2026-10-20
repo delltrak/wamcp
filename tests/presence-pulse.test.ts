@@ -284,6 +284,7 @@ describe("presence pulse scheduler", () => {
       config: config({ timesPerDay: 1 }),
       listDevices: () => [ready],
       now: () => at(8, 0, 30),
+      bootedAt: at(7),
       random: () => 0,
     });
 
@@ -307,6 +308,7 @@ describe("presence pulse scheduler", () => {
       config: config(),
       listDevices: () => [device({ runPulse })],
       now: () => now,
+      bootedAt: at(7),
       random: () => 0,
     });
 
@@ -331,6 +333,7 @@ describe("presence pulse scheduler", () => {
       config: config(),
       listDevices: () => [device({ runPulse })],
       now: () => now,
+      bootedAt: at(7),
       random: () => 0,
     });
 
@@ -350,6 +353,7 @@ describe("presence pulse scheduler", () => {
       config: config({ timesPerDay: 1 }),
       listDevices: () => [ready],
       now: () => now,
+      bootedAt: at(7),
       random: () => 0,
     });
 
@@ -372,6 +376,7 @@ describe("presence pulse scheduler", () => {
       config: config({ timesPerDay: 1 }),
       listDevices: () => devices,
       now: () => now,
+      bootedAt: at(7),
       random: () => 0,
     });
 
@@ -392,31 +397,57 @@ describe("presence pulse scheduler", () => {
     scheduler.stop();
   });
 
-  it("plans the day again after a restart while a slot is still open", async () => {
-    const first = device();
-    const now = at(8, 1);
+  it("skips slots that start within a few minutes of boot and still runs a later slot", async () => {
+    const ready = device();
+    let now = at(8, 1);
     const scheduler = new PresencePulseScheduler({
-      config: config({ timesPerDay: 1 }),
-      listDevices: () => [first],
+      config: config({ timesPerDay: 2 }),
+      listDevices: () => [ready],
       now: () => now,
       random: () => 0,
     });
+
     scheduler.runDue(now);
     await flush();
-    expect(first.runPulse).toHaveBeenCalledTimes(1);
-    scheduler.stop();
+    expect(ready.runPulse).not.toHaveBeenCalled();
 
-    const restarted = device({ id: "restarted" });
-    const again = new PresencePulseScheduler({
-      config: config({ timesPerDay: 1 }),
-      listDevices: () => [restarted],
+    now = at(8, 20);
+    scheduler.runDue(now);
+    await flush();
+    expect(ready.runPulse).toHaveBeenCalledTimes(1);
+    scheduler.stop();
+  });
+
+  it("skips a spring-forward day when the real window no longer fits", async () => {
+    const runPulse = vi.fn(async () => true);
+    const warn = vi.fn();
+    let now = Date.parse("2026-03-08T06:30:00Z");
+    const scheduler = new PresencePulseScheduler({
+      config: config({
+        timeZone: "America/New_York",
+        timesPerDay: 2,
+        minutes: 15,
+        window: parsePresencePulseWindow("02:00-03:30"),
+      }),
+      listDevices: () => [device({ runPulse })],
       now: () => now,
       random: () => 0,
+      log: { info: vi.fn(), warn },
+      checkIntervalMs: 60 * 60 * 1000,
     });
-    again.runDue(now);
+
+    expect(() => scheduler.start()).not.toThrow();
+    expect(() => scheduler.runDue(now)).not.toThrow();
     await flush();
-    expect(restarted.runPulse).toHaveBeenCalledTimes(1);
-    again.stop();
+    expect(runPulse).not.toHaveBeenCalled();
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(warn.mock.calls[0]?.[1]).toContain("skipped for this day");
+
+    now = Date.parse("2026-03-09T06:00:00Z");
+    expect(() => scheduler.runDue(now)).not.toThrow();
+    await flush();
+    expect(runPulse).toHaveBeenCalledTimes(1);
+    scheduler.stop();
   });
 
   it("skips pulsing and logs once when the account is already online", () => {
@@ -473,6 +504,23 @@ describe("BaileysAdapter presence pulse", () => {
     });
     return { adapter, sendPresenceUpdate };
   }
+
+  it("unrefs the pulse timer so a long pulse does not hold the process open", async () => {
+    vi.stubEnv("WA_PRESENCE_MODE", "always");
+    vi.stubEnv("WA_MARK_ONLINE_ON_CONNECT", "false");
+    const sample = setTimeout(() => undefined, 60_000);
+    const unref = vi.spyOn(Object.getPrototypeOf(sample), "unref");
+    clearTimeout(sample);
+
+    const { adapter } = connectedAdapter("pulse-unref");
+    const pulse = adapter.runPresencePulse(60_000);
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(unref).toHaveBeenCalled();
+    await adapter.disconnect();
+    await pulse;
+    unref.mockRestore();
+  });
 
   it("does not pulse when disconnected and rejects a non-positive duration", async () => {
     const adapter = new BaileysAdapter("pulse-disconnected");

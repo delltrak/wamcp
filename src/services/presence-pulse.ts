@@ -19,6 +19,11 @@ export const PRESENCE_PULSE_MIN_OFFLINE_GAP_MINUTES = 15;
 export const PRESENCE_PULSE_DEFAULT_WINDOW = "08:00-22:00";
 /** How often the scheduler looks for a due pulse. */
 export const PRESENCE_PULSE_CHECK_INTERVAL_MS = 60 * 1000;
+/**
+ * Slots that start this close to process start are skipped.
+ * A restart otherwise replans the day and can fire another pulse immediately.
+ */
+export const PRESENCE_PULSE_BOOT_SKIP_MS = 3 * 60 * 1000;
 const MIN_REMAINING_MS = 1_000;
 
 export interface PresenceWindow {
@@ -55,6 +60,8 @@ export interface PresencePulseSchedulerOptions {
   listDevices: () => PresencePulseDevice[];
   checkIntervalMs?: number;
   now?: () => number;
+  /** Process start used to skip slots that begin within a few minutes of boot. */
+  bootedAt?: number;
   random?: () => number;
   log?: PresencePulseLog;
 }
@@ -305,6 +312,7 @@ export class PresencePulseScheduler {
   private readonly listDevices: () => PresencePulseDevice[];
   private readonly checkIntervalMs: number;
   private readonly now: () => number;
+  private readonly bootedAt: number;
   private readonly random: () => number;
   private readonly log: PresencePulseLog;
   private skipLogged = false;
@@ -314,6 +322,7 @@ export class PresencePulseScheduler {
     this.listDevices = options.listDevices;
     this.checkIntervalMs = options.checkIntervalMs ?? PRESENCE_PULSE_CHECK_INTERVAL_MS;
     this.now = options.now ?? Date.now;
+    this.bootedAt = options.bootedAt ?? this.now();
     this.random = options.random ?? Math.random;
     this.log = options.log ?? logger;
   }
@@ -354,7 +363,17 @@ export class PresencePulseScheduler {
       if (!live.has(id)) this.plans.delete(id);
     }
     for (const device of devices) {
-      this.startIfDue(device, now);
+      try {
+        this.startIfDue(device, now);
+      } catch (error) {
+        this.log.warn(
+          {
+            err: error instanceof Error ? error.message : String(error),
+            instanceId: device.id,
+          },
+          "Presence pulse skipped for this day",
+        );
+      }
     }
   }
 
@@ -389,14 +408,29 @@ export class PresencePulseScheduler {
     const dayKey = zonedDayKey(now, this.config.timeZone);
     const existing = this.plans.get(deviceId);
     if (existing?.dayKey === dayKey) return existing;
-    const starts = planPresencePulseStarts({
-      now,
-      timeZone: this.config.timeZone,
-      window: this.config.window,
-      timesPerDay: this.config.timesPerDay,
-      minutes: this.config.minutes,
-      random: this.random,
-    });
+    let starts: number[];
+    try {
+      starts = planPresencePulseStarts({
+        now,
+        timeZone: this.config.timeZone,
+        window: this.config.window,
+        timesPerDay: this.config.timesPerDay,
+        minutes: this.config.minutes,
+        random: this.random,
+      });
+    } catch (error) {
+      this.log.warn(
+        {
+          err: error instanceof Error ? error.message : String(error),
+          instanceId: deviceId,
+          day: dayKey,
+        },
+        "Presence pulse skipped for this day",
+      );
+      const skipped = { dayKey, starts: [], done: [] };
+      this.plans.set(deviceId, skipped);
+      return skipped;
+    }
     const plan = { dayKey, starts, done: starts.map(() => false) };
     this.plans.set(deviceId, plan);
     return plan;
@@ -411,6 +445,10 @@ export class PresencePulseScheduler {
       if (plan.done[index]) continue;
       const start = plan.starts[index] ?? 0;
       const end = start + durationMs;
+      if (Math.abs(start - this.bootedAt) <= PRESENCE_PULSE_BOOT_SKIP_MS) {
+        plan.done[index] = true;
+        continue;
+      }
       if (now < start) return undefined;
       if (now >= end || end - now < MIN_REMAINING_MS) {
         plan.done[index] = true;

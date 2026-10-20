@@ -5,9 +5,9 @@ services:
     restart: unless-stopped
     ports:
       - "3000:3000"
-    # The image does not set a time zone, so the container clock is UTC unless you set one.
-    # TZ=America/Bahia
     environment:
+      # The image does not set a time zone, so the container clock is UTC unless you set one.
+      # - TZ=America/Bahia
       - WA_TRANSPORT=http
       - WA_MCP_PORT=3000
       - WA_REDIS_URL=redis://redis:6379

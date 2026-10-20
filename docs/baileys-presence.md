@@ -43,8 +43,11 @@ daylight-saving time shifts the UTC offset.
 A check runs about once a minute. A pulse only starts while its scheduled slot is still open;
 a missed slot is not replayed later. Each start writes one short log line with the instance
 id and the duration in minutes. The plan for an instance is dropped on the next check when
-that instance is no longer connected through Baileys. Restarting the process plans the day
-again, which can add extra pulses that day.
+that instance is no longer connected through Baileys. A window that fits at startup can still
+be too short on a spring-forward day, when the missing hour shrinks the real span. That day
+is skipped and a warning is logged; the next day is planned again. Restarting the process
+plans the day again. Slots that start within 3 minutes of startup are skipped, so a restart
+does not immediately repeat a pulse. Later slots in the new plan can still run.
 
 Times per day must be an integer from 1 to 12. Minutes must be an integer from 1 to 15.
 The window must match `HH:MM-HH:MM` and end after it starts on the same day. Consecutive
