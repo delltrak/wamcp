@@ -1356,9 +1356,11 @@ locally.
 
 Export the participants of a group as a CSV file. The file is written under the data directory
 (`<database directory>/exports`, `data/exports` by default) and the response returns that path.
-One row is written per participant. Phone is empty when it is not known. `name` is the saved
-contact name when one is stored; `push_name` is the name the contact set on WhatsApp. `role` is
-`admin`, `superadmin`, or `member`.
+That directory is mode `0700`. On the next export, regular files in it that are older than 24 hours
+are deleted. One row is written per participant. Phone is empty when it is not known. `name` is the
+saved contact name when one is stored; `push_name` is the name the contact set on WhatsApp. `role`
+is `admin`, `superadmin`, or `member`. `contactsTruncated` is true when the saved-name lookup was
+limited to the first 5000 identities.
 
 | Parameter    | Type   | Required | Description                        |
 | ------------ | ------ | -------- | ---------------------------------- |
@@ -1374,6 +1376,7 @@ group participant export.
 {
   "groupJid": "120363000000000000@g.us",
   "participantCount": 3,
+  "contactsTruncated": false,
   "mimeType": "text/csv",
   "path": "data/exports/group-120363000000000000_g.us-participants.csv",
   "fileName": "group-120363000000000000_g.us-participants.csv",
@@ -2477,7 +2480,10 @@ timestamp lower bound.
 Download image, video, audio, document, sticker, or video-note media from one Channel post. Pass
 `serverId` or the post `id` from `wa_newsletter_list_posts` as `messageId`. The bytes are saved with
 the same directory, size cap, and file-name rules as `wa_download_media`, and the response returns
-that path.
+that path. Posts that include a media key are decrypted. Posts uploaded without a media key are
+downloaded as plaintext from `https://mmg.whatsapp.net` plus the post `directPath`, with the same
+size cap and timeout, with redirects refused, and are kept only when the SHA-256 matches
+`fileSha256`.
 
 | Parameter       | Type   | Required | Description                                      |
 | --------------- | ------ | -------- | ------------------------------------------------ |

@@ -283,7 +283,7 @@ WA MCP exposes **139 tools** across 15 domains. All tools use the `wa_` prefix.
 | ------------------------------ | ----------------------------- |
 | `wa_list_groups`               | List groups and account role  |
 | `wa_get_group_info`            | Get group metadata and members |
-| `wa_export_group_participants` | Export participants as CSV in the data directory |
+| `wa_export_group_participants` | Export participants as CSV in the data directory (`contactsTruncated` when the name lookup stops at 5000 identities) |
 | `wa_group_set_member_label`     | Set this account's group member label (Baileys, gated, queued) |
 | `wa_group_remove_member_label`  | Remove this account's group member label (Baileys, gated, queued) |
 | `wa_get_group_invite_info`     | Read invite metadata before joining (Baileys) |
@@ -376,7 +376,7 @@ this operation.
 | `wa_newsletter_update_picture` | Update Channel picture (Baileys, gated write) |
 | `wa_newsletter_react` | React to a Channel post (Baileys, gated write) |
 | `wa_newsletter_list_posts` | List Channel posts (Baileys) |
-| `wa_download_newsletter_media` | Download media from a Channel post (Baileys) |
+| `wa_download_newsletter_media` | Download Channel post media, including plaintext posts without a media key (Baileys) |
 
 </details>
 

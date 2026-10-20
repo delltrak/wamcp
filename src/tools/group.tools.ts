@@ -92,7 +92,7 @@ export function registerGroupTools(
     "wa_export_group_participants",
     {
       description:
-        "Export a group's participants as CSV (jid, phone when known, lid, saved name, push name, and admin/superadmin/member role). The file is saved in the data directory and the path is returned. Read-only. Baileys only.",
+        "Export a group's participants as CSV (jid, phone when known, lid, saved name, push name, and admin/superadmin/member role). The file is saved in the data directory and the path is returned. contactsTruncated is true when saved names were looked up for only the first 5000 identities. Read-only. Baileys only.",
       inputSchema: ExportGroupParticipantsSchema,
     },
     async (params) => {
@@ -113,6 +113,7 @@ export function registerGroupTools(
         return toolSuccess({
           groupJid: exported.groupJid,
           participantCount: exported.participants.length,
+          contactsTruncated: exported.contactsTruncated,
           mimeType: "text/csv",
           ...saved,
         });

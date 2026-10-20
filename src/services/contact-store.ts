@@ -7,8 +7,11 @@ import { and, count, eq, inArray, isNotNull, isNull, like, or, sql } from "drizz
 import type { db as applicationDb } from "../db/client.js";
 import { chats as chatsTable, contacts as contactsTable } from "../db/schema.js";
 import type { Contact } from "../types/channel.types.js";
+import { createChildLogger } from "../utils/logger.js";
 
 const MAX_LOCAL_MESSAGE_CONTACT_CANDIDATES = 50_000;
+const IDENTITY_LOOKUP_LIMIT = 5_000;
+const log = createChildLogger({ service: "contact-store" });
 
 export interface ContactSyncRecord {
   id?: string | null;
@@ -32,6 +35,12 @@ export interface StoredContactIdentity {
   phone: string | null;
   name: string | null;
   notifyName: string | null;
+}
+
+export interface ContactIdentityLookup {
+  contacts: StoredContactIdentity[];
+  /** True when the caller passed more than 5000 identities and the rest were not queried. */
+  truncated: boolean;
 }
 
 export interface ContactRecoverySourceResult {
@@ -258,12 +267,17 @@ export class ContactStore {
   }
 
   /** Match stored contacts by JID, LID, or phone digits. Names stay separate from push names. */
-  findByIdentities(identities: string[]): StoredContactIdentity[] {
-    const keys = [...new Set(identities.map((identity) => identity.trim()).filter(Boolean))].slice(
-      0,
-      5_000,
-    );
-    if (keys.length === 0) return [];
+  findByIdentities(identities: string[]): ContactIdentityLookup {
+    const unique = [...new Set(identities.map((identity) => identity.trim()).filter(Boolean))];
+    const truncated = unique.length > IDENTITY_LOOKUP_LIMIT;
+    const keys = truncated ? unique.slice(0, IDENTITY_LOOKUP_LIMIT) : unique;
+    if (truncated) {
+      log.warn(
+        { instanceId: this.instanceId, requested: unique.length, limit: IDENTITY_LOOKUP_LIMIT },
+        "Contact identity lookup truncated",
+      );
+    }
+    if (keys.length === 0) return { contacts: [], truncated: false };
 
     const phones = [
       ...new Set(
@@ -281,7 +295,7 @@ export class ContactStore {
       ...(phones.length > 0 ? [inArray(contactsTable.phone, phones)] : []),
     ];
 
-    return this.database
+    const contacts = this.database
       .select({
         jid: contactsTable.jid,
         lid: contactsTable.lid,
@@ -299,6 +313,7 @@ export class ContactStore {
         name: row.name ?? null,
         notifyName: row.notifyName ?? null,
       }));
+    return { contacts, truncated };
   }
 
   private upsertContact(contact: ContactSyncRecord): void {

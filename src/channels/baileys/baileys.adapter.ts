@@ -3582,8 +3582,13 @@ export class BaileysAdapter implements ChannelAdapter {
 
     return {
       groupJid: meta.id,
+      contactsTruncated: stored.truncated,
       participants: resolved.map((participant) => {
-        const match = matchStoredContact(participant.identities, participant.phone, stored);
+        const match = matchStoredContact(
+          participant.identities,
+          participant.phone,
+          stored.contacts,
+        );
         return {
           jid: participant.jid,
           phone: participant.phone,

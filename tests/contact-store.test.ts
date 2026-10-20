@@ -300,20 +300,49 @@ describe("ContactStore", () => {
       },
     ]);
 
-    expect(store.findByIdentities(["155500000000099@lid"])).toEqual([
+    expect(store.findByIdentities(["155500000000099@lid"])).toEqual({
+      truncated: false,
+      contacts: [
+        {
+          jid: "15555550199@s.whatsapp.net",
+          lid: "155500000000099@lid",
+          phone: "15555550199",
+          name: "Saved Name",
+          notifyName: "Push Name",
+        },
+      ],
+    });
+    expect(store.findByIdentities(["15555550199"])).toEqual({
+      truncated: false,
+      contacts: [expect.objectContaining({ name: "Saved Name", notifyName: "Push Name" })],
+    });
+    expect(store.findByIdentities([])).toEqual({ contacts: [], truncated: false });
+
+    sqlite.close();
+  });
+
+  it("reports when an identity lookup is cut off at 5000 keys", async () => {
+    const { sqlite, store } = createStore();
+    await store.upsertContacts([
       {
-        jid: "15555550199@s.whatsapp.net",
-        lid: "155500000000099@lid",
-        phone: "15555550199",
-        name: "Saved Name",
-        notifyName: "Push Name",
+        id: "15555551000@s.whatsapp.net",
+        name: "Kept",
+        phoneNumber: "15555551000@s.whatsapp.net",
+      },
+      {
+        id: "15555559999@s.whatsapp.net",
+        name: "Dropped",
+        phoneNumber: "15555559999@s.whatsapp.net",
       },
     ]);
-    expect(store.findByIdentities(["15555550199"])).toEqual([
-      expect.objectContaining({ name: "Saved Name", notifyName: "Push Name" }),
-    ]);
-    expect(store.findByIdentities([])).toEqual([]);
+    const keys = Array.from({ length: 5_000 }, (_, index) => `unused-${index}@lid`);
+    keys[0] = "15555551000@s.whatsapp.net";
+    keys.push("15555559999@s.whatsapp.net");
 
+    const lookup = store.findByIdentities(keys);
+
+    expect(lookup.truncated).toBe(true);
+    expect(lookup.contacts.map((contact) => contact.jid)).toEqual(["15555551000@s.whatsapp.net"]);
     sqlite.close();
   });
 });

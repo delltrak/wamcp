@@ -1,6 +1,17 @@
-import { mkdtemp, readFile, rm, stat } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import {
+  lstat,
+  lutimes,
+  mkdtemp,
+  readFile,
+  rm,
+  stat,
+  symlink,
+  utimes,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { proto, type BinaryNode, type WASocket } from "@whiskeysockets/baileys";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
@@ -15,6 +26,7 @@ import { ExportGroupParticipantsSchema } from "../src/schemas/group.schema.js";
 import { DownloadNewsletterMediaSchema } from "../src/schemas/newsletter.schema.js";
 import { registerGroupTools } from "../src/tools/group.tools.js";
 import { registerNewsletterTools } from "../src/tools/newsletter.tools.js";
+import { EXPORT_RETENTION_MS, saveDataDirectoryFile } from "../src/services/data-export.js";
 import { renderGroupParticipantsCsv } from "../src/utils/group-participants-csv.js";
 
 type RegisteredTool = {
@@ -32,6 +44,7 @@ const directories: string[] = [];
 
 afterEach(async () => {
   vi.restoreAllMocks();
+  vi.unstubAllGlobals();
   delete process.env.WA_DATABASE_PATH;
   delete process.env.WA_MEDIA_DOWNLOAD_DIR;
   delete process.env.WA_GROUP_WRITES_ENABLED;
@@ -124,15 +137,18 @@ describe("group participant CSV", () => {
     process.env.WA_DATABASE_PATH = join(directory, "whatsapp.db");
     delete process.env.WA_GROUP_WRITES_ENABLED;
     delete process.env.WA_APP_STATE_WRITES_ENABLED;
-    const findByIdentities = vi.fn(() => [
-      {
-        jid: "5511777770000@s.whatsapp.net",
-        lid: "1999990001@lid",
-        phone: "5511777770000",
-        name: "Saved Person",
-        notifyName: "Push Person",
-      },
-    ]);
+    const findByIdentities = vi.fn(() => ({
+      truncated: false,
+      contacts: [
+        {
+          jid: "5511777770000@s.whatsapp.net",
+          lid: "1999990001@lid",
+          phone: "5511777770000",
+          name: "Saved Person",
+          notifyName: "Push Person",
+        },
+      ],
+    }));
     const contactStore = { findByIdentities } as unknown as ContactStore;
     const groupMetadata = vi.fn(async () => ({
       id: GROUP_JID,
@@ -172,11 +188,13 @@ describe("group participant CSV", () => {
     expect(body).toMatchObject({
       groupJid: GROUP_JID,
       participantCount: 3,
+      contactsTruncated: false,
       mimeType: "text/csv",
       fileName: "group-120363000000000000_g.us-participants.csv",
     });
     expect(resolve(savedPath).startsWith(resolve(directory, "exports"))).toBe(true);
     expect((await stat(savedPath)).mode & 0o777).toBe(0o600);
+    expect((await stat(dirname(savedPath))).mode & 0o777).toBe(0o700);
     expect(csv.replace(/^\uFEFF/, "").split("\r\n")).toEqual([
       "jid,phone,lid,name,push_name,role",
       `${OWN_PN},5511999990000,,Owner Saved,Owner Push,admin`,
@@ -200,6 +218,32 @@ describe("group participant CSV", () => {
 
     expect(response.isError).toBe(true);
     expect(response.content[0]?.text).toContain("not supported on Cloud API");
+  });
+
+  it("keeps exports private and deletes files older than the retention window", async () => {
+    const directory = await tempDirectory("wamcp-export-retention-");
+    process.env.WA_DATABASE_PATH = join(directory, "whatsapp.db");
+    const saved = await saveDataDirectoryFile(Buffer.from("fresh"), "fresh.csv");
+    const exportsDir = dirname(saved.path);
+    const stalePath = join(exportsDir, "stale.csv");
+    const recentPath = join(exportsDir, "recent.csv");
+    const outside = join(directory, "secret.txt");
+    const linkPath = join(exportsDir, "link.csv");
+    await writeFile(stalePath, "old", { mode: 0o600 });
+    await writeFile(recentPath, "recent", { mode: 0o600 });
+    await writeFile(outside, "keep", { mode: 0o600 });
+    await symlink(outside, linkPath);
+    const expired = new Date(Date.now() - EXPORT_RETENTION_MS - 60_000);
+    await utimes(stalePath, expired, expired);
+    await lutimes(linkPath, expired, expired);
+
+    await saveDataDirectoryFile(Buffer.from("again"), "again.csv");
+
+    expect((await stat(exportsDir)).mode & 0o777).toBe(0o700);
+    await expect(stat(stalePath)).rejects.toThrow();
+    expect((await stat(recentPath)).isFile()).toBe(true);
+    expect((await lstat(linkPath)).isSymbolicLink()).toBe(true);
+    expect(await readFile(outside, "utf8")).toBe("keep");
   });
 });
 
@@ -228,6 +272,7 @@ describe("channel post media", () => {
         mediaType: "image",
         mimeType: "image/jpeg",
         fileLength: 12,
+        encrypted: true,
       },
     });
     expect(newsletterMedia.findNewsletterPostMedia(wrapped, "101")).toEqual({
@@ -268,6 +313,7 @@ describe("channel post media", () => {
           mediaType: "image",
           mimeType: "image/jpeg",
           fileLength: 100,
+          encrypted: true,
           downloadable: { mediaKey: new Uint8Array(32), url: "https://example.com/media" },
         },
         10,
@@ -384,6 +430,97 @@ describe("channel post media", () => {
       "does not contain downloadable media",
     );
     expect(query).toHaveBeenCalledTimes(1);
+  });
+
+  it("downloads a channel post that has no media key and checks fileSha256", async () => {
+    const payload = Buffer.from("channel-plain-bytes");
+    const fileSha256 = createHash("sha256").update(payload).digest();
+    const directPath = "/v/t62.7118-24/12345?ccb=1&oh=abc";
+    const lookup = newsletterMedia.findNewsletterPostMedia(
+      newsletterIq([
+        newsletterMessage("200", "message-200", {
+          imageMessage: {
+            mimetype: "image/jpeg",
+            directPath,
+            fileSha256,
+            fileLength: payload.length,
+            url: `https://mmg.whatsapp.net${directPath}`,
+          },
+        }),
+      ]),
+      "200",
+    );
+
+    expect(lookup).toMatchObject({
+      status: "ready",
+      media: { encrypted: false, directPath, mediaType: "image", messageId: "message-200" },
+    });
+    if (lookup.status !== "ready") throw new Error("expected channel media");
+    expect(lookup.media.downloadable).toBeUndefined();
+
+    const fetchMock = vi.fn(async (_url: string, init?: RequestInit) => {
+      expect(init?.redirect).toBe("error");
+      expect(init?.signal).toBeInstanceOf(AbortSignal);
+      return new Response(payload, { status: 200 });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(
+      newsletterMedia.readNewsletterMediaBytes(lookup.media, 1024, 5_000),
+    ).resolves.toEqual(payload);
+    expect(fetchMock).toHaveBeenCalledWith(
+      `https://mmg.whatsapp.net${directPath}`,
+      expect.any(Object),
+    );
+
+    fetchMock.mockImplementation(async () => new Response(payload, { status: 200 }));
+    await expect(
+      newsletterMedia.readNewsletterMediaBytes(
+        { ...lookup.media, fileSha256: Buffer.alloc(32, 1) },
+        1024,
+        5_000,
+      ),
+    ).rejects.toThrow("does not match fileSha256");
+  });
+
+  it("rejects an unencrypted channel download that leaves the CDN or exceeds the cap", async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+    const fileSha256 = new Uint8Array(32).fill(4);
+    const source = {
+      messageId: "1",
+      serverId: "1",
+      mediaType: "image" as const,
+      mimeType: "image/jpeg",
+      encrypted: false,
+      directPath: "/v/../secret",
+      fileSha256,
+    };
+
+    await expect(newsletterMedia.readNewsletterMediaBytes(source, 100)).rejects.toThrow(
+      "not a CDN path",
+    );
+    await expect(
+      newsletterMedia.readNewsletterMediaBytes({ ...source, directPath: "//evil.example/v" }, 100),
+    ).rejects.toThrow("not a CDN path");
+    expect(fetchMock).not.toHaveBeenCalled();
+
+    fetchMock.mockResolvedValue(new Response(Buffer.from("plain"), { status: 200 }));
+    await expect(
+      newsletterMedia.readNewsletterMediaBytes(
+        { ...source, directPath: "/v/plain", fileSha256: undefined },
+        100,
+      ),
+    ).rejects.toThrow("missing fileSha256");
+
+    fetchMock.mockResolvedValue(new Response(new Uint8Array(100), { status: 200 }));
+    await expect(
+      newsletterMedia.readNewsletterMediaBytes(
+        { ...source, directPath: "/v/plain", fileLength: undefined },
+        10,
+        1_000,
+      ),
+    ).rejects.toThrow("maximum download size of 10 bytes");
   });
 
   it("rejects the download on Cloud API", async () => {

@@ -3,6 +3,7 @@
 // ============================================================
 
 import { Buffer } from "node:buffer";
+import { createHash, timingSafeEqual } from "node:crypto";
 import {
   downloadContentFromMessage,
   proto,
@@ -10,8 +11,12 @@ import {
   type DownloadableMessage,
   type MediaType,
 } from "@whiskeysockets/baileys";
+import { mediaResponseToBuffer } from "../../services/media.js";
 
 export type NewsletterDownloadType = "image" | "video" | "ptv" | "audio" | "document" | "sticker";
+
+/** WhatsApp's default media host. Channel uploads publish plaintext at this origin. */
+const CHANNEL_MEDIA_ORIGIN = "https://mmg.whatsapp.net";
 
 export interface NewsletterMediaSource {
   messageId: string;
@@ -20,7 +25,14 @@ export interface NewsletterMediaSource {
   mimeType: string;
   fileName?: string;
   fileLength?: number;
-  downloadable: DownloadableMessage;
+  /**
+   * Current Baileys Channel uploads omit `mediaKey` and publish the raw file.
+   * Older posts that still carry a key stay on the decrypt path.
+   */
+  encrypted: boolean;
+  downloadable?: DownloadableMessage;
+  directPath?: string;
+  fileSha256?: Uint8Array;
 }
 
 export type NewsletterMediaLookup =
@@ -61,6 +73,7 @@ interface ProtoMediaFields {
   url?: string | null;
   directPath?: string | null;
   mediaKey?: Uint8Array | null;
+  fileSha256?: Uint8Array | null;
   mimetype?: string | null;
   fileLength?: number | { toNumber?: () => number } | null;
   fileName?: string | null;
@@ -94,36 +107,14 @@ export function findNewsletterPostMedia(
     const raw = message[candidate.field];
     if (!raw || typeof raw !== "object") continue;
     const media = raw as ProtoMediaFields;
-    const mediaKey = media.mediaKey;
-    const directPath = nonEmptyString(media.directPath);
-    const url = nonEmptyString(media.url);
-    if (!mediaKey || mediaKey.byteLength === 0 || (!directPath && !url)) continue;
-
-    const fileName = nonEmptyString(media.fileName);
-    return {
-      status: "ready",
-      media: {
-        messageId: id,
-        serverId,
-        mediaType: candidate.mediaType,
-        mimeType: nonEmptyString(media.mimetype) ?? candidate.fallbackMimeType,
-        ...(fileName ? { fileName } : {}),
-        ...(numericLength(media.fileLength) !== undefined
-          ? { fileLength: numericLength(media.fileLength) }
-          : {}),
-        downloadable: {
-          mediaKey,
-          ...(directPath ? { directPath } : {}),
-          ...(url ? { url } : {}),
-        },
-      },
-    };
+    const described = describeMedia(id, serverId, candidate, media);
+    if (described) return { status: "ready", media: described };
   }
 
   return { status: "no-media", messageId: id };
 }
 
-/** Download and decrypt Channel media, enforcing the same byte cap as received-media downloads. */
+/** Download Channel media, decrypting only when the post carries a media key. */
 export async function readNewsletterMediaBytes(
   media: NewsletterMediaSource,
   maxBytes?: number,
@@ -133,6 +124,11 @@ export async function readNewsletterMediaBytes(
     throw new Error(`Media exceeds maximum download size of ${sizeLabel(maxBytes)}`);
   }
 
+  if (!media.encrypted) return readUnencryptedNewsletterMedia(media, maxBytes, timeoutMs);
+
+  if (!media.downloadable?.mediaKey?.byteLength) {
+    throw new Error("Channel media is missing a media key");
+  }
   const stream = await downloadContentFromMessage(
     media.downloadable,
     media.mediaType satisfies MediaType,
@@ -155,6 +151,143 @@ export async function readNewsletterMediaBytes(
     throw error;
   }
   return Buffer.concat(chunks, size);
+}
+
+function describeMedia(
+  messageId: string,
+  serverId: string,
+  candidate: (typeof MEDIA_FIELDS)[number],
+  media: ProtoMediaFields,
+): NewsletterMediaSource | undefined {
+  const mediaKey = media.mediaKey && media.mediaKey.byteLength > 0 ? media.mediaKey : undefined;
+  const directPath = nonEmptyString(media.directPath);
+  const url = nonEmptyString(media.url);
+  const fileName = nonEmptyString(media.fileName);
+  const fileLength = numericLength(media.fileLength);
+  const fileSha256 =
+    media.fileSha256 && media.fileSha256.byteLength > 0 ? Buffer.from(media.fileSha256) : undefined;
+  const shared = {
+    messageId,
+    serverId,
+    mediaType: candidate.mediaType,
+    mimeType: nonEmptyString(media.mimetype) ?? candidate.fallbackMimeType,
+    ...(fileName ? { fileName } : {}),
+    ...(fileLength !== undefined ? { fileLength } : {}),
+  };
+
+  if (mediaKey) {
+    if (!directPath && !url) return undefined;
+    return {
+      ...shared,
+      encrypted: true,
+      downloadable: {
+        mediaKey,
+        ...(directPath ? { directPath } : {}),
+        ...(url ? { url } : {}),
+      },
+    };
+  }
+
+  if (!directPath) return undefined;
+  return {
+    ...shared,
+    encrypted: false,
+    directPath,
+    ...(fileSha256 ? { fileSha256 } : {}),
+  };
+}
+
+async function readUnencryptedNewsletterMedia(
+  media: NewsletterMediaSource,
+  maxBytes: number | undefined,
+  timeoutMs: number | undefined,
+): Promise<Buffer> {
+  if (!media.directPath) throw new Error("Channel media directPath is not a CDN path");
+  const url = channelMediaUrl(media.directPath);
+  let response: Response;
+  try {
+    response = await fetch(url, {
+      redirect: "error",
+      ...(timeoutMs !== undefined ? { signal: AbortSignal.timeout(timeoutMs) } : {}),
+    });
+  } catch (error) {
+    if (isRedirectRejection(error)) {
+      throw new Error("Channel media download was redirected", { cause: error });
+    }
+    throw error;
+  }
+  if (!response.ok) {
+    throw new Error(`Failed to download channel media: HTTP ${response.status}`);
+  }
+
+  let data: Buffer;
+  try {
+    data = await mediaResponseToBuffer(response, maxBytes);
+  } catch (error) {
+    if (error instanceof Error && error.message.includes("maximum size of")) {
+      throw new Error(error.message.replace("maximum size of", "maximum download size of"), {
+        cause: error,
+      });
+    }
+    throw error;
+  }
+  assertFileSha256(data, media.fileSha256);
+  return data;
+}
+
+/** Build `https://mmg.whatsapp.net{directPath}` and reject anything that leaves that host. */
+export function channelMediaUrl(directPath: string): string {
+  let decodedPath: string;
+  try {
+    decodedPath = decodeURIComponent(directPath);
+  } catch {
+    throw new Error("Channel media directPath is not a CDN path");
+  }
+  if (
+    !directPath.startsWith("/") ||
+    directPath.startsWith("//") ||
+    directPath.includes("\\") ||
+    directPath.includes("#") ||
+    hasControlOrSpace(directPath) ||
+    decodedPath.split("/").some((segment) => segment === ".." || segment === ".")
+  ) {
+    throw new Error("Channel media directPath is not a CDN path");
+  }
+
+  let url: URL;
+  try {
+    url = new URL(directPath, CHANNEL_MEDIA_ORIGIN);
+  } catch {
+    throw new Error("Channel media directPath is not a CDN path");
+  }
+  if (url.origin !== CHANNEL_MEDIA_ORIGIN || url.username || url.password) {
+    throw new Error("Channel media directPath is not a CDN path");
+  }
+  return url.toString();
+}
+
+function hasControlOrSpace(value: string): boolean {
+  for (let index = 0; index < value.length; index++) {
+    if (value.charCodeAt(index) <= 0x20) return true;
+  }
+  return false;
+}
+
+function assertFileSha256(data: Buffer, expected: Uint8Array | undefined): void {
+  if (!expected || expected.byteLength !== 32) {
+    throw new Error("Channel media is missing fileSha256");
+  }
+  const actual = createHash("sha256").update(data).digest();
+  const expectedBuffer = Buffer.from(expected);
+  if (actual.length !== expectedBuffer.length || !timingSafeEqual(actual, expectedBuffer)) {
+    throw new Error("Channel media SHA-256 does not match fileSha256");
+  }
+}
+
+function isRedirectRejection(error: unknown): boolean {
+  if (!(error instanceof Error)) return false;
+  const cause = "cause" in error && error.cause instanceof Error ? error.cause.message : "";
+  return /redirect/i.test(`${error.message} ${cause}`);
 }
 
 function messageNodeMatches(node: BinaryNode, messageId: string): boolean {

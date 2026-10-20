@@ -89,7 +89,7 @@ export function registerNewsletterTools(
     "wa_download_newsletter_media",
     {
       description:
-        "Download image, video, audio, document, or sticker media from a WhatsApp Channel post and save it the same way as received media. messageId is the post server ID or message ID from wa_newsletter_list_posts. Returns the saved file path. Read-only. Baileys only.",
+        "Download image, video, audio, document, or sticker media from a WhatsApp Channel post and save it the same way as received media. Posts without a media key are downloaded in the clear from the WhatsApp CDN and checked against fileSha256. messageId is the post server ID or message ID from wa_newsletter_list_posts. Returns the saved file path. Read-only. Baileys only.",
       inputSchema: DownloadNewsletterMediaSchema,
     },
     async (params) => {

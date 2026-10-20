@@ -469,6 +469,8 @@ export interface GroupParticipantExport {
 export interface GroupParticipantsExport {
   groupJid: string;
   participants: GroupParticipantExport[];
+  /** True when saved-name lookup stopped after 5000 identities. */
+  contactsTruncated: boolean;
 }
 
 export interface NormalizedGroupMemberLabelEvent {
