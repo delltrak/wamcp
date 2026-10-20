@@ -3,7 +3,10 @@ import { lookup as lookupDns } from "node:dns/promises";
 import { isIP } from "node:net";
 import type { ConnectionOptions } from "node:tls";
 import { Queue, UnrecoverableError, Worker, type Job, type JobsOptions } from "bullmq";
+import { and, eq, inArray, or } from "drizzle-orm";
 import { Agent } from "undici";
+import { db } from "../db/client.js";
+import { contacts } from "../db/schema.js";
 import type { InstanceManager } from "./instance-manager.js";
 import { QUEUE_COMPLETED_AGE_S, QUEUE_FAILED_AGE_S } from "../constants.js";
 import type {
@@ -708,40 +711,115 @@ function addJidCandidate(candidates: string[], value: unknown): void {
   if (jid.includes("@")) candidates.push(jid);
 }
 
-/** Chat, sender, and LID fields a JID ignore rule can match. Participant lists are not included. */
-export function eventJidCandidates(payload: ChannelEventPayload[ChannelEvent]): string[] {
+/** #140: drop a WhatsApp device suffix (`:12` before `@`) and compare case-insensitively. */
+const JID_DEVICE_SUFFIX = /:\d+(?=@)/;
+
+export function normalizeIgnoreJid(value: string): string {
+  return value.trim().toLowerCase().replace(JID_DEVICE_SUFFIX, "");
+}
+
+/**
+ * JIDs used by WA_EVENT_WEBHOOK_IGNORE_JIDS (#140).
+ * Address wildcards match only chatJids. Exact and starred entries also match identityJids.
+ * Participant arrays are not included.
+ */
+export function eventIgnoreJidSets(payload: ChannelEventPayload[ChannelEvent]): {
+  chatJids: string[];
+  identityJids: string[];
+} {
   const data = payload as unknown as Record<string, unknown>;
   const message = isRecord(data.message) ? data.message : {};
   const association = isRecord(data.association) ? data.association : {};
-  const candidates: string[] = [];
-  addJidCandidate(candidates, data.chatId);
-  addJidCandidate(candidates, data.groupId);
-  addJidCandidate(candidates, data.newsletterId);
-  addJidCandidate(candidates, data.contactId);
-  addJidCandidate(candidates, data.participant);
-  addJidCandidate(candidates, data.callerId);
-  addJidCandidate(candidates, data.reactedBy);
-  addJidCandidate(candidates, data.deletedBy);
-  addJidCandidate(candidates, data.author);
-  addJidCandidate(candidates, data.chatLid);
-  addJidCandidate(candidates, data.senderLid);
-  addJidCandidate(candidates, data.fromLid);
-  addJidCandidate(candidates, data.participantLid);
-  addJidCandidate(candidates, message.sender);
-  addJidCandidate(candidates, message.senderLid);
-  addJidCandidate(candidates, association.chatId);
-  return candidates;
+  const chatJids: string[] = [];
+  addJidCandidate(chatJids, data.chatId);
+  addJidCandidate(chatJids, data.groupId);
+  addJidCandidate(chatJids, data.newsletterId);
+  addJidCandidate(chatJids, association.chatId);
+  const identityJids: string[] = [];
+  addJidCandidate(identityJids, data.participant);
+  addJidCandidate(identityJids, data.callerId);
+  addJidCandidate(identityJids, data.reactedBy);
+  addJidCandidate(identityJids, data.deletedBy);
+  addJidCandidate(identityJids, data.author);
+  addJidCandidate(identityJids, data.contactId);
+  addJidCandidate(identityJids, data.chatLid);
+  addJidCandidate(identityJids, data.senderLid);
+  addJidCandidate(identityJids, data.fromLid);
+  addJidCandidate(identityJids, data.participantLid);
+  addJidCandidate(identityJids, message.sender);
+  addJidCandidate(identityJids, message.senderLid);
+  return { chatJids, identityJids };
+}
+
+/** Chat, sender, and LID fields a JID ignore rule can see. Participant lists are not included. */
+export function eventJidCandidates(payload: ChannelEventPayload[ChannelEvent]): string[] {
+  const { chatJids, identityJids } = eventIgnoreJidSets(payload);
+  return [...chatJids, ...identityJids];
 }
 
 export function jidMatchesIgnorePattern(jid: string, pattern: string): boolean {
-  if (pattern.startsWith("@")) return jid.endsWith(pattern);
-  const star = pattern.indexOf("*");
-  if (star === -1) return jid === pattern;
-  const prefix = pattern.slice(0, star);
-  const suffix = pattern.slice(star + 1);
+  const normalizedJid = normalizeIgnoreJid(jid);
+  const normalizedPattern = normalizeIgnoreJid(pattern);
+  if (!normalizedJid || !normalizedPattern) return false;
+  if (normalizedPattern.startsWith("@")) return normalizedJid.endsWith(normalizedPattern);
+  const star = normalizedPattern.indexOf("*");
+  if (star === -1) return normalizedJid === normalizedPattern;
+  const prefix = normalizedPattern.slice(0, star);
+  const suffix = normalizedPattern.slice(star + 1);
   return (
-    jid.length >= prefix.length + suffix.length && jid.startsWith(prefix) && jid.endsWith(suffix)
+    normalizedJid.length >= prefix.length + suffix.length &&
+    normalizedJid.startsWith(prefix) &&
+    normalizedJid.endsWith(suffix)
   );
+}
+
+function phoneJidFromStoredPhone(phone: string): string | undefined {
+  const digits = phone.replace(/\D/g, "");
+  if (!digits) return undefined;
+  return `${digits}@s.whatsapp.net`;
+}
+
+/**
+ * #140: a LID-only message has no phone alias on the event. Use the contact row
+ * (jid, lid, phone) so an exact or starred phone entry can still match.
+ * Address wildcards do not use these aliases.
+ */
+function lookupStoredJidAliases(instanceId: string, jids: readonly string[]): string[] {
+  const needles = [
+    ...new Set(
+      jids
+        .map((jid) => normalizeIgnoreJid(jid))
+        .filter(
+          (jid) => jid.endsWith("@lid") || jid.endsWith("@s.whatsapp.net") || jid.endsWith("@c.us"),
+        ),
+    ),
+  ];
+  if (!instanceId || needles.length === 0) return [];
+  try {
+    const rows = db
+      .select({ jid: contacts.jid, phone: contacts.phone, lid: contacts.lid })
+      .from(contacts)
+      .where(
+        and(
+          eq(contacts.instanceId, instanceId),
+          or(inArray(contacts.jid, needles), inArray(contacts.lid, needles)),
+        ),
+      )
+      .all();
+    const aliases: string[] = [];
+    for (const row of rows) {
+      if (row.jid) aliases.push(row.jid);
+      if (row.lid) aliases.push(row.lid);
+      if (row.phone) {
+        const phoneJid = phoneJidFromStoredPhone(row.phone);
+        if (phoneJid) aliases.push(phoneJid);
+      }
+    }
+    return aliases;
+  } catch {
+    logger.warn("Unable to resolve stored LID mappings for the JID ignore filter");
+    return [];
+  }
 }
 
 export function eventMatchesIgnoreJids(
@@ -749,8 +827,26 @@ export function eventMatchesIgnoreJids(
   ignoreJids: readonly string[] | undefined,
 ): boolean {
   if (!ignoreJids || ignoreJids.length === 0) return false;
-  return eventJidCandidates(payload).some((jid) =>
-    ignoreJids.some((pattern) => jidMatchesIgnorePattern(jid, pattern)),
+  const { chatJids, identityJids } = eventIgnoreJidSets(payload);
+  const domainPatterns: string[] = [];
+  const specificPatterns: string[] = [];
+  for (const pattern of ignoreJids) {
+    if (normalizeIgnoreJid(pattern).startsWith("@")) domainPatterns.push(pattern);
+    else specificPatterns.push(pattern);
+  }
+  if (
+    domainPatterns.some((pattern) => chatJids.some((jid) => jidMatchesIgnorePattern(jid, pattern)))
+  ) {
+    return true;
+  }
+  if (specificPatterns.length === 0) return false;
+  const instanceId =
+    typeof (payload as { instanceId?: unknown }).instanceId === "string"
+      ? (payload as { instanceId: string }).instanceId
+      : "";
+  const resolved = lookupStoredJidAliases(instanceId, [...chatJids, ...identityJids]);
+  return [...chatJids, ...identityJids, ...resolved].some((jid) =>
+    specificPatterns.some((pattern) => jidMatchesIgnorePattern(jid, pattern)),
   );
 }
 

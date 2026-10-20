@@ -27,7 +27,7 @@ HTTP Host header.
 | `WA_EVENT_WEBHOOK_PRESET` | unset | `grok-bot` selects compact Grok Bot message and lifecycle payloads plus incoming-message filters. |
 | `WA_EVENT_WEBHOOK_EVENTS` | `message.received` | Comma-separated events for the single destination and multi-destination defaults. |
 | `WA_EVENT_WEBHOOK_IGNORE_FROM_ME` | `true` | Ignore messages sent by this WhatsApp instance. |
-| `WA_EVENT_WEBHOOK_IGNORE_JIDS` | unset | Comma-separated exact JIDs, `@` address wildcards, or one `*` in the user part. Unset forwards every chat. |
+| `WA_EVENT_WEBHOOK_IGNORE_JIDS` | unset | Exact JIDs, chat-only `@` wildcards, or one `*` in the user part (#140). Case-insensitive. Unset forwards every chat. |
 | `WA_EVENT_WEBHOOK_HEADERS` | unset | JSON object of extra headers for the single destination. |
 | `WA_EVENT_WEBHOOK_AUTH_HEADER` | unset | Single-destination authentication header. Grok Bot defaults to `X-Grok-Bot-Key` when the preset and auth value are set. |
 | `WA_EVENT_WEBHOOK_AUTH_VALUE` | unset | Single-destination authentication value. |
@@ -46,22 +46,31 @@ HTTP Host header.
 `events` array. The default event set remains `message.received`, and the `grok-bot` preset remains
 limited to incoming messages.
 
-`WA_EVENT_WEBHOOK_IGNORE_JIDS` drops events whose chat or sender JID matches the list. It is
+`WA_EVENT_WEBHOOK_IGNORE_JIDS` (#140) drops events whose JID matches the list. It is
 independent of `WA_EVENT_WEBHOOK_EVENTS`: an event is delivered only when its name is selected and
-none of its JIDs are ignored. Unset or empty applies no JID filter.
+none of its compared JIDs are ignored. Unset or empty applies no JID filter.
 
 An entry that starts with `@` is an address-space wildcard. Supported wildcards are `@g.us`,
-`@s.whatsapp.net`, `@lid`, `@newsletter`, `@broadcast`, and `@c.us`. An entry with one `*` in the
-user part is a prefix or suffix wildcard, for example `5577*@s.whatsapp.net`. Every other entry
-is an exact, case-sensitive JID. Invalid entries fail startup with
-`Invalid WA_EVENT_WEBHOOK_IGNORE_JIDS`. Matching chats are still stored; only webhook delivery
-is skipped.
+`@s.whatsapp.net`, `@lid`, `@newsletter`, `@broadcast`, and `@c.us`. Those wildcards match only
+the chat JID (`chatId`, `groupId`, `newsletterId`, or an association `chatId`). They do not match
+the sender or a LID alias, so `@lid` does not hide a phone chat that also carries a LID, and
+`@s.whatsapp.net` does not hide a group message sent from a phone JID.
 
-The match covers `chatId`, `groupId`, `newsletterId`, the sender (`message.sender`, `participant`,
-`callerId`, `reactedBy`, `deletedBy`, `author`, `contactId`), association `chatId`, and LID fields
-`chatLid`, `senderLid`, `fromLid`, and `participantLid`. It does not scan participant arrays.
-`instance.*` events are never dropped by this list. A multi-destination `ignoreJids` array is
-unioned with the global list for that destination only.
+An entry with one `*` in the user part is a prefix or suffix wildcard, for example
+`5577*@s.whatsapp.net`. Every other entry is an exact JID. Exact and starred entries match the
+chat, the sender (`message.sender`, `participant`, `callerId`, `reactedBy`, `deletedBy`, `author`,
+`contactId`), and LID aliases (`chatLid`, `senderLid`, `fromLid`, `participantLid`). Participant
+arrays are not scanned. Comparison is case-insensitive, and a device suffix (`:12` immediately
+before `@`) is ignored on both the entry and the candidate.
+
+A LID-only message has no phone alias on the event. Before exact and starred matching, the filter
+looks up `contacts` for that instance (`jid`, `lid`, or `phone`) and adds the stored phone JID and
+LID. If that row is missing, list both forms. Address wildcards do not use this lookup.
+
+Blank slots from a trailing or repeated comma are skipped. Any other invalid entry fails startup
+with `Invalid WA_EVENT_WEBHOOK_IGNORE_JIDS`. Matching chats are still stored; only webhook delivery
+is skipped. `instance.*` events are never dropped by this list. A multi-destination `ignoreJids`
+array is unioned with the global list for that destination only.
 
 `@g.us` mutes group traffic because the group id ends in `@g.us`. `@s.whatsapp.net` also matches
 the sender of a group message, so it suppresses those group events too. Use an exact JID to mute

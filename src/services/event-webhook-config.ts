@@ -287,7 +287,7 @@ const STAR_JID_RE = /^([0-9A-Za-z._:-]*)\*([0-9A-Za-z._:-]*)@([A-Za-z0-9][A-Za-z
 const JID_DOMAINS = ["g.us", "s.whatsapp.net", "lid", "newsletter", "broadcast", "c.us"] as const;
 
 export function parseIgnoreJidEntry(entry: string, label: string): string {
-  const value = entry.trim();
+  const value = entry.trim().toLowerCase();
   if (!value) throw new Error(`Invalid ${label}; empty entry`);
   if (/\s/.test(value)) throw new Error(`Invalid ${label}; invalid JID "${value}"`);
   if (value.startsWith("@")) {
@@ -313,10 +313,14 @@ export function parseIgnoreJidEntry(entry: string, label: string): string {
   return value;
 }
 
-/** Empty or unset means no JID filter. Comma-separated entries are exact JIDs or wildcards. */
+/** Empty or unset means no JID filter. Blank comma slots are skipped; other invalid entries fail. */
 export function parseIgnoreJidList(value: string | undefined, label: string): string[] {
   if (value === undefined || value.trim() === "") return [];
-  return [...new Set(value.split(",").map((entry) => parseIgnoreJidEntry(entry, label)))];
+  const entries = value
+    .split(",")
+    .map((entry) => entry.trim())
+    .filter(Boolean);
+  return [...new Set(entries.map((entry) => parseIgnoreJidEntry(entry, label)))];
 }
 
 function parseDestinationIgnoreJids(value: unknown): string[] {
@@ -325,7 +329,12 @@ function parseDestinationIgnoreJids(value: unknown): string[] {
     throw new Error("Invalid WA_EVENT_WEBHOOKS; ignoreJids must be an array of JID patterns");
   }
   return [
-    ...new Set(value.map((item) => parseIgnoreJidEntry(item, "WA_EVENT_WEBHOOKS ignoreJids"))),
+    ...new Set(
+      value
+        .map((item) => item.trim())
+        .filter(Boolean)
+        .map((item) => parseIgnoreJidEntry(item, "WA_EVENT_WEBHOOKS ignoreJids")),
+    ),
   ];
 }
 
