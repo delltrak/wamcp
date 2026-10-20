@@ -64,6 +64,10 @@ Tools marked **Baileys only** are not available on Cloud API instances.
 - **`instanceId`** -- Every tool requires an `instanceId` identifying which WhatsApp connection to use.
 - **`to`** -- Recipient for send operations. Use a phone number (e.g. `"5511999999999"`) or a group JID (e.g. `"120363...@g.us"`).
 - **JID** -- Jabber ID, WhatsApp's internal identifier. Individual: `5511999999999@s.whatsapp.net`. Group: `120363...@g.us`.
+- **Storage** -- `WA_DATABASE_URL` empty (the default) keeps SQLite at `WA_DATABASE_PATH`
+  (`data/whatsapp.db`), including Baileys auth keys. A `postgres://` or `postgresql://` URL stores
+  that same data in Postgres. Existing databases are not migrated unless you run
+  `npm run db:migrate-to-postgres` yourself.
 - **Media** -- Image/video/audio/document fields accept a URL (`https://...`) or base64-encoded data.
   Stickers and GIFs are converted to WhatsApp-compatible formats with ffmpeg. Received media can
   be saved under `WA_MEDIA_DOWNLOAD_DIR` (default `data/media-downloads`) or returned as base64.
@@ -1861,7 +1865,7 @@ Tools for refreshing and searching contacts, checking phone numbers, blocking/un
 Refresh contacts for an already linked Baileys session without pairing again. The tool resyncs each
 Baileys app-state collection separately, then supplements the contact cache from locally stored
 individual chats and messages. Collection failures are reported individually while the remaining
-collections and local recovery continue. Recovered contacts persist in SQLite across server restarts.
+collections and local recovery continue. Recovered contacts persist in the configured database across server restarts.
 
 Use this on a connected Baileys instance. Call `wa_connect_instance` first to reconnect an existing
 stored session, or invoke this tool directly if that session is already connected. The Cloud API

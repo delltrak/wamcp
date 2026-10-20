@@ -139,7 +139,7 @@ Add to your `claude_desktop_config.json`:
 | 📡  | **Real-time events**   | 15 notification types via SSE: messages, typing, groups, calls, connection status.                       |
 | ⚡  | **Rate limiting**      | BullMQ queues prevent WhatsApp bans (20 msg/min Baileys, 80 msg/min Cloud).                               |
 | 🔁  | **Auto-reconnect**     | Automatic reconnection with exponential backoff.                                                          |
-| 🗃️  | **Persistent**         | SQLite storage for sessions, messages, contacts, groups.                                                  |
+| 🗃️  | **Persistent**         | SQLite storage for sessions, messages, contacts, and groups. Set `WA_DATABASE_URL` to use Postgres instead. |
 | 🐳  | **Single container**   | `docker compose up` — only Redis as external dependency.                                                  |
 
 ---
@@ -330,7 +330,7 @@ For an existing linked Baileys session, connect the stored instance with `wa_con
 and call `wa_resync_contacts` with its `instanceId`. If it is already connected, call the resync
 tool directly. It refreshes app-state collections and supplements them with individual contacts
 from locally stored chats and messages. It does not require pairing again. Recovered contacts are
-stored in SQLite and remain available after server restarts. The Cloud API channel does not support
+stored in the configured database and remain available after server restarts. The Cloud API channel does not support
 this operation.
 
 <details>
@@ -677,7 +677,7 @@ See [Outgoing event webhooks](docs/event-webhooks.md) for configuration details.
 │  │  │  (WebSocket) │ │    (HTTPS)     │  │ │
 │  │  └──────────────┘ └────────────────┘  │ │
 │  └────────────────────────────────────────┘ │
-│       SQLite (Drizzle)    BullMQ (Redis)    │
+│    SQLite or Postgres     BullMQ (Redis)    │
 └─────────────────────────────────────────────┘
                    │
                    ▼  WebSocket / HTTPS
@@ -709,7 +709,8 @@ Copy `.env.example` to `.env` and configure:
 | `WA_MCP_PORT`               | `3000`                   | HTTP server port                         |
 | `WA_REDIS_URL`              | `redis://localhost:6379` | Redis for BullMQ queues                  |
 | `WA_LOG_LEVEL`              | `info`                   | `debug` \| `info` \| `warn` \| `error`   |
-| `WA_DATABASE_PATH`          | `data/whatsapp.db`       | SQLite database path; in Docker this resolves under `/app` |
+| `WA_DATABASE_PATH`          | `data/whatsapp.db`       | SQLite database path when `WA_DATABASE_URL` is empty; in Docker this resolves under `/app` |
+| `WA_DATABASE_URL`           | empty                    | Optional `postgres://` or `postgresql://` URL. Empty keeps SQLite at `WA_DATABASE_PATH` |
 | `WA_BAILEYS_HISTORY_SYNC_MAX_MESSAGES` | `100` | Maximum messages requested per chat by automatic and on-demand history fetches (1–10000) |
 | `WA_DATA_DIR`               | `wa-data` in Compose     | Optional absolute host directory mounted at `/app/data`; unset preserves the existing named volume |
 | `WA_BAILEYS_RATE_LIMIT`     | `20`                     | Messages/min per Baileys instance        |
@@ -842,6 +843,50 @@ when intentionally overriding a leftover WAL file, for example:
 ```bash
 ./scripts/restore.sh /srv/wamcp-data/whatsapp.db /srv/wamcp-data /srv/wamcp-data/.env --force
 ```
+
+### PostgreSQL
+
+Leave `WA_DATABASE_URL` empty to keep using SQLite at `WA_DATABASE_PATH`. Setting a
+`postgres://` or `postgresql://` URL stores instances, messages, contacts, groups, and the Baileys
+auth keys in that database. The SQLite file is not opened, moved, or migrated on startup.
+
+`npm run db:migrate` applies the SQLite Drizzle migrations when the URL is empty, and applies the
+Postgres schema when it is set. Postgres records that baseline in `schema_migrations`.
+
+To copy an existing SQLite database, including the session, stop WA MCP and run:
+
+```bash
+WA_DATABASE_PATH=data/whatsapp.db \
+WA_DATABASE_URL=postgres://wamcp:wamcp@localhost:5432/wamcp \
+npm run db:migrate-to-postgres
+```
+
+The command refuses to run without a Postgres URL. It reads SQLite (a consistent snapshot, including
+the WAL) and upserts rows into Postgres. Run it again to refresh those rows. It does not delete the
+SQLite file, does not remove extra Postgres rows, and does not pair the WhatsApp account again.
+Start WA MCP with the same `WA_DATABASE_URL` afterward.
+
+Back up Postgres with `pg_dump` while the server can stay up. The dump contains auth keys: mode
+`0600`, treat it as a secret, and do not commit it.
+
+```bash
+./scripts/postgres-backup.sh "$WA_DATABASE_URL" /srv/wamcp-backups
+```
+
+Restore only after stopping WA MCP. The default restore loads a custom-format dump into the target
+database. `--force` drops existing objects in that database first:
+
+```bash
+./scripts/postgres-restore.sh /srv/wamcp-backups/wamcp-postgres-YYYYMMDDTHHMMSSZ.dump "$WA_DATABASE_URL"
+```
+
+Docker Compose does not start Postgres unless you opt in. Set `WA_DATABASE_URL` and run:
+
+```bash
+WA_DATABASE_URL=postgres://wamcp:wamcp@postgres:5432/wamcp docker compose --profile postgres up -d
+```
+
+The named volume `wa-data` and `WA_DATABASE_PATH` stay in place for SQLite installs.
 
 Baileys may emit an incoming offline message delivered as an `append` once when its timestamp is
 after the instance's last disconnect (or last connect) or latest stored message. When those timestamps
@@ -1016,7 +1061,9 @@ src/
 ├── tts/                         # Text-to-speech provider interface and registry
 ├── db/
 │   ├── schema.ts                # Drizzle table definitions
-│   └── client.ts                # SQLite connection
+│   ├── client.ts                # SQLite or Postgres connection
+│   ├── schema-sql.ts            # Runtime schema for both drivers
+│   └── sqlite-to-postgres.ts    # Manual SQLite copy
 ├── schemas/                     # Zod validation (10 files)
 └── types/                       # TypeScript definitions
 ```
