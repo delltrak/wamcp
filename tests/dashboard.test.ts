@@ -1,4 +1,4 @@
-import { createServer, type Server } from "node:http";
+import { createServer, request as httpRequest, type Server } from "node:http";
 import { readFileSync } from "node:fs";
 import { afterEach, describe, expect, it } from "vitest";
 import { baileysCredsArePaired, pairingRefusal } from "../src/channels/baileys/pairing-state.js";
@@ -17,6 +17,7 @@ import { dashboardPage } from "../src/server/dashboard-page.js";
 import { renderQrDataUrl } from "../src/server/dashboard-qr.js";
 import {
   createDashboardHandler,
+  dashboardOriginAllowed,
   type DashboardHandler,
   type DashboardInstances,
 } from "../src/server/dashboard.js";
@@ -583,7 +584,7 @@ describe("dashboard HTTP", () => {
     expect(calls).toContain("connect:inst_aabbccdd");
   });
 
-  it("limits repeated failed logins from one address", async () => {
+  it("limits wrong passwords without locking out a missing or valid login", async () => {
     let clock = 10_000;
     const { handle } = handlerFor({
       maxLoginFailures: 2,
@@ -591,20 +592,40 @@ describe("dashboard HTTP", () => {
       now: () => clock,
     });
     const base = await serve(handle);
-    const first = await fetch(`${base}/dashboard/`);
-    expect(first.status).toBe(401);
-    expect(first.headers.get("www-authenticate")).toContain("Basic");
-    const second = await fetch(`${base}/dashboard/`);
-    expect(second.status).toBe(429);
-    expect(second.headers.get("www-authenticate")).toBeNull();
-    expect(await second.json()).toEqual({ error: "Too many login attempts" });
-    const locked = await fetch(`${base}/dashboard/`, {
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      const missing = await fetch(`${base}/dashboard/`);
+      expect(missing.status).toBe(401);
+      expect(missing.headers.get("www-authenticate")).toContain("Basic");
+    }
+    const firstWrong = await fetch(`${base}/dashboard/`, {
+      headers: { Authorization: basic("ops", "wrong-horse") },
+    });
+    expect(firstWrong.status).toBe(401);
+    const secondWrong = await fetch(`${base}/dashboard/`, {
+      headers: { Authorization: basic("ops", "wrong-horse") },
+    });
+    expect(secondWrong.status).toBe(429);
+    expect(secondWrong.headers.get("www-authenticate")).toBeNull();
+    expect(await secondWrong.json()).toEqual({ error: "Too many login attempts" });
+    const stillMissing = await fetch(`${base}/dashboard/`);
+    expect(stillMissing.status).toBe(401);
+    clock += 1_001;
+    const afterWindow = await fetch(`${base}/dashboard/`, {
+      headers: { Authorization: basic("ops", "wrong-horse") },
+    });
+    expect(afterWindow.status).toBe(401);
+    const limitedAgain = await fetch(`${base}/dashboard/`, {
+      headers: { Authorization: basic("ops", "wrong-horse") },
+    });
+    expect(limitedAgain.status).toBe(429);
+    const correct = await fetch(`${base}/dashboard/`, {
       headers: { Authorization: basic("ops", "correct-horse") },
     });
-    expect(locked.status).toBe(429);
-    clock += 1_001;
-    const retry = await fetch(`${base}/dashboard/`);
-    expect(retry.status).toBe(401);
+    expect(correct.status).toBe(200);
+    const afterSuccess = await fetch(`${base}/dashboard/`, {
+      headers: { Authorization: basic("ops", "wrong-horse") },
+    });
+    expect(afterSuccess.status).toBe(401);
   });
 
   it("uses relative API URLs under its mount path", async () => {
@@ -628,7 +649,9 @@ describe("dashboard HTTP", () => {
     const csp = page.headers.get("content-security-policy") ?? "";
     const nonce = /script-src 'nonce-([A-Za-z0-9_-]+)'/.exec(csp)?.[1];
     expect(nonce).toBeTruthy();
-    expect(csp).not.toContain("script-src 'unsafe-inline'");
+    expect(csp).not.toContain("unsafe-inline");
+    expect(csp).toContain(`style-src 'nonce-${nonce}'`);
+    expect(html).toContain(`<style nonce="${nonce}">`);
     expect(html).toContain(`nonce="${nonce}"`);
     expect(html).toContain('const overviewUrl = "api/overview"');
     expect(html).toContain('"api/instances/"');
@@ -665,6 +688,76 @@ describe("dashboard HTTP", () => {
     });
     expect(badId.status).toBe(400);
     expect(calls).toEqual([]);
+  });
+
+  it("accepts pairing when Host includes the default port and ignores X-Forwarded-Proto", async () => {
+    const { handle, calls } = handlerFor({});
+    const base = await serve(handle);
+    const target = new URL(base);
+    const send = (headers: Record<string, string>) =>
+      new Promise<{ status: number }>((resolve, reject) => {
+        const req = httpRequest(
+          {
+            hostname: target.hostname,
+            port: target.port,
+            path: "/dashboard/api/instances/inst_aabbccdd/pairing",
+            method: "POST",
+            headers: {
+              ...headers,
+              "Content-Length": Buffer.byteLength("{}"),
+            },
+          },
+          (res) => {
+            res.resume();
+            res.on("end", () => resolve({ status: res.statusCode ?? 0 }));
+          },
+        );
+        req.on("error", reject);
+        req.end("{}");
+      });
+    const auth = {
+      Authorization: basic("ops", "correct-horse"),
+      "Content-Type": "application/json",
+    };
+    const explicitDefault = await send({
+      ...auth,
+      Host: "dashboard.example:80",
+      Origin: "http://dashboard.example",
+    });
+    expect(explicitDefault.status).toBe(200);
+    const nonDefault = await send({
+      ...auth,
+      Host: "dashboard.example:8080",
+      Origin: "http://dashboard.example",
+    });
+    expect(nonDefault.status).toBe(403);
+    const forwarded = await fetch(`${base}/dashboard/api/instances/inst_aabbccdd/pairing`, {
+      method: "POST",
+      headers: {
+        ...auth,
+        Origin: new URL(base).origin,
+        "X-Forwarded-Proto": "https",
+      },
+      body: "{}",
+    });
+    expect(forwarded.status).toBe(200);
+    expect(calls.filter((call) => call.startsWith("connect:"))).toEqual(["connect:inst_aabbccdd"]);
+  });
+});
+
+describe("dashboard origin check", () => {
+  it("treats default ports as the same host and compares scheme only when known", () => {
+    expect(dashboardOriginAllowed("http://x", "x:80", null)).toBe(true);
+    expect(dashboardOriginAllowed("https://x", "x:443", null)).toBe(true);
+    expect(dashboardOriginAllowed("http://x:80", "x", null)).toBe(true);
+    expect(dashboardOriginAllowed("https://x", "X", null)).toBe(true);
+    expect(dashboardOriginAllowed("http://x", "x:8080", null)).toBe(false);
+    expect(dashboardOriginAllowed("https://x", "x:80", null)).toBe(false);
+    expect(dashboardOriginAllowed("http://[::1]", "[::1]:80", null)).toBe(true);
+    expect(dashboardOriginAllowed("http://x", "x", "https")).toBe(false);
+    expect(dashboardOriginAllowed("https://x", "x:443", "https")).toBe(true);
+    expect(dashboardOriginAllowed("http://evil.example", "x", null)).toBe(false);
+    expect(dashboardOriginAllowed("null", "x", null)).toBe(false);
   });
 });
 

@@ -169,7 +169,7 @@ function sendHtml(res: ServerResponse): void {
     "X-Content-Type-Options": "nosniff",
     "Referrer-Policy": "no-referrer",
     "X-Frame-Options": "DENY",
-    "Content-Security-Policy": `default-src 'none'; style-src 'unsafe-inline'; img-src data:; script-src 'nonce-${nonce}'; connect-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'`,
+    "Content-Security-Policy": `default-src 'none'; style-src 'nonce-${nonce}'; img-src data:; script-src 'nonce-${nonce}'; connect-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'`,
   });
   res.end(html);
 }
@@ -218,6 +218,100 @@ function clientAddress(req: IncomingMessage): string {
   return raw.startsWith("::ffff:") ? raw.slice("::ffff:".length) : raw;
 }
 
+function parseHostHeader(value: string): { hostname: string; port: string } | null {
+  if (value.length < 1 || value.length > 255 || /[\s/@\\?#]/.test(value)) return null;
+  let hostname = value;
+  let port = "";
+  let ipv6 = false;
+  if (value.startsWith("[")) {
+    const end = value.indexOf("]");
+    if (end <= 1) return null;
+    hostname = value.slice(1, end);
+    const rest = value.slice(end + 1);
+    if (rest.length > 0) {
+      if (!rest.startsWith(":")) return null;
+      port = rest.slice(1);
+    }
+    ipv6 = true;
+  } else {
+    const colon = value.lastIndexOf(":");
+    if (colon !== -1) {
+      hostname = value.slice(0, colon);
+      port = value.slice(colon + 1);
+    }
+  }
+  if (!hostname) return null;
+  if (port !== "") {
+    if (!/^\d{1,5}$/.test(port)) return null;
+    const portNumber = Number(port);
+    if (portNumber < 1 || portNumber > 65535) return null;
+    port = String(portNumber);
+  }
+  try {
+    const parsed = new URL(`http://${ipv6 ? `[${hostname}]` : hostname}`);
+    const parsedName = parsed.hostname.replace(/^\[|\]$/g, "").toLowerCase();
+    if (
+      parsed.username ||
+      parsed.password ||
+      parsed.pathname !== "/" ||
+      parsed.search ||
+      parsed.hash ||
+      parsed.port !== "" ||
+      parsedName !== hostname.toLowerCase()
+    ) {
+      return null;
+    }
+    return { hostname: parsedName, port };
+  } catch {
+    return null;
+  }
+}
+
+function sameAuthorityPort(
+  hostPort: string,
+  originPort: string,
+  scheme: "http" | "https",
+): boolean {
+  const fallback = scheme === "https" ? "443" : "80";
+  const canonical = (port: string): string => (port === "" || port === fallback ? fallback : port);
+  return canonical(hostPort) === canonical(originPort);
+}
+
+/**
+ * True when a browser Origin names the same host as the request.
+ * Ports 80 and 443 match an omitted port for http and https.
+ * `scheme` is set only when this process can see it (a TLS socket).
+ * X-Forwarded-Proto is not trusted and must not be passed here.
+ */
+export function dashboardOriginAllowed(
+  originHeader: string,
+  hostHeader: string,
+  scheme: "http" | "https" | null,
+): boolean {
+  let origin: URL;
+  try {
+    origin = new URL(originHeader);
+  } catch {
+    return false;
+  }
+  if (origin.protocol !== "http:" && origin.protocol !== "https:") return false;
+  if (
+    origin.username ||
+    origin.password ||
+    origin.pathname !== "/" ||
+    origin.search ||
+    origin.hash
+  ) {
+    return false;
+  }
+  const originScheme = origin.protocol === "https:" ? "https" : "http";
+  if (scheme !== null && originScheme !== scheme) return false;
+  const host = parseHostHeader(hostHeader);
+  const originName = origin.hostname.replace(/^\[|\]$/g, "").toLowerCase();
+  if (!host || host.hostname !== originName) return false;
+  return sameAuthorityPort(host.port, origin.port, originScheme);
+}
+
 /**
  * Browsers resend cached Basic credentials on a cross-site POST. Reject that
  * before any pairing work. A missing Sec-Fetch-Site or Origin is allowed so
@@ -233,18 +327,9 @@ function assertSameOriginMutation(req: IncomingMessage): void {
   if (origin.toLowerCase() === "null") {
     throw new DashboardHttpError(403, "Cross-site request rejected");
   }
-  let originHost: string;
-  try {
-    const parsed = new URL(origin);
-    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
-      throw new Error("unsupported origin");
-    }
-    originHost = parsed.host.toLowerCase();
-  } catch {
-    throw new DashboardHttpError(403, "Cross-site request rejected");
-  }
-  const host = headerToken(req.headers.host).toLowerCase();
-  if (host === "" || originHost !== host) {
+  const socket = req.socket as { encrypted?: boolean };
+  const scheme = socket.encrypted === true ? "https" : null;
+  if (!dashboardOriginAllowed(origin, headerToken(req.headers.host), scheme)) {
     throw new DashboardHttpError(403, "Cross-site request rejected");
   }
 }
@@ -594,26 +679,31 @@ export function createDashboardHandler(options: DashboardHandlerOptions): Dashbo
     if (!options.config.enabled || dashboardSubpath(url.pathname, mount) === null) return false;
     try {
       const address = clientAddress(req);
-      if (loginAttempts.isLimited(address)) {
-        tooManyLogins(res);
-        return true;
-      }
-      const header = req.headers.authorization;
-      const parsed = typeof header === "string" ? parseBasicAuthorization(header) : null;
+      const rawAuthorization = req.headers.authorization;
+      const header = typeof rawAuthorization === "string" ? rawAuthorization : "";
+      const presented = header.trim() !== "";
+      const parsed = presented ? parseBasicAuthorization(header) : null;
       const allowed =
         options.config.users.length > 0 &&
         parsed !== null &&
         dashboardCredentialsMatch(options.config.users, parsed.username, parsed.password);
-      if (!allowed) {
-        if (loginAttempts.recordFailure(address)) {
-          tooManyLogins(res);
-        } else {
-          unauthorized(res);
-        }
+      if (allowed) {
+        loginAttempts.recordSuccess(address);
+        await route(req, res, url);
         return true;
       }
-      loginAttempts.recordSuccess(address);
-      await route(req, res, url);
+      // A browser visits without Authorization so it can show the login prompt.
+      // Those requests must not lock the operator, or everyone behind one proxy.
+      if (!presented) {
+        unauthorized(res);
+        return true;
+      }
+      if (loginAttempts.isLimited(address) || loginAttempts.recordFailure(address)) {
+        tooManyLogins(res);
+      } else {
+        unauthorized(res);
+      }
+      return true;
     } catch (err) {
       const httpError = err instanceof DashboardHttpError ? err : null;
       if (!httpError) logger.error({ err }, "Dashboard request failed");

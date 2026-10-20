@@ -14,7 +14,7 @@ export function dashboardPage(nonce: string): string {
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="robots" content="noindex, nofollow">
 <title>WA MCP operations</title>
-<style>
+<style nonce="${nonce}">
   :root { color-scheme: light; --ink: #1c1917; --muted: #57534e; --line: #e7e5e4; --bg: #fafaf9; --card: #fff; --ok: #166534; --warn: #9a3412; --bad: #991b1b; }
   * { box-sizing: border-box; }
   body { margin: 0; font: 15px/1.45 system-ui, sans-serif; color: var(--ink); background: var(--bg); }
