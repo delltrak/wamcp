@@ -20,6 +20,7 @@ const EVENT_TO_METHOD: Record<ChannelEvent, string> = {
   "chat.updated": "whatsapp/chat.updated",
   "group.updated": "whatsapp/group.updated",
   "group.participants_changed": "whatsapp/group.participants_changed",
+  "group.joined": "whatsapp/group.joined",
   "group.member_label_changed": "whatsapp/group.member_label_changed",
   "contact.updated": "whatsapp/contact.updated",
   "connection.changed": "whatsapp/connection.changed",
@@ -31,6 +32,11 @@ const EVENT_TO_METHOD: Record<ChannelEvent, string> = {
   "instance.qr_expired": "whatsapp/instance.qr_expired",
   "call.received": "whatsapp/call.received",
   "label.updated": "whatsapp/label.updated",
+  "label.association": "whatsapp/label.association",
+  "newsletter.joined": "whatsapp/newsletter.joined",
+  "newsletter.left": "whatsapp/newsletter.left",
+  "newsletter.message": "whatsapp/newsletter.message",
+  "newsletter.mute": "whatsapp/newsletter.mute",
   "event.response": "whatsapp/event.response",
 };
 

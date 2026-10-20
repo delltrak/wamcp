@@ -6,13 +6,14 @@ import { Queue, UnrecoverableError, Worker, type Job, type JobsOptions } from "b
 import { Agent } from "undici";
 import type { InstanceManager } from "./instance-manager.js";
 import { QUEUE_COMPLETED_AGE_S, QUEUE_FAILED_AGE_S } from "../constants.js";
-import type {
-  BusinessLabel,
-  ChannelEvent,
-  ChannelEventPayload,
-  EventResponseStatus,
-  InstanceAuthMethod,
-  MessageButton,
+import {
+  isWebhookRoutineEvent,
+  type BusinessLabel,
+  type ChannelEvent,
+  type ChannelEventPayload,
+  type EventResponseStatus,
+  type InstanceAuthMethod,
+  type MessageButton,
 } from "../types/channel.types.js";
 import { createChildLogger } from "../utils/logger.js";
 import { getRedisConnectionOptions } from "./redis.js";
@@ -63,6 +64,17 @@ export interface EventWebhookPayload {
   association?: { type: "chat" | "message"; chatId: string; messageId?: string };
   chatLabels?: BusinessLabel[];
   messageLabels?: BusinessLabel[];
+  newsletterId?: string;
+  mute?: "on" | "off";
+  labeled?: boolean;
+  labelId?: string;
+  subject?: string | null;
+  name?: string;
+  description?: string | null;
+  role?: string | null;
+  participants?: string[];
+  serverId?: string | null;
+  views?: number | null;
 }
 
 export type InstanceLifecycleWebhookPayload =
@@ -520,7 +532,7 @@ export function normalizeEventWebhookPayload(
   return {
     event,
     instanceId,
-    chat: firstString(data.chatId, data.groupId, association?.chatId),
+    chat: firstString(data.chatId, data.groupId, data.newsletterId, association?.chatId),
     sender: firstString(
       message.sender,
       data.participant,
@@ -536,7 +548,9 @@ export function normalizeEventWebhookPayload(
         data.action,
         event === "event.response" ? undefined : data.status,
       ) ?? event,
-    text: firstString(message.content, data.newContent, data.emoji, changes.text),
+    text:
+      firstString(message.content, message.text, data.newContent, data.emoji, changes.text) ??
+      routineEventText(event, data),
     timestamp: firstNumber(message.timestamp, data.editedAt, data.timestamp),
     ...(typeof message.mediaUrl === "string" ? { mediaUrl: message.mediaUrl } : {}),
     ...(typeof message.mediaMimetype === "string" ? { mediaMimetype: message.mediaMimetype } : {}),
@@ -575,7 +589,80 @@ export function normalizeEventWebhookPayload(
     ...(association ? { association } : {}),
     ...(chatLabels ? { chatLabels } : {}),
     ...(messageLabels ? { messageLabels } : {}),
+    ...optionalWebhookFields(event, data, message),
   };
+}
+
+/** Short Portuguese text for the routine preset. Message content wins when it exists. */
+function routineEventText(event: ChannelEvent, data: Record<string, unknown>): string | null {
+  if (!isWebhookRoutineEvent(event)) return null;
+  const labelName = isRecord(data.label) ? firstString(data.label.name) : null;
+  switch (event) {
+    case "group.joined": {
+      const subject = firstString(data.subject);
+      return subject ? `Você entrou no grupo ${subject}` : "Você entrou em um grupo";
+    }
+    case "label.association":
+      if (data.labeled === true) {
+        return labelName ? `Etiqueta "${labelName}" aplicada` : "Etiqueta aplicada";
+      }
+      return labelName ? `Etiqueta "${labelName}" removida` : "Etiqueta removida";
+    case "newsletter.joined": {
+      const name = firstString(data.name);
+      return name ? `Você entrou no canal ${name}` : "Você entrou em um canal";
+    }
+    case "newsletter.left": {
+      const name = firstString(data.name);
+      return name ? `Você saiu do canal ${name}` : "Você saiu de um canal";
+    }
+    case "newsletter.message":
+      return "Nova mensagem no canal";
+    case "newsletter.mute":
+      if (data.mute === "on") return "Canal silenciado";
+      if (data.mute === "off") return "Canal com som";
+      return null;
+    default:
+      return null;
+  }
+}
+
+function optionalWebhookFields(
+  event: ChannelEvent,
+  data: Record<string, unknown>,
+  message: Record<string, unknown>,
+): Partial<EventWebhookPayload> {
+  const newsletterId = firstString(data.newsletterId);
+  const fields: Partial<EventWebhookPayload> = {
+    ...(newsletterId ? { newsletterId } : {}),
+  };
+  if (event === "group.joined") {
+    fields.subject = firstString(data.subject);
+    fields.description = firstString(data.description);
+    fields.participants = Array.isArray(data.participants)
+      ? data.participants.filter(
+          (participant): participant is string => typeof participant === "string",
+        )
+      : [];
+  }
+  if (event === "newsletter.joined" || event === "newsletter.left") {
+    const name = firstString(data.name);
+    if (name) fields.name = name;
+    fields.description = firstString(data.description) ?? null;
+    fields.role = firstString(data.role) ?? null;
+  }
+  if (event === "newsletter.mute" && (data.mute === "on" || data.mute === "off")) {
+    fields.mute = data.mute;
+  }
+  if (event === "newsletter.message") {
+    fields.serverId = typeof message.serverId === "string" ? message.serverId : null;
+    fields.views = typeof message.views === "number" ? message.views : null;
+  }
+  if (event === "label.association") {
+    fields.labeled = data.labeled === true;
+    const labelId = firstString(data.labelId);
+    if (labelId) fields.labelId = labelId;
+  }
+  return fields;
 }
 
 /** Build the compact Grok Bot body. Message content carries captions/text only; media bytes are never copied. */
@@ -712,7 +799,8 @@ export function shouldSendEventWebhook(
   if (
     config.preset === "grok-bot" &&
     event !== "message.received" &&
-    !event.startsWith("instance.")
+    !event.startsWith("instance.") &&
+    !isWebhookRoutineEvent(event)
   ) {
     return false;
   }
@@ -737,9 +825,10 @@ export function shouldSendEventWebhook(
           ? data.callerId
           : "";
 
-  if (event === "message.received") {
+  if (event === "message.received" || event === "newsletter.message") {
     if (config.ignoreFromMe && message.isFromMe === true) return false;
     if (
+      event === "message.received" &&
       config.preset === "grok-bot" &&
       (chatId.toLowerCase() === "status@broadcast" ||
         chatId.toLowerCase().endsWith("@broadcast") ||

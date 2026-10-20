@@ -698,6 +698,62 @@ export interface NormalizedLabelUpdateEvent {
   };
 }
 
+export interface NormalizedLabelAssociationEvent {
+  instanceId: string;
+  labelId: string;
+  labeled: boolean;
+  chatId: string;
+  messageId?: string;
+  label: BusinessLabel;
+  association: {
+    type: "chat" | "message";
+    chatId: string;
+    messageId?: string;
+  };
+}
+
+export interface NormalizedGroupJoinedEvent {
+  instanceId: string;
+  groupId: string;
+  chatId: string;
+  subject: string | null;
+  description: string | null;
+  participants: string[];
+  author: string | null;
+}
+
+export interface NormalizedNewsletterMembershipEvent {
+  instanceId: string;
+  newsletterId: string;
+  chatId: string;
+  name: string | null;
+  description: string | null;
+  role: string | null;
+}
+
+export interface NormalizedNewsletterMuteEvent {
+  instanceId: string;
+  newsletterId: string;
+  chatId: string;
+  mute: "on" | "off";
+}
+
+export interface NormalizedNewsletterMessageEvent {
+  instanceId: string;
+  newsletterId: string;
+  chatId: string;
+  message: {
+    id: string;
+    serverId: string | null;
+    sender: string;
+    timestamp: number;
+    type: string;
+    text: string | null;
+    views: number | null;
+    isFromMe: boolean;
+  };
+}
+
 export interface NormalizedEventResponseEvent {
   instanceId: string;
   chatId: string;
@@ -720,6 +776,7 @@ export const CHANNEL_EVENTS = [
   "chat.updated",
   "group.updated",
   "group.participants_changed",
+  "group.joined",
   "group.member_label_changed",
   "contact.updated",
   "connection.changed",
@@ -731,10 +788,31 @@ export const CHANNEL_EVENTS = [
   "instance.qr_expired",
   "call.received",
   "label.updated",
+  "label.association",
+  "newsletter.joined",
+  "newsletter.left",
+  "newsletter.message",
+  "newsletter.mute",
   "event.response",
 ] as const;
 
 export type ChannelEvent = (typeof CHANNEL_EVENTS)[number];
+
+/** Opt-in webhook events whose body includes a short routine text. */
+export const WEBHOOK_ROUTINE_EVENTS = [
+  "group.joined",
+  "label.association",
+  "newsletter.joined",
+  "newsletter.left",
+  "newsletter.message",
+  "newsletter.mute",
+] as const satisfies readonly ChannelEvent[];
+
+export function isWebhookRoutineEvent(
+  event: string,
+): event is (typeof WEBHOOK_ROUTINE_EVENTS)[number] {
+  return (WEBHOOK_ROUTINE_EVENTS as readonly string[]).includes(event);
+}
 
 // Event payload map
 export type ChannelEventPayload = {
@@ -747,6 +825,7 @@ export type ChannelEventPayload = {
   "chat.updated": NormalizedChatUpdateEvent;
   "group.updated": NormalizedGroupUpdateEvent;
   "group.participants_changed": NormalizedGroupParticipantsEvent;
+  "group.joined": NormalizedGroupJoinedEvent;
   "group.member_label_changed": NormalizedGroupMemberLabelEvent;
   "contact.updated": NormalizedContactUpdateEvent;
   "connection.changed": NormalizedConnectionEvent;
@@ -758,5 +837,10 @@ export type ChannelEventPayload = {
   "instance.qr_expired": InstanceAuthChallengeExpiredEvent;
   "call.received": NormalizedCallEvent;
   "label.updated": NormalizedLabelUpdateEvent;
+  "label.association": NormalizedLabelAssociationEvent;
+  "newsletter.joined": NormalizedNewsletterMembershipEvent;
+  "newsletter.left": NormalizedNewsletterMembershipEvent;
+  "newsletter.message": NormalizedNewsletterMessageEvent;
+  "newsletter.mute": NormalizedNewsletterMuteEvent;
   "event.response": NormalizedEventResponseEvent;
 };

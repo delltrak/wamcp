@@ -45,6 +45,33 @@ HTTP Host header.
 `events` array. The default event set remains `message.received`, and the `grok-bot` preset remains
 limited to incoming messages.
 
+These additional events are also off unless their names are listed:
+
+| Event | When it is emitted |
+| --- | --- |
+| `group.joined` | This account is added to a group, a group-create notification includes this account, or `wa_join_group` succeeds. |
+| `label.association` | A label is applied to or removed from a chat or message. `label.updated` is still emitted for the same change. |
+| `newsletter.joined` | `wa_newsletter_follow` or `wa_create_newsletter` succeeds, or a newsletter participant update adds this account. |
+| `newsletter.left` | `wa_newsletter_unfollow` succeeds, or a newsletter participant update removes this account. |
+| `newsletter.message` | A newsletter post arrives. Append-path posts are not also sent as `message.received`. Notify-path posts still emit `message.received` and this event. `WA_EVENT_WEBHOOK_IGNORE_FROM_ME` applies. |
+| `newsletter.mute` | A newsletter settings update includes `mute`, `mute_state`, or `muted`. |
+
+When one of these events is delivered, `text` is a short Portuguese line:
+`Você entrou no grupo {subject}` (or `Você entrou em um grupo`),
+`Etiqueta "{name}" aplicada` / `Etiqueta "{name}" removida`,
+`Você entrou no canal {name}` / `Você entrou em um canal`,
+`Você saiu do canal {name}` / `Você saiu de um canal`,
+the newsletter post text or `Nova mensagem no canal`,
+and `Canal silenciado` / `Canal com som`.
+The Grok Bot preset forwards these six events when they are listed and still drops
+other non-message, non-lifecycle events.
+
+Baileys 7.0.0-rc14 does not expose every newsletter notification. Participant updates that are not
+join or leave, such as promote and demote, do not emit membership events. The binary newsletter
+settings stanza only carries name and description, so a mute change that arrives only there is not
+emitted. `newsletter.message` leaves `views` null because that Baileys message does not include a
+view count. These events are Baileys-only.
+
 Startup logs a warning when no destination is configured, when the single-destination
 auth header and value are not set together, when the event set is empty, or when a
 Grok Bot preset drops configured non-lifecycle events. The latter warning includes
