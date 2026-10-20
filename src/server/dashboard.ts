@@ -25,6 +25,7 @@ const LOGIN_PROBE_INTERVAL_MS = 60_000;
 const LOGIN_COMPARISON_WINDOW_MS = 60_000;
 const LOGIN_MAX_COMPARISONS_PER_MINUTE = 60;
 const LOGIN_TRACKED_ADDRESSES = 1024;
+const LOGIN_TRACKED_HARD_CAP = 10_000;
 const INSTANCE_ID_RE = /^inst_[0-9a-f]{8}$/;
 const SAFE_EVENT = /^[a-z][a-z0-9._-]{0,63}$/i;
 const SAFE_ID = /^[A-Za-z0-9_-]{1,64}$/;
@@ -413,16 +414,30 @@ function normalizeOptionalPhone(value: unknown): string | undefined {
   return digits;
 }
 
-/** Drop oldest unlocked buckets. Limited buckets stay even when the map is over the cap. */
+/**
+ * Drop the oldest unlocked buckets down to `maxEntries`.
+ * `pinned` is the key just inserted and is never dropped.
+ * Limited buckets stay until `hardCap`, then the oldest of those is dropped.
+ */
 export function pruneLoginBuckets<T>(
   entries: Map<string, T>,
   maxEntries: number,
   keep: (key: string, value: T) => boolean,
+  options?: { pinned?: string; hardCap?: number },
 ): void {
-  if (entries.size <= maxEntries) return;
-  for (const [key, value] of entries) {
-    if (entries.size <= maxEntries) return;
-    if (keep(key, value)) continue;
+  const pinned = options?.pinned;
+  if (entries.size > maxEntries) {
+    for (const [key, value] of entries) {
+      if (entries.size <= maxEntries) break;
+      if (key === pinned || keep(key, value)) continue;
+      entries.delete(key);
+    }
+  }
+  const hardCap = options?.hardCap;
+  if (hardCap === undefined || entries.size <= hardCap) return;
+  for (const [key] of entries) {
+    if (entries.size <= hardCap) return;
+    if (key === pinned) continue;
     entries.delete(key);
   }
 }
@@ -492,22 +507,25 @@ class LoginAttemptLimiter {
     this.pruneComparisons();
   }
 
-  recordFailure(address: string, username: string): void {
+  /** A malformed header counts against the address and does not open a username bucket. */
+  recordAddressFailure(address: string): void {
     this.push(this.byAddress, address);
-    this.push(this.byPair, pairKey(address, username));
+  }
+
+  recordFailure(address: string, username: string): void {
+    const key = pairKey(address, username);
+    this.succeededAt.delete(key);
+    this.push(this.byAddress, address);
+    this.push(this.byPair, key);
   }
 
   /**
-   * A success clears this username only when that pair is already limited.
-   * It does not clear the address total or any other username.
-   * The pair is remembered for the failure window so it can skip the address
-   * total and the process-wide cap. Its own failure limit still applies.
+   * A success remembers this pair so it can skip the address total and the
+   * process-wide cap. It does not clear failures; they expire on their own.
+   * Any later failure of this pair removes that skip.
    */
   recordSuccess(address: string, username: string): void {
     this.noteRecentSuccess(address, username);
-    const key = pairKey(address, username);
-    if (this.recent(this.byPair, key).length < this.maxFailures) return;
-    this.byPair.delete(key);
   }
 
   private noteRecentSuccess(address: string, username: string): void {
@@ -518,7 +536,10 @@ class LoginAttemptLimiter {
     for (const [entry, at] of this.succeededAt) {
       if (at <= cutoff) this.succeededAt.delete(entry);
     }
-    pruneLoginBuckets(this.succeededAt, LOGIN_TRACKED_ADDRESSES, () => false);
+    pruneLoginBuckets(this.succeededAt, LOGIN_TRACKED_ADDRESSES, () => false, {
+      pinned: key,
+      hardCap: LOGIN_TRACKED_HARD_CAP,
+    });
   }
 
   private push(entries: Map<string, number[]>, key: string): void {
@@ -526,7 +547,7 @@ class LoginAttemptLimiter {
     recent.push(this.now());
     entries.delete(key);
     entries.set(key, recent);
-    this.pruneFailures(entries);
+    this.pruneFailures(entries, key);
   }
 
   private recent(entries: Map<string, number[]>, key: string): number[] {
@@ -537,8 +558,11 @@ class LoginAttemptLimiter {
     return kept;
   }
 
-  private pruneFailures(entries: Map<string, number[]>): void {
-    pruneLoginBuckets(entries, LOGIN_TRACKED_ADDRESSES, (_key, samples) => this.hot(samples));
+  private pruneFailures(entries: Map<string, number[]>, pinned: string): void {
+    pruneLoginBuckets(entries, LOGIN_TRACKED_ADDRESSES, (_key, samples) => this.hot(samples), {
+      pinned,
+      hardCap: LOGIN_TRACKED_HARD_CAP,
+    });
   }
 
   private pruneProbes(): void {
@@ -546,6 +570,7 @@ class LoginAttemptLimiter {
       this.probedAt,
       LOGIN_TRACKED_ADDRESSES,
       (address) => this.recent(this.byAddress, address).length >= this.maxFailures,
+      { hardCap: LOGIN_TRACKED_HARD_CAP },
     );
   }
 
@@ -853,21 +878,23 @@ export function createDashboardHandler(options: DashboardHandlerOptions): Dashbo
         return true;
       }
       const parsed = parseBasicAuthorization(header);
-      const username = parsed?.username ?? "\0invalid";
-      const exempt = parsed !== null && loginAttempts.hasRecentSuccess(address, parsed.username);
+      if (parsed === null) {
+        if (loginAttempts.isLimited(address, null)) {
+          tooManyLogins(res);
+          return true;
+        }
+        loginAttempts.recordAddressFailure(address);
+        unauthorized(res);
+        return true;
+      }
+      const exempt = loginAttempts.hasRecentSuccess(address, parsed.username);
       if (!exempt && !loginAttempts.canCompare()) {
         tooManyLogins(res);
         return true;
       }
-      const limited = loginAttempts.isLimited(address, parsed ? username : null);
-      if (limited && (parsed === null || !loginAttempts.allowProbe(address))) {
+      const limited = loginAttempts.isLimited(address, parsed.username);
+      if (limited && !loginAttempts.allowProbe(address)) {
         tooManyLogins(res);
-        return true;
-      }
-      if (parsed === null) {
-        loginAttempts.recordFailure(address, username);
-        if (limited) tooManyLogins(res);
-        else unauthorized(res);
         return true;
       }
       const allowed =

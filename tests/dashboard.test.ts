@@ -1,4 +1,10 @@
-import { createServer, request as httpRequest, type IncomingMessage, type Server } from "node:http";
+import {
+  createServer,
+  request as httpRequest,
+  type IncomingMessage,
+  type Server,
+  type ServerResponse,
+} from "node:http";
 import { readFileSync } from "node:fs";
 import { afterEach, describe, expect, it } from "vitest";
 import { baileysCredsArePaired, pairingRefusal } from "../src/channels/baileys/pairing-state.js";
@@ -161,6 +167,30 @@ function handlerFor(input: {
       now: input.now ?? (() => 6_000),
     }),
   };
+}
+
+async function dashboardStatus(
+  handle: DashboardHandler,
+  headers: Record<string, string>,
+): Promise<number> {
+  let status = 0;
+  const req = {
+    method: "GET",
+    headers,
+    socket: { remoteAddress: "127.0.0.1" },
+  } as IncomingMessage;
+  const res = {
+    headersSent: false,
+    writeHead(code: number) {
+      status = code;
+      this.headersSent = true;
+    },
+    end() {
+      return this;
+    },
+  };
+  await handle(req, res as unknown as ServerResponse, new URL("http://127.0.0.1/dashboard/"));
+  return status;
 }
 
 async function listen(
@@ -657,8 +687,8 @@ describe("dashboard HTTP", () => {
     const afterSuccess = await fetch(`${base}/dashboard/`, {
       headers: { Authorization: basic("ops", "wrong-horse") },
     });
-    expect(afterSuccess.status).toBe(401);
-    expect(comparisons).toBe(11);
+    expect(afterSuccess.status).toBe(429);
+    expect(comparisons).toBe(10);
   });
 
   it("keeps the address limited when a correct login is not itself limited", async () => {
@@ -802,6 +832,14 @@ describe("dashboard HTTP", () => {
     const polled = await fetch(`${base}/dashboard/`, { headers: operator });
     expect(polled.status).toBe(200);
     expect(comparisons).toBe(62);
+    const freshLogin = await fetch(`${base}/dashboard/`, {
+      headers: {
+        Authorization: basic("ops", "correct-horse"),
+        "x-client-address": "198.51.100.80",
+      },
+    });
+    expect(freshLogin.status).toBe(429);
+    expect(comparisons).toBe(62);
   });
 
   it("lets a recent success pass the address total but not its own pair limit", async () => {
@@ -834,12 +872,11 @@ describe("dashboard HTTP", () => {
     expect((await fetch(`${base}/dashboard/`, { headers: attacker })).status).toBe(429);
     expect(comparisons).toBe(11);
     const ownFailure = { Authorization: basic("ops", "wrong-horse") };
-    for (let attempt = 0; attempt < 8; attempt += 1) {
-      expect((await fetch(`${base}/dashboard/`, { headers: ownFailure })).status).toBe(401);
-    }
-    const ownLimited = await fetch(`${base}/dashboard/`, { headers: operator });
-    expect(ownLimited.status).toBe(429);
-    expect(comparisons).toBe(19);
+    expect((await fetch(`${base}/dashboard/`, { headers: ownFailure })).status).toBe(401);
+    expect(comparisons).toBe(12);
+    const dropped = await fetch(`${base}/dashboard/`, { headers: operator });
+    expect(dropped.status).toBe(429);
+    expect(comparisons).toBe(12);
   });
 
   it("keeps the global failure window independent of the probe interval", async () => {
@@ -866,6 +903,86 @@ describe("dashboard HTTP", () => {
     expect((await wrong("198.51.100.2")).status).toBe(429);
     clock += 60_000;
     expect((await wrong("198.51.100.3")).status).toBe(401);
+  });
+
+  it("does not let a successful poll refresh guesses for that username", async () => {
+    let clock = 1_000_000;
+    let comparisons = 0;
+    const { handle } = handlerFor({
+      maxLoginFailures: 8,
+      loginProbeIntervalMs: 60_000,
+      now: () => clock,
+      matchCredentials(list, username, password) {
+        comparisons += 1;
+        return dashboardCredentialsMatch(list, username, password);
+      },
+    });
+    const base = await serve(handle);
+    const wrong = { Authorization: basic("ops", "wrong-horse") };
+    const right = { Authorization: basic("ops", "correct-horse") };
+    for (let attempt = 0; attempt < 8; attempt += 1) {
+      expect((await fetch(`${base}/dashboard/`, { headers: wrong })).status).toBe(401);
+    }
+    expect(comparisons).toBe(8);
+    for (let minute = 0; minute < 12; minute += 1) {
+      if (minute > 0) clock += 60_000;
+      expect((await fetch(`${base}/dashboard/`, { headers: right })).status).toBe(200);
+      for (let guess = 0; guess < 8; guess += 1) {
+        expect((await fetch(`${base}/dashboard/`, { headers: wrong })).status).toBe(429);
+      }
+    }
+    expect(comparisons).toBe(8 + 12);
+  });
+
+  it("still limits a new address and an exempt pair after the bucket map is full", async () => {
+    const { handle } = handlerFor({
+      maxLoginFailures: 8,
+      clientAddress(req) {
+        const raw = req.headers["x-client-address"];
+        return dashboardClientKey(typeof raw === "string" ? raw : "127.0.0.1");
+      },
+    });
+    const malformed = { authorization: "Basic !!!!", "x-client-address": "" };
+    for (let index = 0; index < 1100; index += 1) {
+      const address = `2001:db8:${(index >>> 8).toString(16)}:${(index & 0xff).toString(16)}::1`;
+      for (let attempt = 0; attempt < 8; attempt += 1) {
+        const status = await dashboardStatus(handle, {
+          ...malformed,
+          "x-client-address": address,
+        });
+        if (status !== 401) {
+          throw new Error(`filled prefix ${index} attempt ${attempt} returned ${status}`);
+        }
+      }
+    }
+    const fresh = "2001:db8:ffff:eeee::1";
+    const wrong = basic("ops", "wrong-horse");
+    for (let attempt = 0; attempt < 8; attempt += 1) {
+      expect(
+        await dashboardStatus(handle, {
+          authorization: wrong,
+          "x-client-address": fresh,
+        }),
+      ).toBe(401);
+    }
+    expect(await dashboardStatus(handle, { authorization: wrong, "x-client-address": fresh })).toBe(
+      429,
+    );
+    const exempt = "2001:db8:ffff:eeed::1";
+    expect(
+      await dashboardStatus(handle, {
+        authorization: basic("ops", "correct-horse"),
+        "x-client-address": exempt,
+      }),
+    ).toBe(200);
+    for (let attempt = 0; attempt < 8; attempt += 1) {
+      expect(
+        await dashboardStatus(handle, { authorization: wrong, "x-client-address": exempt }),
+      ).toBe(401);
+    }
+    expect(
+      await dashboardStatus(handle, { authorization: wrong, "x-client-address": exempt }),
+    ).toBe(429);
   });
 
   it("uses relative API URLs under its mount path", async () => {
@@ -1001,6 +1118,28 @@ describe("dashboard login buckets", () => {
     }
     pruneLoginBuckets(locked, 1024, (_key, samples) => samples.length >= 8);
     expect(locked.size).toBe(1025);
+
+    const crowded = new Map<string, number[]>(locked);
+    crowded.set("fresh", [1]);
+    pruneLoginBuckets(crowded, 1024, (_key, samples) => samples.length >= 8, {
+      pinned: "fresh",
+      hardCap: 10_000,
+    });
+    expect(crowded.has("fresh")).toBe(true);
+    expect(crowded.get("fresh")).toEqual([1]);
+
+    const huge = new Map<string, number[]>();
+    for (let index = 0; index < 10_000; index += 1) {
+      huge.set(`locked-${index}`, [1, 1, 1, 1, 1, 1, 1, 1]);
+    }
+    huge.set("fresh", [1]);
+    pruneLoginBuckets(huge, 1024, (_key, samples) => samples.length >= 8, {
+      pinned: "fresh",
+      hardCap: 10_000,
+    });
+    expect(huge.has("fresh")).toBe(true);
+    expect(huge.has("locked-0")).toBe(false);
+    expect(huge.size).toBe(10_000);
   });
 });
 
