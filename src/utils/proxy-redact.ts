@@ -25,6 +25,7 @@ function addVariant(
 }
 
 const BARE_SECRET_MIN_LENGTH = 4;
+const BARE_SECRET_SUBSTRING_LENGTH = 8;
 
 interface RedactionPlan {
   substrings: Array<[string, string]>;
@@ -33,12 +34,17 @@ interface RedactionPlan {
 
 const variantCache = new Map<string, RedactionPlan>();
 
-function addBareSecret(tokens: Set<string>, value: string): void {
+function addBareSecret(substrings: Map<string, string>, tokens: Set<string>, value: string): void {
   // Shorter credentials stay visible unless they are inside a proxy URL or a user:password pair.
+  // 4 to 7 characters match as whole tokens. 8 or more are removed even inside a longer token.
   if (value.length < BARE_SECRET_MIN_LENGTH) return;
-  tokens.add(value);
+  const forms = new Set<string>([value]);
   const escaped = JSON.stringify(value).slice(1, -1);
-  if (escaped !== value && escaped.length >= BARE_SECRET_MIN_LENGTH) tokens.add(escaped);
+  if (escaped !== value && escaped.length >= BARE_SECRET_MIN_LENGTH) forms.add(escaped);
+  for (const form of forms) {
+    if (form.length >= BARE_SECRET_SUBSTRING_LENGTH) substrings.set(form, "***");
+    else tokens.add(form);
+  }
 }
 
 function secretVariants(proxyUrl: string): RedactionPlan {
@@ -58,10 +64,10 @@ function secretVariants(proxyUrl: string): RedactionPlan {
       addVariant(substrings, `${encodedUser}:${encodedPass}`, "***:***");
       addVariant(substrings, `${decodedUser}:${decodedPass}`, "***:***");
     }
-    addBareSecret(tokens, encodedUser);
-    addBareSecret(tokens, decodedUser);
-    addBareSecret(tokens, encodedPass);
-    addBareSecret(tokens, decodedPass);
+    addBareSecret(substrings, tokens, encodedUser);
+    addBareSecret(substrings, tokens, decodedUser);
+    addBareSecret(substrings, tokens, encodedPass);
+    addBareSecret(substrings, tokens, decodedPass);
   } catch {
     // The URL regex above still covers well-formed proxy URLs.
   }

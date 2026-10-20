@@ -37,11 +37,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- (#146) Percent-encoded proxy credentials are decoded before the SOCKS5 handshake. A dispatcher
-  with a stuck request is destroyed instead of waiting, and reconnect does not block on that
-  cleanup. `WA_PROXY_URL` is validated at startup. Usernames and passwords of at least 4 characters
-  are redacted as whole words; shorter ones are removed only from the proxy URL and from a
-  user:password pair. History-sync and app-state blob downloads use the proxy dispatcher.
+- (#146) Percent-encoded proxy credentials are decoded before the SOCKS5 handshake. A discarded
+  dispatcher is destroyed directly, so a stuck request is aborted, and reconnect does not wait for
+  that cleanup. `disconnect()` logs a warning if that destroy fails. `WA_PROXY_URL` is validated at
+  startup. Usernames and passwords of 4 to 7 characters are redacted as whole words; values of 8 or
+  more characters are removed wherever they appear. Shorter ones are removed only from the proxy URL
+  and from a user:password pair. History-sync and app-state blob downloads use the proxy dispatcher.
 - App-state writes now run through a per-instance queue with configurable spacing and a resync
   preflight that requires a retrievable current key, a positive collection version, a 128-byte hash,
   and no Baileys-reported sync, decode, missing-key, or hash-verification failure. Successful writes

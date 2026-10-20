@@ -11,7 +11,6 @@ import { fetch as undiciFetch, ProxyAgent, type Dispatcher } from "undici";
 import { sqlite } from "../src/db/client.js";
 import { buildHealthBody, renderHealthBody } from "../src/server/health.js";
 import {
-  PROXY_DISPATCHER_CLOSE_TIMEOUT_MS,
   closeBaileysProxyAgents,
   createBaileysProxyAgents,
   mediaDownloadOptions,
@@ -166,14 +165,21 @@ async function driveProxy(dispatcher: Dispatcher, done: Promise<unknown>): Promi
 function silentProxy(): Promise<{
   port: number;
   connections: () => number;
+  closed: () => number;
   close: () => Promise<void>;
 }> {
   return new Promise((resolve, reject) => {
     const sockets = new Set<Socket>();
+    let closed = 0;
     const server = createServer((socket) => {
       sockets.add(socket);
       socket.on("error", () => undefined);
-      socket.on("close", () => sockets.delete(socket));
+      socket.on("close", () => {
+        sockets.delete(socket);
+        closed += 1;
+      });
+      // A paused socket hides the peer close until the received bytes are consumed.
+      socket.resume();
     });
     server.once("error", reject);
     server.listen(0, "127.0.0.1", () => {
@@ -185,6 +191,7 @@ function silentProxy(): Promise<{
       resolve({
         port: address.port,
         connections: () => sockets.size,
+        closed: () => closed,
         close: () =>
           new Promise<void>((resolveClose, rejectClose) => {
             for (const socket of sockets) socket.destroy();
@@ -301,6 +308,19 @@ describe("proxy credential redaction", () => {
     );
     expect(redactProxyCredentials("http://u:ab@127.0.0.1:8080", "http://u:ab@127.0.0.1:8080")).toBe(
       "http://***:***@127.0.0.1:8080",
+    );
+  });
+
+  it("redacts secrets of 8 or more characters inside a longer token", () => {
+    const url = "http://username:p%40ss%3Aw0rd@127.0.0.1:8080";
+    expect(redactProxyCredentials("xp@ss:w0rd/xy", url)).toBe("x***/xy");
+    expect(redactProxyCredentials("xp%40ss%3Aw0rd/xy", url)).toBe("x***/xy");
+    expect(redactProxyCredentials("xusernamey", url)).toBe("x***y");
+    expect(redactProxyCredentials("xsecretx", "http://user:secret1@127.0.0.1:8080")).toBe(
+      "xsecretx",
+    );
+    expect(redactProxyCredentials("the secret1 value", "http://user:secret1@127.0.0.1:8080")).toBe(
+      "the *** value",
     );
   });
 
@@ -481,10 +501,11 @@ describe("Baileys proxy agents", () => {
     }
   });
 
-  it("destroys a dispatcher that still has a hung request", async () => {
+  it("rejects a stuck request and closes its proxy socket", async () => {
     const proxy = await silentProxy();
     const agents = createBaileysProxyAgents(`http://127.0.0.1:${proxy.port}`);
     const before = proxy.connections();
+    const closedBefore = proxy.closed();
     const pending = undiciFetch("http://127.0.0.1:59999/", { dispatcher: agents.dispatcher }).then(
       () => "fulfilled",
       () => "rejected",
@@ -493,8 +514,12 @@ describe("Baileys proxy agents", () => {
       await waitForProxyConnection(proxy.connections, before);
       const started = performance.now();
       await closeBaileysProxyAgents(agents);
-      expect(performance.now() - started).toBeLessThan(PROXY_DISPATCHER_CLOSE_TIMEOUT_MS + 750);
+      expect(performance.now() - started).toBeLessThan(500);
       expect(await pending).toBe("rejected");
+      await vi.waitFor(() => {
+        expect(proxy.closed()).toBeGreaterThan(closedBefore);
+        expect(proxy.connections()).toBe(before);
+      });
     } finally {
       await proxy.close();
     }
@@ -565,7 +590,7 @@ describe("BaileysAdapter proxy wiring", () => {
     vi.stubEnv("WA_PROXY_URL", proxyUrl("socks5", 1080));
     const adapter = await connectAdapter();
     const destroyed = new Set<unknown>();
-    const closed = new Set<unknown>();
+    const destroyedDispatchers = new Set<unknown>();
     const generations: Array<{ agent: unknown; fetchAgent: unknown; dispatcher: unknown }> = [];
 
     const track = (): void => {
@@ -574,13 +599,14 @@ describe("BaileysAdapter proxy wiring", () => {
       const fetchAgent = options.fetchAgent as { destroy: () => void };
       const held = (
         adapter as unknown as {
-          proxyAgents?: { dispatcher: { close: () => Promise<void> } };
+          proxyAgents?: { dispatcher: { destroy: () => Promise<void> } };
         }
       ).proxyAgents;
       expect(held?.dispatcher).toBeInstanceOf(ProxyAgent);
       const dispatcher = held!.dispatcher;
       const originalDestroy = agent.destroy.bind(agent);
       const originalFetchDestroy = fetchAgent.destroy.bind(fetchAgent);
+      const originalDispatcherDestroy = dispatcher.destroy.bind(dispatcher);
       agent.destroy = () => {
         destroyed.add(agent);
         originalDestroy();
@@ -589,8 +615,10 @@ describe("BaileysAdapter proxy wiring", () => {
         destroyed.add(fetchAgent);
         originalFetchDestroy();
       };
-      dispatcher.close = async () => {
-        closed.add(dispatcher);
+      dispatcher.destroy = (...args: unknown[]) => {
+        destroyedDispatchers.add(dispatcher);
+        dispatcher.destroy = originalDispatcherDestroy;
+        return originalDispatcherDestroy(...args);
       };
       generations.push({ agent, fetchAgent, dispatcher });
     };
@@ -623,14 +651,14 @@ describe("BaileysAdapter proxy wiring", () => {
     for (const previous of generations.slice(0, -1)) {
       expect(destroyed.has(previous.agent)).toBe(true);
       expect(destroyed.has(previous.fetchAgent)).toBe(true);
-      expect(closed.has(previous.dispatcher)).toBe(true);
+      expect(destroyedDispatchers.has(previous.dispatcher)).toBe(true);
     }
     const current = generations[3]!;
     expect(destroyed.has(current.agent)).toBe(false);
     expect(destroyed.has(current.fetchAgent)).toBe(false);
-    expect(closed.has(current.dispatcher)).toBe(false);
+    expect(destroyedDispatchers.has(current.dispatcher)).toBe(false);
     expect(destroyed.size).toBe(6);
-    expect(closed.size).toBe(3);
+    expect(destroyedDispatchers.size).toBe(3);
   }, 20_000);
 
   it("handles connection close synchronously", async () => {
@@ -654,6 +682,7 @@ describe("BaileysAdapter proxy wiring", () => {
         .proxyAgents?.dispatcher;
       expect(dispatcher).toBeInstanceOf(ProxyAgent);
       const before = proxy.connections();
+      const closedBefore = proxy.closed();
       const pending = undiciFetch("http://127.0.0.1:59999/", { dispatcher }).then(
         () => "fulfilled",
         () => "rejected",
@@ -662,12 +691,47 @@ describe("BaileysAdapter proxy wiring", () => {
       (adapter as unknown as { sock: unknown }).sock = null;
       const started = performance.now();
       await adapter.connect();
-      expect(performance.now() - started).toBeLessThan(PROXY_DISPATCHER_CLOSE_TIMEOUT_MS / 2);
+      expect(performance.now() - started).toBeLessThan(500);
       expect(mocks.makeWASocket).toHaveBeenCalledTimes(2);
       expect(socketOptions().options).toEqual({ dispatcher: expect.any(ProxyAgent) });
       expect(await pending).toBe("rejected");
+      await vi.waitFor(() => {
+        expect(proxy.closed()).toBeGreaterThan(closedBefore);
+        expect(proxy.connections()).toBe(before);
+      });
     } finally {
       await proxy.close();
+    }
+  });
+
+  it("logs a warning when disconnect fails to destroy the proxy dispatcher", async () => {
+    vi.stubEnv("WA_PROXY_URL", proxyUrl("socks5", 1080));
+    const adapter = await connectAdapter();
+    const held = (
+      adapter as unknown as {
+        proxyAgents?: { dispatcher: Dispatcher & { destroy: () => Promise<void> } };
+      }
+    ).proxyAgents;
+    expect(held?.dispatcher).toBeInstanceOf(ProxyAgent);
+    const originalDestroy = held!.dispatcher.destroy.bind(held!.dispatcher);
+    held!.dispatcher.destroy = () =>
+      Promise.reject(new Error(`destroy failed via ${proxyUrl("socks5", 1080)}`));
+    const warn = vi.spyOn(logger, "warn").mockImplementation(() => undefined);
+    try {
+      await expect(adapter.disconnect()).resolves.toBeUndefined();
+      const warning = warn.mock.calls.find(
+        (call) => call[1] === "Failed to close outbound proxy agents",
+      );
+      expect(warning).toBeDefined();
+      const logged = warning?.[0] as { err?: Error; instanceId?: string };
+      expect(logged.err).toBeInstanceOf(Error);
+      expect(logged.err?.message).toContain("destroy failed");
+      expect(logged.instanceId).toBe((adapter as unknown as { instanceId: string }).instanceId);
+      expectNoSecret(`${logged.err?.message}\n${logged.err?.stack ?? ""}`);
+    } finally {
+      held!.dispatcher.destroy = originalDestroy;
+      warn.mockRestore();
+      activeAdapter = undefined;
     }
   });
 
@@ -799,6 +863,10 @@ describe("proxy documentation", () => {
     expect(readme).toContain("options.dispatcher");
     expect(readme).toContain("link-preview-js");
     expect(readme).toContain("shorter than 4 characters");
+    expect(readme).toContain("8 or more characters");
+    expect(readme).toContain("resolves DNS locally");
+    expect(readme).toContain("socks5h://");
+    expect(readme).toContain("remote DNS everywhere");
     expect(readme).toContain("An invalid value stops startup.");
     const changelog = readFileSync(new URL("../CHANGELOG.md", import.meta.url), "utf8");
     expect(changelog).toContain("#146");

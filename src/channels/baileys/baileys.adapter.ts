@@ -1827,7 +1827,14 @@ export class BaileysAdapter implements ChannelAdapter {
         },
       });
     } catch (error) {
-      await closeBaileysProxyAgents(proxyAgents);
+      try {
+        await closeBaileysProxyAgents(proxyAgents);
+      } catch (closeError) {
+        logger.warn(
+          { err: redactError(closeError, this.proxyUrl), instanceId: this.instanceId },
+          "Failed to close outbound proxy agents",
+        );
+      }
       throw redactError(error, this.proxyUrl);
     }
 
@@ -1855,7 +1862,14 @@ export class BaileysAdapter implements ChannelAdapter {
     this.status = "disconnected";
     const proxyAgents = this.proxyAgents;
     this.proxyAgents = undefined;
-    await closeBaileysProxyAgents(proxyAgents);
+    try {
+      await closeBaileysProxyAgents(proxyAgents);
+    } catch (error) {
+      logger.warn(
+        { err: redactError(error, this.proxyUrl), instanceId: this.instanceId },
+        "Failed to close outbound proxy agents",
+      );
+    }
   }
 
   getStatus(): ConnectionStatus {
