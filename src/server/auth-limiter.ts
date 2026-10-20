@@ -19,6 +19,13 @@ export interface AuthLimiterOptions {
   now?: () => number;
 }
 
+export interface AuthAttemptResult {
+  /** Positive when a lock is already in effect and the password must not be checked. */
+  retryAfterMs: number;
+  /** Set when this attempt was counted and may still be undone. */
+  token?: string;
+}
+
 interface AttemptBucket {
   failures: number;
   lockedUntil: number;
@@ -30,17 +37,35 @@ interface Exemption {
   remaining: number;
 }
 
+interface EvictedBucket {
+  key: string;
+  bucket: AttemptBucket;
+}
+
+interface PendingUndo {
+  ipKey: string;
+  pairKey: string;
+  userKey: string;
+  ipLockBefore: number;
+  pairLockBefore: number;
+  userLockBefore: number;
+  ipLockAfter: number;
+  pairLockAfter: number;
+  userLockAfter: number;
+}
+
 /**
  * Failed-sign-in backoff.
  * The strict lock is the client address and the address-plus-username pair.
- * A username also has a much higher limit across addresses, only for a
- * distributed attack. The attempt is counted before password verification.
- * A success removes that one count and does not change a lock that is already
- * in effect. A lock keeps its failure count when it expires and doubles on the
- * next attempt, up to `maxDelayMs`. Quiet time starts at the later of the last
- * attempt and the end of the lock. The address is an IPv6 /64 or everyone
- * behind the same NAT, so a recent success exempts only that username at that
- * address, and only for a few failures.
+ * A username is also limited across addresses after 128 failures, which takes
+ * about 16 distinct /64s or NATs. The wait returned to the caller is a lock
+ * that was already in effect. Counting this attempt may lock only the next
+ * one. A success removes this attempt's count and the lock it created. A lock
+ * keeps its failure count when it expires and doubles on the next failure, up
+ * to `maxDelayMs`. Quiet time starts at the later of the last attempt and the
+ * end of the lock. The address is an IPv6 /64 or everyone behind the same NAT,
+ * so a recent success exempts only that username at that address, and only for
+ * a few failures.
  */
 export class AuthAttemptLimiter {
   private readonly freeFailures: number;
@@ -54,8 +79,9 @@ export class AuthAttemptLimiter {
   private readonly byPair = new Map<string, AttemptBucket>();
   private readonly byUser = new Map<string, AttemptBucket>();
   private readonly exemptions = new Map<string, Exemption>();
-  /** Attempts that reached verification and can still be undone by a success. */
-  private readonly pending = new Map<string, number>();
+  /** Counted attempts that can still be undone, keyed by the token given to the caller. */
+  private readonly pending = new Map<string, PendingUndo>();
+  private nextToken = 1;
 
   constructor(options: AuthLimiterOptions = {}) {
     this.freeFailures = options.freeFailures ?? DEFAULT_FREE_FAILURES;
@@ -68,12 +94,13 @@ export class AuthAttemptLimiter {
   }
 
   /**
-   * Reserve one attempt before verification. A positive result must be refused
-   * without checking the password; the attempt is already counted.
-   * Returns a positive delay when every stored bucket is still locked and none
-   * can be forgotten.
+   * Reserve one attempt before verification.
+   * A positive `retryAfterMs` is a lock that was already in effect; the password
+   * must not be checked and nothing is counted. A zero result may be checked.
+   * The count can lock later attempts. Returns the base delay when every stored
+   * bucket is still locked.
    */
-  beginAttempt(ip: string, username: string): number {
+  beginAttempt(ip: string, username: string): AuthAttemptResult {
     const now = this.now();
     const ipKey = normalizeClientIp(ip);
     const userKey = normalizeUser(username);
@@ -87,32 +114,44 @@ export class AuthAttemptLimiter {
     const exemption = this.exemptionFor(ipKey, userKey, now);
     const blocked = Math.max(ipWait, pairWait, userWait);
     const bypass = exemption !== undefined && blocked > 0;
-    if (!bypass && blocked > 0) return blocked;
+    if (!bypass && blocked > 0) return { retryAfterMs: blocked };
     if (bypass && exemption) {
       exemption.remaining -= 1;
       if (exemption.remaining <= 0) this.exemptions.delete(this.exemptionKey(ipKey, userKey));
-      return 0;
+      return { retryAfterMs: 0 };
     }
     const ipBefore = cloneBucket(this.byIp.get(ipKey));
     const pairBefore = cloneBucket(this.byPair.get(pairKey));
     const userBefore = cloneBucket(this.byUser.get(userKey));
-    const stored =
-      this.bump(this.byIp, ipKey, now, this.freeFailures) &&
-      this.bump(this.byPair, pairKey, now, this.freeFailures) &&
-      this.bump(this.byUser, userKey, now, this.globalFreeFailures);
-    if (!stored) {
+    const ipLockBefore = ipBefore?.lockedUntil ?? 0;
+    const pairLockBefore = pairBefore?.lockedUntil ?? 0;
+    const userLockBefore = userBefore?.lockedUntil ?? 0;
+    const ipBump = this.bump(this.byIp, ipKey, now, this.freeFailures);
+    const pairBump = ipBump ? this.bump(this.byPair, pairKey, now, this.freeFailures) : undefined;
+    const userBump = pairBump
+      ? this.bump(this.byUser, userKey, now, this.globalFreeFailures)
+      : undefined;
+    if (!ipBump || !pairBump || !userBump) {
       restoreBucket(this.byIp, ipKey, ipBefore);
       restoreBucket(this.byPair, pairKey, pairBefore);
       restoreBucket(this.byUser, userKey, userBefore);
-      return this.baseDelayMs;
+      this.restoreEvicted(this.byIp, ipBump?.evicted);
+      this.restoreEvicted(this.byPair, pairBump?.evicted);
+      this.restoreEvicted(this.byUser, userBump?.evicted);
+      return { retryAfterMs: this.baseDelayMs };
     }
-    const wait = Math.max(
-      this.wait(this.byIp.get(ipKey), now),
-      this.wait(this.byPair.get(pairKey), now),
-      this.wait(this.byUser.get(userKey), now),
-    );
-    if (wait === 0) this.noteCredit(ipKey, userKey);
-    return wait;
+    const token = this.notePending({
+      ipKey,
+      pairKey,
+      userKey,
+      ipLockBefore,
+      pairLockBefore,
+      userLockBefore,
+      ipLockAfter: this.byIp.get(ipKey)?.lockedUntil ?? 0,
+      pairLockAfter: this.byPair.get(pairKey)?.lockedUntil ?? 0,
+      userLockAfter: this.byUser.get(userKey)?.lockedUntil ?? 0,
+    });
+    return { retryAfterMs: 0, token };
   }
 
   retryAfterMs(ip: string, username?: string): number {
@@ -134,18 +173,19 @@ export class AuthAttemptLimiter {
   }
 
   /**
-   * Password matched. Undoes this request's count on the address, the pair, and
-   * the global username bucket. An existing lock is left unchanged, and other
-   * failures on the address stay in place.
+   * Password matched. Undoes this attempt's count and the lock it created.
+   * A lock that was already in effect stays. Other failures on the address stay.
    */
-  recordSuccess(ip: string, username: string): void {
+  recordSuccess(ip: string, username: string, token?: string): void {
     const now = this.now();
     const ipKey = normalizeClientIp(ip);
     const userKey = normalizeUser(username);
-    if (this.takeCredit(ipKey, userKey)) {
-      this.release(this.byIp, ipKey, now);
-      this.release(this.byPair, this.pairKey(ipKey, userKey), now);
-      this.release(this.byUser, userKey, now);
+    const undo = token ? this.takePending(ipKey, userKey, token) : undefined;
+    if (token && !undo) return;
+    if (undo) {
+      this.undo(this.byIp, undo.ipKey, now, undo.ipLockBefore, undo.ipLockAfter);
+      this.undo(this.byPair, undo.pairKey, now, undo.pairLockBefore, undo.pairLockAfter);
+      this.undo(this.byUser, undo.userKey, now, undo.userLockBefore, undo.userLockAfter);
     }
     this.exemptions.delete(this.exemptionKey(ipKey, userKey));
     this.exemptions.set(this.exemptionKey(ipKey, userKey), {
@@ -160,16 +200,16 @@ export class AuthAttemptLimiter {
   }
 
   /** A wrong password removes the recent-success exemption for this address and username. */
-  recordFailure(ip: string, username: string): void {
+  recordFailure(ip: string, username: string, token?: string): void {
     const ipKey = normalizeClientIp(ip);
     const userKey = normalizeUser(username);
-    this.takeCredit(ipKey, userKey);
+    this.takePending(ipKey, userKey, token);
     this.exemptions.delete(this.exemptionKey(ipKey, userKey));
   }
 
   /** Verification did not finish. The counted attempt stays, and an exemption stays. */
-  recordBusy(ip: string, username: string): void {
-    this.takeCredit(normalizeClientIp(ip), normalizeUser(username));
+  recordBusy(ip: string, username: string, token?: string): void {
+    this.takePending(normalizeClientIp(ip), normalizeUser(username), token);
   }
 
   hasRecentSuccess(ip: string, username: string): boolean {
@@ -186,25 +226,38 @@ export class AuthAttemptLimiter {
     return this.pairKey(ipKey, userKey);
   }
 
-  private noteCredit(ipKey: string, userKey: string): void {
-    const key = this.pairKey(ipKey, userKey);
-    this.pending.set(key, (this.pending.get(key) ?? 0) + 1);
+  private notePending(undo: PendingUndo): string {
+    while (this.pending.size >= MAX_BUCKETS) {
+      const oldest = this.pending.keys().next().value;
+      if (oldest === undefined) break;
+      this.pending.delete(oldest);
+    }
+    const token = String(this.nextToken);
+    this.nextToken += 1;
+    this.pending.set(token, undo);
+    return token;
   }
 
-  private takeCredit(ipKey: string, userKey: string): boolean {
-    const key = this.pairKey(ipKey, userKey);
-    const count = this.pending.get(key) ?? 0;
-    if (count <= 0) return false;
-    if (count === 1) this.pending.delete(key);
-    else this.pending.set(key, count - 1);
-    return true;
+  private takePending(ipKey: string, userKey: string, token?: string): PendingUndo | undefined {
+    if (!token) return undefined;
+    const undo = this.pending.get(token);
+    if (!undo || undo.ipKey !== ipKey || undo.userKey !== userKey) return undefined;
+    this.pending.delete(token);
+    return undo;
   }
 
-  /** Drop this request's increment. A lock that is already set stays set. */
-  private release(buckets: Map<string, AttemptBucket>, key: string, now: number): void {
+  /** Drop this attempt's increment and the lock it set, unless a later attempt replaced that lock. */
+  private undo(
+    buckets: Map<string, AttemptBucket>,
+    key: string,
+    now: number,
+    lockBefore: number,
+    lockAfter: number,
+  ): void {
     const bucket = buckets.get(key);
     if (!bucket) return;
     bucket.failures = Math.max(0, bucket.failures - 1);
+    if (bucket.lockedUntil === lockAfter) bucket.lockedUntil = lockBefore;
     if (bucket.failures === 0 && bucket.lockedUntil <= now) buckets.delete(key);
   }
 
@@ -235,15 +288,17 @@ export class AuthAttemptLimiter {
     return bucket.lockedUntil - now;
   }
 
-  /** @returns false when a new bucket cannot be stored without dropping a live lock. */
+  /** @returns undefined when a new bucket cannot be stored without dropping a live lock. */
   private bump(
     buckets: Map<string, AttemptBucket>,
     key: string,
     now: number,
     freeFailures: number,
-  ): boolean {
-    if (!buckets.has(key) && buckets.size >= MAX_BUCKETS && !this.evictIdle(buckets, now)) {
-      return false;
+  ): { evicted?: EvictedBucket } | undefined {
+    let evicted: EvictedBucket | undefined;
+    if (!buckets.has(key) && buckets.size >= MAX_BUCKETS) {
+      evicted = this.evictUnlocked(buckets, now);
+      if (!evicted) return undefined;
     }
     const current = buckets.get(key) ?? { failures: 0, lockedUntil: 0, lastAttempt: now };
     current.failures += 1;
@@ -255,18 +310,29 @@ export class AuthAttemptLimiter {
     }
     buckets.delete(key);
     buckets.set(key, current);
-    return true;
+    return { evicted };
   }
 
-  /** Drop one unlocked bucket whose idle window has elapsed. */
-  private evictIdle(buckets: Map<string, AttemptBucket>, now: number): boolean {
+  /** Drop the oldest bucket that is not locked right now. */
+  private evictUnlocked(
+    buckets: Map<string, AttemptBucket>,
+    now: number,
+  ): EvictedBucket | undefined {
     for (const [key, bucket] of buckets) {
-      if (this.idle(bucket, now)) {
+      if (bucket.lockedUntil <= now) {
         buckets.delete(key);
-        return true;
+        return { key, bucket };
       }
     }
-    return false;
+    return undefined;
+  }
+
+  private restoreEvicted(
+    buckets: Map<string, AttemptBucket>,
+    evicted: EvictedBucket | undefined,
+  ): void {
+    if (!evicted) return;
+    buckets.set(evicted.key, evicted.bucket);
   }
 }
 

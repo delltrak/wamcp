@@ -143,24 +143,28 @@ describe("async Basic Auth verification", () => {
 });
 
 describe("sign-in backoff", () => {
-  it("backs off per address and per user, and a success undoes only that attempt", () => {
+  it("backs off per address and a success clears only the lock it created", () => {
     let now = 1_000_000;
     const limiter = new AuthAttemptLimiter({
       freeFailures: 1,
       baseDelayMs: 1000,
       now: () => now,
     });
-    expect(limiter.beginAttempt("203.0.113.5", "alice")).toBe(0);
-    expect(limiter.beginAttempt("203.0.113.5", "alice")).toBe(1000);
+    const first = limiter.beginAttempt("203.0.113.5", "alice");
+    expect(first.retryAfterMs).toBe(0);
+    limiter.recordFailure("203.0.113.5", "alice", first.token);
+    const second = limiter.beginAttempt("203.0.113.5", "alice");
+    expect(second.retryAfterMs).toBe(0);
+    limiter.recordFailure("203.0.113.5", "alice", second.token);
     expect(limiter.retryAfterMs("203.0.113.9", "alice")).toBe(0);
     expect(limiter.retryAfterMs("203.0.113.5", "bob")).toBe(1000);
-    limiter.recordSuccess("203.0.113.5", "alice");
-    expect(limiter.retryAfterMs("203.0.113.5", "bob")).toBe(1000);
-    expect(limiter.retryAfterMs("203.0.113.5", "alice")).toBe(0);
     now += 1000;
+    const allowed = limiter.beginAttempt("203.0.113.5", "alice");
+    expect(allowed.retryAfterMs).toBe(0);
+    limiter.recordSuccess("203.0.113.5", "alice", allowed.token);
+    expect(limiter.retryAfterMs("203.0.113.5", "bob")).toBe(0);
     expect(limiter.retryAfterMs("198.51.100.4", "alice")).toBe(0);
-    expect(limiter.beginAttempt("203.0.113.5", "bob")).toBe(1000);
-    expect(limiter.retryAfterMs("198.51.100.8", "bob")).toBe(0);
+    expect(limiter.beginAttempt("203.0.113.5", "bob").retryAfterMs).toBe(0);
     const forwarded = {
       socket: { remoteAddress: "203.0.113.10" },
       headers: { "x-forwarded-for": "198.51.100.20" },
@@ -205,16 +209,12 @@ describe("sign-in backoff", () => {
         },
       });
     expect((await basic(`${PASSWORD}-wrong`)).status).toBe(401);
-    const limited = await basic(`${PASSWORD}-wrong`, "198.51.100.50");
+    expect((await basic(`${PASSWORD}-wrong`, "198.51.100.50")).status).toBe(401);
+    const limited = await basic(PASSWORD, "198.51.100.51");
     expect(limited.status).toBe(429);
     expect(limited.headers.get("retry-after")).toBe("2");
     expect(await limited.text()).not.toContain(PASSWORD);
-    expect((await basic(PASSWORD, "198.51.100.51")).status).toBe(429);
     now += 2000;
-    const scaled = await basic(PASSWORD);
-    expect(scaled.status).toBe(429);
-    expect(scaled.headers.get("retry-after")).toBe("4");
-    now += 4_000 + 60_000;
     expect((await basic(PASSWORD)).status).toBe(200);
   });
 
@@ -285,18 +285,14 @@ describe("sign-in backoff", () => {
         }),
       });
     expect((await authorize(`${PASSWORD}-wrong`)).status).toBe(401);
-    const locked = await authorize(`${PASSWORD}-wrong`);
+    expect((await authorize(`${PASSWORD}-wrong`)).status).toBe(401);
+    const locked = await authorize(PASSWORD);
     expect(locked.status).toBe(429);
     expect(locked.headers.get("retry-after")).toBe("2");
     const body = await locked.json();
     expect(body).toMatchObject({ error: "temporarily_unavailable" });
     expect(JSON.stringify(body)).not.toContain(PASSWORD);
-    expect((await authorize(PASSWORD)).status).toBe(429);
     now += 2000;
-    const scaled = await authorize(PASSWORD);
-    expect(scaled.status).toBe(429);
-    expect(scaled.headers.get("retry-after")).toBe("4");
-    now += 4_000 + 60_000;
     expect((await authorize(PASSWORD)).status).toBe(302);
   });
 });

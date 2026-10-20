@@ -55,18 +55,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   unused authorization codes. `/oauth/revoke` sends the same CORS headers as the token endpoint.
   Tokens stored with an empty credential version, including tokens issued before this binding, are
   rejected once, so existing OAuth sessions must sign in again.
-- Sign-in backoff keeps its failure count when a lock expires and doubles on the next attempt, up
+- Sign-in backoff keeps its failure count when a lock expires and doubles on the next failure, up
   to 15 minutes. Quiet time starts at the later of the last attempt and the end of the lock, so a
-  15 minute lock stays at that ceiling. The strict lock is the client address and the
-  address-plus-username pair. A username is also limited across addresses after 128 failures, so
-  one other address cannot lock a legitimate user out. A successful password undoes only that
-  request's count and does not clear a lock that is already in effect. A recent success exempts
-  only that username at that address (the whole IPv6 /64 or NAT) for a few failures, and a wrong
-  password removes the exemption. The presented username is limited whether or not an account
-  exists, and a live lock is not evicted to make room. scrypt work uses a short queue, keeps one
-  slot for a recent sign-in, and a rejected attempt still counts. The credential key is linked into
-  place so it is never read empty. Back up `oauth.db.mac` with `oauth.db`; losing the key signs
-  every session out.
+  15 minute lock stays at that ceiling. The attempt that crosses a limit is still checked; if it
+  fails, later attempts get 429 with `Retry-After` until the window ends, and the correct password
+  is accepted after that. A successful password removes that request's count and the lock that
+  request created. The strict lock is the client address and the address-plus-username pair. One
+  other address cannot lock the name. 128 failures spread across addresses can, for example 16
+  IPv6 /64s or NATs using the free attempts; the user then sees 429 from every address until that
+  global window ends. A recent success exempts only that username at that address (the whole IPv6
+  /64 or NAT) for a few failures, and a wrong password removes the exemption. The presented
+  username is limited whether or not an account exists. A full limiter drops the oldest entry that
+  is not locked, and a live lock is not evicted to make room. An attempt that does not finish is
+  tied to a bounded token, so it cannot undo a later failure. scrypt work uses a short queue, keeps
+  one slot for a recent sign-in, and a rejected attempt still counts. The credential key is linked
+  into place so it is never read empty. Back up `oauth.db.mac` with `oauth.db`; losing the key
+  signs every session out.
 - App-state writes now run through a per-instance queue with configurable spacing and a resync
   preflight that requires a retrievable current key, a positive collection version, a 128-byte hash,
   and no Baileys-reported sync, decode, missing-key, or hash-verification failure. Successful writes

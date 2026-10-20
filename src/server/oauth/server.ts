@@ -521,7 +521,8 @@ export class McpOAuthServer {
     const ip = clientAddress(req, this.trustProxy);
     const subject = this.attemptSubject(username);
     const priority = this.limiter?.hasRecentSuccess(ip, subject) ?? false;
-    const reserved = this.limiter?.beginAttempt(ip, subject) ?? 0;
+    const attempt = this.limiter?.beginAttempt(ip, subject);
+    const reserved = attempt?.retryAfterMs ?? 0;
     if (reserved > 0) {
       this.sendRateLimited(res, reserved);
       return;
@@ -532,27 +533,36 @@ export class McpOAuthServer {
       password.length >= 1 &&
       password.length <= 256;
     let credentialsAccepted: boolean;
+    let settled = false;
     try {
-      credentialsAccepted =
-        credentialsWellFormed && (await this.validateCredential(username, password, { priority }));
-    } catch (error) {
-      if (error instanceof ScryptBusyError) {
-        this.limiter?.recordBusy(ip, subject);
-        this.sendRateLimited(res, 1000);
+      try {
+        credentialsAccepted =
+          credentialsWellFormed &&
+          (await this.validateCredential(username, password, { priority }));
+      } catch (error) {
+        if (error instanceof ScryptBusyError) {
+          this.limiter?.recordBusy(ip, subject, attempt?.token);
+          settled = true;
+          this.sendRateLimited(res, 1000);
+          return;
+        }
+        throw error;
+      }
+      if (!credentialsAccepted) {
+        this.limiter?.recordFailure(ip, subject, attempt?.token);
+        settled = true;
+        this.log.warn(
+          { event: "oauth_authorize_rejected" },
+          "OAuth authorization credentials were rejected",
+        );
+        this.renderAuthorize(res, 401, input, validated.client, "Invalid username or password.");
         return;
       }
-      throw error;
+      this.limiter?.recordSuccess(ip, subject, attempt?.token);
+      settled = true;
+    } finally {
+      if (!settled) this.limiter?.recordBusy(ip, subject, attempt?.token);
     }
-    if (!credentialsAccepted) {
-      this.limiter?.recordFailure(ip, subject);
-      this.log.warn(
-        { event: "oauth_authorize_rejected" },
-        "OAuth authorization credentials were rejected",
-      );
-      this.renderAuthorize(res, 401, input, validated.client, "Invalid username or password.");
-      return;
-    }
-    this.limiter?.recordSuccess(ip, subject);
 
     let code: string;
     try {
@@ -928,25 +938,33 @@ ${error}
     const ip = clientAddress(req, this.trustProxy);
     const subject = this.attemptSubject(decoded.username);
     const priority = this.limiter?.hasRecentSuccess(ip, subject) ?? false;
-    const reserved = this.limiter?.beginAttempt(ip, subject) ?? 0;
+    const attempt = this.limiter?.beginAttempt(ip, subject);
+    const reserved = attempt?.retryAfterMs ?? 0;
     if (reserved > 0) return "limited";
+    let settled = false;
     try {
-      const accepted = await this.validateCredential(decoded.username, decoded.password, {
-        priority,
-      });
+      let accepted = false;
+      try {
+        accepted = await this.validateCredential(decoded.username, decoded.password, { priority });
+      } catch (error) {
+        if (error instanceof ScryptBusyError) {
+          this.limiter?.recordBusy(ip, subject, attempt?.token);
+          settled = true;
+          return "limited";
+        }
+        throw error;
+      }
       if (accepted) {
-        this.limiter?.recordSuccess(ip, subject);
+        this.limiter?.recordSuccess(ip, subject, attempt?.token);
+        settled = true;
         return "yes";
       }
-      this.limiter?.recordFailure(ip, subject);
-    } catch (error) {
-      if (error instanceof ScryptBusyError) {
-        this.limiter?.recordBusy(ip, subject);
-        return "limited";
-      }
-      throw error;
+      this.limiter?.recordFailure(ip, subject, attempt?.token);
+      settled = true;
+      return "no";
+    } finally {
+      if (!settled) this.limiter?.recordBusy(ip, subject, attempt?.token);
     }
-    return "no";
   }
 
   /** Malformed names share one bucket. A presented name is limited as given. */

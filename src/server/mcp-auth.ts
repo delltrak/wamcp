@@ -115,31 +115,41 @@ export async function authorizeMcpHttpRequest(
     const ip = clientAddress(req, auth.trustProxy);
     const username = decoded ? decoded.username : "\0unknown";
     const priority = auth.limiter?.hasRecentSuccess(ip, username) ?? false;
-    const reserved = auth.limiter?.beginAttempt(ip, username) ?? 0;
+    const attempt = auth.limiter?.beginAttempt(ip, username);
+    const reserved = attempt?.retryAfterMs ?? 0;
     if (reserved > 0) {
       logger.warn("MCP Basic authentication is rate limited");
       writeTooMany(res, reserved, challenges);
       return false;
     }
+    let settled = false;
     try {
-      const accepted = decoded
-        ? await verifyBasicCredentials(auth.basicUsers, decoded.username, decoded.password, {
-            priority,
-          })
-        : false;
+      let accepted = false;
+      try {
+        accepted = decoded
+          ? await verifyBasicCredentials(auth.basicUsers, decoded.username, decoded.password, {
+              priority,
+            })
+          : false;
+      } catch (error) {
+        if (error instanceof ScryptBusyError) {
+          auth.limiter?.recordBusy(ip, username, attempt?.token);
+          settled = true;
+          logger.warn("MCP Basic authentication is rate limited");
+          writeTooMany(res, 1000, challenges);
+          return false;
+        }
+        throw error;
+      }
       if (accepted && decoded) {
-        auth.limiter?.recordSuccess(ip, username);
+        auth.limiter?.recordSuccess(ip, username, attempt?.token);
+        settled = true;
         return true;
       }
-      auth.limiter?.recordFailure(ip, username);
-    } catch (error) {
-      if (error instanceof ScryptBusyError) {
-        auth.limiter?.recordBusy(ip, username);
-        logger.warn("MCP Basic authentication is rate limited");
-        writeTooMany(res, 1000, challenges);
-        return false;
-      }
-      throw error;
+      auth.limiter?.recordFailure(ip, username, attempt?.token);
+      settled = true;
+    } finally {
+      if (!settled) auth.limiter?.recordBusy(ip, username, attempt?.token);
     }
     logger.warn("Unauthorized MCP request");
     writeUnauthorized(res, challenges);

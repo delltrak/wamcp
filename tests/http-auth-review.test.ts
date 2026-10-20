@@ -140,12 +140,17 @@ describe("concurrent sign-in attempts", () => {
       baseDelayMs: 1000,
       now: () => now,
     });
-    const results = Array.from({ length: 300 }, () => limiter.beginAttempt("203.0.113.5", "alice"));
-    expect(results.filter((wait) => wait === 0)).toHaveLength(8);
-    expect(results.slice(8).every((wait) => wait > 0)).toBe(true);
-    expect(results[299]).toBe(results[8]);
-    now += results[8] ?? 0;
-    expect(limiter.beginAttempt("203.0.113.5", "alice")).toBe(2000);
+    const results = Array.from(
+      { length: 300 },
+      () => limiter.beginAttempt("203.0.113.5", "alice").retryAfterMs,
+    );
+    expect(results.filter((wait) => wait === 0)).toHaveLength(9);
+    expect(results.slice(9).every((wait) => wait > 0)).toBe(true);
+    expect(results[299]).toBe(results[9]);
+    now += results[9] ?? 0;
+    const after = limiter.beginAttempt("203.0.113.5", "alice");
+    expect(after.retryAfterMs).toBe(0);
+    expect(limiter.retryAfterMs("203.0.113.5", "alice")).toBe(2000);
   });
 
   it("doubles the lock on each later cycle until the maximum, then forgets an idle bucket", () => {
@@ -158,18 +163,20 @@ describe("concurrent sign-in attempts", () => {
       maxDelayMs: max,
       now: () => now,
     });
-    expect(limiter.beginAttempt("203.0.113.5", "alice")).toBe(0);
+    expect(limiter.beginAttempt("203.0.113.5", "alice").retryAfterMs).toBe(0);
     for (let cycle = 0; cycle < 4; cycle += 1) {
-      const wait = limiter.beginAttempt("203.0.113.5", "alice");
+      expect(limiter.beginAttempt("203.0.113.5", "alice").retryAfterMs).toBe(0);
+      const wait = limiter.retryAfterMs("203.0.113.5", "alice");
       expect(wait).toBe(Math.min(base * 2 ** cycle, max));
-      expect(limiter.beginAttempt("203.0.113.5", "alice")).toBe(wait);
+      expect(limiter.beginAttempt("203.0.113.5", "alice").retryAfterMs).toBe(wait);
       now += wait;
     }
-    expect(limiter.beginAttempt("203.0.113.5", "alice")).toBe(max);
-    const held = limiter.beginAttempt("203.0.113.5", "alice");
-    expect(held).toBe(max);
+    expect(limiter.beginAttempt("203.0.113.5", "alice").retryAfterMs).toBe(0);
+    expect(limiter.retryAfterMs("203.0.113.5", "alice")).toBe(max);
+    const held = limiter.retryAfterMs("203.0.113.5", "alice");
+    expect(limiter.beginAttempt("203.0.113.5", "alice").retryAfterMs).toBe(held);
     now += held + max;
-    expect(limiter.beginAttempt("203.0.113.5", "alice")).toBe(0);
+    expect(limiter.beginAttempt("203.0.113.5", "alice").retryAfterMs).toBe(0);
   });
 
   it("keeps the backoff at the ceiling after a 15 minute lock", () => {
@@ -181,15 +188,17 @@ describe("concurrent sign-in attempts", () => {
       maxDelayMs: max,
       now: () => now,
     });
-    expect(limiter.beginAttempt("203.0.113.5", "alice")).toBe(0);
+    expect(limiter.beginAttempt("203.0.113.5", "alice").retryAfterMs).toBe(0);
     let wait = 0;
     for (let cycle = 0; cycle < 12; cycle += 1) {
-      wait = limiter.beginAttempt("203.0.113.5", "alice");
-      expect(limiter.beginAttempt("203.0.113.5", "alice")).toBe(wait);
+      expect(limiter.beginAttempt("203.0.113.5", "alice").retryAfterMs).toBe(0);
+      wait = limiter.retryAfterMs("203.0.113.5", "alice");
+      expect(limiter.beginAttempt("203.0.113.5", "alice").retryAfterMs).toBe(wait);
       now += wait;
     }
     expect(wait).toBe(max);
-    expect(limiter.beginAttempt("203.0.113.5", "alice")).toBe(max);
+    expect(limiter.beginAttempt("203.0.113.5", "alice").retryAfterMs).toBe(0);
+    expect(limiter.retryAfterMs("203.0.113.5", "alice")).toBe(max);
   });
 
   it("refuses the correct password once the in-flight budget is exhausted", async () => {
@@ -198,7 +207,7 @@ describe("concurrent sign-in attempts", () => {
       release = resolve;
     });
     let checks = 0;
-    const limiter = new AuthAttemptLimiter({ freeFailures: 1, baseDelayMs: 60_000 });
+    const limiter = new AuthAttemptLimiter({ freeFailures: 0, baseDelayMs: 60_000 });
     const store = openOAuthStore(":memory:");
     const oauth = new McpOAuthServer({
       issuerUrl: ISSUER,
@@ -253,7 +262,7 @@ describe("concurrent sign-in attempts", () => {
 
   it("does not let a trailing correct Basic password skip the backoff", async () => {
     clearBasicAuthSuccessCache();
-    const limiter = new AuthAttemptLimiter({ freeFailures: 1, baseDelayMs: 60_000 });
+    const limiter = new AuthAttemptLimiter({ freeFailures: 0, baseDelayMs: 60_000 });
     const users = parseBasicAuthUsers(`alice:${PASSWORD}`);
     const handler = createHttpRequestHandler({
       routes: { health: "/health", mcp: "/mcp", webhook: "/cloud-webhook" },
@@ -396,11 +405,13 @@ describe("trusted proxies and address buckets", () => {
     expect(normalizeClientIp("2001:db8:1:2::1")).not.toBe(normalizeClientIp("2001:db8:1:3::1"));
 
     const limiter = new AuthAttemptLimiter({ freeFailures: 1, baseDelayMs: 1000, now: () => 50 });
-    expect(limiter.beginAttempt("2001:db8:1:2::1", "alice")).toBe(0);
-    expect(limiter.beginAttempt("2001:db8:1:2::2", "bob")).toBe(1000);
-    expect(limiter.beginAttempt("2001:db8:9:9::1", "carol")).toBe(0);
-    expect(limiter.beginAttempt("::ffff:127.0.0.1", "dave")).toBe(0);
-    expect(limiter.beginAttempt("127.0.0.1", "erin")).toBe(1000);
+    expect(limiter.beginAttempt("2001:db8:1:2::1", "alice").retryAfterMs).toBe(0);
+    expect(limiter.beginAttempt("2001:db8:1:2::2", "bob").retryAfterMs).toBe(0);
+    expect(limiter.beginAttempt("2001:db8:1:2::3", "frank").retryAfterMs).toBe(1000);
+    expect(limiter.beginAttempt("2001:db8:9:9::1", "carol").retryAfterMs).toBe(0);
+    expect(limiter.beginAttempt("::ffff:127.0.0.1", "dave").retryAfterMs).toBe(0);
+    expect(limiter.beginAttempt("127.0.0.1", "erin").retryAfterMs).toBe(0);
+    expect(limiter.beginAttempt("127.0.0.1", "gary").retryAfterMs).toBe(1000);
   });
 
   it("parses WA_TRUST_PROXY and ignores it on stdio", () => {
@@ -435,9 +446,10 @@ describe("trusted proxies and address buckets", () => {
 describe("per-user lock exemption", () => {
   it("does not let an attacker on another address lock the legitimate user", () => {
     const limiter = new AuthAttemptLimiter({ freeFailures: 1, baseDelayMs: 60_000, now: () => 10 });
-    expect(limiter.beginAttempt("198.51.100.1", "alice")).toBe(0);
-    expect(limiter.beginAttempt("198.51.100.1", "alice")).toBe(60_000);
-    expect(limiter.beginAttempt("203.0.113.8", "alice")).toBe(0);
+    expect(limiter.beginAttempt("198.51.100.1", "alice").retryAfterMs).toBe(0);
+    expect(limiter.beginAttempt("198.51.100.1", "alice").retryAfterMs).toBe(0);
+    expect(limiter.beginAttempt("198.51.100.1", "alice").retryAfterMs).toBe(60_000);
+    expect(limiter.beginAttempt("203.0.113.8", "alice").retryAfterMs).toBe(0);
     expect(limiter.retryAfterMs("203.0.113.8", "alice")).toBe(0);
   });
 
@@ -448,9 +460,10 @@ describe("per-user lock exemption", () => {
       baseDelayMs: 1000,
       now: () => 10,
     });
-    expect(limiter.beginAttempt("198.51.100.1", "alice")).toBe(0);
-    expect(limiter.beginAttempt("198.51.100.2", "alice")).toBe(0);
-    expect(limiter.beginAttempt("203.0.113.3", "alice")).toBe(1000);
+    expect(limiter.beginAttempt("198.51.100.1", "alice").retryAfterMs).toBe(0);
+    expect(limiter.beginAttempt("198.51.100.2", "alice").retryAfterMs).toBe(0);
+    expect(limiter.beginAttempt("203.0.113.3", "alice").retryAfterMs).toBe(0);
+    expect(limiter.beginAttempt("203.0.113.4", "alice").retryAfterMs).toBe(1000);
   });
 
   it("gives a recent address a few tries, then drops the exemption on a failure", () => {
@@ -463,19 +476,18 @@ describe("per-user lock exemption", () => {
       now: () => now,
     });
     limiter.recordSuccess("203.0.113.8", "alice");
-    expect(limiter.beginAttempt("198.51.100.1", "alice")).toBe(0);
-    expect(limiter.beginAttempt("198.51.100.1", "alice")).toBe(60_000);
-    expect(limiter.beginAttempt("203.0.113.8", "alice")).toBe(0);
-    expect(limiter.beginAttempt("203.0.113.8", "mallory")).toBe(60_000);
-    expect(limiter.beginAttempt("203.0.113.8", "alice")).toBe(0);
-    expect(limiter.beginAttempt("203.0.113.8", "alice")).toBe(0);
-    expect(limiter.beginAttempt("203.0.113.8", "alice")).toBe(0);
-    expect(limiter.beginAttempt("203.0.113.8", "alice")).toBe(60_000);
+    expect(limiter.beginAttempt("203.0.113.8", "mallory").retryAfterMs).toBe(0);
+    expect(limiter.beginAttempt("203.0.113.8", "mallory").retryAfterMs).toBe(0);
+    expect(limiter.beginAttempt("203.0.113.8", "mallory").retryAfterMs).toBe(60_000);
+    expect(limiter.beginAttempt("203.0.113.8", "alice").retryAfterMs).toBe(0);
+    expect(limiter.beginAttempt("203.0.113.8", "alice").retryAfterMs).toBe(0);
+    expect(limiter.beginAttempt("203.0.113.8", "alice").retryAfterMs).toBe(0);
+    expect(limiter.beginAttempt("203.0.113.8", "alice").retryAfterMs).toBe(60_000);
     limiter.recordSuccess("203.0.113.8", "alice");
-    expect(limiter.beginAttempt("203.0.113.8", "alice")).toBe(0);
+    expect(limiter.beginAttempt("203.0.113.8", "alice").retryAfterMs).toBe(0);
     limiter.recordFailure("203.0.113.8", "alice");
-    expect(limiter.beginAttempt("203.0.113.8", "alice")).toBe(60_000);
-    expect(limiter.beginAttempt("203.0.113.8", "bob")).toBe(60_000);
+    expect(limiter.beginAttempt("203.0.113.8", "alice").retryAfterMs).toBe(60_000);
+    expect(limiter.beginAttempt("203.0.113.8", "bob").retryAfterMs).toBe(60_000);
     now += 60_000;
     expect(limiter.retryAfterMs("198.51.100.1", "carol")).toBe(0);
   });
@@ -540,7 +552,8 @@ describe("scrypt concurrency cap", () => {
     expect(allowed).toBe(false);
     expect(response.statusCode).toBe(429);
     limiter.recordSuccess("203.0.113.8", "alice");
-    expect(limiter.beginAttempt("203.0.113.8", "alice")).toBe(1000);
+    expect(limiter.beginAttempt("203.0.113.8", "alice").retryAfterMs).toBe(0);
+    expect(limiter.retryAfterMs("203.0.113.8", "bob")).toBe(1000);
   });
 
   it("slides the successful scrypt cache forward on a hit", async () => {
@@ -737,6 +750,151 @@ describe("credential version HMAC", () => {
   });
 });
 
+describe("sign-in after the lock window", () => {
+  it("accepts the correct password after eight failures and the lock window", async () => {
+    let now = 9_000_000;
+    const limiter = new AuthAttemptLimiter({
+      freeFailures: 8,
+      baseDelayMs: 1000,
+      now: () => now,
+    });
+    const users = parseBasicAuthUsers(`alice:${PASSWORD}`);
+    const handler = createHttpRequestHandler({
+      routes: { health: "/health", mcp: "/mcp", webhook: "/cloud-webhook" },
+      oauth: null,
+      authorize: (req, res) =>
+        authorizeMcpHttpRequest(req, res, { basicUsers: users, limiter }, null),
+      health: (_req, res) => {
+        res.writeHead(200);
+        res.end();
+      },
+      mcp: async (_req, res) => {
+        res.writeHead(200);
+        res.end();
+      },
+      webhook: async (_req, res) => {
+        res.writeHead(200);
+        res.end();
+      },
+    });
+    const harness = await listen(handler);
+    const basic = (password: string) =>
+      fetch(`${harness.baseUrl}/mcp`, {
+        method: "POST",
+        headers: {
+          Authorization: `Basic ${Buffer.from(`alice:${password}`).toString("base64")}`,
+        },
+      });
+    for (let index = 0; index < 8; index += 1) {
+      expect((await basic(`${PASSWORD}-wrong`)).status).toBe(401);
+    }
+    expect((await basic(`${PASSWORD}-wrong`)).status).toBe(401);
+    const locked = await basic(PASSWORD);
+    expect(locked.status).toBe(429);
+    expect(locked.headers.get("retry-after")).toBe("1");
+    now += 1000;
+    expect((await basic(PASSWORD)).status).toBe(200);
+  });
+
+  it("accepts the correct password after the global lock window", async () => {
+    let now = 4_000_000;
+    const limiter = new AuthAttemptLimiter({
+      globalFreeFailures: 128,
+      baseDelayMs: 60_000,
+      now: () => now,
+    });
+    for (let index = 0; index < 128; index += 1) {
+      const ip = `198.51.0.${index + 1}`;
+      const attempt = limiter.beginAttempt(ip, "alice");
+      expect(attempt.retryAfterMs).toBe(0);
+      limiter.recordFailure(ip, "alice", attempt.token);
+    }
+    const arming = limiter.beginAttempt("203.0.113.50", "alice");
+    expect(arming.retryAfterMs).toBe(0);
+    limiter.recordFailure("203.0.113.50", "alice", arming.token);
+    const users = parseBasicAuthUsers(`alice:${PASSWORD}`);
+    const handler = createHttpRequestHandler({
+      routes: { health: "/health", mcp: "/mcp", webhook: "/cloud-webhook" },
+      oauth: null,
+      authorize: (req, res) =>
+        authorizeMcpHttpRequest(req, res, { basicUsers: users, limiter }, null),
+      health: (_req, res) => {
+        res.writeHead(200);
+        res.end();
+      },
+      mcp: async (_req, res) => {
+        res.writeHead(200);
+        res.end();
+      },
+      webhook: async (_req, res) => {
+        res.writeHead(200);
+        res.end();
+      },
+    });
+    const harness = await listen(handler);
+    const basic = (password: string) =>
+      fetch(`${harness.baseUrl}/mcp`, {
+        method: "POST",
+        headers: {
+          Authorization: `Basic ${Buffer.from(`alice:${password}`).toString("base64")}`,
+        },
+      });
+    expect((await basic(PASSWORD)).status).toBe(429);
+    now += 60_000;
+    expect((await basic(PASSWORD)).status).toBe(200);
+  });
+});
+
+describe("full limiter maps and unsettled attempts", () => {
+  it("lets a real user through after 1250 networks fill the maps", () => {
+    const limiter = new AuthAttemptLimiter({ now: () => 1_000 });
+    let count = 0;
+    for (let net = 0; net < 1250; net += 1) {
+      const ip = `2001:db8:${net.toString(16)}::1`;
+      for (let name = 0; name < 8; name += 1) {
+        expect(limiter.beginAttempt(ip, `user-${count}`).retryAfterMs).toBe(0);
+        count += 1;
+      }
+    }
+    expect(count).toBe(10_000);
+    expect(limiter.beginAttempt("2001:db8:ffff::1", "alice").retryAfterMs).toBe(0);
+  });
+
+  it("does not let a leaked attempt undo a later failure", () => {
+    const limiter = new AuthAttemptLimiter({ freeFailures: 1, baseDelayMs: 1000, now: () => 50 });
+    const leaked = limiter.beginAttempt("203.0.113.5", "alice");
+    expect(leaked.retryAfterMs).toBe(0);
+    const failure = limiter.beginAttempt("203.0.113.5", "alice");
+    expect(failure.retryAfterMs).toBe(0);
+    limiter.recordFailure("203.0.113.5", "alice", failure.token);
+    expect(limiter.retryAfterMs("203.0.113.5", "alice")).toBe(1000);
+    limiter.recordSuccess("203.0.113.5", "alice", leaked.token);
+    expect(limiter.retryAfterMs("203.0.113.5", "bob")).toBe(1000);
+    expect(limiter.retryAfterMs("203.0.113.5", "alice")).toBe(0);
+  });
+
+  it("drops the oldest unsettled attempt once pending is full", () => {
+    let now = 1_000;
+    const limiter = new AuthAttemptLimiter({
+      freeFailures: 10_000,
+      globalFreeFailures: 10_000,
+      baseDelayMs: 1000,
+      now: () => now,
+    });
+    const first = limiter.beginAttempt("203.0.113.5", "alice");
+    expect(first.retryAfterMs).toBe(0);
+    for (let index = 1; index < 10_000; index += 1) {
+      expect(limiter.beginAttempt("203.0.113.5", "alice").retryAfterMs).toBe(0);
+    }
+    expect(limiter.beginAttempt("203.0.113.5", "alice").retryAfterMs).toBe(0);
+    expect(limiter.retryAfterMs("203.0.113.5", "alice")).toBe(1000);
+    limiter.recordSuccess("203.0.113.5", "alice", first.token);
+    now += 1000;
+    expect(limiter.beginAttempt("203.0.113.5", "alice").retryAfterMs).toBe(0);
+    expect(limiter.retryAfterMs("203.0.113.5", "alice")).toBe(2000);
+  });
+});
+
 describe("unknown usernames and bucket eviction", () => {
   it("does not answer differently when the username does not exist", async () => {
     const limiter = new AuthAttemptLimiter({ freeFailures: 1, baseDelayMs: 60_000 });
@@ -756,9 +914,11 @@ describe("unknown usernames and bucket eviction", () => {
       ).then(() => response.statusCode);
     };
     expect(await call("alice", `${PASSWORD}-wrong`, "203.0.113.40")).toBe(401);
+    expect(await call("alice", `${PASSWORD}-wrong`, "203.0.113.40")).toBe(401);
     expect(await call("alice", `${PASSWORD}-wrong`, "203.0.113.40")).toBe(429);
     expect(await call("stranger-a", "x", "198.51.100.1")).toBe(401);
     expect(await call("stranger-b", "x", "198.51.100.2")).toBe(401);
+    expect(await call("ghost", "x", "198.51.100.3")).toBe(401);
     expect(await call("ghost", "x", "198.51.100.3")).toBe(401);
     expect(await call("ghost", "x", "198.51.100.3")).toBe(429);
     expect(await call("phantom", "x", "198.51.100.4")).toBe(401);
@@ -779,14 +939,15 @@ describe("unknown usernames and bucket eviction", () => {
     });
     const address = (index: number) => `10.1.${Math.floor(index / 256)}.${index % 256}`;
     for (let index = 0; index < 10_000; index += 1) {
-      expect(limiter.beginAttempt(address(index), `user-${index}`)).toBe(1000);
+      expect(limiter.beginAttempt(address(index), `user-${index}`).retryAfterMs).toBe(0);
     }
     expect(limiter.retryAfterMs(address(0), "user-0")).toBe(1000);
-    expect(limiter.beginAttempt("203.0.113.80", "overflow")).toBe(1000);
+    expect(limiter.beginAttempt("203.0.113.80", "overflow").retryAfterMs).toBe(1000);
     expect(limiter.retryAfterMs(address(0), "user-0")).toBe(1000);
     now += 61_000;
-    expect(limiter.beginAttempt("203.0.113.80", "overflow")).toBe(1000);
-    expect(limiter.retryAfterMs(address(0), "user-0")).toBe(0);
+    expect(limiter.beginAttempt("203.0.113.80", "overflow").retryAfterMs).toBe(0);
+    expect(limiter.beginAttempt(address(0), "user-0").retryAfterMs).toBe(0);
+    expect(limiter.retryAfterMs(address(0), "user-0")).toBe(1000);
   });
 });
 
