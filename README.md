@@ -36,7 +36,7 @@
 
 **WA MCP** is a WhatsApp MCP server built with TypeScript that gives AI agents full access to WhatsApp through the [Model Context Protocol](https://modelcontextprotocol.io). It supports both **Baileys** (WhatsApp Web) and **Meta Cloud API** as dual-channel backends, deployable with **Docker** in a single command.
 
-Your agent connects once and auto-discovers **137 tools**, **10 resources**, and **15 real-time events** — zero configuration, zero REST wrappers, zero glue code.
+Your agent connects once and auto-discovers **142 tools**, **10 resources**, and **15 real-time events** — zero configuration, zero REST wrappers, zero glue code.
 
 ```
 Your AI Agent ←→ MCP Protocol ←→ WA MCP ←→ WhatsApp
@@ -82,7 +82,7 @@ from google.adk.tools.mcp_tool import McpToolset
 
 tools = McpToolset(url="http://localhost:3000/mcp")
 
-# Agent auto-discovers 137 WhatsApp tools
+# Agent auto-discovers 142 WhatsApp tools
 # wa_create_instance, wa_send_text, wa_send_image, ...
 ```
 
@@ -137,6 +137,7 @@ Add to your `claude_desktop_config.json`:
 | 👥  | **Groups**             | List groups, inspect participants, manage membership and settings, invite links, and group pictures. |
 | 👤  | **Contacts & Profile** | Number check, block/unblock, business profiles, privacy, status updates.                                  |
 | 📡  | **Real-time events**   | 15 notification types via SSE: messages, typing, groups, calls, connection status.                       |
+| ⏰  | **Scheduled sends**    | One-shot, daily, weekly, and monthly messages in SQLite. Off until `WA_SCHEDULER_ENABLED=true`.          |
 | ⚡  | **Rate limiting**      | BullMQ queues prevent WhatsApp bans (20 msg/min Baileys, 80 msg/min Cloud).                               |
 | 🔁  | **Auto-reconnect**     | Automatic reconnection with exponential backoff.                                                          |
 | 🗃️  | **Persistent**         | SQLite storage for sessions, messages, contacts, groups.                                                  |
@@ -146,7 +147,7 @@ Add to your `claude_desktop_config.json`:
 
 ## 🛠️ Tools
 
-WA MCP exposes **137 tools** across 15 domains. All tools use the `wa_` prefix.
+WA MCP exposes **142 tools** across 16 domains. All tools use the `wa_` prefix.
 
 <details>
 <summary>📋 <strong>Instance Management</strong> (9 tools)</summary>
@@ -201,6 +202,30 @@ WA MCP exposes **137 tools** across 15 domains. All tools use the `wa_` prefix.
 | `wa_get_message_receipts` | List locally observed per-participant receipts (Baileys) |
 | `wa_get_message_reactions` | List locally observed reactions (Baileys) |
 | `wa_mark_read`         | Mark messages as read   |
+
+</details>
+
+<details>
+<summary>⏰ <strong>Scheduled sends</strong> (5 tools)</summary>
+
+| Tool                   | Description                                                                 |
+| ---------------------- | --------------------------------------------------------------------------- |
+| `wa_schedule_message` | Store a one-shot or daily/weekly/monthly send. Default timezone `America/Bahia` |
+| `wa_list_scheduled`   | List schedules for an instance                                              |
+| `wa_pause_scheduled`  | Pause an active schedule                                                    |
+| `wa_resume_scheduled` | Resume a paused schedule                                                    |
+| `wa_cancel_scheduled` | Cancel a schedule so it is not sent                                         |
+
+Schedules are stored in the existing SQLite file (`WA_DATABASE_PATH`, default `data/whatsapp.db`). The database path and Docker volume do not change. `WA_SCHEDULER_ENABLED=false` by default: create, pause, resume, and cancel refuse, the worker does not run, and nothing is queued. Listing still works. When the gate is on, a due send is handed to the same per-instance BullMQ limiter as `wa_send_text` (`WA_BAILEYS_RATE_LIMIT` / `WA_CLOUD_RATE_LIMIT`).
+
+`scheduledAt` is an RFC3339 instant. Daily, weekly, and monthly repeats use that instant's wall clock in the schedule timezone (`America/Bahia` when omitted). Weekly `weekdays` are `0` (Sunday) through `6` (Saturday). Monthly `dayOfMonth` uses the last day of a short month. Text is supported, as are image, video, audio, document, and sticker inputs (HTTPS or base64, same rules as immediate sends).
+
+**Missed runs.** A due time less than 2 minutes old is on time and is sent, including after a short restart. Older than that, `WA_SCHEDULER_MISSED_POLICY` applies:
+
+- `skip` (default): do not send the missed occurrence. A one-shot becomes `skipped`. A recurring schedule moves to the next future slot. If none remains, it is `completed`.
+- `send`: enqueue the missed occurrence once, then move a recurring schedule to the next slot after now. Downtime does not produce one message per missed day.
+
+A row left `running` because the process stopped after claiming it is not sent again. A one-shot is marked `failed`; a recurring schedule advances to the next future slot. Enqueue failures retry up to 5 times, 30 seconds apart, then that occurrence is given up the same way.
 
 </details>
 
@@ -712,6 +737,8 @@ Copy `.env.example` to `.env` and configure:
 | `WA_DATABASE_PATH`          | `data/whatsapp.db`       | SQLite database path; in Docker this resolves under `/app` |
 | `WA_BAILEYS_HISTORY_SYNC_MAX_MESSAGES` | `100` | Maximum messages requested per chat by automatic and on-demand history fetches (1–10000) |
 | `WA_DATA_DIR`               | `wa-data` in Compose     | Optional absolute host directory mounted at `/app/data`; unset preserves the existing named volume |
+| `WA_SCHEDULER_ENABLED`      | `false`                  | Allow scheduled sends. While false, nothing is queued |
+| `WA_SCHEDULER_MISSED_POLICY` | `skip`                  | `skip` drops occurrences missed during downtime; `send` queues that occurrence once on resume |
 | `WA_BAILEYS_RATE_LIMIT`     | `20`                     | Messages/min per Baileys instance        |
 | `WA_CLOUD_RATE_LIMIT`       | `80`                     | Messages/min per Cloud API instance      |
 | `WA_MESSAGE_RETENTION_DAYS` | `30`                     | Auto-delete old messages                 |
@@ -1000,7 +1027,7 @@ src/
 ├── index.ts                     # Entry point (HTTP/stdio)
 ├── constants.ts                 # Defaults and limits
 ├── server/mcp.ts                # MCP server setup
-├── tools/                       # 🔧 137 MCP tools (15 files)
+├── tools/                       # 🔧 142 MCP tools (16 files)
 ├── resources/                   # 📖 10 MCP resources (8 files)
 ├── notifications/events.ts      # 📡 15 documented event types
 ├── channels/

@@ -25,6 +25,8 @@ import { logger } from "./utils/logger.js";
 import { getAutoReadMode } from "./services/auto-read.js";
 import { bootEventWebhook, type EventWebhookStatus } from "./services/event-webhook-config.js";
 import { buildHealthBody } from "./server/health.js";
+import { sqlite } from "./db/client.js";
+import { MessageScheduler } from "./services/scheduler.js";
 
 const CLOUD_WEBHOOK_PATH = "/cloud-webhook";
 
@@ -86,14 +88,26 @@ async function initServices() {
   const maintenance = new MaintenanceService(instanceManager);
   await maintenance.start();
 
+  const scheduler = new MessageScheduler({
+    sqlite,
+    enqueue: (instanceId, to, content, channel) =>
+      messageQueue.enqueueMessage(instanceId, to, content, channel),
+    resolveChannel: (instanceId) => instanceManager.getInstanceChannel(instanceId),
+    instanceExists: (instanceId) => {
+      instanceManager.getInstance(instanceId);
+    },
+  });
+  scheduler.start();
+
   logger.info("Services initialized");
 
-  return { instanceManager, messageQueue, eventWebhook, maintenance };
+  return { instanceManager, messageQueue, eventWebhook, maintenance, scheduler };
 }
 
 async function startHttp(webhookStatus: EventWebhookStatus): Promise<void> {
-  const { instanceManager, messageQueue, eventWebhook, maintenance } = await initServices();
-  const mcpSessions = new McpHttpSessionManager(instanceManager, messageQueue);
+  const { instanceManager, messageQueue, eventWebhook, maintenance, scheduler } =
+    await initServices();
+  const mcpSessions = new McpHttpSessionManager(instanceManager, messageQueue, scheduler);
   const startTime = Date.now();
 
   const httpServer = createServer(async (req: IncomingMessage, res: ServerResponse) => {
@@ -213,6 +227,7 @@ async function startHttp(webhookStatus: EventWebhookStatus): Promise<void> {
       messageQueue.close(),
       eventWebhook.close(),
       maintenance.stop(),
+      Promise.resolve(scheduler.stop()),
     ]).then(() => undefined);
     return servicesClosePromise;
   };
@@ -249,8 +264,9 @@ async function startHttp(webhookStatus: EventWebhookStatus): Promise<void> {
 }
 
 async function startStdio(): Promise<void> {
-  const { instanceManager, messageQueue, eventWebhook, maintenance } = await initServices();
-  const { server: mcpServer } = createMcpServer(instanceManager, messageQueue);
+  const { instanceManager, messageQueue, eventWebhook, maintenance, scheduler } =
+    await initServices();
+  const { server: mcpServer } = createMcpServer(instanceManager, messageQueue, scheduler);
   const onServerClose = mcpServer.server.onclose;
   let servicesClosePromise: Promise<void> | null = null;
   const closeServices = (): Promise<void> => {
@@ -258,6 +274,7 @@ async function startStdio(): Promise<void> {
       messageQueue.close(),
       eventWebhook.close(),
       maintenance.stop(),
+      Promise.resolve(scheduler.stop()),
     ]).then(() => undefined);
     return servicesClosePromise;
   };

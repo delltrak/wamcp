@@ -362,6 +362,51 @@ export const pendingPollVotes = sqliteTable(
 );
 
 // ============================================================
+// SCHEDULED MESSAGES
+// One-shot and recurring outbound sends. Lives in the existing database file.
+// ============================================================
+export const scheduledMessages = sqliteTable(
+  "scheduled_messages",
+  {
+    id: text("id").primaryKey(),
+    instanceId: text("instance_id")
+      .notNull()
+      .references(() => instances.id, { onDelete: "cascade" }),
+    recipient: text("recipient").notNull(),
+    messageType: text("message_type", {
+      enum: ["text", "image", "video", "audio", "document", "sticker"],
+    }).notNull(),
+    payloadJson: text("payload_json").notNull(),
+    timezone: text("timezone").notNull(),
+    recurrence: text("recurrence", {
+      enum: ["once", "daily", "weekly", "monthly"],
+    }).notNull(),
+    scheduledAt: integer("scheduled_at").notNull(),
+    nextRunAt: integer("next_run_at").notNull(),
+    weekdaysJson: text("weekdays_json"),
+    dayOfMonth: integer("day_of_month"),
+    endAt: integer("end_at"),
+    occurrenceLimit: integer("occurrence_limit"),
+    occurrenceCount: integer("occurrence_count").notNull().default(0),
+    attempts: integer("attempts").notNull().default(0),
+    status: text("status", {
+      enum: ["active", "paused", "running", "completed", "cancelled", "failed", "skipped"],
+    }).notNull(),
+    leaseToken: text("lease_token"),
+    leaseUntil: integer("lease_until"),
+    lastRunAt: integer("last_run_at"),
+    lastJobId: text("last_job_id"),
+    lastError: text("last_error"),
+    createdAt: integer("created_at").notNull(),
+    updatedAt: integer("updated_at").notNull(),
+  },
+  (table) => [
+    index("idx_scheduled_messages_due").on(table.status, table.nextRunAt),
+    index("idx_scheduled_messages_instance").on(table.instanceId, table.status),
+  ],
+);
+
+// ============================================================
 // VERSION CACHE
 // WhatsApp Web version auto-update (daily check)
 // ============================================================

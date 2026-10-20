@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Added scheduled and recurring sends (`wa_schedule_message`, `wa_list_scheduled`,
+  `wa_pause_scheduled`, `wa_resume_scheduled`, `wa_cancel_scheduled`). Rows live in the existing
+  SQLite database. `WA_SCHEDULER_ENABLED=false` by default, so nothing is sent until it is turned
+  on. `WA_SCHEDULER_MISSED_POLICY=skip` (or `send`) controls occurrences missed while the process
+  is down. The default timezone is `America/Bahia`. Due sends use the existing outbound rate limiter.
+
 - Added Baileys instance lifecycle webhooks for connection, disconnect, pairing-code, and QR events,
   plus the read-only `wa_get_instance_status` tool. Pairing and QR challenge data is omitted from
   webhook payloads and status output.

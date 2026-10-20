@@ -58,6 +58,17 @@ export const PRUNE_DEDUP_CRON = "0 * * * *"; // Hourly
 export const CHECK_VERSION_CRON = "0 6 * * *"; // Daily at 6 AM
 export const HEALTH_CHECK_INTERVAL_MS = 300_000; // 5 minutes
 
+// Scheduled sends. The worker stays off until WA_SCHEDULER_ENABLED=true.
+export const DEFAULT_SCHEDULER_TIMEZONE = "America/Bahia";
+export const DEFAULT_SCHEDULER_MISSED_POLICY = "skip";
+export const SCHEDULER_POLL_MS = 5_000;
+/** Due times older than this are missed runs. A short restart still sends. */
+export const SCHEDULER_ON_TIME_SLACK_MS = 120_000;
+export const SCHEDULER_LEASE_MS = 120_000;
+export const SCHEDULER_MAX_ATTEMPTS = 5;
+export const SCHEDULER_RETRY_DELAY_MS = 30_000;
+export const SCHEDULER_MAX_PER_TICK = 50;
+
 // Instance ID prefix
 export const INSTANCE_ID_PREFIX = "inst_";
 

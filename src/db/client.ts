@@ -7,6 +7,7 @@ import { dirname, resolve } from "node:path";
 import Database, { type Database as DatabaseType } from "better-sqlite3";
 import { drizzle } from "drizzle-orm/better-sqlite3";
 import * as schema from "./schema.js";
+import { createScheduledMessagesTable } from "./scheduled-messages.js";
 
 const DB_PATH = resolve(process.env.WA_DATABASE_PATH?.trim() || "data/whatsapp.db");
 
@@ -282,6 +283,7 @@ try {
 }
 
 initializeDatabase();
+createScheduledMessagesTable(sqlite);
 
 try {
   sqlite.exec(`ALTER TABLE event_responses ADD COLUMN extra_guest_count INTEGER`);

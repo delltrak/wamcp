@@ -21,6 +21,7 @@
    - [WhatsApp Business Labels](#211-whatsapp-business-labels-8-tools)
    - [WhatsApp Events](#212-whatsapp-events-2-tools)
    - [Business, Communities, and Catalog](#213-business-communities-and-catalog-15-tools)
+   - [Scheduled sends](#214-scheduled-sends-5-tools)
 3. [Resources Reference](#3-resources-reference)
 4. [Notifications Reference](#4-notifications-reference)
 5. [Error Handling](#5-error-handling)
@@ -105,12 +106,21 @@ Tools marked **Baileys only** are not available on Cloud API instances.
   real-number check has been performed for this change.
 - **Real WhatsApp checks** -- Run real integration tests only with a throwaway number. Automated
   tests use mocked sockets and do not connect to WhatsApp.
+- **Scheduled sends** -- `WA_SCHEDULER_ENABLED=false` by default. `wa_schedule_message`,
+  `wa_pause_scheduled`, `wa_resume_scheduled`, and `wa_cancel_scheduled` refuse until it is `true`,
+  and the worker does not claim or enqueue anything. `wa_list_scheduled` still reads rows.
+  Schedules persist in the existing SQLite database (`scheduled_messages`). The default timezone
+  is `America/Bahia`. `WA_SCHEDULER_MISSED_POLICY` is `skip` or `send` (default `skip`). A due time
+  within 2 minutes is sent. Older than that, `skip` drops the occurrence and waits for the next
+  future slot (a one-shot becomes `skipped`); `send` queues that one occurrence and then advances
+  a recurring schedule to the next slot after now. A claimed row whose lease expires is not sent
+  again. Due sends go through the existing outbound rate limiter.
 
 ---
 
 ## 2. Tools Reference
 
-WA MCP exposes **137 tools** grouped by domain. All tools return MCP-standard responses.
+WA MCP exposes **142 tools** grouped by domain. All tools return MCP-standard responses.
 
 ### Success Response Format
 
@@ -2624,6 +2634,91 @@ to find an existing reply's timestamp before editing or deleting it.
 
 Catalog image URLs are fetched only from public HTTPS hosts; the media helper enforces input-size
 limits before upload.
+
+---
+
+### 2.14 Scheduled sends (5 tools)
+
+Store a message and let the worker queue it later. The worker polls every 5 seconds and only runs
+when `WA_SCHEDULER_ENABLED=true`. Each due message calls the same outbound queue as an immediate
+send, so `WA_BAILEYS_RATE_LIMIT` and `WA_CLOUD_RATE_LIMIT` still apply. Rows are created in the
+existing SQLite file; the database path is unchanged.
+
+`scheduledAt` is RFC3339 and must be in the future. `timezone` defaults to `America/Bahia`. `once`
+sends a single time. `daily`, `weekly`, and `monthly` repeat that instant's wall clock in the
+schedule timezone. Weekly `weekdays` use `0` for Sunday through `6` for Saturday. Monthly
+`dayOfMonth` is clamped to the last day of a short month. Optional `endAt` (RFC3339) and
+`occurrenceLimit` stop the series. Supported `content.type` values are `text`, `image`, `video`,
+`audio`, `document`, and `sticker`.
+
+Missed-run policy (`WA_SCHEDULER_MISSED_POLICY`, default `skip`):
+
+| Situation | `skip` | `send` |
+| --------- | ------ | ------ |
+| Due time is at most 2 minutes ago | Send | Send |
+| Due time is older than 2 minutes | Do not send. One-shot becomes `skipped`. Recurring moves to the next future slot | Enqueue that occurrence once, then move a recurring schedule to the next slot after now |
+| Process died after the row was claimed (`running` lease expired) | Do not send again. One-shot becomes `failed`. Recurring moves to the next future slot | Same. The queue may already have accepted the message |
+| Gate is false | Nothing is claimed or queued | Nothing is claimed or queued |
+
+Enqueue failures stay active and retry up to 5 times, 30 seconds apart, then that occurrence is
+given up (one-shot `failed`, recurring advances).
+
+#### `wa_schedule_message`
+
+| Parameter         | Type   | Required | Description |
+| ----------------- | ------ | -------- | ----------- |
+| `instanceId`      | string | Yes      | Instance to send from |
+| `to`              | string | Yes      | Phone number or group JID |
+| `scheduledAt`     | string | Yes      | RFC3339 first run, in the future |
+| `timezone`        | string | No       | IANA timezone. Default `America/Bahia` |
+| `recurrence`      | string | No       | `once` (default), `daily`, `weekly`, or `monthly` |
+| `weekdays`        | number[] | No    | Weekly only. Unique values `0`–`6` |
+| `dayOfMonth`      | number | No       | Monthly only. `1`–`31` |
+| `endAt`           | string | No       | RFC3339 instant after which nothing else is sent |
+| `occurrenceLimit` | number | No       | Stop after this many successful sends |
+| `content`         | object | Yes      | `{ type: "text", text }` or an image, video, audio, document, or sticker payload |
+
+**Channel support:** Both. The eventual send uses the instance channel.
+
+**Response:** the stored schedule, including `id`, `status: "active"`, `scheduledAt`, and `nextRunAt`.
+
+#### `wa_list_scheduled`
+
+| Parameter    | Type   | Required | Description |
+| ------------ | ------ | -------- | ----------- |
+| `instanceId` | string | Yes      | Instance to list |
+| `status`     | string | No       | `active`, `paused`, `running`, `completed`, `cancelled`, `failed`, or `skipped` |
+| `limit`      | number | No       | 1–100, default 25 |
+| `offset`     | number | No       | Default 0 |
+
+Listing does not require the scheduler gate.
+
+#### `wa_pause_scheduled`
+
+| Parameter    | Type   | Required | Description |
+| ------------ | ------ | -------- | ----------- |
+| `instanceId` | string | Yes      | Owning instance |
+| `scheduleId` | string | Yes      | Schedule id |
+
+Only an `active` schedule can be paused. Paused rows are not sent.
+
+#### `wa_resume_scheduled`
+
+| Parameter    | Type   | Required | Description |
+| ------------ | ------ | -------- | ----------- |
+| `instanceId` | string | Yes      | Owning instance |
+| `scheduleId` | string | Yes      | Schedule id |
+
+Only a `paused` schedule can be resumed. If it is already due, the next tick applies the missed-run policy.
+
+#### `wa_cancel_scheduled`
+
+| Parameter    | Type   | Required | Description |
+| ------------ | ------ | -------- | ----------- |
+| `instanceId` | string | Yes      | Owning instance |
+| `scheduleId` | string | Yes      | Schedule id |
+
+Cancels an `active`, `paused`, or `failed` schedule. A cancelled row is never sent.
 
 ---
 
