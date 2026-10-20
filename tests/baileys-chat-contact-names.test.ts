@@ -10,16 +10,16 @@ import type { ContactStore } from "../src/services/contact-store.js";
 describe("Baileys chat contact names", () => {
   let instanceId: string;
 
-  beforeEach(() => {
+  beforeEach(async () => {
     instanceId = `chat_contact_names_${randomUUID()}`;
     const now = Date.now();
-    db.insert(instances)
+    (await db.insert(instances)
       .values({ id: instanceId, name: "test", createdAt: now, updatedAt: now })
-      .run();
+      .run());
   });
 
-  afterEach(() => {
-    db.delete(instances).where(eq(instances.id, instanceId)).run();
+  afterEach(async () => {
+    (await db.delete(instances).where(eq(instances.id, instanceId)).run());
   });
 
   it("skips group, broadcast, newsletter, and status names from chats.update", async () => {

@@ -641,12 +641,12 @@ describe("normalizeWebhookPayload", () => {
     });
   });
 
-  it("persists Cloud API forwarded media and never downgrades it on conflict", () => {
+  it("persists Cloud API forwarded media and never downgrades it on conflict", async () => {
     const instanceId = `cloud_forward_${randomUUID()}`;
     const now = Date.now();
-    db.insert(instances)
+    (await db.insert(instances)
       .values({ id: instanceId, name: "cloud forward test", createdAt: now, updatedAt: now })
-      .run();
+      .run());
 
     try {
       const adapter = new CloudApiAdapter(instanceId);
@@ -671,17 +671,17 @@ describe("normalizeWebhookPayload", () => {
         };
       };
 
-      adapter.emit("message.received", createPayload({ forwarded: true }));
-      adapter.emit("message.received", createPayload({ forwarded: false }));
+      (await adapter.emit("message.received", createPayload({ forwarded: true })));
+      (await adapter.emit("message.received", createPayload({ forwarded: false })));
 
-      const stored = db
+      const stored = (await db
         .select({ isForwarded: messages.isForwarded })
         .from(messages)
         .where(eq(messages.id, "wamid.cloud-forwarded-image"))
-        .get();
+        .get());
       expect(stored?.isForwarded).toBe(1);
     } finally {
-      db.delete(instances).where(eq(instances.id, instanceId)).run();
+      (await db.delete(instances).where(eq(instances.id, instanceId)).run());
     }
   });
 });

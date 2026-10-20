@@ -101,7 +101,7 @@ async function startHttp(webhookStatus: EventWebhookStatus): Promise<void> {
 
     // Health endpoint
     if (url.pathname === HEALTH_ENDPOINT && req.method === "GET") {
-      const allInstances = instanceManager.getAllInstances();
+      const allInstances = await instanceManager.getAllInstances();
       const connected = allInstances.filter((i) => i.status === "connected").length;
       const health = buildHealthBody({
         uptimeSeconds: Math.floor((Date.now() - startTime) / 1000),
@@ -190,7 +190,7 @@ async function startHttp(webhookStatus: EventWebhookStatus): Promise<void> {
             // Set instanceId on the payload
             (evt.payload as unknown as { instanceId: string }).instanceId = match.instanceId;
 
-            match.adapter.emit(evt.event, evt.payload);
+            await match.adapter.emit(evt.event, evt.payload);
           }
         } catch (err) {
           logger.error({ err }, "Failed to process cloud webhook payload");

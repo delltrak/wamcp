@@ -37,7 +37,11 @@ services:
     volumes:
       - ${WA_DATA_DIR:-wa-data}:/app/data
     depends_on:
-      - redis
+      redis:
+        condition: service_started
+      postgres:
+        condition: service_healthy
+        required: false
 
   redis:
     image: redis:7-alpine
@@ -57,10 +61,13 @@ services:
     restart: unless-stopped
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-wamcp}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-wamcp}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}
       POSTGRES_DB: ${POSTGRES_DB:-wamcp}
-    ports:
-      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U wamcp -d wamcp"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
     volumes:
       - wa-pg-data:/var/lib/postgresql/data
 

@@ -27,7 +27,7 @@ export async function useSqliteAuthState(
   // ---- Helpers ----
 
   const readData = async (key: string): Promise<string | null> => {
-    const row = db
+    const row = await db
       .select({ keyData: authKeys.keyData })
       .from(authKeys)
       .where(and(eq(authKeys.instanceId, instanceId), eq(authKeys.keyId, key)))
@@ -36,7 +36,8 @@ export async function useSqliteAuthState(
   };
 
   const writeData = async (key: string, data: string): Promise<void> => {
-    db.insert(authKeys)
+    await db
+      .insert(authKeys)
       .values({ instanceId, keyId: key, keyData: data })
       .onConflictDoUpdate({
         target: [authKeys.instanceId, authKeys.keyId],
@@ -46,7 +47,8 @@ export async function useSqliteAuthState(
   };
 
   const removeData = async (key: string): Promise<void> => {
-    db.delete(authKeys)
+    await db
+      .delete(authKeys)
       .where(and(eq(authKeys.instanceId, instanceId), eq(authKeys.keyId, key)))
       .run();
   };
@@ -113,5 +115,5 @@ export async function useSqliteAuthState(
  * Clears all auth state for an instance (used after logout).
  */
 export async function clearAuthState(instanceId: string): Promise<void> {
-  db.delete(authKeys).where(eq(authKeys.instanceId, instanceId)).run();
+  await db.delete(authKeys).where(eq(authKeys.instanceId, instanceId)).run();
 }

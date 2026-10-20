@@ -242,23 +242,36 @@ const ADDITIVE_COLUMNS_AFTER_SCHEMA = [
 /**
  * Creates any missing tables and columns.
  * Safe to run on every startup and from `db:migrate`. Existing rows are kept.
+ *
+ * Postgres does not run the files in `drizzle/`. Those migrations are SQLite-only.
+ * A new table or column has to be added here (and in `schema.ts`) or Postgres
+ * will not create it. `npm run db:generate` does not update this script.
  */
-export function applySchemaSql(exec: (sql: string) => void, driver: DatabaseDriverName): void {
+export async function applySchemaSql(
+  exec: (sql: string) => void | Promise<void>,
+  driver: DatabaseDriverName,
+): Promise<void> {
   const adapt = (sql: string) => (driver === "postgres" ? sqliteDdlToPostgres(sql) : sql);
-  const addColumn = (sql: string) => {
+  const addColumn = async (sql: string) => {
+    // Postgres accepts ADD COLUMN IF NOT EXISTS. SQLite does not, so a second
+    // run there is recognized by the duplicate-column error and ignored.
+    const statement =
+      driver === "postgres" ? sql.replace(/ADD COLUMN /g, "ADD COLUMN IF NOT EXISTS ") : sql;
     try {
-      exec(adapt(sql));
-    } catch {
-      // The column already exists, or the table is created by SCHEMA_SQL below.
+      await exec(adapt(statement));
+    } catch (error) {
+      // Fresh databases do not have the table yet; SCHEMA_SQL creates it with the column.
+      if (isMissingTableError(error) || isDuplicateColumnError(error)) return;
+      throw error;
     }
   };
 
-  for (const statement of ADDITIVE_COLUMNS_BEFORE_SCHEMA) addColumn(statement);
-  exec(adapt(SCHEMA_SQL));
-  for (const statement of ADDITIVE_COLUMNS_AFTER_SCHEMA) addColumn(statement);
+  for (const statement of ADDITIVE_COLUMNS_BEFORE_SCHEMA) await addColumn(statement);
+  await exec(adapt(SCHEMA_SQL));
+  for (const statement of ADDITIVE_COLUMNS_AFTER_SCHEMA) await addColumn(statement);
 
   if (driver === "postgres") {
-    exec(`
+    await exec(`
       CREATE TABLE IF NOT EXISTS schema_migrations (
         id TEXT PRIMARY KEY,
         applied_at BIGINT NOT NULL
@@ -268,4 +281,16 @@ export function applySchemaSql(exec: (sql: string) => void, driver: DatabaseDriv
       ON CONFLICT (id) DO NOTHING;
     `);
   }
+}
+
+function isMissingTableError(error: unknown): boolean {
+  if (typeof error !== "object" || error === null) return false;
+  if ("code" in error && error.code === "42P01") return true;
+  const message = error instanceof Error ? error.message : String(error);
+  return /no such table/i.test(message);
+}
+
+function isDuplicateColumnError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return /duplicate column name/i.test(message);
 }

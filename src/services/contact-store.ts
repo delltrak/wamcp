@@ -3,7 +3,7 @@
 // Persists contacts received from Baileys and serves local lookups.
 // ============================================================
 
-import { and, count, eq, isNotNull, isNull, like, or, sql } from "drizzle-orm";
+import { and, count, eq, isNotNull, isNull, or, sql } from "drizzle-orm";
 import type { db as applicationDb } from "../db/client.js";
 import { chats as chatsTable, contacts as contactsTable } from "../db/schema.js";
 import type { Contact } from "../types/channel.types.js";
@@ -56,7 +56,7 @@ export class ContactStore {
       if (!phoneNumber && lid && resolvePn) phoneNumber = (await resolvePn(lid)) ?? undefined;
       if (phoneNumber && lid) this.lidMappings.set(lid, phoneNumber);
 
-      this.upsertContact(phoneNumber ? { ...contact, phoneNumber } : contact);
+      await this.upsertContact(phoneNumber ? { ...contact, phoneNumber } : contact);
     }
   }
 
@@ -89,7 +89,7 @@ export class ContactStore {
 
     const chatCandidates = new Map<string, ContactSyncRecord>();
     try {
-      const chats = this.database
+      const chats = await this.database
         .select({ jid: chatsTable.jid, name: chatsTable.name })
         .from(chatsTable)
         .where(eq(chatsTable.instanceId, this.instanceId))
@@ -107,7 +107,7 @@ export class ContactStore {
 
     const messageCandidates = new Map<string, ContactSyncRecord>();
     try {
-      const messages = this.database.all<{
+      const messages = await this.database.all<{
         jid: string;
         push_name: string | null;
       }>(sql`
@@ -179,8 +179,8 @@ export class ContactStore {
     return result;
   }
 
-  getContactCount(): number {
-    const row = this.database
+  async getContactCount(): Promise<number> {
+    const row = await this.database
       .select({ count: count() })
       .from(contactsTable)
       .where(eq(contactsTable.instanceId, this.instanceId))
@@ -189,9 +189,9 @@ export class ContactStore {
   }
 
   /** Apply a LID-to-phone mapping to contacts already persisted for this instance. */
-  updateLidMapping(lid: string, pn: string): void {
+  async updateLidMapping(lid: string, pn: string): Promise<void> {
     this.lidMappings.set(lid, pn);
-    this.database
+    await this.database
       .update(contactsTable)
       .set({ phone: phoneFromJid(pn), updatedAt: Date.now() })
       .where(
@@ -204,8 +204,8 @@ export class ContactStore {
   }
 
   /** Return stored LIDs whose phone mapping can still be resolved at read time. */
-  getUnresolvedLids(): string[] {
-    const rows = this.database
+  async getUnresolvedLids(): Promise<string[]> {
+    const rows = await this.database
       .select({ lid: contactsTable.lid })
       .from(contactsTable)
       .where(
@@ -219,20 +219,21 @@ export class ContactStore {
     return [...new Set(rows.flatMap((row) => (row.lid ? [row.lid] : [])))];
   }
 
-  getContacts(search?: string): Contact[] {
+  async getContacts(search?: string): Promise<Contact[]> {
     const words = search?.trim().split(/\s+/).filter(Boolean) ?? [];
-    const wordConditions = words.map((word) =>
-      or(
-        like(contactsTable.name, `%${word}%`),
-        like(contactsTable.notifyName, `%${word}%`),
-        like(contactsTable.phone, `%${word}%`),
-        like(contactsTable.lid, `%${word}%`),
-      ),
-    );
+    const wordConditions = words.map((word) => {
+      const pattern = `%${word}%`;
+      return or(
+        sql`lower(${contactsTable.name}) like lower(${pattern})`,
+        sql`lower(${contactsTable.notifyName}) like lower(${pattern})`,
+        sql`lower(${contactsTable.phone}) like lower(${pattern})`,
+        sql`lower(${contactsTable.lid}) like lower(${pattern})`,
+      );
+    });
     const filters = [eq(contactsTable.instanceId, this.instanceId)];
     if (wordConditions.length > 0) filters.push(or(...wordConditions)!);
 
-    const rows = this.database
+    const rows = await this.database
       .select()
       .from(contactsTable)
       .where(and(...filters))
@@ -249,14 +250,14 @@ export class ContactStore {
     }));
   }
 
-  private upsertContact(contact: ContactSyncRecord): void {
+  private async upsertContact(contact: ContactSyncRecord): Promise<void> {
     const id = contact.id?.trim();
     if (!id) return;
 
     const isLid = id.endsWith("@lid");
     let jid = id;
     if (isLid) {
-      const existingLid = this.database
+      const existingLid = await this.database
         .select({ jid: contactsTable.jid })
         .from(contactsTable)
         .where(
@@ -269,7 +270,7 @@ export class ContactStore {
       jid = existingLid?.jid ?? (contact.phoneNumber || id);
     }
 
-    const existing = this.database
+    const existing = await this.database
       .select()
       .from(contactsTable)
       .where(and(eq(contactsTable.instanceId, this.instanceId), eq(contactsTable.jid, jid)))
@@ -287,7 +288,7 @@ export class ContactStore {
     const lid = contact.lid ?? (isLid ? id : existing?.lid) ?? null;
     const now = Date.now();
 
-    this.database
+    await this.database
       .insert(contactsTable)
       .values({
         instanceId: this.instanceId,
@@ -323,9 +324,9 @@ export class ContactStore {
     candidates: Map<string, ContactSyncRecord>,
     resolvePn?: ContactPnResolver,
   ): Promise<number> {
-    const before = this.getContactCount();
+    const before = await this.getContactCount();
     await this.upsertContacts([...candidates.values()], resolvePn);
-    return Math.max(0, this.getContactCount() - before);
+    return Math.max(0, (await this.getContactCount()) - before);
   }
 }
 

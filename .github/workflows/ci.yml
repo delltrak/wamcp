@@ -80,8 +80,5 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Migrate Postgres
-        run: npm run db:migrate
-
       - name: Test
         run: npm test

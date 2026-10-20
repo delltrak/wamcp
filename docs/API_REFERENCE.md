@@ -66,8 +66,10 @@ Tools marked **Baileys only** are not available on Cloud API instances.
 - **JID** -- Jabber ID, WhatsApp's internal identifier. Individual: `5511999999999@s.whatsapp.net`. Group: `120363...@g.us`.
 - **Storage** -- `WA_DATABASE_URL` empty (the default) keeps SQLite at `WA_DATABASE_PATH`
   (`data/whatsapp.db`), including Baileys auth keys. A `postgres://` or `postgresql://` URL stores
-  that same data in Postgres. Existing databases are not migrated unless you run
-  `npm run db:migrate-to-postgres` yourself.
+  that same data in Postgres. Nothing is copied until you stop wa-mcp and run
+  `npm run db:migrate-to-postgres` once, into an empty database, before the first Postgres boot.
+  A second copy is refused unless `--force` is passed, because it would replace newer Postgres
+  rows with the stale SQLite snapshot.
 - **Media** -- Image/video/audio/document fields accept a URL (`https://...`) or base64-encoded data.
   Stickers and GIFs are converted to WhatsApp-compatible formats with ffmpeg. Received media can
   be saved under `WA_MEDIA_DOWNLOAD_DIR` (default `data/media-downloads`) or returned as base64.

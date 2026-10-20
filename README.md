@@ -851,23 +851,50 @@ Leave `WA_DATABASE_URL` empty to keep using SQLite at `WA_DATABASE_PATH`. Settin
 auth keys in that database. The SQLite file is not opened, moved, or migrated on startup.
 
 `npm run db:migrate` applies the SQLite Drizzle migrations when the URL is empty, and applies the
-Postgres schema when it is set. Postgres records that baseline in `schema_migrations`.
+Postgres schema when it is set. Postgres records that baseline in `schema_migrations`. The files in
+`drizzle/` are SQLite-only: Postgres never runs them. A new table or column has to be added to
+`src/db/schema-sql.ts` by hand (and to `src/db/schema.ts`) or a Postgres database will not grow it.
+`npm run db:generate` does not update that script.
 
-To copy an existing SQLite database, including the session, stop WA MCP and run:
+To copy an existing SQLite database, including the session, stop wa-mcp and run the copy **once**,
+before the first process that boots with `WA_DATABASE_URL` set:
 
 ```bash
 WA_DATABASE_PATH=data/whatsapp.db \
-WA_DATABASE_URL=postgres://wamcp:wamcp@localhost:5432/wamcp \
+WA_DATABASE_URL=postgres://USER:PASSWORD@127.0.0.1:5432/wamcp \
 npm run db:migrate-to-postgres
 ```
 
 The command refuses to run without a Postgres URL. It reads SQLite (a consistent snapshot, including
-the WAL) and upserts rows into Postgres. Run it again to refresh those rows. It does not delete the
-SQLite file, does not remove extra Postgres rows, and does not pair the WhatsApp account again.
-Start WA MCP with the same `WA_DATABASE_URL` afterward.
+the WAL) and inserts rows into an empty Postgres database. It does not delete the SQLite file and
+does not pair the WhatsApp account again. Start wa-mcp with the same `WA_DATABASE_URL` only after
+that copy finishes. A later run is refused when `instances` or `auth_keys` already has rows: copying
+again would replace the live Baileys session with the older SQLite snapshot. `--force` overwrites
+those rows anyway. Do not rerun the copy to refresh Postgres.
+
+Postgres queries run off the Node.js event loop, so a remote database or a history sync does not
+freeze Baileys, HTTP, or BullMQ. Each statement fails after 10 seconds instead of hanging, and a
+dropped connection is retried once outside an open transaction. Text sort order follows the database
+collation (often `en_US.UTF-8`) rather than SQLite's binary order. Create the cluster with
+`LC_COLLATE=C` when you need that binary order. Integers above 2^53 are returned as strings. NUL
+bytes in text are stripped, because Postgres rejects them.
+
+`npm run db:migrate` for SQLite needs a checkout that has drizzle-kit installed. The production
+image has neither `tsx` nor `scripts/`. Apply the Postgres schema inside the image with the compiled
+CLI, and run the SQLite Drizzle migrate from a host checkout:
+
+```bash
+docker compose run --rm \
+  -e WA_DATABASE_URL=postgres://USER:PASSWORD@postgres:5432/wamcp \
+  wa-mcp node dist/db/migrate-cli.js
+```
+
+The copy CLI is compiled to `dist/db/migrate-to-postgres-cli.js`. Mount the SQLite file when you run
+it in the container. From a checkout, `npm run db:migrate-to-postgres` remains the normal command.
 
 Back up Postgres with `pg_dump` while the server can stay up. The dump contains auth keys: mode
-`0600`, treat it as a secret, and do not commit it.
+`0600`, treat it as a secret, and do not commit it. The backup scripts run on the host; the runtime
+image does not include `pg_dump`.
 
 ```bash
 ./scripts/postgres-backup.sh "$WA_DATABASE_URL" /srv/wamcp-backups
@@ -880,13 +907,20 @@ database. `--force` drops existing objects in that database first:
 ./scripts/postgres-restore.sh /srv/wamcp-backups/wamcp-postgres-YYYYMMDDTHHMMSSZ.dump "$WA_DATABASE_URL"
 ```
 
-Docker Compose does not start Postgres unless you opt in. Set `WA_DATABASE_URL` and run:
+Docker Compose does not start Postgres unless you opt in, and it does not publish `5432`. wa-mcp
+reaches `postgres:5432` on the Compose network. A published Docker port is reachable past ufw; if a
+host tool needs the database, add `127.0.0.1:5432:5432` in a Compose override. Set
+`POSTGRES_PASSWORD` before starting the profile (there is no default password):
 
 ```bash
-WA_DATABASE_URL=postgres://wamcp:wamcp@postgres:5432/wamcp docker compose --profile postgres up -d
+POSTGRES_PASSWORD='choose-a-password' \
+WA_DATABASE_URL=postgres://USER:PASSWORD@postgres:5432/wamcp \
+docker compose --profile postgres up -d
 ```
 
-The named volume `wa-data` and `WA_DATABASE_PATH` stay in place for SQLite installs.
+The named volume `wa-data` and `WA_DATABASE_PATH` stay in place for SQLite installs. The Postgres
+service waits until `pg_isready` succeeds, and wa-mcp does not require that service when the
+profile is off.
 
 Baileys may emit an incoming offline message delivered as an `append` once when its timestamp is
 after the instance's last disconnect (or last connect) or latest stored message. When those timestamps
@@ -1062,8 +1096,12 @@ src/
 ├── db/
 │   ├── schema.ts                # Drizzle table definitions
 │   ├── client.ts                # SQLite or Postgres connection
+│   ├── executor.ts              # Async drivers, timeouts, reconnect
+│   ├── async-session.ts         # Async Drizzle session for both drivers
 │   ├── schema-sql.ts            # Runtime schema for both drivers
-│   └── sqlite-to-postgres.ts    # Manual SQLite copy
+│   ├── migrate-cli.ts           # db:migrate (compiled into the image)
+│   ├── migrate-to-postgres-cli.ts
+│   └── sqlite-to-postgres.ts    # One-shot SQLite copy
 ├── schemas/                     # Zod validation (10 files)
 └── types/                       # TypeScript definitions
 ```

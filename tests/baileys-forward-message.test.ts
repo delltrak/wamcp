@@ -125,27 +125,27 @@ function mediaCases(): Array<{ label: string; type: string; content: Record<stri
 describe("Baileys message forwarding", () => {
   let instanceId: string;
 
-  beforeEach(() => {
+  beforeEach(async () => {
     instanceId = `forward_${randomUUID()}`;
     const now = Date.now();
-    db.insert(instances)
+    (await db.insert(instances)
       .values({ id: instanceId, name: "forward test", createdAt: now, updatedAt: now })
-      .run();
+      .run());
     pttHarness.preparePttAudio.mockClear();
   });
 
-  afterEach(() => {
-    db.delete(instances).where(eq(instances.id, instanceId)).run();
+  afterEach(async () => {
+    (await db.delete(instances).where(eq(instances.id, instanceId)).run());
   });
 
-  function insertStoredMessage(
+  async function insertStoredMessage(
     id: string,
     type: string,
     rawData: string | null,
     content?: string,
     isFromMe = false,
   ) {
-    db.insert(messages)
+    (await db.insert(messages)
       .values({
         id,
         instanceId,
@@ -158,7 +158,7 @@ describe("Baileys message forwarding", () => {
         timestamp: 1_700_000_000,
         rawData,
       })
-      .run();
+      .run());
   }
 
   function createAdapter(sendMessage: WASocket["sendMessage"]) {
@@ -171,19 +171,22 @@ describe("Baileys message forwarding", () => {
     return { adapter, socket };
   }
 
-  function persistIncomingMessage(
+  async function persistIncomingMessage(
     adapter: BaileysAdapter,
     source: WAMessage,
-  ): NormalizedMessageEvent {
+  ): Promise<NormalizedMessageEvent> {
     const event = normalizeMessagesUpsert(instanceId, {
       type: "notify",
       messages: [source],
     } as Parameters<typeof normalizeMessagesUpsert>[1])[0];
     if (!event) throw new Error("Synthetic message did not normalize");
 
-    (
+    await (
       adapter as unknown as {
-        persistMessage: (normalized: NormalizedMessageEvent, source: WAMessage) => void;
+        persistMessage: (
+          normalized: NormalizedMessageEvent,
+          source: WAMessage,
+        ) => Promise<void>;
       }
     ).persistMessage(event, source);
     return event;
@@ -194,7 +197,7 @@ describe("Baileys message forwarding", () => {
     async ({ label, type, content }) => {
       const id = `stored-${label.replaceAll(" ", "-")}`;
       const original = sourceMessage(id, content);
-      insertStoredMessage(id, type, JSON.stringify(original, BufferJSON.replacer));
+      (await insertStoredMessage(id, type, JSON.stringify(original, BufferJSON.replacer)));
       const { adapter, socket } = createAdapter(
         async () => ({ key: { id: "forwarded-id" } }) as WAMessage,
       );
@@ -218,7 +221,7 @@ describe("Baileys message forwarding", () => {
   it("round-trips PTT proto buffers from stored raw_data", async () => {
     const id = "stored-ptt-buffer-roundtrip";
     const original = sourceMessage(id, audioMessage(true));
-    insertStoredMessage(id, "audio", JSON.stringify(original, BufferJSON.replacer));
+    (await insertStoredMessage(id, "audio", JSON.stringify(original, BufferJSON.replacer)));
     const { adapter, socket } = createAdapter(
       async () => ({ key: { id: "forwarded-id" } }) as WAMessage,
     );
@@ -247,14 +250,14 @@ describe("Baileys message forwarding", () => {
       async () => ({ key: { id: "forwarded-album-parent" } }) as WAMessage,
     );
 
-    const normalized = persistIncomingMessage(adapter, original);
+    const normalized = await persistIncomingMessage(adapter, original);
     expect(normalized.message.type).toBe("album");
 
-    const stored = db
+    const stored = (await db
       .select({ rawData: messages.rawData, type: messages.type })
       .from(messages)
       .where(eq(messages.id, id))
-      .get();
+      .get());
     expect(stored?.type).toBe("album");
     expect(stored?.rawData).toBeTruthy();
     const reconstructed = JSON.parse(stored!.rawData!, BufferJSON.reviver) as WAMessage;
@@ -272,7 +275,7 @@ describe("Baileys message forwarding", () => {
   it("forwards a stored empty protobuf message body", async () => {
     const id = "stored-empty-request-phone-number";
     const original = sourceMessage(id, { requestPhoneNumberMessage: {} });
-    insertStoredMessage(id, "text", JSON.stringify(original, BufferJSON.replacer));
+    (await insertStoredMessage(id, "text", JSON.stringify(original, BufferJSON.replacer)));
     const { adapter, socket } = createAdapter(
       async () => ({ key: { id: "forwarded-empty-body" } }) as WAMessage,
     );
@@ -292,7 +295,7 @@ describe("Baileys message forwarding", () => {
   it("rejects a stored sender key distribution message without user content", async () => {
     const id = "stored-sender-key-distribution-only";
     const original = sourceMessage(id, { senderKeyDistributionMessage: {} });
-    insertStoredMessage(id, "text", JSON.stringify(original, BufferJSON.replacer));
+    (await insertStoredMessage(id, "text", JSON.stringify(original, BufferJSON.replacer)));
     const { adapter, socket } = createAdapter(
       async () => ({ key: { id: "unexpected" } }) as WAMessage,
     );
@@ -316,11 +319,11 @@ describe("Baileys message forwarding", () => {
       mimeType: WHATSAPP_VOICE_MIME_TYPE,
     });
 
-    const stored = db
+    const stored = (await db
       .select({ rawData: messages.rawData, type: messages.type, isFromMe: messages.isFromMe })
       .from(messages)
       .where(eq(messages.id, outgoingId))
-      .get();
+      .get());
     expect(stored).toMatchObject({ type: "audio", isFromMe: 1 });
     expect(stored?.rawData).toBeTruthy();
     const revived = JSON.parse(stored!.rawData!, BufferJSON.reviver) as WAMessage;
@@ -333,11 +336,11 @@ describe("Baileys message forwarding", () => {
   it("stores forwarded metadata returned when forwarding a received audio message", async () => {
     const sourceId = "received-audio-to-forward";
     const outgoingId = "forwarded-received-audio";
-    insertStoredMessage(
+    (await insertStoredMessage(
       sourceId,
       "audio",
       JSON.stringify(sourceMessage(sourceId, audioMessage(false)), BufferJSON.replacer),
-    );
+    ));
 
     const forwardedAudio = audioMessage(false);
     Object.assign(forwardedAudio.audioMessage, {
@@ -349,11 +352,11 @@ describe("Baileys message forwarding", () => {
 
     await adapter.forwardMessage(DESTINATION, sourceId, SOURCE_CHAT);
 
-    const stored = db
+    const stored = (await db
       .select({ isForwarded: messages.isForwarded })
       .from(messages)
       .where(eq(messages.id, outgoingId))
-      .get();
+      .get());
     expect(stored?.isForwarded).toBe(1);
   });
 
@@ -361,13 +364,13 @@ describe("Baileys message forwarding", () => {
     const sourceId = "own-audio-to-forward";
     const outgoingId = "forwarded-own-audio";
     const source = sourceMessage(sourceId, audioMessage(false), true);
-    insertStoredMessage(
+    (await insertStoredMessage(
       sourceId,
       "audio",
       JSON.stringify(source, BufferJSON.replacer),
       undefined,
       true,
-    );
+    ));
 
     const forwardedAudio = audioMessage(false);
     Object.assign(forwardedAudio.audioMessage, {
@@ -379,15 +382,15 @@ describe("Baileys message forwarding", () => {
 
     await adapter.forwardMessage(DESTINATION, sourceId, SOURCE_CHAT);
 
-    const stored = db
+    const stored = (await db
       .select({ isForwarded: messages.isForwarded })
       .from(messages)
       .where(eq(messages.id, outgoingId))
-      .get();
+      .get());
     expect(stored?.isForwarded).toBe(0);
   });
 
-  it("stores an incoming forwarded text message", () => {
+  it("stores an incoming forwarded text message", async () => {
     const incoming = sourceMessage("incoming-forwarded-text", {
       ephemeralMessage: {
         message: {
@@ -400,18 +403,18 @@ describe("Baileys message forwarding", () => {
     });
     const { adapter } = createAdapter(async () => ({ key: { id: "unused" } }) as WAMessage);
 
-    const event = persistIncomingMessage(adapter, incoming);
-    const stored = db
+    const event = await persistIncomingMessage(adapter, incoming);
+    const stored = (await db
       .select({ isForwarded: messages.isForwarded })
       .from(messages)
       .where(eq(messages.id, incoming.key.id!))
-      .get();
+      .get());
 
     expect(event.message.isForwarded).toBe(true);
     expect(stored?.isForwarded).toBe(1);
   });
 
-  it("upgrades forwarded state on conflict and never downgrades it", () => {
+  it("upgrades forwarded state on conflict and never downgrades it", async () => {
     const id = "incoming-forwarded-text-conflict";
     const { adapter } = createAdapter(async () => ({ key: { id: "unused" } }) as WAMessage);
     const makeIncoming = (forwardingScore: number) =>
@@ -422,15 +425,15 @@ describe("Baileys message forwarding", () => {
         },
       });
 
-    persistIncomingMessage(adapter, makeIncoming(0));
-    persistIncomingMessage(adapter, makeIncoming(1));
-    persistIncomingMessage(adapter, makeIncoming(0));
+    await persistIncomingMessage(adapter, makeIncoming(0));
+    await persistIncomingMessage(adapter, makeIncoming(1));
+    await persistIncomingMessage(adapter, makeIncoming(0));
 
-    const stored = db
+    const stored = (await db
       .select({ isForwarded: messages.isForwarded })
       .from(messages)
       .where(eq(messages.id, id))
-      .get();
+      .get());
     expect(stored?.isForwarded).toBe(1);
   });
 
@@ -444,11 +447,11 @@ describe("Baileys message forwarding", () => {
 
     await adapter.sendMessage("5511777777", { type: "text", text: "hello" });
 
-    const stored = db
+    const stored = (await db
       .select({ timestamp: messages.timestamp })
       .from(messages)
       .where(eq(messages.id, outgoingId))
-      .get();
+      .get());
     expect(stored?.timestamp).toBeGreaterThanOrEqual(beforeSend);
     expect(stored?.timestamp).toBeLessThanOrEqual(Math.floor(Date.now() / 1000));
   });
@@ -469,17 +472,17 @@ describe("Baileys message forwarding", () => {
 
     await adapter.sendMessage("5511777777", { type: "text", text: "hello" });
 
-    const stored = db
+    const stored = (await db
       .select({ timestamp: messages.timestamp })
       .from(messages)
       .where(eq(messages.id, outgoingId))
-      .get();
+      .get());
     expect(stored?.timestamp).toBe(1_700_000_123);
   });
 
   it("uses normalized stored text when an older row has no raw message", async () => {
     const id = "legacy-text-without-raw-data";
-    insertStoredMessage(id, "text", null, "original text");
+    (await insertStoredMessage(id, "text", null, "original text"));
     const { adapter, socket } = createAdapter(
       async () => ({ key: { id: "forwarded-text" } }) as WAMessage,
     );
@@ -496,7 +499,7 @@ describe("Baileys message forwarding", () => {
 
   it("returns an error and sends nothing when stored media content is unavailable", async () => {
     const id = "legacy-audio-without-content";
-    insertStoredMessage(id, "audio", null);
+    (await insertStoredMessage(id, "audio", null));
     const { adapter, socket } = createAdapter(
       async () => ({ key: { id: "unexpected" } }) as WAMessage,
     );
@@ -512,7 +515,7 @@ describe("Baileys message forwarding", () => {
     const partialAudio = sourceMessage(id, {
       audioMessage: { ptt: true, mimetype: "audio/ogg; codecs=opus" },
     });
-    insertStoredMessage(id, "audio", JSON.stringify(partialAudio, BufferJSON.replacer));
+    (await insertStoredMessage(id, "audio", JSON.stringify(partialAudio, BufferJSON.replacer)));
     const { adapter, socket } = createAdapter(
       async () => ({ key: { id: "unexpected" } }) as WAMessage,
     );
@@ -525,11 +528,11 @@ describe("Baileys message forwarding", () => {
 
   it("forwards an empty text value from a stored full message", async () => {
     const id = "empty-text-content";
-    insertStoredMessage(
+    (await insertStoredMessage(
       id,
       "text",
       JSON.stringify(sourceMessage(id, { conversation: "" }), BufferJSON.replacer),
-    );
+    ));
     const { adapter, socket } = createAdapter(
       async () => ({ key: { id: "forwarded-empty-text" } }) as WAMessage,
     );

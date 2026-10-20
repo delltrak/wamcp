@@ -45,7 +45,7 @@ export function registerTtsTools(
         ttsService.assertConfigured();
         ttsService.assertTextWithinLimit(params.text);
         const voiceId = ttsService.resolveVoiceId(params.voiceId);
-        const channel = instanceManager.getInstanceChannel(params.instanceId);
+        const channel = await instanceManager.getInstanceChannel(params.instanceId);
         if (channel !== "baileys") {
           throw new Error(
             "Voice notes with push-to-talk are only supported for Baileys instances.",

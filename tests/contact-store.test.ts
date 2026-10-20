@@ -103,7 +103,7 @@ describe("ContactStore", () => {
     restartedSqlite.pragma("foreign_keys = ON");
     const restartedStore = new ContactStore(instanceId, drizzle(restartedSqlite, { schema }));
 
-    expect(restartedStore.getContacts("15555550123")).toEqual([
+    expect((await restartedStore.getContacts("15555550123"))).toEqual([
       {
         jid: "15555550123@s.whatsapp.net",
         name: "Example Contact",
@@ -114,7 +114,7 @@ describe("ContactStore", () => {
         isBlocked: false,
       },
     ]);
-    expect(restartedStore.getContacts()).toHaveLength(3);
+    expect((await restartedStore.getContacts())).toHaveLength(3);
 
     restartedSqlite.close();
   });
@@ -125,11 +125,11 @@ describe("ContactStore", () => {
     const pn = "15555550123@s.whatsapp.net";
 
     await store.upsertContacts([{ id: lid, name: "LID Contact" }]);
-    expect(store.getContacts("15555550123")).toEqual([]);
+    expect((await store.getContacts("15555550123"))).toEqual([]);
 
-    store.updateLidMapping(lid, pn);
+    (await store.updateLidMapping(lid, pn));
 
-    expect(store.getContacts("15555550123")).toEqual([
+    expect((await store.getContacts("15555550123"))).toEqual([
       {
         jid: lid,
         name: "LID Contact",
@@ -157,7 +157,7 @@ describe("ContactStore", () => {
         .prepare("SELECT jid, phone, lid FROM contacts WHERE instance_id = ?")
         .get("inst_fake_sync"),
     ).toEqual({ jid: pn, phone: "15555550123", lid });
-    expect(store.getContacts("15555550123")).toHaveLength(1);
+    expect((await store.getContacts("15555550123"))).toHaveLength(1);
 
     sqlite.close();
   });
@@ -170,7 +170,7 @@ describe("ContactStore", () => {
     await store.upsertContacts([{ id: jid, name: "Initial profile" }]);
     await store.upsertContacts([{ id: jid, notify: "Updated profile" }]);
 
-    expect(store.getContacts()).toEqual([
+    expect((await store.getContacts())).toEqual([
       {
         jid,
         name: "Initial profile",
@@ -236,8 +236,8 @@ describe("ContactStore", () => {
       chats: { candidates: 1, contactsAdded: 1 },
       messages: { candidates: 4, contactsAdded: 3 },
     });
-    expect(store.getContactCount()).toBe(4);
-    expect(store.getContacts()).toEqual(
+    expect((await store.getContactCount())).toBe(4);
+    expect((await store.getContacts())).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
           jid: directJid,
@@ -253,7 +253,7 @@ describe("ContactStore", () => {
         }),
       ]),
     );
-    expect(store.getContacts().map((contact) => contact.jid)).not.toEqual(
+    expect((await store.getContacts()).map((contact) => contact.jid)).not.toEqual(
       expect.arrayContaining([groupJid, "status@broadcast", "12345@newsletter"]),
     );
 
@@ -273,7 +273,7 @@ describe("ContactStore", () => {
     const recovery = await store.recoverFromLocalData();
 
     expect(recovery.messages).toEqual({ candidates: 1, contactsAdded: 1 });
-    expect(store.getContacts()).toEqual([
+    expect((await store.getContacts())).toEqual([
       {
         jid,
         name: "Latest name",

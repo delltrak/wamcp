@@ -75,26 +75,26 @@ afterEach(() => {
 });
 
 describe("group member labels", () => {
-  it("persists labels and removal tombstones for PN and LID identities", () => {
+  it("persists labels and removal tombstones for PN and LID identities", async () => {
     const { store } = createStore();
 
-    expect(store.update(GROUP_JID, [OWN_PN, OWN_LID], "Group coordinator", 1_700_000_000)).toBe(
+    expect((await store.update(GROUP_JID, [OWN_PN, OWN_LID], "Group coordinator", 1_700_000_000))).toBe(
       true,
     );
     expect(
-      store
-        .getForGroup(GROUP_JID)
+      (await store
+        .getForGroup(GROUP_JID))
         .sort((left, right) => left.participantJid.localeCompare(right.participantJid)),
     ).toMatchObject([
       { participantJid: OWN_LID, memberLabel: "Group coordinator", labelTimestamp: 1_700_000_000 },
       { participantJid: OWN_PN, memberLabel: "Group coordinator", labelTimestamp: 1_700_000_000 },
     ]);
 
-    expect(store.update(GROUP_JID, [OWN_PN, OWN_LID], null, 1_700_000_001)).toBe(true);
-    expect(store.update(GROUP_JID, [OWN_PN, OWN_LID], "Stale label", 1_700_000_000)).toBe(false);
+    expect((await store.update(GROUP_JID, [OWN_PN, OWN_LID], null, 1_700_000_001))).toBe(true);
+    expect((await store.update(GROUP_JID, [OWN_PN, OWN_LID], "Stale label", 1_700_000_000))).toBe(false);
     expect(
-      store
-        .getForGroup(GROUP_JID)
+      (await store
+        .getForGroup(GROUP_JID))
         .sort((left, right) => left.participantJid.localeCompare(right.participantJid)),
     ).toMatchObject([
       { participantJid: OWN_LID, memberLabel: null, labelTimestamp: 1_700_000_001 },
@@ -183,8 +183,8 @@ describe("group member labels", () => {
       { action: "removed", memberLabel: null, participant: OWN_PN },
     ]);
     expect(
-      store
-        .getForGroup(GROUP_JID)
+      (await store
+        .getForGroup(GROUP_JID))
         .sort((left, right) => left.participantJid.localeCompare(right.participantJid)),
     ).toMatchObject([
       { participantJid: OWN_LID, memberLabel: null, labelTimestamp: 1_700_000_001 },

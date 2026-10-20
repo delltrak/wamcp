@@ -141,7 +141,7 @@ export class MaintenanceService {
     const cutoffMs = Date.now() - retentionDays * 24 * 60 * 60 * 1000;
     const cutoffSeconds = Math.floor(cutoffMs / 1000);
 
-    const result = db
+    const result = await db
       .delete(messages)
       .where(
         or(
@@ -150,7 +150,7 @@ export class MaintenanceService {
         ),
       )
       .run();
-    const audiencesResult = db
+    const audiencesResult = await db
       .delete(statusAudiences)
       .where(lt(statusAudiences.createdAt, cutoffMs))
       .run();
@@ -164,7 +164,7 @@ export class MaintenanceService {
   private async pruneDedup(): Promise<void> {
     const cutoff = Date.now() - DEDUP_TTL_HOURS * 60 * 60 * 1000;
 
-    const result = db
+    const result = await db
       .delete(processedMessages)
       .where(lt(processedMessages.processedAt, cutoff))
       .run();
@@ -185,7 +185,7 @@ export class MaintenanceService {
   }
 
   private async runHealthCheck(): Promise<void> {
-    const allInstances = this.instanceManager.getAllInstances();
+    const allInstances = await this.instanceManager.getAllInstances();
 
     for (const instance of allInstances) {
       if (instance.status === "disconnected") {

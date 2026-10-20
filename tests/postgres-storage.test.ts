@@ -15,25 +15,25 @@ describe.skipIf(!postgresEnabled)("postgres storage", () => {
     expect(existsSync(resolveDatabaseConfig().path)).toBe(false);
   });
 
-  it("records the baseline migration and stores timestamps as bigint", () => {
-    const migration = sqlite
+  it("records the baseline migration and stores timestamps as bigint", async () => {
+    const migration = (await sqlite
       .prepare("SELECT id FROM schema_migrations WHERE id = ?")
-      .get(POSTGRES_BASELINE_MIGRATION_ID) as { id: string } | undefined;
+      .get(POSTGRES_BASELINE_MIGRATION_ID)) as { id: string } | undefined;
     expect(migration?.id).toBe(POSTGRES_BASELINE_MIGRATION_ID);
-    const column = sqlite
+    const column = (await sqlite
       .prepare(
         `SELECT data_type FROM information_schema.columns
          WHERE table_schema = current_schema() AND table_name = 'messages' AND column_name = 'timestamp'`,
       )
-      .get() as { data_type: string };
+      .get()) as { data_type: string };
     expect(column.data_type).toBe("bigint");
   });
 
-  it("keeps aggregate MAX, rewrites scalar MAX, and reports insert conflicts", () => {
+  it("keeps aggregate MAX, rewrites scalar MAX, and reports insert conflicts", async () => {
     const instanceId = `pg-storage-${randomUUID()}`;
     const now = Date.now();
     try {
-      db.insert(instances)
+      (await db.insert(instances)
         .values({
           id: instanceId,
           name: "Postgres storage",
@@ -42,22 +42,22 @@ describe.skipIf(!postgresEnabled)("postgres storage", () => {
           createdAt: now,
           updatedAt: now,
         })
-        .run();
+        .run());
 
-      const inserted = db
+      const inserted = (await db
         .insert(processedMessages)
         .values({ instanceId, messageId: "m1", processedAt: now })
         .onConflictDoNothing()
-        .run();
-      const duplicate = db
+        .run());
+      const duplicate = (await db
         .insert(processedMessages)
         .values({ instanceId, messageId: "m1", processedAt: now })
         .onConflictDoNothing()
-        .run();
+        .run());
       expect(inserted.changes).toBe(1);
       expect(duplicate.changes).toBe(0);
 
-      db.insert(messageReceipts)
+      (await db.insert(messageReceipts)
         .values({
           instanceId,
           chatId: "15550001111@s.whatsapp.net",
@@ -66,8 +66,8 @@ describe.skipIf(!postgresEnabled)("postgres storage", () => {
           status: "delivered",
           timestamp: 10,
         })
-        .run();
-      db.insert(messageReceipts)
+        .run());
+      (await db.insert(messageReceipts)
         .values({
           instanceId,
           chatId: "15550001111@s.whatsapp.net",
@@ -92,16 +92,16 @@ describe.skipIf(!postgresEnabled)("postgres storage", () => {
             timestamp: sql`MAX(${messageReceipts.timestamp}, excluded.timestamp)`,
           },
         })
-        .run();
-      const receipt = db
+        .run());
+      const receipt = (await db
         .select()
         .from(messageReceipts)
         .where(eq(messageReceipts.instanceId, instanceId))
-        .get();
+        .get());
       expect(receipt?.status).toBe("read");
       expect(receipt?.timestamp).toBe(10);
 
-      const aggregate = sqlite
+      const aggregate = (await sqlite
         .prepare(
           `WITH rows AS (
              SELECT 'a' AS jid, 2 AS candidate_at
@@ -110,28 +110,28 @@ describe.skipIf(!postgresEnabled)("postgres storage", () => {
            )
            SELECT jid, MAX(candidate_at) AS latest_at FROM rows GROUP BY jid`,
         )
-        .get() as { jid: string; latest_at: number };
+        .get()) as { jid: string; latest_at: number };
       expect(aggregate).toEqual({ jid: "a", latest_at: 2 });
 
-      sqlite
+      (await sqlite
         .prepare(
           `INSERT INTO messages (
              id, instance_id, chat_id, sender_id, type, content, is_from_me, is_forwarded, status, timestamp
            ) VALUES (?, ?, ?, ?, 'text', ?, 0, 0, 'received', ?)`,
         )
-        .run("m-search", instanceId, "15550001111@s.whatsapp.net", "15550001111@s.whatsapp.net", "Hello Postgres", now);
-      const found = searchStoredMessages(sqlite, instanceId, {
+        .run("m-search", instanceId, "15550001111@s.whatsapp.net", "15550001111@s.whatsapp.net", "Hello Postgres", now));
+      const found = (await searchStoredMessages(sqlite, instanceId, {
         query: "postgres",
         limit: 10,
         offset: 0,
-      });
+      }));
       expect(found.messages.map((message) => message.id)).toEqual(["m-search"]);
 
       const rolledBack = `pg-rollback-${randomUUID()}`;
-      expect(() => {
+      await expect(
         sqlite
-          .transaction(() => {
-            sqlite
+          .transaction(async () => {
+            await sqlite
               .prepare(
                 `INSERT INTO instances (id, name, channel, status, created_at, updated_at)
                  VALUES (?, 'rollback', 'baileys', 'disconnected', ?, ?)`,
@@ -139,11 +139,11 @@ describe.skipIf(!postgresEnabled)("postgres storage", () => {
               .run(rolledBack, now, now);
             throw new Error("rollback");
           })
-          .deferred();
-      }).toThrow(/rollback/);
-      expect(sqlite.prepare("SELECT id FROM instances WHERE id = ?").get(rolledBack)).toBeUndefined();
+          .deferred(),
+      ).rejects.toThrow(/rollback/);
+      expect((await sqlite.prepare("SELECT id FROM instances WHERE id = ?").get(rolledBack))).toBeUndefined();
     } finally {
-      sqlite.prepare("DELETE FROM instances WHERE id = ?").run(instanceId);
+      (await sqlite.prepare("DELETE FROM instances WHERE id = ?").run(instanceId));
     }
   });
 });

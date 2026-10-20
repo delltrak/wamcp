@@ -69,7 +69,7 @@ export class InstanceManager {
 
   /** Initialize: load existing instances from DB and reconnect those with status "open"/connected */
   async init(): Promise<void> {
-    const rows = db.select().from(instances).all();
+    const rows = await db.select().from(instances).all();
     for (const row of rows) {
       if (row.status === "connected" || row.status === "connecting") {
         try {
@@ -80,7 +80,8 @@ export class InstanceManager {
           logger.info({ instanceId: row.id }, "Reconnected instance on startup");
         } catch (err) {
           logger.error({ instanceId: row.id, err }, "Failed to reconnect instance on startup");
-          db.update(instances)
+          await db
+            .update(instances)
             .set({ status: "disconnected", updatedAt: Date.now() })
             .where(eq(instances.id, row.id))
             .run();
@@ -95,7 +96,8 @@ export class InstanceManager {
     const id = `${INSTANCE_ID_PREFIX}${randomUUID().slice(0, 8)}`;
     const now = Date.now();
 
-    db.insert(instances)
+    await db
+      .insert(instances)
       .values({
         id,
         name,
@@ -106,12 +108,13 @@ export class InstanceManager {
       })
       .run();
 
-    db.insert(queueStats)
+    await db
+      .insert(queueStats)
       .values({ instanceId: id, messagesSent: 0, messagesFailed: 0 })
       .onConflictDoNothing()
       .run();
 
-    return this.getInstanceFromDb(id);
+    return await this.getInstanceFromDb(id);
   }
 
   /**
@@ -120,11 +123,11 @@ export class InstanceManager {
    * instance to have been connected — configuration steps (Cloud API
    * credentials) have to run before a connection is possible.
    */
-  ensureAdapter(id: string): ChannelAdapter {
+  async ensureAdapter(id: string): Promise<ChannelAdapter> {
     const managed = this.adapters.get(id);
     if (managed) return managed.adapter;
 
-    const row = this.getInstanceFromDb(id);
+    const row = await this.getInstanceFromDb(id);
     const adapter = this.createAdapter(id, row.channel as ChannelType);
     this.adapters.set(id, { adapter, channel: row.channel as ChannelType });
     this.bindAdapterEvents(id, adapter);
@@ -132,9 +135,10 @@ export class InstanceManager {
   }
 
   async connectInstance(id: string): Promise<void> {
-    const adapter = this.ensureAdapter(id);
+    const adapter = await this.ensureAdapter(id);
 
-    db.update(instances)
+    await db
+      .update(instances)
       .set({ status: "connecting", updatedAt: Date.now() })
       .where(eq(instances.id, id))
       .run();
@@ -147,7 +151,8 @@ export class InstanceManager {
     if (managed) {
       await managed.adapter.disconnect();
     }
-    db.update(instances)
+    await db
+      .update(instances)
       .set({
         status: "disconnected",
         lastDisconnected: Date.now(),
@@ -171,10 +176,10 @@ export class InstanceManager {
     }
 
     // Delete auth keys
-    db.delete(authKeys).where(eq(authKeys.instanceId, id)).run();
+    await db.delete(authKeys).where(eq(authKeys.instanceId, id)).run();
 
     // Delete instance (cascades to messages, contacts, groups, chats, queue_stats)
-    db.delete(instances).where(eq(instances.id, id)).run();
+    await db.delete(instances).where(eq(instances.id, id)).run();
   }
 
   async restartInstance(id: string): Promise<void> {
@@ -194,25 +199,25 @@ export class InstanceManager {
     return managed.adapter;
   }
 
-  getInstanceChannel(id: string): ChannelType {
+  async getInstanceChannel(id: string): Promise<ChannelType> {
     const managed = this.adapters.get(id);
     if (managed) return managed.channel;
-    const row = this.getInstanceFromDb(id);
+    const row = await this.getInstanceFromDb(id);
     return row.channel as ChannelType;
   }
 
   // ---- DB reads ----
 
-  getAllInstances(): InstanceEntity[] {
-    return db.select().from(instances).all() as InstanceEntity[];
+  async getAllInstances(): Promise<InstanceEntity[]> {
+    return (await db.select().from(instances).all()) as InstanceEntity[];
   }
 
-  getInstance(id: string): InstanceEntity {
-    return this.getInstanceFromDb(id);
+  async getInstance(id: string): Promise<InstanceEntity> {
+    return await this.getInstanceFromDb(id);
   }
 
   /** Return lifecycle metadata without selecting credential or session columns. */
-  getInstanceLifecycleStatuses(id?: string): InstanceLifecycleStatusSnapshot[] {
+  async getInstanceLifecycleStatuses(id?: string): Promise<InstanceLifecycleStatusSnapshot[]> {
     const select = db
       .select({
         id: instances.id,
@@ -226,7 +231,7 @@ export class InstanceManager {
         lastDisconnectStatusCode: instances.lastDisconnectStatusCode,
       })
       .from(instances);
-    const rows = id ? select.where(eq(instances.id, id)).all() : select.all();
+    const rows = id ? await select.where(eq(instances.id, id)).all() : await select.all();
     if (id && rows.length === 0) throw new Error(`Instance ${id} not found`);
 
     return rows.map((row) => {
@@ -253,8 +258,8 @@ export class InstanceManager {
     });
   }
 
-  private getInstanceFromDb(id: string): InstanceEntity {
-    const row = db.select().from(instances).where(eq(instances.id, id)).get();
+  private async getInstanceFromDb(id: string): Promise<InstanceEntity> {
+    const row = await db.select().from(instances).where(eq(instances.id, id)).get();
     if (!row) {
       throw new Error(`Instance ${id} not found`);
     }
@@ -291,10 +296,11 @@ export class InstanceManager {
 
   private bindAdapterEvents(instanceId: string, adapter: ChannelAdapter): void {
     for (const event of CHANNEL_EVENTS) {
-      adapter.on(event, (payload: ChannelEventPayload[typeof event]) => {
+      adapter.on(event, async (payload: ChannelEventPayload[typeof event]) => {
         if (event === "instance.connected") {
           const connectedPayload = payload as ChannelEventPayload["instance.connected"];
-          db.update(instances)
+          await db
+            .update(instances)
             .set({
               ...(connectedPayload.phone ? { phoneNumber: connectedPayload.phone } : {}),
               updatedAt: connectedPayload.connectedAt,
@@ -305,7 +311,8 @@ export class InstanceManager {
 
         if (event === "instance.disconnected") {
           const disconnectedPayload = payload as ChannelEventPayload["instance.disconnected"];
-          db.update(instances)
+          await db
+            .update(instances)
             .set({
               lastDisconnectReason: disconnectedPayload.reason,
               lastDisconnectStatusCode: disconnectedPayload.statusCode,
@@ -331,7 +338,7 @@ export class InstanceManager {
             updateFields.lastConnected = Date.now();
           }
           if (connPayload.status === "close") {
-            const instance = db
+            const instance = await db
               .select({
                 lastConnected: instances.lastConnected,
                 lastDisconnected: instances.lastDisconnected,
@@ -346,7 +353,7 @@ export class InstanceManager {
             // Keep the first close time until a successful connection starts a new outage.
             if (!outageAlreadyRecorded) updateFields.lastDisconnected = Date.now();
           }
-          db.update(instances).set(updateFields).where(eq(instances.id, instanceId)).run();
+          await db.update(instances).set(updateFields).where(eq(instances.id, instanceId)).run();
         }
 
         // Forward to global handlers

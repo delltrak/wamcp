@@ -9,8 +9,8 @@ import { DEDUP_TTL_HOURS } from "../constants.js";
 
 export class DedupService {
   /** Returns true if the message was already processed */
-  isDuplicate(instanceId: string, messageId: string): boolean {
-    const row = db
+  async isDuplicate(instanceId: string, messageId: string): Promise<boolean> {
+    const row = await db
       .select()
       .from(processedMessages)
       .where(
@@ -24,8 +24,8 @@ export class DedupService {
   }
 
   /** Mark a message as processed */
-  markProcessed(instanceId: string, messageId: string): boolean {
-    const result = db
+  async markProcessed(instanceId: string, messageId: string): Promise<boolean> {
+    const result = await db
       .insert(processedMessages)
       .values({
         instanceId,
@@ -38,9 +38,9 @@ export class DedupService {
   }
 
   /** Remove entries older than the configured TTL */
-  cleanup(): number {
+  async cleanup(): Promise<number> {
     const cutoff = Date.now() - DEDUP_TTL_HOURS * 60 * 60 * 1000;
-    const result = db
+    const result = await db
       .delete(processedMessages)
       .where(lt(processedMessages.processedAt, cutoff))
       .run();

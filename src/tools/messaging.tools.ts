@@ -68,7 +68,7 @@ Returns: { status: "queued", jobId }`,
       const log = createRequestLogger("wa_send_text", params.instanceId);
       const start = Date.now();
       try {
-        const channel = instanceManager.getInstanceChannel(params.instanceId);
+        const channel = await instanceManager.getInstanceChannel(params.instanceId);
         const result = await messageQueue.enqueueMessage(
           params.instanceId,
           params.to,
@@ -99,7 +99,7 @@ Returns: { status: "queued", jobId }`,
       const log = createRequestLogger("wa_send_image", params.instanceId);
       const start = Date.now();
       try {
-        const channel = instanceManager.getInstanceChannel(params.instanceId);
+        const channel = await instanceManager.getInstanceChannel(params.instanceId);
         const result = await messageQueue.enqueueMessage(
           params.instanceId,
           params.to,
@@ -131,7 +131,7 @@ Returns: { status: "queued", jobId }`,
       const log = createRequestLogger("wa_send_video", params.instanceId);
       const start = Date.now();
       try {
-        const channel = instanceManager.getInstanceChannel(params.instanceId);
+        const channel = await instanceManager.getInstanceChannel(params.instanceId);
         const result = await messageQueue.enqueueMessage(
           params.instanceId,
           params.to,
@@ -163,7 +163,7 @@ Returns: { status: "queued", jobId }`,
       const log = createRequestLogger("wa_send_ptv", params.instanceId);
       const start = Date.now();
       try {
-        const channel = instanceManager.getInstanceChannel(params.instanceId);
+        const channel = await instanceManager.getInstanceChannel(params.instanceId);
         if (channel === "cloud") {
           throw new Error(
             "Video notes (PTV) are not supported on Cloud API; use a Baileys instance",
@@ -200,7 +200,7 @@ Returns: { status: "queued", jobId }`,
       const log = createRequestLogger("wa_send_sticker", params.instanceId);
       const start = Date.now();
       try {
-        const channel = instanceManager.getInstanceChannel(params.instanceId);
+        const channel = await instanceManager.getInstanceChannel(params.instanceId);
         const sticker = await mediaService.prepareSticker(params.sticker, params.animated);
         const result = await messageQueue.enqueueMessage(
           params.instanceId,
@@ -235,7 +235,7 @@ Returns: { status: "queued", jobId }`,
       const log = createRequestLogger("wa_send_gif", params.instanceId);
       const start = Date.now();
       try {
-        const channel = instanceManager.getInstanceChannel(params.instanceId);
+        const channel = await instanceManager.getInstanceChannel(params.instanceId);
         if (channel === "cloud") {
           throw new Error(
             "GIF playback sending is not supported on Cloud API; use a Baileys instance",
@@ -274,7 +274,7 @@ Returns: { status: "queued", jobId }`,
       const log = createRequestLogger("wa_send_audio", params.instanceId);
       const start = Date.now();
       try {
-        const channel = instanceManager.getInstanceChannel(params.instanceId);
+        const channel = await instanceManager.getInstanceChannel(params.instanceId);
         const result = await messageQueue.enqueueMessage(
           params.instanceId,
           params.to,
@@ -306,7 +306,7 @@ Returns: { status: "queued", jobId }`,
       const log = createRequestLogger("wa_send_document", params.instanceId);
       const start = Date.now();
       try {
-        const channel = instanceManager.getInstanceChannel(params.instanceId);
+        const channel = await instanceManager.getInstanceChannel(params.instanceId);
         const result = await messageQueue.enqueueMessage(
           params.instanceId,
           params.to,
@@ -397,7 +397,7 @@ Returns: { status: "queued", jobId }`,
       const log = createRequestLogger("wa_send_location", params.instanceId);
       const start = Date.now();
       try {
-        const channel = instanceManager.getInstanceChannel(params.instanceId);
+        const channel = await instanceManager.getInstanceChannel(params.instanceId);
         const result = await messageQueue.enqueueMessage(
           params.instanceId,
           params.to,
@@ -429,7 +429,7 @@ Returns: { status: "queued", jobId }`,
       const log = createRequestLogger("wa_send_live_location", params.instanceId);
       const start = Date.now();
       try {
-        const channel = instanceManager.getInstanceChannel(params.instanceId);
+        const channel = await instanceManager.getInstanceChannel(params.instanceId);
         const result = await messageQueue.enqueueMessage(
           params.instanceId,
           params.to,
@@ -462,7 +462,7 @@ Returns: { status: "queued", jobId }`,
       const log = createRequestLogger("wa_send_contact", params.instanceId);
       const start = Date.now();
       try {
-        const channel = instanceManager.getInstanceChannel(params.instanceId);
+        const channel = await instanceManager.getInstanceChannel(params.instanceId);
         const result = await messageQueue.enqueueMessage(
           params.instanceId,
           params.to,
@@ -493,7 +493,7 @@ Returns: { status: "queued", jobId }`,
       const log = createRequestLogger("wa_send_poll", params.instanceId);
       const start = Date.now();
       try {
-        const channel = instanceManager.getInstanceChannel(params.instanceId);
+        const channel = await instanceManager.getInstanceChannel(params.instanceId);
         const result = await messageQueue.enqueueMessage(
           params.instanceId,
           params.to,
@@ -732,7 +732,7 @@ Returns: { status: "queued", jobId }`,
     },
     async (params) => {
       try {
-        if (instanceManager.getInstanceChannel(params.instanceId) === "cloud") {
+        if ((await instanceManager.getInstanceChannel(params.instanceId)) === "cloud") {
           throw new Error(
             "Group @all mentions are not supported on Cloud API; use a Baileys instance",
           );
@@ -774,7 +774,7 @@ Returns: { status: "queued", jobId }`,
     },
     async (params) => {
       try {
-        const channel = instanceManager.getInstanceChannel(params.instanceId);
+        const channel = await instanceManager.getInstanceChannel(params.instanceId);
         const result = await messageQueue.enqueueMessage(
           params.instanceId,
           params.to,
@@ -800,7 +800,7 @@ Returns: { status: "queued", jobId }`,
     },
     async (params) => {
       try {
-        const channel = instanceManager.getInstanceChannel(params.instanceId);
+        const channel = await instanceManager.getInstanceChannel(params.instanceId);
         const result = await messageQueue.enqueueMessage(
           params.instanceId,
           params.to,
@@ -832,7 +832,7 @@ Returns: { status: "queued", jobId }`,
     },
     async (params) => {
       try {
-        if (instanceManager.getInstanceChannel(params.instanceId) === "cloud") {
+        if ((await instanceManager.getInstanceChannel(params.instanceId)) === "cloud") {
           throw new Error("Media albums are not supported on Cloud API; use a Baileys instance");
         }
         const result = await messageQueue.enqueueMediaAlbum(

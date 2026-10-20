@@ -1,7 +1,9 @@
 import { existsSync } from "node:fs";
-import { resolveDatabaseConfig } from "../src/db/config.js";
-import { migrateSqliteToPostgres } from "../src/db/sqlite-to-postgres.js";
+import { resolveDatabaseConfig } from "./config.js";
+import { migrateSqliteToPostgres } from "./sqlite-to-postgres.js";
 
+const force = process.argv.includes("--force");
+const args = process.argv.slice(2).filter((arg) => arg !== "--force");
 const config = resolveDatabaseConfig();
 if (config.driver !== "postgres") {
   process.stderr.write(
@@ -10,7 +12,7 @@ if (config.driver !== "postgres") {
   process.exit(1);
 }
 
-const sqlitePath = process.argv[2] ? process.argv[2] : config.path;
+const sqlitePath = args[0] ? args[0] : config.path;
 if (!existsSync(sqlitePath)) {
   process.stderr.write(`SQLite database not found at ${sqlitePath}\n`);
   process.exit(1);
@@ -19,6 +21,7 @@ if (!existsSync(sqlitePath)) {
 const result = await migrateSqliteToPostgres({
   sqlitePath,
   databaseUrl: config.url,
+  force,
 });
 const total = Object.values(result.tables).reduce((sum, count) => sum + count, 0);
 process.stdout.write(
@@ -26,4 +29,7 @@ process.stdout.write(
 );
 for (const [table, count] of Object.entries(result.tables)) {
   process.stdout.write(`  ${table}: ${count}\n`);
+}
+if (result.skipped.length > 0) {
+  process.stderr.write(`Skipped tables not in the Postgres schema: ${result.skipped.join(", ")}\n`);
 }

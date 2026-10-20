@@ -32,7 +32,7 @@ interface AdapterInternals {
   reconnectAttempt: number;
   saveCreds: (() => Promise<void>) | null;
   bindEvents: (sock: WASocket) => void;
-  getAppendNotifyWatermark: (now: number) => number;
+  getAppendNotifyWatermark: (now: number) => Promise<number>;
 }
 
 interface InstanceManagerInternals {
@@ -48,19 +48,21 @@ function createTestEventBuffer() {
 
 type TestEventBuffer = ReturnType<typeof createTestEventBuffer>;
 
-function createFixture(options: { lastConnected?: number; lastDisconnected?: number } = {}): {
+async function createFixture(options: { lastConnected?: number; lastDisconnected?: number } = {}): Promise<{
   instanceId: string;
   adapter: BaileysAdapter;
   socket: WASocket;
   eventBuffer: TestEventBuffer;
   dispatchBatch: (events: Partial<BaileysEventMap>) => Promise<void>;
   dispatch: (type: "append" | "notify", messages: WAMessage[]) => Promise<void>;
-  dispatchConnectionUpdate: (update: BaileysEventMap["connection.update"]) => void;
-} {
+  dispatchConnectionUpdate: (
+    update: BaileysEventMap["connection.update"],
+  ) => Promise<void>;
+}> {
   const instanceId = `append_notify_${randomUUID()}`;
   const now = Date.now();
   const eventBuffer = createTestEventBuffer();
-  db.insert(instances)
+  (await db.insert(instances)
     .values({
       id: instanceId,
       name: "Append notification fixture",
@@ -69,10 +71,12 @@ function createFixture(options: { lastConnected?: number; lastDisconnected?: num
       lastConnected: options.lastConnected,
       lastDisconnected: options.lastDisconnected,
     })
-    .run();
+    .run());
 
   let processEvents: ((events: Partial<BaileysEventMap>) => Promise<void> | void) | undefined;
-  let connectionUpdate: ((update: BaileysEventMap["connection.update"]) => void) | undefined;
+  let connectionUpdate:
+    | ((update: BaileysEventMap["connection.update"]) => void | Promise<void>)
+    | undefined;
   const socket = {
     ev: {
       on: vi.fn(
@@ -107,20 +111,20 @@ function createFixture(options: { lastConnected?: number; lastDisconnected?: num
     dispatch: async (type, messages) => {
       await dispatchBatch({ "messages.upsert": { type, messages } } as Partial<BaileysEventMap>);
     },
-    dispatchConnectionUpdate: (update) => {
+    dispatchConnectionUpdate: async (update) => {
       if (!connectionUpdate)
         throw new Error("Baileys connection update handler was not registered");
-      connectionUpdate(update);
+      await connectionUpdate(update);
     },
   };
 }
 
-function deleteInstance(instanceId: string): void {
-  db.delete(instances).where(eq(instances.id, instanceId)).run();
+async function deleteInstance(instanceId: string): Promise<void> {
+  (await db.delete(instances).where(eq(instances.id, instanceId)).run());
 }
 
-function seedStoredMessage(instanceId: string, messageId: string, timestamp: number): void {
-  db.insert(messages)
+async function seedStoredMessage(instanceId: string, messageId: string, timestamp: number): Promise<void> {
+  (await db.insert(messages)
     .values({
       id: messageId,
       instanceId,
@@ -131,7 +135,7 @@ function seedStoredMessage(instanceId: string, messageId: string, timestamp: num
       status: "received",
       timestamp,
     })
-    .run();
+    .run());
 }
 
 afterEach(() => {
@@ -143,7 +147,7 @@ afterEach(() => {
 describe("Baileys offline append notifications", () => {
   it("auto-reads an eligible append once when on_receive is enabled", async () => {
     vi.stubEnv("WA_AUTO_READ", "on_receive");
-    const { instanceId, adapter, dispatch } = createFixture();
+    const { instanceId, adapter, dispatch } = (await createFixture());
     const markRead = vi.spyOn(adapter, "markRead").mockResolvedValue(undefined);
     const message = fixtureMessage("auto-read-offline-append");
 
@@ -155,7 +159,7 @@ describe("Baileys offline append notifications", () => {
       expect(markRead).toHaveBeenCalledTimes(1);
       expect(markRead).toHaveBeenCalledWith(CHAT_JID, ["auto-read-offline-append"], undefined);
     } finally {
-      deleteInstance(instanceId);
+      (await deleteInstance(instanceId));
     }
   });
 
@@ -163,7 +167,7 @@ describe("Baileys offline append notifications", () => {
     vi.stubEnv("WA_AUTO_READ", "on_receive");
     vi.stubEnv("WA_BAILEYS_APPEND_NOTIFY_MAX_PER_BATCH", "1");
     const now = Date.now();
-    const { instanceId, adapter, dispatch } = createFixture();
+    const { instanceId, adapter, dispatch } = (await createFixture());
     const markRead = vi.spyOn(adapter, "markRead").mockResolvedValue(undefined);
 
     try {
@@ -179,13 +183,13 @@ describe("Baileys offline append notifications", () => {
       expect(markRead).toHaveBeenCalledTimes(1);
       expect(markRead).toHaveBeenCalledWith(CHAT_JID, ["append-winner"], undefined);
     } finally {
-      deleteInstance(instanceId);
+      (await deleteInstance(instanceId));
     }
   });
 
   it("leaves append messages unread in modes other than on_receive", async () => {
     vi.stubEnv("WA_AUTO_READ", "on_fetch");
-    const { instanceId, adapter, dispatch } = createFixture();
+    const { instanceId, adapter, dispatch } = (await createFixture());
     const markRead = vi.spyOn(adapter, "markRead").mockResolvedValue(undefined);
 
     try {
@@ -194,23 +198,23 @@ describe("Baileys offline append notifications", () => {
 
       expect(markRead).not.toHaveBeenCalled();
     } finally {
-      deleteInstance(instanceId);
+      (await deleteInstance(instanceId));
     }
   });
 
   it("normalizes millisecond-stored message timestamps and still emits newer appends", async () => {
     const now = Date.now();
     const storedTimestampMs = now - 2 * 60_000;
-    const { instanceId, adapter, dispatch } = createFixture({
+    const { instanceId, adapter, dispatch } = (await createFixture({
       lastConnected: now - 10 * 60_000,
       lastDisconnected: now - 15 * 60_000,
-    });
-    seedStoredMessage(instanceId, "stored-millisecond-message", storedTimestampMs);
+    }));
+    (await seedStoredMessage(instanceId, "stored-millisecond-message", storedTimestampMs));
     const received = vi.fn();
     adapter.on("message.received", received);
 
     try {
-      expect((adapter as unknown as AdapterInternals).getAppendNotifyWatermark(now)).toBe(
+      expect(await (adapter as unknown as AdapterInternals).getAppendNotifyWatermark(now)).toBe(
         storedTimestampMs,
       );
 
@@ -219,43 +223,43 @@ describe("Baileys offline append notifications", () => {
       ]);
       expect(received).toHaveBeenCalledTimes(1);
     } finally {
-      deleteInstance(instanceId);
+      (await deleteInstance(instanceId));
     }
   });
 
-  it("picks the newest stored message when timestamps use seconds and milliseconds", () => {
+  it("picks the newest stored message when timestamps use seconds and milliseconds", async () => {
     const now = Date.now();
     const olderTimestampMs = now - 10 * 60_000;
     const newerTimestampSeconds = Math.floor((now - 60_000) / 1000);
-    const { instanceId, adapter } = createFixture();
-    seedStoredMessage(instanceId, "older-millisecond-message", olderTimestampMs);
-    seedStoredMessage(instanceId, "newer-second-message", newerTimestampSeconds);
+    const { instanceId, adapter } = (await createFixture());
+    (await seedStoredMessage(instanceId, "older-millisecond-message", olderTimestampMs));
+    (await seedStoredMessage(instanceId, "newer-second-message", newerTimestampSeconds));
 
     try {
-      expect((adapter as unknown as AdapterInternals).getAppendNotifyWatermark(now)).toBe(
+      expect(await (adapter as unknown as AdapterInternals).getAppendNotifyWatermark(now)).toBe(
         newerTimestampSeconds * 1000,
       );
     } finally {
-      deleteInstance(instanceId);
+      (await deleteInstance(instanceId));
     }
   });
 
   it("skips a redelivered append after its processed-message record was pruned", async () => {
     const now = Date.now();
-    const { instanceId, adapter, dispatch } = createFixture();
+    const { instanceId, adapter, dispatch } = (await createFixture());
     const messageId = "pruned-processed-append";
-    seedStoredMessage(instanceId, messageId, Math.floor((now - 6 * 60_000) / 1000));
-    db.insert(processedMessages)
+    (await seedStoredMessage(instanceId, messageId, Math.floor((now - 6 * 60_000) / 1000)));
+    (await db.insert(processedMessages)
       .values({ messageId, instanceId, processedAt: now - 25 * 60 * 60_000 })
-      .run();
-    db.delete(processedMessages)
+      .run());
+    (await db.delete(processedMessages)
       .where(
         and(
           eq(processedMessages.instanceId, instanceId),
           lt(processedMessages.processedAt, now - 24 * 60 * 60_000),
         ),
       )
-      .run();
+      .run());
     const received = vi.fn();
     adapter.on("message.received", received);
 
@@ -263,19 +267,19 @@ describe("Baileys offline append notifications", () => {
       await dispatch("append", [fixtureMessage(messageId, { timestampMs: now - 2 * 60_000 })]);
       expect(received).not.toHaveBeenCalled();
       expect(
-        db.select().from(processedMessages).where(eq(processedMessages.messageId, messageId)).get(),
+        (await db.select().from(processedMessages).where(eq(processedMessages.messageId, messageId)).get()),
       ).toBeUndefined();
     } finally {
-      deleteInstance(instanceId);
+      (await deleteInstance(instanceId));
     }
   });
 
   it("notifies a brand-new offline append once", async () => {
     const now = Date.now();
-    const { instanceId, adapter, dispatch } = createFixture({
+    const { instanceId, adapter, dispatch } = (await createFixture({
       lastConnected: now - 15 * 60_000,
       lastDisconnected: now - 10 * 60_000,
-    });
+    }));
     const received = vi.fn();
     adapter.on("message.received", received);
     const message = fixtureMessage("new-offline-append-once", { timestampMs: now - 8 * 60_000 });
@@ -285,16 +289,16 @@ describe("Baileys offline append notifications", () => {
       await dispatch("append", [message]);
       expect(received).toHaveBeenCalledTimes(1);
     } finally {
-      deleteInstance(instanceId);
+      (await deleteInstance(instanceId));
     }
   });
 
   it("emits one received event and webhook payload across append and notify redelivery", async () => {
     const now = Date.now();
-    const { instanceId, adapter, dispatch } = createFixture({
+    const { instanceId, adapter, dispatch } = (await createFixture({
       lastConnected: now - 2 * 60_000,
       lastDisconnected: now - 5 * 60_000,
-    });
+    }));
     const received: NormalizedMessageEvent[] = [];
     const webhooks: unknown[] = [];
     adapter.on("message.received", (event) => {
@@ -324,22 +328,22 @@ describe("Baileys offline append notifications", () => {
         text: "fixture offline-message-once",
       });
       expect(
-        db
+        (await db
           .select()
           .from(processedMessages)
           .where(eq(processedMessages.messageId, "offline-message-once"))
-          .get(),
+          .get()),
       ).toBeDefined();
     } finally {
-      deleteInstance(instanceId);
+      (await deleteInstance(instanceId));
     }
   });
 
   it("skips append messages before the disconnect watermark, outside the fallback window, and from this account", async () => {
     const now = Date.now();
-    const { instanceId, adapter, dispatch } = createFixture({
+    const { instanceId, adapter, dispatch } = (await createFixture({
       lastDisconnected: now - 60 * 60_000,
-    });
+    }));
     const received = vi.fn();
     adapter.on("message.received", received);
 
@@ -350,10 +354,10 @@ describe("Baileys offline append notifications", () => {
       ]);
       expect(received).not.toHaveBeenCalled();
     } finally {
-      deleteInstance(instanceId);
+      (await deleteInstance(instanceId));
     }
 
-    const fallback = createFixture();
+    const fallback = (await createFixture());
     const fallbackReceived = vi.fn();
     fallback.adapter.on("message.received", fallbackReceived);
     try {
@@ -362,16 +366,16 @@ describe("Baileys offline append notifications", () => {
       ]);
       expect(fallbackReceived).not.toHaveBeenCalled();
     } finally {
-      deleteInstance(fallback.instanceId);
+      (await deleteInstance(fallback.instanceId));
     }
   });
 
   it("uses the newest persisted connection timestamp when the disconnect timestamp is stale", async () => {
     const now = Date.now();
-    const { instanceId, adapter, dispatch } = createFixture({
+    const { instanceId, adapter, dispatch } = (await createFixture({
       lastDisconnected: now - 2 * 60 * 60_000,
       lastConnected: now - 30 * 60_000,
-    });
+    }));
     const received = vi.fn();
     adapter.on("message.received", received);
 
@@ -381,16 +385,16 @@ describe("Baileys offline append notifications", () => {
       ]);
       expect(received).not.toHaveBeenCalled();
     } finally {
-      deleteInstance(instanceId);
+      (await deleteInstance(instanceId));
     }
   });
 
   it("keeps the pre-connect watermark for offline messages delivered after open", async () => {
     const now = Date.now();
-    const { instanceId, adapter, dispatch, dispatchConnectionUpdate } = createFixture({
+    const { instanceId, adapter, dispatch, dispatchConnectionUpdate } = (await createFixture({
       lastDisconnected: now - 30 * 60_000,
       lastConnected: now - 40 * 60_000,
-    });
+    }));
     const received = vi.fn();
     adapter.on("message.received", received);
     const offlineMessageTimestampMs = now - 10 * 60_000;
@@ -399,13 +403,13 @@ describe("Baileys offline append notifications", () => {
     });
 
     try {
-      dispatchConnectionUpdate({ connection: "open" });
+      await dispatchConnectionUpdate({ connection: "open" });
       expect(
-        db
+        (await db
           .select({ lastConnected: instances.lastConnected })
           .from(instances)
           .where(eq(instances.id, instanceId))
-          .get()?.lastConnected,
+          .get())?.lastConnected,
       ).toBeGreaterThan(offlineMessageTimestampMs);
 
       await dispatch("append", [offlineMessage]);
@@ -414,7 +418,7 @@ describe("Baileys offline append notifications", () => {
         expect.objectContaining({ message: expect.objectContaining({ id: "offline-after-open" }) }),
       );
     } finally {
-      deleteInstance(instanceId);
+      (await deleteInstance(instanceId));
     }
   });
 
@@ -422,9 +426,9 @@ describe("Baileys offline append notifications", () => {
     vi.useFakeTimers();
     const start = new Date("2026-10-15T12:00:00.000Z").getTime();
     vi.setSystemTime(start);
-    const { instanceId, adapter, dispatch, dispatchConnectionUpdate } = createFixture({
+    const { instanceId, adapter, dispatch, dispatchConnectionUpdate } = (await createFixture({
       lastConnected: start - 10 * 60_000,
-    });
+    }));
     const received = vi.fn();
     adapter.on("message.received", received);
     const outageMessage = fixtureMessage("message-after-original-disconnect", {
@@ -432,28 +436,28 @@ describe("Baileys offline append notifications", () => {
     });
 
     try {
-      dispatchConnectionUpdate({ connection: "close" });
-      const originalDisconnect = db
+      await dispatchConnectionUpdate({ connection: "close" });
+      const originalDisconnect = (await db
         .select({ lastDisconnected: instances.lastDisconnected })
         .from(instances)
         .where(eq(instances.id, instanceId))
-        .get()?.lastDisconnected;
+        .get())?.lastDisconnected;
       expect(originalDisconnect).toBe(start);
 
       for (const elapsedMs of [2, 4, 6].map((minutes) => minutes * 60_000)) {
         vi.setSystemTime(start + elapsedMs);
-        dispatchConnectionUpdate({ connection: "close" });
+        await dispatchConnectionUpdate({ connection: "close" });
         expect(
-          db
+          (await db
             .select({ lastDisconnected: instances.lastDisconnected })
             .from(instances)
             .where(eq(instances.id, instanceId))
-            .get()?.lastDisconnected,
+            .get())?.lastDisconnected,
         ).toBe(originalDisconnect);
       }
 
       vi.setSystemTime(start + 8 * 60_000);
-      dispatchConnectionUpdate({ connection: "open" });
+      await dispatchConnectionUpdate({ connection: "open" });
       await dispatch("append", [outageMessage]);
       await dispatch("append", [outageMessage]);
 
@@ -464,18 +468,18 @@ describe("Baileys offline append notifications", () => {
         }),
       );
     } finally {
-      deleteInstance(instanceId);
+      (await deleteInstance(instanceId));
     }
   });
 
   it("notifies a new append sharing the latest stored second but skips stored IDs", async () => {
     const now = Date.now();
     const timestampSeconds = Math.floor((now - 60_000) / 1000);
-    const { instanceId, adapter, dispatch } = createFixture({
+    const { instanceId, adapter, dispatch } = (await createFixture({
       lastConnected: now - 5 * 60_000,
       lastDisconnected: now - 4 * 60_000,
-    });
-    seedStoredMessage(instanceId, "latest-stored-append", timestampSeconds);
+    }));
+    (await seedStoredMessage(instanceId, "latest-stored-append", timestampSeconds));
     const received = vi.fn();
     adapter.on("message.received", received);
 
@@ -495,12 +499,12 @@ describe("Baileys offline append notifications", () => {
         }),
       );
     } finally {
-      deleteInstance(instanceId);
+      (await deleteInstance(instanceId));
     }
   });
 
   it("never emits messages included in a history sync", async () => {
-    const { instanceId, adapter, dispatch, dispatchBatch } = createFixture();
+    const { instanceId, adapter, dispatch, dispatchBatch } = (await createFixture());
     const received = vi.fn();
     adapter.on("message.received", received);
     const historyMessage = fixtureMessage("history-sync-message");
@@ -517,14 +521,14 @@ describe("Baileys offline append notifications", () => {
       await dispatch("append", [historyMessage]);
       expect(received).not.toHaveBeenCalled();
     } finally {
-      deleteInstance(instanceId);
+      (await deleteInstance(instanceId));
     }
   });
 
   it("caps emitted append events per batch", async () => {
     const originalCap = process.env.WA_BAILEYS_APPEND_NOTIFY_MAX_PER_BATCH;
     process.env.WA_BAILEYS_APPEND_NOTIFY_MAX_PER_BATCH = "2";
-    const { instanceId, adapter, dispatch } = createFixture();
+    const { instanceId, adapter, dispatch } = (await createFixture());
     const received = vi.fn();
     adapter.on("message.received", received);
 
@@ -535,7 +539,7 @@ describe("Baileys offline append notifications", () => {
       );
       expect(received).toHaveBeenCalledTimes(2);
     } finally {
-      deleteInstance(instanceId);
+      (await deleteInstance(instanceId));
       if (originalCap === undefined) delete process.env.WA_BAILEYS_APPEND_NOTIFY_MAX_PER_BATCH;
       else process.env.WA_BAILEYS_APPEND_NOTIFY_MAX_PER_BATCH = originalCap;
     }
@@ -546,7 +550,7 @@ describe("Baileys offline append notifications", () => {
     vi.setSystemTime(new Date("2026-10-15T12:00:00.000Z"));
     const oldWatchdog = process.env.WA_BAILEYS_HEALTH_WATCHDOG_MS;
     process.env.WA_BAILEYS_HEALTH_WATCHDOG_MS = "1000";
-    const { instanceId, adapter } = createFixture();
+    const { instanceId, adapter } = (await createFixture());
 
     const listeners = new Map<string, (value: unknown) => void>();
     const websocketListeners = new Map<string, Array<(...args: unknown[]) => void>>();
@@ -593,7 +597,7 @@ describe("Baileys offline append notifications", () => {
     adapter.on("connection.changed", connectionChanged);
 
     try {
-      listeners.get("connection.update")?.({ connection: "open" });
+      await listeners.get("connection.update")?.({ connection: "open" });
       for (let elapsed = 0; elapsed < 1000; elapsed += 100) {
         for (const event of ["message", "ping", "pong"]) {
           for (const handler of websocketListeners.get(event) ?? []) handler();
@@ -635,7 +639,7 @@ describe("Baileys offline append notifications", () => {
       expect(socketEnd.mock.calls[0]?.[0]).toBeInstanceOf(Error);
       expect(socketEnd.mock.calls[0]?.[0]?.message).toContain("simulated USync timeout");
 
-      listeners.get("connection.update")?.({
+      await listeners.get("connection.update")?.({
         connection: "close",
         lastDisconnect: { error: new Error("watchdog reconnect fixture"), date: new Date() },
       });
@@ -645,7 +649,7 @@ describe("Baileys offline append notifications", () => {
       );
       expect(saveCreds).not.toHaveBeenCalled();
     } finally {
-      deleteInstance(instanceId);
+      (await deleteInstance(instanceId));
       vi.clearAllTimers();
       if (oldWatchdog === undefined) delete process.env.WA_BAILEYS_HEALTH_WATCHDOG_MS;
       else process.env.WA_BAILEYS_HEALTH_WATCHDOG_MS = oldWatchdog;
@@ -656,7 +660,7 @@ describe("Baileys offline append notifications", () => {
     vi.useFakeTimers();
     const oldWatchdog = process.env.WA_BAILEYS_HEALTH_WATCHDOG_MS;
     process.env.WA_BAILEYS_HEALTH_WATCHDOG_MS = "1000";
-    const { instanceId, adapter } = createFixture();
+    const { instanceId, adapter } = (await createFixture());
 
     const listeners = new Map<string, (value: unknown) => void>();
     let processEvents: ((events: Partial<BaileysEventMap>) => Promise<void> | void) | undefined;
@@ -690,7 +694,7 @@ describe("Baileys offline append notifications", () => {
     internals.bindEvents(socket);
 
     try {
-      listeners.get("connection.update")?.({ connection: "open" });
+      await listeners.get("connection.update")?.({ connection: "open" });
       await vi.advanceTimersByTimeAsync(3000);
 
       expect(fetchStatus).toHaveBeenCalledTimes(3);
@@ -700,7 +704,7 @@ describe("Baileys offline append notifications", () => {
       expect(saveCreds).not.toHaveBeenCalled();
       expect(processEvents).toBeDefined();
     } finally {
-      deleteInstance(instanceId);
+      (await deleteInstance(instanceId));
       vi.clearAllTimers();
       if (oldWatchdog === undefined) delete process.env.WA_BAILEYS_HEALTH_WATCHDOG_MS;
       else process.env.WA_BAILEYS_HEALTH_WATCHDOG_MS = oldWatchdog;
@@ -715,7 +719,7 @@ describe("Baileys offline append notifications", () => {
     process.env.WA_BAILEYS_HEALTH_WATCHDOG_MS = "10000";
     process.env.WA_BAILEYS_EVENT_BUFFER_STALL_MS = "1000";
     const { instanceId, adapter, socket, eventBuffer, dispatch, dispatchConnectionUpdate } =
-      createFixture({ lastConnected: Date.now() - 10_000 });
+      (await createFixture({ lastConnected: Date.now() - 10_000 }));
     const internals = adapter as unknown as AdapterInternals;
     internals.sock = socket;
     eventBuffer.isBuffering.mockReturnValue(true);
@@ -732,7 +736,7 @@ describe("Baileys offline append notifications", () => {
     adapter.on("message.received", received);
 
     try {
-      dispatchConnectionUpdate({ connection: "open" });
+      await dispatchConnectionUpdate({ connection: "open" });
       await vi.advanceTimersByTimeAsync(999);
       expect(eventBuffer.flush).not.toHaveBeenCalled();
 
@@ -748,7 +752,7 @@ describe("Baileys offline append notifications", () => {
       );
       expect(socket.end).not.toHaveBeenCalled();
     } finally {
-      deleteInstance(instanceId);
+      (await deleteInstance(instanceId));
       vi.clearAllTimers();
       if (oldWatchdog === undefined) delete process.env.WA_BAILEYS_HEALTH_WATCHDOG_MS;
       else process.env.WA_BAILEYS_HEALTH_WATCHDOG_MS = oldWatchdog;
@@ -764,13 +768,13 @@ describe("Baileys offline append notifications", () => {
     const oldBufferStall = process.env.WA_BAILEYS_EVENT_BUFFER_STALL_MS;
     process.env.WA_BAILEYS_HEALTH_WATCHDOG_MS = "10000";
     process.env.WA_BAILEYS_EVENT_BUFFER_STALL_MS = "1000";
-    const { instanceId, adapter, socket, eventBuffer, dispatchConnectionUpdate } = createFixture();
+    const { instanceId, adapter, socket, eventBuffer, dispatchConnectionUpdate } = (await createFixture());
     const internals = adapter as unknown as AdapterInternals;
     internals.sock = socket;
     eventBuffer.isBuffering.mockReturnValue(true);
 
     try {
-      dispatchConnectionUpdate({ connection: "open" });
+      await dispatchConnectionUpdate({ connection: "open" });
       await vi.advanceTimersByTimeAsync(1000);
       expect(eventBuffer.flush).toHaveBeenCalledTimes(1);
       expect(socket.end).not.toHaveBeenCalled();
@@ -783,13 +787,13 @@ describe("Baileys offline append notifications", () => {
         (socket.end as unknown as ReturnType<typeof vi.fn>).mock.calls[0]?.[0]?.message,
       ).toContain("event buffer remained stalled");
 
-      dispatchConnectionUpdate({
+      await dispatchConnectionUpdate({
         connection: "close",
         lastDisconnect: { error: new Error("stalled buffer fixture"), date: new Date() },
       });
       expect(internals.reconnectAttempt).toBe(1);
     } finally {
-      deleteInstance(instanceId);
+      (await deleteInstance(instanceId));
       vi.clearAllTimers();
       if (oldWatchdog === undefined) delete process.env.WA_BAILEYS_HEALTH_WATCHDOG_MS;
       else process.env.WA_BAILEYS_HEALTH_WATCHDOG_MS = oldWatchdog;
@@ -804,13 +808,13 @@ describe("Baileys offline append notifications", () => {
     const oldBufferStall = process.env.WA_BAILEYS_EVENT_BUFFER_STALL_MS;
     process.env.WA_BAILEYS_HEALTH_WATCHDOG_MS = "10000";
     process.env.WA_BAILEYS_EVENT_BUFFER_STALL_MS = "1000";
-    const { instanceId, adapter, socket, eventBuffer, dispatchConnectionUpdate } = createFixture();
+    const { instanceId, adapter, socket, eventBuffer, dispatchConnectionUpdate } = (await createFixture());
     const internals = adapter as unknown as AdapterInternals;
     internals.sock = socket;
     eventBuffer.isBuffering.mockReturnValue(true);
 
     try {
-      dispatchConnectionUpdate({ connection: "open" });
+      await dispatchConnectionUpdate({ connection: "open" });
       await vi.advanceTimersByTimeAsync(500);
       eventBuffer.isBuffering.mockReturnValue(false);
       await vi.advanceTimersByTimeAsync(1000);
@@ -818,7 +822,7 @@ describe("Baileys offline append notifications", () => {
       expect(eventBuffer.flush).not.toHaveBeenCalled();
       expect(socket.end).not.toHaveBeenCalled();
     } finally {
-      deleteInstance(instanceId);
+      (await deleteInstance(instanceId));
       vi.clearAllTimers();
       if (oldWatchdog === undefined) delete process.env.WA_BAILEYS_HEALTH_WATCHDOG_MS;
       else process.env.WA_BAILEYS_HEALTH_WATCHDOG_MS = oldWatchdog;

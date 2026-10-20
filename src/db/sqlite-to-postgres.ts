@@ -7,16 +7,19 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import Database from "better-sqlite3";
+import { getTableName, isTable } from "drizzle-orm";
 import { Client } from "pg";
-import { PostgresSyncDatabase } from "./postgres-sync.js";
+import { createChildLogger } from "../utils/logger.js";
+import * as schema from "./schema.js";
 import { applySchemaSql } from "./schema-sql.js";
-import { quoteIdent } from "./sql-compat.js";
+import { bigintForSql, quoteIdent } from "./sql-compat.js";
 
+const log = createChildLogger({ service: "sqlite-to-postgres" });
 const COPY_BATCH = 100;
-const SKIPPED_TABLES = new Set(["schema_migrations"]);
 
 export interface SqliteToPostgresResult {
   tables: Record<string, number>;
+  skipped: string[];
 }
 
 interface ColumnInfo {
@@ -29,28 +32,41 @@ interface ForeignKeyInfo {
 }
 
 /**
- * Copies every application table, including Baileys `auth_keys`, into Postgres.
- * Re-running upserts rows. The SQLite file is not modified or deleted.
+ * Copies application tables, including Baileys `auth_keys`, into Postgres.
+ * Refuses when the target already has instance or auth rows unless `force` is set.
+ * The SQLite file is not modified or deleted.
  */
 export async function migrateSqliteToPostgres(options: {
   sqlitePath: string;
   databaseUrl: string;
+  force?: boolean;
 }): Promise<SqliteToPostgresResult> {
   const snapshot = await snapshotDatabase(options.sqlitePath);
-  const postgres = new PostgresSyncDatabase(options.databaseUrl);
-  try {
-    applySchemaSql((sql) => {
-      postgres.exec(sql);
-    }, "postgres");
-  } finally {
-    postgres.close();
-  }
-
-  const source = new Database(snapshot.snapshotPath, { readonly: true, fileMustExist: true });
-  const client = new Client({ connectionString: options.databaseUrl });
+  const client = new Client({
+    connectionString: options.databaseUrl,
+    connectionTimeoutMillis: 10_000,
+  });
+  client.on("error", (err: Error) => {
+    log.error({ err: err.message }, "Postgres copy connection dropped");
+  });
   await client.connect();
+  const source = new Database(snapshot.snapshotPath, { readonly: true, fileMustExist: true });
   try {
-    const tables = orderTables(source, listTables(source));
+    await applySchemaSql(async (sql) => {
+      await client.query(sql);
+    }, "postgres");
+    await assertCopyAllowed(client, options.force === true);
+
+    const discovered = listTables(source);
+    const allowed = new Set(applicationTableNames());
+    const skipped = discovered.filter((table) => !allowed.has(table));
+    for (const table of skipped) {
+      log.warn({ table }, "Skipping SQLite table that is not in the Postgres schema");
+    }
+    const tables = orderTables(
+      source,
+      discovered.filter((table) => allowed.has(table)),
+    );
     const counts: Record<string, number> = {};
     await client.query("BEGIN");
     try {
@@ -62,11 +78,34 @@ export async function migrateSqliteToPostgres(options: {
       await client.query("ROLLBACK");
       throw error;
     }
-    return { tables: counts };
+    return { tables: counts, skipped };
   } finally {
     source.close();
     await client.end();
     rmSync(snapshot.directory, { recursive: true, force: true });
+  }
+}
+
+export function applicationTableNames(): string[] {
+  return Object.values(schema)
+    .filter((value) => isTable(value))
+    .map((table) => getTableName(table))
+    .sort();
+}
+
+async function assertCopyAllowed(client: Client, force: boolean): Promise<void> {
+  const result = await client.query<{ instances: string | number; auth_keys: string | number }>(
+    `SELECT
+       (SELECT count(*) FROM instances) AS instances,
+       (SELECT count(*) FROM auth_keys) AS auth_keys`,
+  );
+  const row = result.rows[0];
+  const instances = Number(row?.instances ?? 0);
+  const authKeys = Number(row?.auth_keys ?? 0);
+  if (!force && (instances > 0 || authKeys > 0)) {
+    throw new Error(
+      "Refusing to copy into Postgres because instances or auth_keys already has rows. Stop wa-mcp, copy once into an empty database, then start wa-mcp with WA_DATABASE_URL. Pass --force to overwrite those rows.",
+    );
   }
 }
 
@@ -90,7 +129,7 @@ function listTables(source: Database.Database): string[] {
       "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name",
     )
     .all() as Array<{ name: string }>;
-  return rows.map((row) => row.name).filter((name) => !SKIPPED_TABLES.has(name));
+  return rows.map((row) => row.name);
 }
 
 function orderTables(source: Database.Database, tables: string[]): string[] {
@@ -176,10 +215,8 @@ async function insertBatch(
 
 function normalizeValue(value: unknown): unknown {
   if (value === undefined) return null;
-  if (typeof value === "bigint") {
-    const asNumber = Number(value);
-    return Number.isSafeInteger(asNumber) ? asNumber : value.toString();
-  }
+  if (typeof value === "string") return value.replaceAll("\u0000", "");
+  if (typeof value === "bigint") return bigintForSql(value);
   if (typeof value === "boolean") return value ? 1 : 0;
   return value;
 }

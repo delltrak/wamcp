@@ -346,8 +346,8 @@ describe("TtsService", () => {
     );
 
     await Promise.all(
-      Array.from({ length: 5 }, (_, index) =>
-        services[index % services.length]!.synthesize("Hello"),
+      Array.from({ length: 5 }, async (_, index) =>
+        (await services[index % services.length]!.synthesize("Hello")),
       ),
     );
     expect(synthesize).toHaveBeenCalledTimes(5);

@@ -99,7 +99,7 @@ export function registerGroupTools(
           params.instanceId,
           params.groupId,
           params.memberLabel,
-          instanceManager.getInstanceChannel(params.instanceId),
+          await instanceManager.getInstanceChannel(params.instanceId),
         );
         log.info({ duration: Date.now() - start }, "Group member label update queued");
         return toolSuccess(result);
@@ -126,7 +126,7 @@ export function registerGroupTools(
           params.instanceId,
           params.groupId,
           null,
-          instanceManager.getInstanceChannel(params.instanceId),
+          await instanceManager.getInstanceChannel(params.instanceId),
         );
         log.info({ duration: Date.now() - start }, "Group member label removal queued");
         return toolSuccess(result);

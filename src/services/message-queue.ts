@@ -152,7 +152,7 @@ export class MessageQueue {
     channel: "baileys" | "cloud" = "baileys",
   ): Promise<EnqueueResult> {
     if ("quotedMessageId" in content && content.quotedMessageId && this.getAdapter) {
-      this.getAdapter(instanceId).validateQuotedMessage?.(to, content.quotedMessageId);
+      await this.getAdapter(instanceId).validateQuotedMessage?.(to, content.quotedMessageId);
     }
 
     const queue = this.getOrCreateQueue(instanceId, channel);

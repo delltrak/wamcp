@@ -26,7 +26,7 @@ export interface WaVersion {
  */
 export async function getWaVersion(): Promise<WaVersion> {
   // Check cache first
-  const cached = db.select().from(waVersionCache).where(eq(waVersionCache.id, 1)).get();
+  const cached = await db.select().from(waVersionCache).where(eq(waVersionCache.id, 1)).get();
 
   if (cached && Date.now() - cached.fetchedAt < CACHE_TTL_MS) {
     return {
@@ -40,7 +40,8 @@ export async function getWaVersion(): Promise<WaVersion> {
     const { version, isLatest } = await fetchLatestBaileysVersion();
 
     // Upsert cache
-    db.insert(waVersionCache)
+    await db
+      .insert(waVersionCache)
       .values({
         id: 1,
         versionJson: JSON.stringify(version),
@@ -82,7 +83,8 @@ export async function getWaVersion(): Promise<WaVersion> {
 export async function refreshWaVersion(): Promise<WaVersion> {
   const { version, isLatest } = await fetchLatestBaileysVersion();
 
-  db.insert(waVersionCache)
+  await db
+    .insert(waVersionCache)
     .values({
       id: 1,
       versionJson: JSON.stringify(version),

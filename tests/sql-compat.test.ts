@@ -2,6 +2,7 @@ import Database from "better-sqlite3";
 import { describe, expect, it } from "vitest";
 import { POSTGRES_BASELINE_MIGRATION_ID, applySchemaSql } from "../src/db/schema-sql.js";
 import {
+  bindParameters,
   replaceScalarMax,
   replaceSqlitePlaceholders,
   splitSqlStatements,
@@ -39,6 +40,38 @@ describe("SQL compatibility", () => {
     );
   });
 
+  it("keeps ? inside comments, dollar quotes, and jsonb operators", () => {
+    expect(bindParameters("select /* ? */ $tag$?$tag$ || $$?$$ where id = ?", [7])).toEqual({
+      sql: "select /* ? */ $tag$?$tag$ || $$?$$ where id = $1",
+      values: [7],
+    });
+    expect(bindParameters("select data ? 'a' and data ?| array['b'] and id = ?", [3])).toEqual({
+      sql: "select data ? 'a' and data ?| array['b'] and id = $1",
+      values: [3],
+    });
+    expect(
+      bindParameters('select "id" from "t" where "id" in (?, ?) order by "id" desc limit ?', [
+        "a",
+        "b",
+        10,
+      ]),
+    ).toEqual({
+      sql: 'select "id" from "t" where "id" in ($1, $2) order by "id" desc limit $3',
+      values: ["a", "b", 10],
+    });
+  });
+
+  it("binds named parameters from one object", () => {
+    expect(
+      bindParameters("select * from t where id = @id and name = :name", [
+        { id: "a", "@name": "b" },
+      ]),
+    ).toEqual({
+      sql: "select * from t where id = $1 and name = $2",
+      values: ["a", "b"],
+    });
+  });
+
   it("prepares a drizzle-style upsert for Postgres", () => {
     expect(
       toPostgresQuery(
@@ -51,9 +84,9 @@ describe("SQL compatibility", () => {
 });
 
 describe("SQLite schema initialization", () => {
-  it("creates the application tables and does not add a Postgres migration journal", () => {
+  it("creates the application tables and does not add a Postgres migration journal", async () => {
     const database = new Database(":memory:");
-    applySchemaSql((sql) => {
+    await applySchemaSql((sql) => {
       database.exec(sql);
     }, "sqlite");
     const tables = database

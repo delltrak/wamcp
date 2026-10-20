@@ -9,16 +9,16 @@ import type { InstanceManager } from "../src/services/instance-manager.js";
 describe("maintenance message retention", () => {
   const instanceId = `maintenance_${randomUUID()}`;
 
-  beforeEach(() => {
+  beforeEach(async () => {
     vi.stubEnv("WA_MESSAGE_RETENTION_DAYS", "30");
     const now = Date.now();
-    db.insert(instances)
+    (await db.insert(instances)
       .values({ id: instanceId, name: "test", createdAt: now, updatedAt: now })
-      .run();
+      .run());
   });
 
-  afterEach(() => {
-    db.delete(instances).where(eq(instances.id, instanceId)).run();
+  afterEach(async () => {
+    (await db.delete(instances).where(eq(instances.id, instanceId)).run());
     vi.unstubAllEnvs();
   });
 
@@ -31,7 +31,7 @@ describe("maintenance message retention", () => {
       { id: "recent-milliseconds", timestamp: now - 60_000 },
       { id: "old-milliseconds", timestamp: now - retentionMs - 60_000 },
     ];
-    db.insert(messages)
+    (await db.insert(messages)
       .values(
         rows.map((row) => ({
           ...row,
@@ -41,9 +41,9 @@ describe("maintenance message retention", () => {
           type: "text" as const,
         })),
       )
-      .run();
+      .run());
 
-    db.insert(statusAudiences)
+    (await db.insert(statusAudiences)
       .values([
         { instanceId, messageId: "recent-audience", recipientJids: "[]", createdAt: now - 60_000 },
         {
@@ -53,25 +53,25 @@ describe("maintenance message retention", () => {
           createdAt: now - retentionMs - 60_000,
         },
       ])
-      .run();
+      .run());
 
     const service = new MaintenanceService({} as InstanceManager);
     await (service as unknown as { pruneMessages: () => Promise<void> }).pruneMessages();
 
-    const remainingMessages = db
+    const remainingMessages = (await db
       .select({ id: messages.id })
       .from(messages)
       .where(eq(messages.instanceId, instanceId))
-      .all()
+      .all())
       .map((row) => row.id)
       .sort();
     expect(remainingMessages).toEqual(["recent-milliseconds", "recent-seconds"]);
 
-    const remainingAudiences = db
+    const remainingAudiences = (await db
       .select({ messageId: statusAudiences.messageId })
       .from(statusAudiences)
       .where(eq(statusAudiences.instanceId, instanceId))
-      .all()
+      .all())
       .map((row) => row.messageId)
       .sort();
     expect(remainingAudiences).toEqual(["recent-audience"]);
