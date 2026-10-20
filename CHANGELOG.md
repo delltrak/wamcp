@@ -44,8 +44,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   revokes that user's tokens. `POST /oauth/revoke` revokes a token or a user. Dynamic client
   registration is limited per IP, can be disabled, and can restrict redirect hosts. Reusing an
   authorization code revokes the tokens issued from it. The OAuth database file is mode 0600.
-  Native redirect schemes such as `app:/cb` are accepted. Invalid `WA_BASIC_AUTH` does not prevent
-  the stdio transport from starting.
+  Native redirect schemes use a reverse-DNS name such as `com.example.app:/cb`. Invalid
+  `WA_BASIC_AUTH` does not prevent the stdio transport from starting.
+- Sign-in attempts are counted before the password check, so concurrent guesses cannot skip the
+  backoff. `WA_TRUST_PROXY` optionally trusts `X-Forwarded-For` from a CIDR list and is unset by
+  default. A successful sign-in clears that address's failure count. A per-user lock does not apply
+  to an address that recently signed in as that user. IPv6 limits use a /64 prefix, and
+  `::ffff:127.0.0.1` is treated as `127.0.0.1`. Concurrent scrypt work is capped. Access tokens last
+  15 minutes, and refresh revokes the previous access token. Opening the OAuth database no longer
+  changes the mode of an existing directory. Credential versions are an HMAC with a per-install key.
+  Revoking a user invalidates unused authorization codes. `/oauth/revoke` sends the same CORS
+  headers as the token endpoint. Tokens stored with an empty credential version, including tokens
+  issued before this binding, are rejected once, so existing OAuth sessions must sign in again.
 - App-state writes now run through a per-instance queue with configurable spacing and a resync
   preflight that requires a retrievable current key, a positive collection version, a 128-byte hash,
   and no Baileys-reported sync, decode, missing-key, or hash-verification failure. Successful writes

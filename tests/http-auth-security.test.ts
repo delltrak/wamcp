@@ -556,7 +556,7 @@ describe("OAuth 2.1 authorization server", () => {
     });
     expect(token.status).toBe(200);
     expect(token.json.token_type).toBe("Bearer");
-    expect(token.json.expires_in).toBe(3600);
+    expect(token.json.expires_in).toBe(900);
     expect(token.json.scope).toBe("mcp");
     const accessToken = String(token.json.access_token);
     const refreshToken = String(token.json.refresh_token);
@@ -624,6 +624,11 @@ describe("OAuth 2.1 authorization server", () => {
     });
     expect(rotated.status).toBe(200);
     expect(rotated.json.expires_in).toBe(900);
+    const previousAccess = await fetch(`${harness.baseUrl}/mcp`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${accessToken}` },
+    });
+    expect(previousAccess.status).toBe(401);
     const rotatedAccess = String(rotated.json.access_token);
     const rotatedRefresh = String(rotated.json.refresh_token);
     const reuse = await exchange(harness, {

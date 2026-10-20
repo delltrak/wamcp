@@ -1,4 +1,4 @@
-import { createHash, scrypt, timingSafeEqual, type ScryptOptions } from "node:crypto";
+import { createHash, createHmac, scrypt, timingSafeEqual, type ScryptOptions } from "node:crypto";
 
 export const BASIC_AUTH_SCRYPT = {
   N: 16_384,
@@ -35,14 +35,37 @@ interface SuccessCacheEntry {
   expiresAt: number;
 }
 
+const DEFAULT_SCRYPT_LIMIT = 2;
+
 const successCache = new Map<string, SuccessCacheEntry>();
 let scryptOperations = 0;
+let scryptInFlight = 0;
+let scryptLimit = DEFAULT_SCRYPT_LIMIT;
 let dummyHashPromise: Promise<Buffer> | undefined;
 
+export class ScryptBusyError extends Error {
+  constructor() {
+    super("scrypt_busy");
+    this.name = "ScryptBusyError";
+  }
+}
+
+/** Cap concurrent scrypt work so the libuv threadpool stays available. */
+export function setBasicAuthScryptLimit(limit: number): void {
+  scryptLimit = limit;
+}
+
+export function basicAuthScryptLimit(): number {
+  return scryptLimit;
+}
+
 function deriveKey(password: string, salt: Buffer): Promise<Buffer> {
+  if (scryptInFlight >= scryptLimit) throw new ScryptBusyError();
+  scryptInFlight += 1;
   scryptOperations += 1;
   return new Promise((resolve, reject) => {
     scrypt(password, salt, BASIC_AUTH_SCRYPT.keylen, SCRYPT_OPTIONS, (error, derived) => {
+      scryptInFlight -= 1;
       if (error) reject(error);
       else resolve(derived);
     });
@@ -135,13 +158,21 @@ export function findBasicUser(
   return matched;
 }
 
-/** Stable id for the configured verifier. Password rotation changes it. */
-export function credentialFingerprint(user: BasicAuthUser): string {
+/** HMAC of the configured verifier. Password rotation changes it. The key stays out of oauth.db. */
+export function credentialFingerprint(user: BasicAuthUser, macKey: Buffer): string {
   const material =
     user.kind === "scrypt"
       ? `scrypt\0${user.salt?.toString("base64url") ?? ""}\0${user.hash?.toString("base64url") ?? ""}`
       : `plain\0${user.password ?? ""}`;
-  return createHash("sha256").update(`${user.username}\0${material}`).digest("hex");
+  return createHmac("sha256", macKey).update(`${user.username}\0${material}`).digest("hex");
+}
+
+function verifierCacheId(user: BasicAuthUser): string {
+  const material =
+    user.kind === "scrypt"
+      ? `scrypt\0${user.salt?.toString("base64url") ?? ""}\0${user.hash?.toString("base64url") ?? ""}`
+      : `plain\0${user.password ?? ""}`;
+  return createHash("sha256").update(material).digest("hex");
 }
 
 function successCacheKey(username: string, password: string, fingerprint: string): string {
@@ -177,8 +208,7 @@ export async function verifyBasicCredentials(
     return false;
   }
 
-  const fingerprint = credentialFingerprint(matched);
-  const key = successCacheKey(username, bounded, fingerprint);
+  const key = successCacheKey(username, bounded, verifierCacheId(matched));
   const cached = successCache.get(key);
   if (cached && cached.expiresAt > now) {
     rememberSuccess(key, cached.expiresAt - SUCCESS_CACHE_TTL_MS);

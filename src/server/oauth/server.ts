@@ -1,7 +1,8 @@
 import { timingSafeEqual } from "node:crypto";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { logger as appLogger } from "../../utils/logger.js";
-import { AuthAttemptLimiter, clientAddress } from "../auth-limiter.js";
+import { AuthAttemptLimiter, clientAddress, type TrustedProxy } from "../auth-limiter.js";
+import { ScryptBusyError } from "../basic-auth.js";
 import { validPkceChallenge, validPkceVerifier } from "./pkce.js";
 import {
   hasControlCharacter,
@@ -35,10 +36,11 @@ export interface McpOAuthServerOptions {
   resourceUrl: string;
   store: OAuthStore;
   validateCredential: (username: string, password: string) => boolean | Promise<boolean>;
-  resolveCredentialVersion?: (username: string) => string | undefined;
+  resolveCredentialVersion?: (username: string, macKey: Buffer) => string | undefined;
   limiter?: AuthAttemptLimiter;
   dynamicRegistration?: "open" | "disabled";
   redirectHostAllowlist?: readonly string[];
+  trustProxy?: TrustedProxy;
   apiKey?: string;
   now?: () => Date;
   log?: OAuthLogger;
@@ -156,6 +158,7 @@ export class McpOAuthServer {
   private readonly limiter: AuthAttemptLimiter | undefined;
   private readonly dynamicRegistration: "open" | "disabled";
   private readonly redirectHostAllowlist: readonly string[];
+  private readonly trustProxy: TrustedProxy | undefined;
   private readonly apiKey: string | undefined;
   private readonly now: () => Date;
   private readonly log: OAuthLogger;
@@ -178,9 +181,12 @@ export class McpOAuthServer {
     this.limiter = options.limiter;
     this.dynamicRegistration = options.dynamicRegistration ?? "open";
     this.redirectHostAllowlist = options.redirectHostAllowlist ?? [];
+    this.trustProxy = options.trustProxy;
     this.apiKey = options.apiKey;
     if (options.resolveCredentialVersion) {
-      this.store.credentialVersion = options.resolveCredentialVersion;
+      const resolveCredentialVersion = options.resolveCredentialVersion;
+      this.store.credentialVersion = (username) =>
+        resolveCredentialVersion(username, this.store.macKey);
     }
     this.now = options.now ?? (() => new Date());
     this.log = options.log ?? defaultLogger;
@@ -279,7 +285,7 @@ export class McpOAuthServer {
     sendOAuthError(res, 404, "invalid_request", "unknown OAuth endpoint");
   }
 
-  private corsScope(pathname: string): "metadata" | "register" | "token" | undefined {
+  private corsScope(pathname: string): "metadata" | "register" | "token" | "revoke" | undefined {
     if (
       pathname === this.paths.authorizationServerMetadata ||
       pathname === this.paths.protectedResourceMetadata
@@ -288,6 +294,7 @@ export class McpOAuthServer {
     }
     if (pathname === this.paths.register) return "register";
     if (pathname === this.paths.token) return "token";
+    if (pathname === this.paths.revoke) return "revoke";
     return undefined;
   }
 
@@ -443,7 +450,7 @@ export class McpOAuthServer {
       createdAt: Math.floor(this.now().getTime() / 1000),
     };
     try {
-      this.store.registerClient(client, clientAddress(req));
+      this.store.registerClient(client, clientAddress(req, this.trustProxy));
     } catch (error) {
       if (error instanceof OAuthFlowError && error.oauthCode === "registration_limit") {
         this.log.warn(
@@ -506,32 +513,38 @@ export class McpOAuthServer {
     const form = new URLSearchParams(body.toString("utf8"));
     const username = form.get("username") ?? "";
     const password = form.get("password") ?? "";
-    const ip = clientAddress(req);
-    const lockedFor = this.limiter?.retryAfterMs(ip, username) ?? 0;
-    if (lockedFor > 0) {
-      this.sendRateLimited(res, lockedFor);
+    const ip = clientAddress(req, this.trustProxy);
+    const reserved = this.limiter?.beginAttempt(ip, username) ?? 0;
+    if (reserved > 0) {
+      this.sendRateLimited(res, reserved);
       return;
     }
-    const credentialsAccepted =
+    const credentialsWellFormed =
       username.length >= 1 &&
       username.length <= 128 &&
       password.length >= 1 &&
-      password.length <= 256 &&
-      (await this.validateCredential(username, password));
+      password.length <= 256;
+    let credentialsAccepted: boolean;
+    try {
+      credentialsAccepted =
+        credentialsWellFormed && (await this.validateCredential(username, password));
+    } catch (error) {
+      if (error instanceof ScryptBusyError) {
+        this.limiter?.cancelAttempt(ip, username);
+        this.sendRateLimited(res, 1000);
+        return;
+      }
+      throw error;
+    }
     if (!credentialsAccepted) {
-      const retryAfter = this.limiter?.recordFailure(ip, username) ?? 0;
       this.log.warn(
         { event: "oauth_authorize_rejected" },
         "OAuth authorization credentials were rejected",
       );
-      if (retryAfter > 0) {
-        this.sendRateLimited(res, retryAfter);
-        return;
-      }
       this.renderAuthorize(res, 401, input, validated.client, "Invalid username or password.");
       return;
     }
-    this.limiter?.recordSuccess(username);
+    this.limiter?.recordSuccess(ip, username);
 
     let code: string;
     try {
@@ -869,7 +882,10 @@ ${error}
     }
     const allowed = await this.mayRevokeSubject(req, username);
     if (allowed === "limited") {
-      this.sendRateLimited(res, this.limiter?.retryAfterMs(clientAddress(req), username) ?? 1000);
+      this.sendRateLimited(
+        res,
+        this.limiter?.retryAfterMs(clientAddress(req, this.trustProxy), username) ?? 1000,
+      );
       return;
     }
     if (allowed !== "yes") {
@@ -901,14 +917,22 @@ ${error}
     if (scheme !== "basic") return "no";
     const decoded = decodeBasicCredentials(parts[1]);
     if (!decoded || decoded.username !== username) return "no";
-    const ip = clientAddress(req);
-    if ((this.limiter?.retryAfterMs(ip, decoded.username) ?? 0) > 0) return "limited";
-    const accepted = await this.validateCredential(decoded.username, decoded.password);
-    if (accepted) {
-      this.limiter?.recordSuccess(decoded.username);
-      return "yes";
+    const ip = clientAddress(req, this.trustProxy);
+    const reserved = this.limiter?.beginAttempt(ip, decoded.username) ?? 0;
+    if (reserved > 0) return "limited";
+    try {
+      const accepted = await this.validateCredential(decoded.username, decoded.password);
+      if (accepted) {
+        this.limiter?.recordSuccess(ip, decoded.username);
+        return "yes";
+      }
+    } catch (error) {
+      if (error instanceof ScryptBusyError) {
+        this.limiter?.cancelAttempt(ip, decoded.username);
+        return "limited";
+      }
+      throw error;
     }
-    this.limiter?.recordFailure(ip, decoded.username);
     return "no";
   }
 
@@ -984,10 +1008,11 @@ export function createMcpOAuthServer(options: {
   resourceUrl: string;
   dbPath: string;
   validateCredential: (username: string, password: string) => boolean | Promise<boolean>;
-  resolveCredentialVersion?: (username: string) => string | undefined;
+  resolveCredentialVersion?: (username: string, macKey: Buffer) => string | undefined;
   limiter?: AuthAttemptLimiter;
   dynamicRegistration?: "open" | "disabled";
   redirectHostAllowlist?: readonly string[];
+  trustProxy?: TrustedProxy;
   apiKey?: string;
   now?: () => Date;
   log?: OAuthLogger;

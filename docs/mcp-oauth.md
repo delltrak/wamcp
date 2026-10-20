@@ -23,13 +23,16 @@ WA_MCP_OAUTH_ISSUER_URL=https://wa.example.com/wamcp
 # Optional. Defaults to the issuer origin, the base path, and /mcp.
 WA_MCP_OAUTH_RESOURCE_URL=https://wa.example.com/wamcp/mcp
 # Optional. Created only when OAuth is enabled. Must not be the WhatsApp database.
-# The file is mode 0600 and its directory is mode 0700.
+# The database file is mode 0600. A new parent directory is mode 0700.
+# An existing directory, including data/, is left unchanged.
 WA_MCP_OAUTH_DB_PATH=data/oauth.db
 # Optional. open (default) or disabled.
 WA_MCP_OAUTH_DCR=open
 # Optional. Comma-separated hostnames or native scheme names. Unset allows every valid redirect.
-WA_MCP_OAUTH_REDIRECT_HOST_ALLOWLIST=client.example,app
+WA_MCP_OAUTH_REDIRECT_HOST_ALLOWLIST=client.example,com.example.app
 ```
+
+`WA_TRUST_PROXY` is optional and empty by default. It is a comma-separated CIDR list. `X-Forwarded-For` is used only when the socket peer belongs to that list. Leave it unset when WA MCP is reached directly.
 
 `WA_MCP_OAUTH_ISSUER_URL` is required. It must be an absolute public HTTPS URL with no userinfo, query, or fragment, and its path must equal `WA_BASE_PATH` (both empty, or both `/wamcp`). The resource URL must be that origin plus the base path plus `/mcp`. Startup fails when OAuth is enabled without at least one Basic Auth user, because the authorization page signs in with those accounts.
 
@@ -69,7 +72,7 @@ The server never writes passwords, API keys, authorization codes, or tokens to t
 4. Register a public client at `registration_endpoint` when the client does not already have a `client_id`.
 5. Send the user to `authorization_endpoint` with `response_type=code`, PKCE `S256`, `resource` set to the canonical MCP URL, and `scope=mcp`.
 6. The user signs in with a `WA_BASIC_AUTH` account. The callback receives `code`, `state`, and `iss`.
-7. Exchange the code at `token_endpoint`. Refresh tokens rotate, and the new access token expires after 15 minutes. Reusing a rotated refresh token, or reusing the authorization code, revokes that token family.
+7. Exchange the code at `token_endpoint`. Access tokens expire after 15 minutes. Refresh tokens rotate and revoke the previous access token. Reusing a rotated refresh token, or reusing the authorization code, revokes that token family.
 8. Call the MCP endpoint with `Authorization: Bearer` and the access token. `POST /oauth/revoke` with `token` and `client_id` revokes that token's family. The same endpoint with `username`, plus that user's Basic credentials or `WA_MCP_API_KEY`, revokes every token for the user.
 
 For a root deployment the discovery URLs are:
@@ -108,19 +111,19 @@ The `401` challenge includes the protected-resource metadata URL, so a conformin
 
 - Public clients only (`token_endpoint_auth_method=none`).
 - Authorization code with mandatory PKCE `S256`. Codes are single-use and expire after 5 minutes.
-- The first access token expires after 1 hour. An access token issued by refresh expires after 15 minutes. Refresh tokens expire after 30 days and rotate on use.
+- Access tokens expire after 15 minutes, including the token issued with the authorization code. Refresh tokens expire after 30 days. Rotation revokes the refresh token that was presented and every previous access token in that family.
 - Reuse of a rotated refresh token, or reuse of an authorization code, revokes the whole token family, including outstanding access tokens.
-- Tokens are bound to the Basic Auth account that approved them. Removing that account, or changing its password, makes refresh and access fail and revokes the family.
-- Failed sign-in attempts on the authorization page and failed Basic authentication on `/mcp` are limited per socket address and per username. The address is the TCP peer, not `X-Forwarded-For`. A successful password clears only the username bucket.
+- Tokens are bound to the Basic Auth account that approved them with an HMAC of the credential and a per-install key stored next to the OAuth database (`oauth.db.mac`, mode 0600). Removing that account, or changing its password, makes refresh and access fail and revokes the family. Revoking a user also invalidates that user's unused authorization codes. Tokens issued before this binding have an empty credential version and are rejected.
+- Failed sign-in attempts on the authorization page and failed Basic authentication on `/mcp` are counted before the password check, per client address and per username. A success clears both counts for that address. A per-user lock does not apply to an address that recently signed in as that user. IPv6 addresses share a /64 bucket. `X-Forwarded-For` is ignored unless `WA_TRUST_PROXY` lists the socket peer. Too many concurrent scrypt checks return 429 without queueing more work.
 - Codes and tokens are random. The database stores SHA-256 hashes, not the raw values.
 - The OAuth `resource` value is bound to the canonical MCP URL at authorization, token issuance, refresh, and MCP access.
 - Successful and failed authorization redirects include the issuer (`iss`) after the client and redirect URI have been validated.
 - Redirect URIs must match the registered value. Native clients may change only the port of an `http://127.0.0.1` or `http://[::1]` callback. `localhost` callbacks require an explicit port and still match exactly, including the port.
-- HTTPS redirect URIs are accepted for web and native clients. Plain HTTP is limited to native loopback callbacks. Native clients may also register a private-use scheme such as `app:/cb` (RFC 8252). `javascript`, `data`, and `file` are rejected.
+- HTTPS redirect URIs are accepted for web and native clients. Plain HTTP is limited to native loopback callbacks, and both `127.0.0.1` and `localhost` require an explicit port. Native clients may register a reverse-DNS scheme such as `com.example.app:/cb` (RFC 8252). Schemes without a dot, and network or handler schemes such as `ftp`, `mailto`, `intent`, and `javascript`, are rejected.
 - `WA_MCP_OAUTH_REDIRECT_HOST_ALLOWLIST` restricts those redirects to the listed hostnames or scheme names. Leave it unset to allow every redirect that passes the rules above.
-- Metadata, dynamic registration, and the token endpoint send `Access-Control-Allow-Origin: *`. The authorization page does not.
+- Metadata, dynamic registration, the token endpoint, and the revocation endpoint send `Access-Control-Allow-Origin: *`. The authorization page does not.
 - The authorization page sets `Cache-Control: no-store`, `X-Frame-Options: DENY`, `Referrer-Policy: no-referrer`, and a restrictive `Content-Security-Policy`.
 - Dynamic registration documents are limited to 16 KiB, each redirect URI to 2 KiB, 10 redirect URIs, 40 new clients per IP per hour, and 1,000 stored clients. Clients unused for 24 hours are pruned before a new registration is accepted. `WA_MCP_OAUTH_DCR=disabled` rejects registration and omits `registration_endpoint` from metadata.
-- The OAuth state lives in `WA_MCP_OAUTH_DB_PATH` (default `data/oauth.db`), which is created only when OAuth is enabled. The file is mode 0600 and its directory is mode 0700. It is not the WhatsApp session database.
+- The OAuth state lives in `WA_MCP_OAUTH_DB_PATH` (default `data/oauth.db`), which is created only when OAuth is enabled. The database file and the credential key are mode 0600. A directory created for that file is mode 0700. An existing directory is not changed. It is not the WhatsApp session database.
 
 The issuer and resource values are the public HTTPS URLs clients use, not the container's internal address. A reverse proxy that terminates TLS should still be the only public entry point; the in-process sign-in limiter uses the address it sees on the socket.

@@ -1,14 +1,15 @@
 import { timingSafeEqual } from "node:crypto";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { logger } from "../utils/logger.js";
-import { AuthAttemptLimiter, clientAddress } from "./auth-limiter.js";
-import { verifyBasicCredentials, type BasicAuthUser } from "./basic-auth.js";
+import { AuthAttemptLimiter, clientAddress, type TrustedProxy } from "./auth-limiter.js";
+import { ScryptBusyError, verifyBasicCredentials, type BasicAuthUser } from "./basic-auth.js";
 import type { McpOAuthServer } from "./oauth/server.js";
 
 export interface McpHttpAuth {
   apiKey?: string;
   basicUsers: readonly BasicAuthUser[];
   limiter?: AuthAttemptLimiter;
+  trustProxy?: TrustedProxy;
 }
 
 function verifyApiKey(provided: string, expected: string): boolean {
@@ -111,25 +112,33 @@ export async function authorizeMcpHttpRequest(
 
   if (authorization?.scheme === "basic" && auth.basicUsers.length > 0) {
     const decoded = decodeBasic(authorization.credentials);
-    const ip = clientAddress(req);
+    const ip = clientAddress(req, auth.trustProxy);
     const username = decoded?.username ?? "\0invalid";
-    const wait = auth.limiter?.retryAfterMs(ip, username) ?? 0;
-    if (wait > 0) {
+    const reserved = auth.limiter?.beginAttempt(ip, username) ?? 0;
+    if (reserved > 0) {
       logger.warn("MCP Basic authentication is rate limited");
-      writeTooMany(res, wait, challenges);
+      writeTooMany(res, reserved, challenges);
       return false;
     }
-    const accepted = decoded
-      ? await verifyBasicCredentials(auth.basicUsers, decoded.username, decoded.password)
-      : false;
-    if (accepted && decoded) {
-      auth.limiter?.recordSuccess(decoded.username);
-      return true;
+    try {
+      const accepted = decoded
+        ? await verifyBasicCredentials(auth.basicUsers, decoded.username, decoded.password)
+        : false;
+      if (accepted && decoded) {
+        auth.limiter?.recordSuccess(ip, decoded.username);
+        return true;
+      }
+    } catch (error) {
+      if (error instanceof ScryptBusyError) {
+        auth.limiter?.cancelAttempt(ip, username);
+        logger.warn("MCP Basic authentication is rate limited");
+        writeTooMany(res, 1000, challenges);
+        return false;
+      }
+      throw error;
     }
-    const lockedFor = auth.limiter?.recordFailure(ip, username) ?? 0;
     logger.warn("Unauthorized MCP request");
-    if (lockedFor > 0) writeTooMany(res, lockedFor, challenges);
-    else writeUnauthorized(res, challenges);
+    writeUnauthorized(res, challenges);
     return false;
   }
 

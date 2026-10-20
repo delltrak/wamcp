@@ -22,8 +22,9 @@ export function hasControlCharacter(value: string): boolean {
   return false;
 }
 
-const BLOCKED_NATIVE_SCHEMES = new Set([
+const BLOCKED_NATIVE_SCHEMES = [
   "javascript",
+  "x-javascript",
   "data",
   "file",
   "blob",
@@ -34,16 +35,40 @@ const BLOCKED_NATIVE_SCHEMES = new Set([
   "vbscript",
   "ws",
   "wss",
-]);
+  "ftp",
+  "mailto",
+  "intent",
+  "view-source",
+  "jar",
+  "http+unix",
+  "ssh",
+  "tel",
+  "sms",
+  "smsto",
+  "market",
+  "content",
+];
 
 function schemeName(url: URL): string {
   return url.protocol.slice(0, -1).toLowerCase();
 }
 
-/** Private-use native schemes such as `app:/cb` (RFC 8252). Loopback HTTP is separate. */
+function blockedNativeScheme(scheme: string): boolean {
+  return BLOCKED_NATIVE_SCHEMES.some(
+    (blocked) =>
+      scheme === blocked || scheme.startsWith(`${blocked}.`) || scheme.startsWith(`${blocked}+`),
+  );
+}
+
+/**
+ * Private-use native schemes must be reverse-DNS names (RFC 8252), such as
+ * `com.example.app:/cb`. Loopback HTTP is separate.
+ */
 function validNativeScheme(url: URL): boolean {
   const scheme = schemeName(url);
-  if (!/^[a-z][a-z0-9+.-]*$/.test(scheme) || BLOCKED_NATIVE_SCHEMES.has(scheme)) return false;
+  if (!/^[a-z][a-z0-9+.-]*$/.test(scheme) || !scheme.includes(".") || blockedNativeScheme(scheme)) {
+    return false;
+  }
   if (url.hostname) return true;
   return url.pathname.length > 1;
 }
@@ -60,8 +85,8 @@ export function validRedirectUri(raw: string, applicationType: "web" | "native")
   if (url.username || url.password || url.hash) return false;
   if (url.protocol === "https:") return Boolean(url.hostname);
   if (url.protocol === "http:") {
-    if (applicationType !== "native" || !url.hostname) return false;
-    if (url.hostname.toLowerCase() === "localhost") return url.port !== "";
+    if (applicationType !== "native" || !url.hostname || url.port === "") return false;
+    if (url.hostname.toLowerCase() === "localhost") return true;
     return isLoopbackAddress(url.hostname);
   }
   return applicationType === "native" && validNativeScheme(url);

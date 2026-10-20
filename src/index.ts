@@ -78,9 +78,10 @@ function openOAuth(
     limiter,
     validateCredential: (username, password) =>
       verifyBasicCredentials(httpConfig.basicUsers, username, password),
-    resolveCredentialVersion: (username) => {
+    ...(httpConfig.trustProxy ? { trustProxy: httpConfig.trustProxy } : {}),
+    resolveCredentialVersion: (username, macKey) => {
       const user = findBasicUser(httpConfig.basicUsers, username);
-      return user ? credentialFingerprint(user) : undefined;
+      return user ? credentialFingerprint(user, macKey) : undefined;
     },
   });
 }
@@ -184,6 +185,7 @@ async function startHttp(
           ...(httpConfig.apiKey ? { apiKey: httpConfig.apiKey } : {}),
           basicUsers: httpConfig.basicUsers,
           limiter: signInLimiter,
+          ...(httpConfig.trustProxy ? { trustProxy: httpConfig.trustProxy } : {}),
         },
         oauth,
       ),

@@ -1,12 +1,14 @@
 import { createHash, randomBytes } from "node:crypto";
-import { chmodSync, existsSync, mkdirSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, statSync } from "node:fs";
 import { dirname } from "node:path";
 import Database from "better-sqlite3";
+import { normalizeClientIp } from "../ip-address.js";
+import { logger } from "../../utils/logger.js";
+import { loadCredentialMacKey } from "./credential-key.js";
 import { verifyPkceS256 } from "./pkce.js";
 
 const CODE_TTL_SECONDS = 5 * 60;
-const ACCESS_TTL_SECONDS = 60 * 60;
-const ROTATED_ACCESS_TTL_SECONDS = 15 * 60;
+const ACCESS_TTL_SECONDS = 15 * 60;
 const REFRESH_TTL_SECONDS = 30 * 24 * 60 * 60;
 
 const SCHEMA = `
@@ -195,11 +197,15 @@ export class OAuthStore {
   registrationWindowMs = 60 * 60 * 1000;
   unusedClientTtlMs = 24 * 60 * 60 * 1000;
   credentialVersion: CredentialVersionResolver | undefined;
+  readonly macKey: Buffer;
 
   constructor(
     private readonly db: Database.Database,
+    macKey: Buffer,
     private readonly filePath?: string,
-  ) {}
+  ) {
+    this.macKey = macKey;
+  }
 
   close(): void {
     this.db.close();
@@ -434,6 +440,12 @@ export class OAuthStore {
           )
           .run(nowSec, hashSecret(request.refreshToken));
         if (revoked.changes !== 1) throw new OAuthFlowError("invalid_grant");
+        this.db
+          .prepare(
+            `UPDATE oauth_tokens SET revoked_at = ?
+             WHERE family_id = ? AND token_type = 'access' AND revoked_at IS NULL`,
+          )
+          .run(nowSec, row.family_id);
         return {
           kind: "issued",
           pair: this.insertTokenPair(
@@ -444,7 +456,7 @@ export class OAuthStore {
             row.scope,
             row.credential_version,
             nowSec,
-            ROTATED_ACCESS_TTL_SECONDS,
+            ACCESS_TTL_SECONDS,
           ),
         };
       },
@@ -501,9 +513,19 @@ export class OAuthStore {
 
   revokeSubject(subject: string, now: Date): void {
     if (subject.length < 1 || subject.length > 128) return;
-    this.db
-      .prepare("UPDATE oauth_tokens SET revoked_at = ? WHERE subject = ? AND revoked_at IS NULL")
-      .run(unixSeconds(now), subject);
+    const nowSec = unixSeconds(now);
+    const revoke = this.db.transaction(() => {
+      this.db
+        .prepare("UPDATE oauth_tokens SET revoked_at = ? WHERE subject = ? AND revoked_at IS NULL")
+        .run(nowSec, subject);
+      this.db
+        .prepare(
+          `UPDATE oauth_authorization_codes SET used_at = ?
+           WHERE subject = ? AND used_at IS NULL`,
+        )
+        .run(nowSec, subject);
+    });
+    revoke.immediate();
     this.tightenPermissions();
   }
 
@@ -604,9 +626,7 @@ export class OAuthStore {
 }
 
 function normalizeRegistrationIp(ip: string): string {
-  const trimmed = ip.trim();
-  if (!trimmed || trimmed.length > 128) return "unknown";
-  return trimmed;
+  return normalizeClientIp(ip);
 }
 
 export function migrateOAuthSchema(db: Database.Database): void {
@@ -644,20 +664,40 @@ function tightenOAuthFile(filePath: string): void {
   }
 }
 
+function prepareOAuthDirectory(directory: string): void {
+  if (existsSync(directory)) {
+    const mode = statSync(directory).mode & 0o777;
+    if ((mode & 0o077) !== 0) {
+      logger.warn(
+        { mode: mode.toString(8) },
+        "OAuth database directory allows access by other users; its permissions were left unchanged",
+      );
+    }
+    return;
+  }
+  const created: string[] = [];
+  let current = directory;
+  while (!existsSync(current)) {
+    created.push(current);
+    const parent = dirname(current);
+    if (parent === current) break;
+    current = parent;
+  }
+  mkdirSync(directory, { recursive: true });
+  for (const path of created) chmodSync(path, 0o700);
+}
+
 export function openOAuthStore(filename: string): OAuthStore {
   const memory = filename === ":memory:";
-  if (!memory) {
-    const directory = dirname(filename);
-    mkdirSync(directory, { recursive: true });
-    chmodSync(directory, 0o700);
-  }
+  if (!memory) prepareOAuthDirectory(dirname(filename));
+  const macKey = loadCredentialMacKey(filename);
   const db = new Database(filename);
   db.pragma("journal_mode = WAL");
   db.pragma("foreign_keys = ON");
   db.pragma("busy_timeout = 5000");
   db.exec(SCHEMA);
   migrateOAuthSchema(db);
-  const store = new OAuthStore(db, memory ? undefined : filename);
+  const store = new OAuthStore(db, macKey, memory ? undefined : filename);
   if (!memory) tightenOAuthFile(filename);
   return store;
 }

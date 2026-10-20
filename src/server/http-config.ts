@@ -1,6 +1,7 @@
 import { resolve } from "node:path";
 import { HEALTH_ENDPOINT, MCP_ENDPOINT } from "../constants.js";
 import { parseBasicAuthUsers, type BasicAuthUser } from "./basic-auth.js";
+import { parseTrustProxy, type TrustedProxy } from "./ip-address.js";
 import { defaultOAuthResourceUrl, parsePublicHttpsUrl } from "./oauth/urls.js";
 
 const WEBHOOK_ENDPOINT = "/cloud-webhook";
@@ -30,6 +31,7 @@ export interface HttpTransportConfig {
   apiKey?: string;
   basicUsers: BasicAuthUser[];
   oauth: DisabledOAuthConfig | EnabledOAuthConfig;
+  trustProxy?: TrustedProxy;
 }
 
 export function parseBasePath(raw: string | undefined): string {
@@ -145,11 +147,13 @@ export function loadHttpTransportConfig(env: NodeJS.ProcessEnv = process.env): H
   const basePath = parseBasePath(env.WA_BASE_PATH);
   const basicUsers = parseBasicAuthUsers(env.WA_BASIC_AUTH);
   const apiKey = env.WA_MCP_API_KEY;
+  const trustProxy = parseTrustProxy(env.WA_TRUST_PROXY);
   return {
     basePath,
     routes: httpRoutesForBasePath(basePath),
     ...(apiKey ? { apiKey } : {}),
     basicUsers,
     oauth: loadOAuthConfig(env, basePath, basicUsers),
+    ...(trustProxy ? { trustProxy } : {}),
   };
 }

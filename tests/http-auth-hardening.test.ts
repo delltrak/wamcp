@@ -133,28 +133,31 @@ describe("async Basic Auth verification", () => {
     expect(await verifyBasicCredentials(users, "scryptuser", `${password}-no`)).toBe(false);
     expect(basicAuthScryptOperations()).toBe(before + 4);
 
+    const macKey = randomBytes(32);
     const rotated = parseBasicAuthUsers(scryptUser("scryptuser", `${password}-rotated`));
-    expect(credentialFingerprint(rotated[0]!)).not.toBe(credentialFingerprint(users[0]!));
+    expect(credentialFingerprint(rotated[0]!, macKey)).not.toBe(
+      credentialFingerprint(users[0]!, macKey),
+    );
     expect(await verifyBasicCredentials(rotated, "scryptuser", password)).toBe(false);
   });
 });
 
 describe("sign-in backoff", () => {
-  it("backs off per address and per user, and a success clears only the user", () => {
+  it("backs off per address and per user, and a success clears that address", () => {
     let now = 1_000_000;
     const limiter = new AuthAttemptLimiter({
       freeFailures: 1,
       baseDelayMs: 1000,
       now: () => now,
     });
-    expect(limiter.recordFailure("203.0.113.5", "alice")).toBe(0);
-    expect(limiter.recordFailure("203.0.113.5", "alice")).toBe(1000);
+    expect(limiter.beginAttempt("203.0.113.5", "alice")).toBe(0);
+    expect(limiter.beginAttempt("203.0.113.5", "alice")).toBe(1000);
     expect(limiter.retryAfterMs("203.0.113.9", "alice")).toBe(1000);
     expect(limiter.retryAfterMs("203.0.113.5", "bob")).toBe(1000);
     now += 1000;
-    limiter.recordSuccess("alice");
+    limiter.recordSuccess("203.0.113.5", "alice");
     expect(limiter.retryAfterMs("198.51.100.4", "alice")).toBe(0);
-    expect(limiter.recordFailure("203.0.113.5", "bob")).toBe(2000);
+    expect(limiter.beginAttempt("203.0.113.5", "bob")).toBe(0);
     expect(limiter.retryAfterMs("198.51.100.8", "bob")).toBe(0);
     const forwarded = {
       socket: { remoteAddress: "203.0.113.10" },
@@ -289,9 +292,9 @@ describe("sign-in backoff", () => {
 describe("OAuth credential binding and revocation", () => {
   it("invalidates tokens when the Basic user is removed or rotated, and accepts revoke", async () => {
     let users = parseBasicAuthUsers(`alice:${PASSWORD},bob:other-secret`);
-    const versionOf = (username: string) => {
+    const versionOf = (username: string, macKey: Buffer) => {
       const user = findBasicUser(users, username);
-      return user ? credentialFingerprint(user) : undefined;
+      return user ? credentialFingerprint(user, macKey) : undefined;
     };
     const store = openOAuthStore(":memory:");
     const oauth = new McpOAuthServer({
@@ -370,7 +373,7 @@ describe("OAuth credential binding and revocation", () => {
 
     const first = await issue();
     expect(first.status).toBe(200);
-    expect(first.expires_in).toBe(3600);
+    expect(first.expires_in).toBe(900);
     expect(oauth.authenticateAccessToken(first.access_token)).toBe(true);
     const replay = await fetch(`${harness.baseUrl}/oauth/token`, {
       method: "POST",
@@ -529,7 +532,7 @@ describe("dynamic client registration scope", () => {
       resourceUrl: RESOURCE,
       store: openOAuthStore(":memory:"),
       dynamicRegistration: "disabled",
-      redirectHostAllowlist: ["client.example", "app"],
+      redirectHostAllowlist: ["client.example", "com.example.app"],
       validateCredential: (username, password) => verifyBasicCredentials(users, username, password),
       log: { info() {}, warn() {} },
     });
@@ -596,13 +599,14 @@ describe("dynamic client registration scope", () => {
   });
 
   it("accepts native scheme redirects and enforces an allowlist", async () => {
-    expect(validRedirectUri("app:/cb", "native")).toBe(true);
-    expect(validRedirectUri("app:/cb", "web")).toBe(false);
+    expect(validRedirectUri("com.example.app:/cb", "native")).toBe(true);
+    expect(validRedirectUri("com.example.app:/cb", "web")).toBe(false);
+    expect(validRedirectUri("app:/cb", "native")).toBe(false);
     expect(validRedirectUri("javascript:alert(1)", "native")).toBe(false);
     expect(validRedirectUri("file:///tmp/cb", "native")).toBe(false);
     expect(validRedirectUri("app:", "native")).toBe(false);
-    expect(redirectHostAllowed("app:/cb", ["app"])).toBe(true);
-    expect(redirectHostAllowed("other:/cb", ["app"])).toBe(false);
+    expect(redirectHostAllowed("com.example.app:/cb", ["com.example.app"])).toBe(true);
+    expect(redirectHostAllowed("other.example.app:/cb", ["com.example.app"])).toBe(false);
     expect(redirectHostAllowed("https://client.example/callback", ["client.example"])).toBe(true);
     expect(redirectHostAllowed("https://evil.example/callback", ["client.example"])).toBe(false);
     expect(redirectHostAllowed("https://evil.example/callback", [])).toBe(true);
@@ -612,7 +616,7 @@ describe("dynamic client registration scope", () => {
       issuerUrl: ISSUER,
       resourceUrl: RESOURCE,
       store: openOAuthStore(":memory:"),
-      redirectHostAllowlist: ["client.example", "app"],
+      redirectHostAllowlist: ["client.example", "com.example.app"],
       validateCredential: (username, password) => verifyBasicCredentials(users, username, password),
       log: { info() {}, warn() {} },
     });
@@ -639,7 +643,7 @@ describe("dynamic client registration scope", () => {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        redirect_uris: ["app:/cb"],
+        redirect_uris: ["com.example.app:/cb"],
         application_type: "native",
       }),
     });
@@ -648,7 +652,7 @@ describe("dynamic client registration scope", () => {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        redirect_uris: ["app:/cb"],
+        redirect_uris: ["com.example.app:/cb"],
         application_type: "web",
       }),
     });
