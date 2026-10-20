@@ -1,0 +1,227 @@
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { eq } from "drizzle-orm";
+import { randomUUID } from "node:crypto";
+import type { BinaryNode, WAMessageKey } from "@whiskeysockets/baileys";
+import { BaileysAdapter } from "../src/channels/baileys/baileys.adapter.js";
+import { CloudApiAdapter } from "../src/channels/cloud-api/cloud.adapter.js";
+import { db } from "../src/db/client.js";
+import { instances, messages } from "../src/db/schema.js";
+import { MarkPlayedSchema } from "../src/schemas/messaging.schema.js";
+
+const PN_JID = "5511999999999@s.whatsapp.net";
+const LID_JID = "1999991111@lid";
+const GROUP_JID = "120363000000000000@g.us";
+const SENDER_JID = "5511888888888@s.whatsapp.net";
+
+describe("MarkPlayedSchema", () => {
+  it("accepts a stored audio id and rejects unknown fields", () => {
+    expect(
+      MarkPlayedSchema.parse({
+        instanceId: "inst_test",
+        chatId: PN_JID,
+        messageIds: ["voice-1"],
+      }),
+    ).toMatchObject({ messageIds: ["voice-1"] });
+
+    expect(() =>
+      MarkPlayedSchema.parse({
+        instanceId: "inst_test",
+        chatId: PN_JID,
+        messageIds: ["voice-1"],
+        extra: true,
+      }),
+    ).toThrow();
+  });
+});
+
+describe("CloudApiAdapter.markPlayed", () => {
+  it("reports that played receipts are unsupported", async () => {
+    await expect(new CloudApiAdapter("cloud_test").markPlayed(PN_JID, ["voice-1"])).rejects.toThrow(
+      "Marking audio messages as played is not supported on Cloud API",
+    );
+  });
+});
+
+describe("BaileysAdapter.markPlayed", () => {
+  let instanceId: string;
+
+  beforeEach(() => {
+    instanceId = `test_${randomUUID()}`;
+    const now = Date.now();
+    db.insert(instances)
+      .values({ id: instanceId, name: "played test", createdAt: now, updatedAt: now })
+      .run();
+  });
+
+  afterEach(() => {
+    db.delete(instances).where(eq(instances.id, instanceId)).run();
+  });
+
+  function connectedAdapter(): {
+    adapter: BaileysAdapter;
+    sendNode: ReturnType<typeof vi.fn>;
+    sendReceipt: ReturnType<typeof vi.fn>;
+  } {
+    const adapter = new BaileysAdapter(instanceId);
+    const sendNode = vi.fn().mockResolvedValue(undefined);
+    const sendReceipt = vi.fn().mockResolvedValue(undefined);
+    Object.assign(adapter, { status: "connected", sock: { sendNode, sendReceipt } });
+    return { adapter, sendNode, sendReceipt };
+  }
+
+  function insertAudio(options: {
+    id: string;
+    chatId?: string;
+    senderId?: string;
+    isFromMe?: number;
+    type?: "audio" | "text" | "image";
+    rawData?: string | null;
+  }): void {
+    db.insert(messages)
+      .values({
+        id: options.id,
+        instanceId,
+        chatId: options.chatId ?? PN_JID,
+        senderId: options.senderId ?? SENDER_JID,
+        type: options.type ?? "audio",
+        isFromMe: options.isFromMe ?? 0,
+        status: "received",
+        timestamp: 1_700_000_000,
+        rawData: options.rawData === undefined ? null : options.rawData,
+      })
+      .run();
+  }
+
+  function rawAudio(key: WAMessageKey, ptt = true): string {
+    return JSON.stringify({
+      key,
+      message: { audioMessage: { ptt, mimetype: "audio/ogg; codecs=opus", seconds: 3 } },
+      messageTimestamp: 1_700_000_000,
+    });
+  }
+
+  it("sends one played receipt with a timestamp for a direct voice note", async () => {
+    insertAudio({ id: "voice-1" });
+    const { adapter, sendNode, sendReceipt } = connectedAdapter();
+    const before = Math.floor(Date.now() / 1000);
+
+    await adapter.markPlayed(PN_JID, ["voice-1", "voice-1"]);
+
+    expect(sendReceipt).not.toHaveBeenCalled();
+    expect(sendNode).toHaveBeenCalledOnce();
+    const node = sendNode.mock.calls[0]?.[0] as BinaryNode;
+    expect(node.tag).toBe("receipt");
+    expect(node.attrs.type).toBe("played");
+    expect(node.attrs.to).toBe(PN_JID);
+    expect(node.attrs.id).toBe("voice-1");
+    expect(node.attrs.participant).toBeUndefined();
+    expect(Number(node.attrs.t)).toBeGreaterThanOrEqual(before);
+    expect(node.content).toBeUndefined();
+  });
+
+  it("uses the stored raw chat address and batches ids from the same group sender", async () => {
+    const firstKey: WAMessageKey = {
+      remoteJid: GROUP_JID,
+      id: "group-voice-1",
+      fromMe: false,
+      participant: SENDER_JID,
+    };
+    const secondKey: WAMessageKey = {
+      remoteJid: GROUP_JID,
+      id: "group-voice-2",
+      fromMe: false,
+      participant: SENDER_JID,
+    };
+    insertAudio({ id: firstKey.id!, chatId: GROUP_JID, rawData: rawAudio(firstKey) });
+    insertAudio({ id: secondKey.id!, chatId: GROUP_JID, rawData: rawAudio(secondKey, false) });
+    const { adapter, sendNode } = connectedAdapter();
+
+    await adapter.markPlayed(GROUP_JID, [firstKey.id!, secondKey.id!]);
+
+    const node = sendNode.mock.calls[0]?.[0] as BinaryNode;
+    expect(node.attrs).toMatchObject({
+      id: "group-voice-1",
+      to: GROUP_JID,
+      type: "played",
+      participant: SENDER_JID,
+    });
+    expect(node.content).toEqual([
+      {
+        tag: "list",
+        attrs: {},
+        content: [{ tag: "item", attrs: { id: "group-voice-2" } }],
+      },
+    ]);
+  });
+
+  it("prefers the stored raw remote jid and falls back to the supplied group participant", async () => {
+    const key: WAMessageKey = {
+      remoteJid: LID_JID,
+      remoteJidAlt: PN_JID,
+      id: "lid-voice",
+      fromMe: false,
+    };
+    insertAudio({ id: key.id!, rawData: rawAudio(key) });
+    const groupId = "group-voice-fallback";
+    insertAudio({ id: groupId, chatId: GROUP_JID, senderId: "me" });
+    const { adapter, sendNode } = connectedAdapter();
+
+    await adapter.markPlayed(PN_JID, [key.id!]);
+    await adapter.markPlayed(GROUP_JID, [groupId], "5511777777777@s.whatsapp.net");
+
+    expect(sendNode.mock.calls[0]?.[0]).toMatchObject({
+      attrs: { to: LID_JID, id: "lid-voice", type: "played" },
+    });
+    expect(sendNode.mock.calls[1]?.[0]).toMatchObject({
+      attrs: {
+        to: GROUP_JID,
+        id: groupId,
+        type: "played",
+        participant: "5511777777777@s.whatsapp.net",
+      },
+    });
+  });
+
+  it("falls back to sendReceipt when the socket has no sendNode", async () => {
+    insertAudio({ id: "voice-fallback" });
+    const adapter = new BaileysAdapter(instanceId);
+    const sendReceipt = vi.fn().mockResolvedValue(undefined);
+    Object.assign(adapter, { status: "connected", sock: { sendReceipt } });
+
+    await adapter.markPlayed(PN_JID, ["voice-fallback"]);
+
+    expect(sendReceipt).toHaveBeenCalledWith(PN_JID, undefined, ["voice-fallback"], "played");
+  });
+
+  it("refuses missing, outgoing, non-audio, and group messages without a sender", async () => {
+    insertAudio({ id: "outgoing-audio", isFromMe: 1 });
+    insertAudio({ id: "text-message", type: "text" });
+    insertAudio({ id: "group-without-sender", chatId: GROUP_JID, senderId: "me" });
+    const { adapter, sendNode, sendReceipt } = connectedAdapter();
+
+    await expect(adapter.markPlayed(PN_JID, ["missing-audio"])).rejects.toThrow(
+      "Message missing-audio is not stored in this chat",
+    );
+    await expect(adapter.markPlayed(PN_JID, ["outgoing-audio"])).rejects.toThrow(
+      "Message outgoing-audio is not an incoming audio or voice message",
+    );
+    await expect(adapter.markPlayed(PN_JID, ["text-message"])).rejects.toThrow(
+      "Message text-message is not an incoming audio or voice message",
+    );
+    await expect(adapter.markPlayed(GROUP_JID, ["group-without-sender"])).rejects.toThrow(
+      "Sender is missing for group audio message group-without-sender",
+    );
+    expect(sendNode).not.toHaveBeenCalled();
+    expect(sendReceipt).not.toHaveBeenCalled();
+  });
+
+  it("rejects more than 100 message ids before sending", async () => {
+    const { adapter, sendNode } = connectedAdapter();
+    const ids = Array.from({ length: 101 }, (_, index) => `voice-${index}`);
+
+    await expect(adapter.markPlayed(PN_JID, ids)).rejects.toThrow(
+      "A mark-played request can contain at most 100 message IDs",
+    );
+    expect(sendNode).not.toHaveBeenCalled();
+  });
+});

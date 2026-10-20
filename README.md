@@ -36,7 +36,7 @@
 
 **WA MCP** is a WhatsApp MCP server built with TypeScript that gives AI agents full access to WhatsApp through the [Model Context Protocol](https://modelcontextprotocol.io). It supports both **Baileys** (WhatsApp Web) and **Meta Cloud API** as dual-channel backends, deployable with **Docker** in a single command.
 
-Your agent connects once and auto-discovers **137 tools**, **10 resources**, and **15 real-time events** — zero configuration, zero REST wrappers, zero glue code.
+Your agent connects once and auto-discovers **138 tools**, **10 resources**, and **15 real-time events** — zero configuration, zero REST wrappers, zero glue code.
 
 ```
 Your AI Agent ←→ MCP Protocol ←→ WA MCP ←→ WhatsApp
@@ -82,7 +82,7 @@ from google.adk.tools.mcp_tool import McpToolset
 
 tools = McpToolset(url="http://localhost:3000/mcp")
 
-# Agent auto-discovers 137 WhatsApp tools
+# Agent auto-discovers 138 WhatsApp tools
 # wa_create_instance, wa_send_text, wa_send_image, ...
 ```
 
@@ -146,7 +146,7 @@ Add to your `claude_desktop_config.json`:
 
 ## 🛠️ Tools
 
-WA MCP exposes **137 tools** across 15 domains. All tools use the `wa_` prefix.
+WA MCP exposes **138 tools** across 15 domains. All tools use the `wa_` prefix.
 
 <details>
 <summary>📋 <strong>Instance Management</strong> (9 tools)</summary>
@@ -166,7 +166,7 @@ WA MCP exposes **137 tools** across 15 domains. All tools use the `wa_` prefix.
 </details>
 
 <details>
-<summary>💬 <strong>Messaging</strong> (31 tools)</summary>
+<summary>💬 <strong>Messaging</strong> (32 tools)</summary>
 
 | Tool                   | Description             |
 | ---------------------- | ----------------------- |
@@ -201,6 +201,7 @@ WA MCP exposes **137 tools** across 15 domains. All tools use the `wa_` prefix.
 | `wa_get_message_receipts` | List locally observed per-participant receipts (Baileys) |
 | `wa_get_message_reactions` | List locally observed reactions (Baileys) |
 | `wa_mark_read`         | Mark messages as read   |
+| `wa_mark_played`       | Mark a stored incoming voice note or audio message as played (Baileys; explicit only) |
 
 </details>
 
@@ -873,7 +874,8 @@ directory.
 
 `WA_AUTO_READ` accepts `false`, `on_fetch`, or `on_receive`. Invalid values disable automatic
 read receipts and produce a warning. Automatic receipts never delay message delivery or tool
-responses; receipt failures are logged.
+responses; receipt failures are logged. Played receipts for voice notes and audio are separate:
+`wa_mark_played` sends one only when called, and there is no automatic played-receipt setting.
 
 `WA_PRESENCE_MODE` accepts `on_activity` or `always`. In `on_activity`, Baileys sends one global
 `unavailable` update after each connection opens, switches to global `available` before an outgoing
@@ -1000,7 +1002,7 @@ src/
 ├── index.ts                     # Entry point (HTTP/stdio)
 ├── constants.ts                 # Defaults and limits
 ├── server/mcp.ts                # MCP server setup
-├── tools/                       # 🔧 137 MCP tools (15 files)
+├── tools/                       # 🔧 138 MCP tools (15 files)
 ├── resources/                   # 📖 10 MCP resources (8 files)
 ├── notifications/events.ts      # 📡 15 documented event types
 ├── channels/

@@ -2968,6 +2968,122 @@ export class BaileysAdapter implements ChannelAdapter {
     await sock.readMessages(keys);
   }
 
+  async markPlayed(chatId: string, messageIds: string[], participant?: string): Promise<void> {
+    if (messageIds.length > MAX_MARK_READ_MESSAGE_IDS) {
+      throw new Error(
+        `A mark-played request can contain at most ${MAX_MARK_READ_MESSAGE_IDS} message IDs`,
+      );
+    }
+    const sock = this.getSock();
+    const jid = this.normalizeJid(chatId);
+    const chatAliases = await this.getChatJidAliases(jid);
+    const batches = new Map<string, { jid: string; participant?: string; messageIds: string[] }>();
+
+    for (const id of [...new Set(messageIds)]) {
+      const storedMessage = db
+        .select({
+          chatId: messagesTable.chatId,
+          senderId: messagesTable.senderId,
+          type: messagesTable.type,
+          isFromMe: messagesTable.isFromMe,
+          rawData: messagesTable.rawData,
+        })
+        .from(messagesTable)
+        .where(
+          and(
+            eq(messagesTable.instanceId, this.instanceId),
+            inArray(messagesTable.chatId, chatAliases),
+            eq(messagesTable.id, id),
+          ),
+        )
+        .get();
+
+      if (!storedMessage) {
+        throw new Error(`Message ${id} is not stored in this chat`);
+      }
+
+      const rawMessage = getStoredMessage(storedMessage.rawData ?? null, id);
+      const outgoing = storedMessage.isFromMe === 1 || rawMessage?.key.fromMe === true;
+      if (outgoing || storedMessage.type !== "audio") {
+        throw new Error(`Message ${id} is not an incoming audio or voice message`);
+      }
+
+      const remoteJid = rawMessage?.key.remoteJid ?? storedMessage.chatId;
+      let receiptParticipant: string | undefined;
+      if (remoteJid.endsWith("@g.us")) {
+        const storedSender =
+          rawMessage?.key.participant ||
+          (storedMessage.senderId && storedMessage.senderId !== "me"
+            ? storedMessage.senderId
+            : undefined);
+        receiptParticipant = storedSender || participant;
+        if (!receiptParticipant) {
+          throw new Error(`Sender is missing for group audio message ${id}`);
+        }
+      }
+
+      const batchKey = `${remoteJid}\0${receiptParticipant ?? ""}`;
+      const batch = batches.get(batchKey) ?? {
+        jid: remoteJid,
+        ...(receiptParticipant ? { participant: receiptParticipant } : {}),
+        messageIds: [],
+      };
+      batch.messageIds.push(id);
+      batches.set(batchKey, batch);
+    }
+
+    for (const batch of batches.values()) {
+      await this.sendPlayedReceipt(sock, batch.jid, batch.participant, batch.messageIds);
+    }
+  }
+
+  /**
+   * rc14 sendReceipt omits the receipt timestamp for type "played".
+   * WhatsApp expects that timestamp, so send the receipt node directly when the socket exposes sendNode.
+   */
+  private async sendPlayedReceipt(
+    sock: WASocket,
+    jid: string,
+    participant: string | undefined,
+    messageIds: string[],
+  ): Promise<void> {
+    const receiptSocket = sock as WASocket & {
+      sendNode?: (node: BinaryNode) => Promise<unknown>;
+    };
+    if (typeof receiptSocket.sendNode === "function") {
+      const attrs: BinaryNode["attrs"] = {
+        id: messageIds[0] ?? "",
+        to: jid,
+        type: "played",
+        t: Math.floor(Date.now() / 1000).toString(),
+      };
+      if (participant) attrs.participant = participant;
+      const remainingIds = messageIds.slice(1);
+      const node: BinaryNode = {
+        tag: "receipt",
+        attrs,
+        ...(remainingIds.length > 0
+          ? {
+              content: [
+                {
+                  tag: "list",
+                  attrs: {},
+                  content: remainingIds.map((id) => ({
+                    tag: "item",
+                    attrs: { id },
+                  })),
+                },
+              ],
+            }
+          : {}),
+      };
+      await receiptSocket.sendNode(node);
+      return;
+    }
+
+    await sock.sendReceipt(jid, participant, messageIds, "played");
+  }
+
   // ---- Chats ----
 
   async modifyChat(chatId: string, modification: ChatModification): Promise<void> {

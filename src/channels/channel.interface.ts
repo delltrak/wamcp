@@ -105,6 +105,7 @@ export interface ChannelAdapter {
   ): Promise<void>;
   subscribePresence(chatId: string): Promise<void>;
   markRead(chatId: string, messageIds: string[], participant?: string): Promise<void>;
+  markPlayed(chatId: string, messageIds: string[], participant?: string): Promise<void>;
   getMessageReceipts(chatId: string, messageId: string): Promise<MessageReceipt[]>;
   getStatusViewers(messageId: string): Promise<string[]>;
   getMessageReactions(chatId: string, messageId: string): Promise<MessageReaction[]>;

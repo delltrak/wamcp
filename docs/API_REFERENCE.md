@@ -9,7 +9,7 @@
 1. [Overview](#1-overview)
 2. [Tools Reference](#2-tools-reference)
    - [Instance Management](#21-instance-management-9-tools)
-   - [Messaging](#22-messaging-31-tools)
+   - [Messaging](#22-messaging-32-tools)
    - [Chat Management](#23-chat-management-11-tools)
    - [Group Management](#24-group-management-26-tools)
    - [Contact Management](#25-contact-management-8-tools)
@@ -110,7 +110,7 @@ Tools marked **Baileys only** are not available on Cloud API instances.
 
 ## 2. Tools Reference
 
-WA MCP exposes **137 tools** grouped by domain. All tools return MCP-standard responses.
+WA MCP exposes **138 tools** grouped by domain. All tools return MCP-standard responses.
 
 ### Success Response Format
 
@@ -331,7 +331,7 @@ Configure Meta Cloud API credentials for a Cloud API instance. Required before c
 
 ---
 
-### 2.2 Messaging (31 tools)
+### 2.2 Messaging (32 tools)
 
 Tools for sending messages, media, reactions, and managing message state.
 
@@ -1010,6 +1010,30 @@ Mark specific messages as read in a chat.
 ```json
 {
   "success": true
+}
+```
+
+---
+
+#### `wa_mark_played`
+
+Send WhatsApp's played receipt for stored incoming voice notes or audio messages. The call is explicit: WA MCP never marks audio as played on its own. Each ID must already be stored for the instance and chat, must be an incoming audio or voice message, and group messages need a sender JID from storage or `participant`.
+
+| Parameter     | Type     | Required | Description                                                      |
+| ------------- | -------- | -------- | ---------------------------------------------------------------- |
+| `instanceId`  | string   | Yes      | The instance ID                                                  |
+| `chatId`      | string   | Yes      | Chat JID containing the audio messages                           |
+| `messageIds`  | string[] | Yes      | Stored incoming audio or voice-note IDs (1-100)                  |
+| `participant` | string   | No       | Sender JID used only when a group message has no stored sender   |
+
+**Channel support:** Baileys only. Cloud API does not support played receipts.
+
+**Response:**
+
+```json
+{
+  "success": true,
+  "count": 1
 }
 ```
 
@@ -3361,7 +3385,7 @@ Add to your Claude Desktop MCP configuration:
 }
 ```
 
-Once configured, the client will auto-discover all 137 WA MCP tools and can interact with WhatsApp directly.
+Once configured, the client will auto-discover all 138 WA MCP tools and can interact with WhatsApp directly.
 
 ### 6.3 LangChain (Python)
 
@@ -3374,7 +3398,7 @@ toolkit = MCPToolkit(
 )
 
 tools = toolkit.get_tools()
-# tools now contains all 137 WA MCP tools, ready for any LangChain agent
+# tools now contains all 138 WA MCP tools, ready for any LangChain agent
 ```
 
 ---
@@ -3384,7 +3408,7 @@ tools = toolkit.get_tools()
 | Domain                            | Tools | Channel                              |
 | --------------------------------- | ----- | ------------------------------------ |
 | Instance Management              | 9     | Both (2 Baileys only, 1 Cloud only)  |
-| Messaging                         | 31    | Both                                 |
+| Messaging                         | 32    | Both                                 |
 | Audio Transcription               | 1     | Both                                 |
 | Text-to-speech                    | 3     | Provider-dependent                   |
 | Chat Management                   | 11    | Both                                 |
@@ -3398,7 +3422,7 @@ tools = toolkit.get_tools()
 | Newsletter / Channels             | 10    | Baileys only                         |
 | Business, Communities, and Catalog| 15    | Baileys only                         |
 | Call Management                   | 1     | Baileys only                         |
-| **Total**                         | **137** |                                    |
+| **Total**                         | **138** |                                    |
 
 | Resources     | 10  |
 | ------------- | --- |
