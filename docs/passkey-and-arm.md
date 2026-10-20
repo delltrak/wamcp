@@ -48,8 +48,9 @@ for `whatsapp.com`.
 
 `package-lock.json` pins `@whiskeysockets/baileys` **7.0.0-rc14** (tag commit `7e7b075`, released
 2026-07-29). Master at `0af2386` (2026-08-04, "advertise WIN_HYBRID") is two commits ahead of that
-tag. `src/Socket/messages-recv.ts` is byte-identical between the tag and master. Neither tree has a
-file, type, or symbol named passkey, WebAuthn, or shortcake.
+tag. `src/Socket/messages-recv.ts` is byte-identical between the tag and master. `src/WAM/constants.ts`
+on both trees defines `passkeyExists` (Daily field 165) and `PASSKEY` (PrivacySettingsClick item
+27). Those are telemetry constants, not a pairing flow: there is no WebAuthn or shortcake handshake.
 
 What linking does exist:
 
@@ -118,10 +119,9 @@ prebuild is in the tarball. The runtime stage opens an in-memory database with t
 the `linux/arm64` stage printed `better-sqlite3 OK`.
 
 `ffmpeg` is the Alpine package (`apk add ffmpeg`), not an npm module. That same run installed
-`ffmpeg` 8.1.2-r0 inside the arm64 stage. The package install does not prove the binary runs, so
-the runtime stage now executes `ffmpeg -hide_banner -version` after the sqlite check. A binary for
-the wrong architecture fails the build with an exec-format error. Sticker, GIF, and voice-note
-conversion keep using that system binary through the existing `WA_MEDIA_FFMPEG_PATH` and
+`ffmpeg` 8.1.2-r0 inside the arm64 stage. The runtime stage runs `ffmpeg -hide_banner -version`
+after the sqlite check. That verifies ffmpeg is installed and the libs load. Sticker, GIF, and
+voice-note conversion keep using that system binary through the existing `WA_MEDIA_FFMPEG_PATH` and
 `WA_TTS_FFMPEG_PATH` settings.
 
 The manifest pushed for `ghcr.io/delltrak/wamcp:main` and `:sha-b0120a3` is
