@@ -3338,6 +3338,8 @@ export class BaileysAdapter implements ChannelAdapter {
     const sock = this.getSock();
     const jids = participants.map((p) => this.normalizeJid(p));
     const result = await sock.groupCreate(name, jids);
+    // #141: a group created here does not emit group.joined. A later groups.upsert
+    // that lists this account still can, because rc14 does not mark that upsert as self-created.
     return { groupId: result.id, inviteCode: undefined };
   }
 
@@ -3715,10 +3717,11 @@ export class BaileysAdapter implements ChannelAdapter {
     groupId: string;
     subject: string | null;
     description: string | null;
-    participants: string[];
+    memberCount: number;
     author: string | null;
   }): void {
-    if (!event.groupId.endsWith("@g.us")) return;
+    // #141: require a member list that already includes this account. Never copy that roster.
+    if (!event.groupId.endsWith("@g.us") || event.memberCount < 1) return;
     if (!this.rememberMembership(`group:${event.groupId}`)) return;
     this.emit("group.joined", {
       instanceId: this.instanceId,
@@ -3726,8 +3729,9 @@ export class BaileysAdapter implements ChannelAdapter {
       chatId: event.groupId,
       subject: event.subject,
       description: event.description,
-      participants: event.participants,
+      memberCount: event.memberCount,
       author: event.author,
+      timestamp: Math.floor(Date.now() / 1000),
     });
   }
 
@@ -3748,7 +3752,10 @@ export class BaileysAdapter implements ChannelAdapter {
       description,
       role,
     };
-    this.emit(kind === "joined" ? "newsletter.joined" : "newsletter.left", payload);
+    this.emit(kind === "joined" ? "newsletter.joined" : "newsletter.left", {
+      ...payload,
+      timestamp: Math.floor(Date.now() / 1000),
+    });
   }
 
   private async handleGroupsUpsert(groups: BaileysEventMap["groups.upsert"]): Promise<void> {
@@ -3756,16 +3763,14 @@ export class BaileysAdapter implements ChannelAdapter {
     for (const group of groups) {
       if (!group.id) continue;
       const roster = group.participants ?? [];
-      if (roster.length > 0 && own.size > 0 && !(await this.participantListIncludesSelf(roster))) {
-        continue;
-      }
+      // #141: an empty roster, or a roster we cannot match to this account, is not a join.
+      if (roster.length === 0 || own.size === 0) continue;
+      if (!(await this.participantListIncludesSelf(roster))) continue;
       this.emitGroupJoined({
         groupId: group.id,
         subject: group.subject ?? null,
         description: group.desc ?? null,
-        participants: roster
-          .map((participant) => participant.phoneNumber ?? participant.id)
-          .filter((participant): participant is string => participant.length > 0),
+        memberCount: roster.length,
         author: group.authorPn ?? group.author ?? null,
       });
     }
@@ -3789,6 +3794,7 @@ export class BaileysAdapter implements ChannelAdapter {
       newsletterId: update.id,
       chatId: update.id,
       mute,
+      timestamp: Math.floor(Date.now() / 1000),
     });
   }
 
@@ -3916,15 +3922,8 @@ export class BaileysAdapter implements ChannelAdapter {
     this.requireGroupWritesEnabled();
     const sock = this.getSock();
     const groupId = await sock.groupAcceptInvite(normalizeGroupInviteCode(inviteCode));
-    if (groupId) {
-      this.emitGroupJoined({
-        groupId,
-        subject: null,
-        description: null,
-        participants: [],
-        author: null,
-      });
-    }
+    // #141: groupAcceptInvite does not return members. group.joined waits for a roster
+    // that includes this account (groups.upsert or a participant add).
     return groupId ?? "";
   }
 
@@ -6803,7 +6802,7 @@ export class BaileysAdapter implements ChannelAdapter {
             groupId: event.groupId,
             subject: null,
             description: null,
-            participants: event.participants,
+            memberCount: update.participants.length,
             author: update.authorPn ?? update.author ?? null,
           });
         }
@@ -6914,6 +6913,7 @@ export class BaileysAdapter implements ChannelAdapter {
             ...(messageId ? { messageId } : {}),
             label,
             association: labelEvent.association,
+            timestamp: Math.floor(Date.now() / 1000),
           });
         }
       }

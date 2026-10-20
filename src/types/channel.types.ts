@@ -710,6 +710,8 @@ export interface NormalizedLabelAssociationEvent {
     chatId: string;
     messageId?: string;
   };
+  /** Unix seconds when this process observed the association. */
+  timestamp?: number;
 }
 
 export interface NormalizedGroupJoinedEvent {
@@ -718,8 +720,11 @@ export interface NormalizedGroupJoinedEvent {
   chatId: string;
   subject: string | null;
   description: string | null;
-  participants: string[];
+  /** Size of the member list that contained this account. Individual member JIDs are not included. */
+  memberCount: number;
   author: string | null;
+  /** Unix seconds when this process observed the join. */
+  timestamp?: number;
 }
 
 export interface NormalizedNewsletterMembershipEvent {
@@ -729,6 +734,8 @@ export interface NormalizedNewsletterMembershipEvent {
   name: string | null;
   description: string | null;
   role: string | null;
+  /** Unix seconds when this process observed the membership change. */
+  timestamp?: number;
 }
 
 export interface NormalizedNewsletterMuteEvent {
@@ -736,6 +743,8 @@ export interface NormalizedNewsletterMuteEvent {
   newsletterId: string;
   chatId: string;
   mute: "on" | "off";
+  /** Unix seconds when this process observed the mute change. */
+  timestamp?: number;
 }
 
 export interface NormalizedNewsletterMessageEvent {

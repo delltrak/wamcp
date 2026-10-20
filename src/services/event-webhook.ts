@@ -8,6 +8,7 @@ import type { InstanceManager } from "./instance-manager.js";
 import { QUEUE_COMPLETED_AGE_S, QUEUE_FAILED_AGE_S } from "../constants.js";
 import {
   isWebhookRoutineEvent,
+  WEBHOOK_ROUTINE_EVENTS,
   type BusinessLabel,
   type ChannelEvent,
   type ChannelEventPayload,
@@ -72,7 +73,7 @@ export interface EventWebhookPayload {
   name?: string;
   description?: string | null;
   role?: string | null;
-  participants?: string[];
+  memberCount?: number;
   serverId?: string | null;
   views?: number | null;
 }
@@ -158,14 +159,50 @@ export interface GrokBotInstanceWebhookPayload {
   expiresAt?: number;
 }
 
+type WebhookRoutineEvent = (typeof WEBHOOK_ROUTINE_EVENTS)[number];
+
+/**
+ * #141 compact body for the six routine events under the grok-bot preset.
+ * `timestamp` is the event time in Unix seconds. `event` keeps this body out of message batches.
+ */
+export interface GrokBotRoutineWebhookPayload {
+  event: WebhookRoutineEvent;
+  instanceId: string;
+  chatId: string;
+  chatName: string | null;
+  senderId: string | null;
+  senderName: string | null;
+  isGroup: boolean;
+  type: string;
+  text: string | null;
+  timestamp: number;
+  messageId: string;
+  memberCount?: number;
+  subject?: string | null;
+  description?: string | null;
+  newsletterId?: string;
+  mute?: "on" | "off";
+  name?: string;
+  role?: string | null;
+  labeled?: boolean;
+  labelId?: string;
+  serverId?: string | null;
+  views?: number | null;
+}
+
 export type EventWebhookBody =
   | EventWebhookPayload
   | InstanceLifecycleWebhookPayload
   | GrokBotWebhookPayload
   | GrokBotInstanceWebhookPayload
+  | GrokBotRoutineWebhookPayload
   | (EventWebhookPayload & { messages: EventWebhookPayload[] })
   | (GrokBotWebhookPayload & { messages: GrokBotWebhookPayload[] })
-  | { events: (NormalizedEventWebhookPayload | GrokBotInstanceWebhookPayload)[] }
+  | {
+      events: (
+        NormalizedEventWebhookPayload | GrokBotInstanceWebhookPayload | GrokBotRoutineWebhookPayload
+      )[];
+    }
   | { messages: GrokBotWebhookPayload[] };
 
 export interface EventWebhookJob {
@@ -209,10 +246,14 @@ export class EventWebhookRetryableError extends Error {
 type EnqueueWebhookJob = (job: EventWebhookJob) => Promise<unknown>;
 const MAX_BATCH_SIZE = 25;
 
+type BufferedDestinationPayload =
+  | NormalizedEventWebhookPayload
+  | GrokBotWebhookPayload
+  | GrokBotInstanceWebhookPayload
+  | GrokBotRoutineWebhookPayload;
+
 interface BufferedDestinationEvents {
-  payloads: (
-    NormalizedEventWebhookPayload | GrokBotWebhookPayload | GrokBotInstanceWebhookPayload
-  )[];
+  payloads: BufferedDestinationPayload[];
   timer: ReturnType<typeof setTimeout>;
 }
 
@@ -240,7 +281,7 @@ const resolveWebhookDns: EventWebhookDnsResolver = (hostname) =>
   lookupDns(hostname, { all: true, verbatim: true });
 
 function isGrokBotMessagePayload(
-  payload: NormalizedEventWebhookPayload | GrokBotWebhookPayload | GrokBotInstanceWebhookPayload,
+  payload: BufferedDestinationPayload,
 ): payload is GrokBotWebhookPayload {
   return !("event" in payload) && "messageId" in payload;
 }
@@ -638,11 +679,8 @@ function optionalWebhookFields(
   if (event === "group.joined") {
     fields.subject = firstString(data.subject);
     fields.description = firstString(data.description);
-    fields.participants = Array.isArray(data.participants)
-      ? data.participants.filter(
-          (participant): participant is string => typeof participant === "string",
-        )
-      : [];
+    // #141: member count only. A full roster is not copied into the webhook body.
+    fields.memberCount = firstNumber(data.memberCount) ?? 0;
   }
   if (event === "newsletter.joined" || event === "newsletter.left") {
     const name = firstString(data.name);
@@ -663,6 +701,50 @@ function optionalWebhookFields(
     if (labelId) fields.labelId = labelId;
   }
   return fields;
+}
+
+/**
+ * #141: grok-bot destinations receive routine events with chatId, senderId, and messageId.
+ * timestamp is the event time in Unix seconds, or the time this body is built when the
+ * channel event has none. The standard body remains normalizeEventWebhookPayload.
+ */
+export function normalizeGrokBotRoutineWebhookPayload(
+  event: WebhookRoutineEvent,
+  instanceId: string,
+  payload: ChannelEventPayload[WebhookRoutineEvent],
+): GrokBotRoutineWebhookPayload {
+  const data = payload as unknown as Record<string, unknown>;
+  const message = isRecord(data.message) ? data.message : {};
+  const association = isRecord(data.association) ? data.association : {};
+  const chatId =
+    firstString(data.chatId, data.groupId, data.newsletterId, association.chatId) ?? "";
+  const observed = firstNumber(message.timestamp, data.timestamp);
+  const details = optionalWebhookFields(event, data, message);
+
+  return {
+    event,
+    instanceId,
+    chatId,
+    chatName: firstString(data.subject, data.name),
+    senderId: firstString(message.sender, data.author, data.participant),
+    senderName: null,
+    isGroup: chatId.toLowerCase().endsWith("@g.us"),
+    type: event,
+    text: firstString(message.text, message.content) ?? routineEventText(event, data),
+    timestamp: observed ?? Math.floor(Date.now() / 1000),
+    messageId: firstString(message.id, data.messageId, association.messageId) ?? "",
+    ...(details.memberCount !== undefined ? { memberCount: details.memberCount } : {}),
+    ...(details.subject !== undefined ? { subject: details.subject } : {}),
+    ...(details.description !== undefined ? { description: details.description } : {}),
+    ...(details.newsletterId ? { newsletterId: details.newsletterId } : {}),
+    ...(details.mute ? { mute: details.mute } : {}),
+    ...(details.name ? { name: details.name } : {}),
+    ...(details.role !== undefined ? { role: details.role } : {}),
+    ...(details.labeled !== undefined ? { labeled: details.labeled } : {}),
+    ...(details.labelId ? { labelId: details.labelId } : {}),
+    ...(details.serverId !== undefined ? { serverId: details.serverId } : {}),
+    ...(details.views !== undefined ? { views: details.views } : {}),
+  };
 }
 
 /** Build the compact Grok Bot body. Message content carries captions/text only; media bytes are never copied. */
@@ -915,7 +997,9 @@ export function registerEventWebhookHandler(
         ? { messages: buffer.payloads as GrokBotWebhookPayload[] }
         : {
             events: buffer.payloads as (
-              NormalizedEventWebhookPayload | GrokBotInstanceWebhookPayload
+              | NormalizedEventWebhookPayload
+              | GrokBotInstanceWebhookPayload
+              | GrokBotRoutineWebhookPayload
             )[],
           };
     return enqueuePayload(destination, payload);
@@ -1042,7 +1126,7 @@ export function registerEventWebhookHandler(
 
   const queuePayload = (
     destination: EventWebhookDestination,
-    payload: NormalizedEventWebhookPayload | GrokBotWebhookPayload | GrokBotInstanceWebhookPayload,
+    payload: BufferedDestinationPayload,
   ): void => {
     if (destination.debounceMs === 0) {
       void enqueuePayload(destination, payload);
@@ -1075,8 +1159,7 @@ export function registerEventWebhookHandler(
         for (const destination of config.destinations) {
           if (!shouldSendEventWebhook(event, payload, destination)) continue;
 
-          let webhookPayload:
-            NormalizedEventWebhookPayload | GrokBotWebhookPayload | GrokBotInstanceWebhookPayload;
+          let webhookPayload: BufferedDestinationPayload;
           if (destination.preset === "grok-bot" && event === "message.received") {
             webhookPayload = normalizeGrokBotWebhookPayload(
               instanceId,
@@ -1087,6 +1170,12 @@ export function registerEventWebhookHandler(
               event as GrokBotInstanceEvent,
               instanceId,
               payload as ChannelEventPayload[ChannelEvent],
+            );
+          } else if (destination.preset === "grok-bot" && isWebhookRoutineEvent(event)) {
+            webhookPayload = normalizeGrokBotRoutineWebhookPayload(
+              event,
+              instanceId,
+              payload as ChannelEventPayload[typeof event],
             );
           } else {
             webhookPayload = normalizeEventWebhookPayload(

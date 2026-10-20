@@ -24,7 +24,7 @@ HTTP Host header.
 | --- | --- | --- |
 | `WA_EVENT_WEBHOOK_URL` | unset | One outgoing destination; unset disables it. |
 | `WA_EVENT_WEBHOOKS` | unset | JSON array of destinations. Use instead of `URL` for multiple endpoints. |
-| `WA_EVENT_WEBHOOK_PRESET` | unset | `grok-bot` selects compact Grok Bot message and lifecycle payloads plus incoming-message filters. |
+| `WA_EVENT_WEBHOOK_PRESET` | unset | `grok-bot` selects compact Grok Bot message, lifecycle, and #141 routine payloads plus incoming-message filters. |
 | `WA_EVENT_WEBHOOK_EVENTS` | `message.received` | Comma-separated events for the single destination and multi-destination defaults. |
 | `WA_EVENT_WEBHOOK_IGNORE_FROM_ME` | `true` | Ignore messages sent by this WhatsApp instance. |
 | `WA_EVENT_WEBHOOK_HEADERS` | unset | JSON object of extra headers for the single destination. |
@@ -42,19 +42,20 @@ HTTP Host header.
 | `WA_REQUIRE_EVENT_WEBHOOK` | `false` | Refuse to start when no destination is configured or the resolved event set is empty. |
 
 `group.member_label_changed` can be selected in `WA_EVENT_WEBHOOK_EVENTS` or in a destination's
-`events` array. The default event set remains `message.received`, and the `grok-bot` preset remains
-limited to incoming messages.
+`events` array. The default event set remains `message.received`. The `grok-bot` preset forwards
+incoming messages, `instance.*` lifecycle events, and the six #141 routine events when those names
+are listed.
 
 These additional events are also off unless their names are listed:
 
 | Event | When it is emitted |
 | --- | --- |
-| `group.joined` | This account is added to a group, a group-create notification includes this account, or `wa_join_group` succeeds. |
+| `group.joined` | A group roster or a participant-add lists this account. The payload carries `memberCount` and does not include member JIDs. An empty roster does not emit. `wa_create_group` does not emit this event. `wa_join_group` waits for a later roster that includes this account. |
 | `label.association` | A label is applied to or removed from a chat or message. `label.updated` is still emitted for the same change. |
-| `newsletter.joined` | `wa_newsletter_follow` or `wa_create_newsletter` succeeds, or a newsletter participant update adds this account. |
+| `newsletter.joined` | `wa_newsletter_follow` or `wa_create_newsletter` succeeds, or a newsletter participant update adds this account. A follow started on the phone is best-effort on Baileys 7.0.0-rc14. |
 | `newsletter.left` | `wa_newsletter_unfollow` succeeds, or a newsletter participant update removes this account. |
 | `newsletter.message` | A newsletter post arrives. Append-path posts are not also sent as `message.received`. Notify-path posts still emit `message.received` and this event. `WA_EVENT_WEBHOOK_IGNORE_FROM_ME` applies. |
-| `newsletter.mute` | A newsletter settings update includes `mute`, `mute_state`, or `muted`. |
+| `newsletter.mute` | Best-effort. Emitted when a newsletter settings object includes `mute`, `mute_state`, or `muted`. |
 
 When one of these events is delivered, `text` is a short Portuguese line:
 `Você entrou no grupo {subject}` (or `Você entrou em um grupo`),
@@ -66,11 +67,50 @@ and `Canal silenciado` / `Canal com som`.
 The Grok Bot preset forwards these six events when they are listed and still drops
 other non-message, non-lifecycle events.
 
+## #141 routine bodies
+
+Without the `grok-bot` preset, each routine event uses the standard body: `event`,
+`instanceId`, `chat`, `sender`, `type`, `text`, and `timestamp`. `timestamp` is the
+event time when the channel payload has one, and `null` when it does not.
+`group.joined` adds `subject`, `description`, and `memberCount`. It does not add
+`participants`.
+
+With `WA_EVENT_WEBHOOK_PRESET=grok-bot`, the same event uses the compact Grok Bot
+shape. `timestamp` is always a Unix-seconds event time: the channel timestamp when
+present (a newsletter post uses the post time), otherwise the time the body is built.
+`messageId` is the message id when the event has one, and `""` otherwise.
+
+```json
+{
+  "event": "group.joined",
+  "instanceId": "inst_1234abcd",
+  "chatId": "120363000000000119@g.us",
+  "chatName": "Weekend",
+  "senderId": "5511999999999@s.whatsapp.net",
+  "senderName": null,
+  "isGroup": true,
+  "type": "group.joined",
+  "text": "Você entrou no grupo Weekend",
+  "timestamp": 1700000100,
+  "messageId": "",
+  "memberCount": 12,
+  "subject": "Weekend",
+  "description": null
+}
+```
+
+`event` is present so a routine body is not mixed into a `{ "messages": [...] }`
+batch. Destination debounce flushes it with other non-message events.
+
 Baileys 7.0.0-rc14 does not expose every newsletter notification. Participant updates that are not
 join or leave, such as promote and demote, do not emit membership events. The binary newsletter
-settings stanza only carries name and description, so a mute change that arrives only there is not
-emitted. `newsletter.message` leaves `views` null because that Baileys message does not include a
-view count. These events are Baileys-only.
+settings stanza only carries name and description, so `newsletter.mute` and a follow started on the
+phone are best-effort: mute is emitted only when the settings object contains `mute`, `mute_state`,
+or `muted`, and a phone follow is not confirmed from that stanza. Local follow, unfollow, and
+newsletter create still emit after the tool succeeds. `newsletter.message` leaves `views` null
+because that Baileys message does not include a view count. These events are Baileys-only.
+Groups created with `wa_create_group` do not emit `group.joined`. A later `groups.upsert` that
+lists this account can still emit it, because rc14 does not mark that upsert as self-created.
 
 Startup logs a warning when no destination is configured, when the single-destination
 auth header and value are not set together, when the event set is empty, or when a

@@ -472,7 +472,7 @@ Events are pushed to connected agents via MCP notifications over SSE (Server-Sen
 | `whatsapp/chat.updated`               | Chat metadata changed                          |
 | `whatsapp/group.updated`              | Group info changed                             |
 | `whatsapp/group.participants_changed` | Member add/remove/promote/demote               |
-| `whatsapp/group.joined`               | This account was added to a group              |
+| `whatsapp/group.joined`               | This account is listed in a group roster (#141) |
 | `whatsapp/group.member_label_changed` | A member's group label changed                 |
 | `whatsapp/contact.updated`            | Contact info changed                           |
 | `whatsapp/connection.changed`         | Instance status change (includes QR as base64) |
@@ -482,7 +482,7 @@ Events are pushed to connected agents via MCP notifications over SSE (Server-Sen
 | `whatsapp/newsletter.joined`          | This account subscribed to a newsletter        |
 | `whatsapp/newsletter.left`            | This account left a newsletter                 |
 | `whatsapp/newsletter.message`         | New newsletter post                            |
-| `whatsapp/newsletter.mute`            | Newsletter mute setting changed                |
+| `whatsapp/newsletter.mute`            | Best-effort newsletter mute (#141)             |
 | `whatsapp/event.response`             | RSVP response to a WhatsApp event              |
 
 ### Outgoing event webhooks
@@ -587,17 +587,18 @@ Opt into the `label.updated` event to receive label edits and chat/message label
 association changes. `label.association` is a separate opt-in event for apply and
 remove changes; `label.updated` still fires for those changes.
 
-Opt into `group.joined` when this account is added to a group. Opt into
+Opt into `group.joined` when a roster lists this account (#141). Opt into
 `newsletter.joined`, `newsletter.left`, `newsletter.message`, and `newsletter.mute`
 for newsletter membership, posts, and mute changes. Opt into `label.association`
 for a label applied to or removed from a chat or message. None of these names are
 in the default event list, so they are not delivered until `WA_EVENT_WEBHOOK_EVENTS`
 includes them. `newsletter.message` also honors `WA_EVENT_WEBHOOK_IGNORE_FROM_ME`.
-The Grok Bot preset delivers these six events when they are listed. Every other
+The Grok Bot preset delivers these six events when they are listed, using
+`chatId`, `senderId`, `messageId`, and a numeric `timestamp`. Every other
 non-message, non-lifecycle event stays dropped.
 
 The standard body keeps `event`, `instanceId`, `chat`, `sender`, `type`, `text`,
-and `timestamp`. `text` is a short Portuguese line the routine can show:
+and `timestamp` (`timestamp` may be null). `text` is a short Portuguese line the routine can show:
 
 | Event | `text` |
 | --- | --- |
@@ -608,14 +609,17 @@ and `timestamp`. `text` is a short Portuguese line the routine can show:
 | `newsletter.message` | The post text, or `Nova mensagem no canal` when it is empty |
 | `newsletter.mute` | `Canal silenciado` or `Canal com som` |
 
-`group.joined` also includes `subject`, `description`, and `participants`.
+`group.joined` also includes `subject`, `description`, and `memberCount`. It does
+not include the member roster. `wa_create_group` does not emit it, and
+`wa_join_group` waits for a roster that includes this account.
 `label.association` includes `labelId`, `labeled`, `label`, and `association`.
 Newsletter events include `newsletterId`. `newsletter.joined` and `newsletter.left`
 include `description` and `role`. `newsletter.mute` includes `mute` (`on` or `off`).
 `newsletter.message` includes `serverId` and `views` (`views` is null on Baileys
-7.0.0-rc14). Baileys 7.0.0-rc14 does not emit a dedicated remote subscribe,
-unsubscribe, or mute event for every newsletter notification; see the event
-webhook doc for what is forwarded.
+7.0.0-rc14). On that Baileys release, `newsletter.mute` and a follow started on the
+phone are best-effort: the settings stanza only carries name and description, so
+mute is forwarded only when the object contains `mute`, `mute_state`, or `muted`.
+See the event webhook doc for both body shapes.
 
 Opt into `event.response` to receive event RSVPs with `eventMessageId`,
 `participant`, `status`, and `timestamp`. The status is included after Baileys

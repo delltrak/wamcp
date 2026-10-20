@@ -695,7 +695,12 @@ export function newsletterMembershipAction(action: string): "joined" | "left" | 
   return null;
 }
 
-/** Read a mute flag from a newsletter settings object. Name and description updates return null. */
+/**
+ * Best-effort mute read for #141. Baileys 7.0.0-rc14 copies only name and description
+ * from the binary newsletter settings stanza, so a mute started on the phone is emitted
+ * only when this object actually contains mute, mute_state, or muted. A follow started
+ * on the phone is not visible on that stanza either.
+ */
 export function newsletterMuteState(update: unknown): "on" | "off" | null {
   if (typeof update !== "object" || update === null || Array.isArray(update)) return null;
   const record = update as Record<string, unknown>;

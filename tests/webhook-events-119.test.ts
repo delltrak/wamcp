@@ -15,6 +15,7 @@ import {
 } from "../src/services/event-webhook-config.js";
 import {
   normalizeEventWebhookPayload,
+  normalizeGrokBotRoutineWebhookPayload,
   registerEventWebhookHandler,
   shouldSendEventWebhook,
   type EventWebhookJob,
@@ -221,17 +222,20 @@ describe("optional webhook event selection", () => {
       chatId: GROUP_ID,
       subject: null,
       description: null,
-      participants: [SELF],
+      memberCount: 40,
       author: OTHER,
+      timestamp: 1_700_000_100,
     });
     expect(joined).toMatchObject({
       event: "group.joined",
       chat: GROUP_ID,
       subject: null,
       description: null,
-      participants: [SELF],
+      memberCount: 40,
+      timestamp: 1_700_000_100,
       text: "Você entrou em um grupo",
     });
+    expect(joined).not.toHaveProperty("participants");
 
     const association = normalizeEventWebhookPayload("label.association", "inst_1234abcd", {
       instanceId: "inst_1234abcd",
@@ -334,7 +338,7 @@ describe("optional webhook event selection", () => {
         chatId: GROUP_ID,
         subject: "Weekend",
         description: null,
-        participants: [],
+        memberCount: 2,
         author: null,
       }),
     ).toMatchObject({ text: "Você entrou no grupo Weekend", subject: "Weekend" });
@@ -364,15 +368,19 @@ describe("optional webhook event selection", () => {
       }),
     ).toBe(true);
     expect(
-      shouldSendEventWebhook("group.joined", {
-        instanceId: "inst_1234abcd",
-        groupId: GROUP_ID,
-        chatId: GROUP_ID,
-        subject: "Weekend",
-        description: null,
-        participants: [],
-        author: null,
-      }, loadEventWebhookConfig({})),
+      shouldSendEventWebhook(
+        "group.joined",
+        {
+          instanceId: "inst_1234abcd",
+          groupId: GROUP_ID,
+          chatId: GROUP_ID,
+          subject: "Weekend",
+          description: null,
+          memberCount: 2,
+          author: null,
+        },
+        loadEventWebhookConfig({}),
+      ),
     ).toBe(false);
     expect(
       shouldSendEventWebhook(
@@ -441,7 +449,7 @@ describe("webhook delivery of optional events", () => {
       chatId: GROUP_ID,
       subject: "Weekend",
       description: null,
-      participants: [],
+      memberCount: 12,
       author: null,
     });
     eventHandler?.("newsletter.mute", "inst_1234abcd", {
@@ -449,15 +457,76 @@ describe("webhook delivery of optional events", () => {
       newsletterId: NEWSLETTER_ID,
       chatId: NEWSLETTER_ID,
       mute: "on",
+      timestamp: 1_700_000_200,
     });
     expect(enqueue).toHaveBeenCalledOnce();
-    expect(enqueue.mock.calls[0]?.[0].payload).toMatchObject({
+    const delivered = enqueue.mock.calls[0]?.[0].payload;
+    expect(delivered).toMatchObject({
       event: "newsletter.mute",
+      instanceId: "inst_1234abcd",
+      chatId: NEWSLETTER_ID,
+      senderId: null,
+      messageId: "",
+      isGroup: false,
+      type: "newsletter.mute",
       text: "Canal silenciado",
+      timestamp: 1_700_000_200,
       mute: "on",
       newsletterId: NEWSLETTER_ID,
     });
+    expect(delivered).not.toHaveProperty("chat");
+    expect(delivered).not.toHaveProperty("participants");
     unsubscribe();
+  });
+
+  it("keeps the standard body when the grok-bot preset is off", () => {
+    const standard = normalizeEventWebhookPayload("newsletter.mute", "inst_1234abcd", {
+      instanceId: "inst_1234abcd",
+      newsletterId: NEWSLETTER_ID,
+      chatId: NEWSLETTER_ID,
+      mute: "on",
+    });
+    expect(standard).toMatchObject({
+      event: "newsletter.mute",
+      chat: NEWSLETTER_ID,
+      sender: null,
+      text: "Canal silenciado",
+      timestamp: null,
+    });
+    expect(standard).not.toHaveProperty("chatId");
+
+    const observed = 1_700_000_300;
+    const grok = normalizeGrokBotRoutineWebhookPayload("group.joined", "inst_1234abcd", {
+      instanceId: "inst_1234abcd",
+      groupId: GROUP_ID,
+      chatId: GROUP_ID,
+      subject: "Weekend",
+      description: null,
+      memberCount: 12,
+      author: OTHER,
+      timestamp: observed,
+    });
+    expect(grok).toMatchObject({
+      event: "group.joined",
+      chatId: GROUP_ID,
+      senderId: OTHER,
+      messageId: "",
+      timestamp: observed,
+      memberCount: 12,
+      isGroup: true,
+      text: "Você entrou no grupo Weekend",
+    });
+    expect(grok).not.toHaveProperty("participants");
+
+    const post = normalizeGrokBotRoutineWebhookPayload(
+      "newsletter.message",
+      "inst_1234abcd",
+      newsletterMessage(),
+    );
+    expect(post.timestamp).toBe(1_700_000_000);
+    expect(post.messageId).toBe("99");
+    expect(post.chatId).toBe(NEWSLETTER_ID);
+    expect(post.senderId).toBe(NEWSLETTER_ID);
   });
 });
 
@@ -490,29 +559,33 @@ describe("Baileys optional webhook events", () => {
     ]);
   });
 
-  it("emits group.joined only when this account is in the roster or the roster is unknown", async () => {
-    const { adapter, dispatch } = useFixture();
+  it("emits group.joined only when this account is in a non-empty roster", async () => {
+    const { adapter, dispatch, socket } = useFixture();
     const joined = collect(adapter, "group.joined");
 
     await dispatch({
       "groups.upsert": [
-        groupMetadata([{ id: SELF }]),
+        groupMetadata([{ id: SELF }, { id: OTHER }, { id: "5511000000003@s.whatsapp.net" }]),
         groupMetadata([{ id: OTHER }], { id: "120363000000000120@g.us", subject: "Other" }),
-        groupMetadata([], { id: "120363000000000121@g.us", subject: "Unknown roster" }),
+        groupMetadata([], { id: "120363000000000121@g.us", subject: "Empty roster" }),
       ],
     });
+    socket.user = undefined;
+    await dispatch({
+      "groups.upsert": [groupMetadata([{ id: SELF }], { id: "120363000000000122@g.us" })],
+    });
 
-    expect(joined.map((event) => event.groupId)).toEqual([
-      GROUP_ID,
-      "120363000000000121@g.us",
-    ]);
+    expect(joined.map((event) => event.groupId)).toEqual([GROUP_ID]);
     expect(joined[0]).toMatchObject({
       subject: "Weekend",
       description: "Plans",
-      participants: [SELF],
+      memberCount: 3,
       author: OTHER,
       chatId: GROUP_ID,
     });
+    expect(joined[0]).not.toHaveProperty("participants");
+    expect(JSON.stringify(joined[0])).not.toContain(SELF);
+    expect(JSON.stringify(joined[0])).not.toContain("5511000000003");
   });
 
   it("emits group.joined for an add of this account and not for someone else", async () => {
@@ -545,10 +618,11 @@ describe("Baileys optional webhook events", () => {
         groupId: GROUP_ID,
         subject: null,
         description: null,
-        participants: [SELF],
+        memberCount: 1,
         author: "5500000000099:1@s.whatsapp.net",
       }),
     ]);
+    expect(joined[0]).not.toHaveProperty("participants");
   });
 
   it("emits newsletter membership for this account and ignores promote or other users", async () => {
@@ -692,7 +766,52 @@ describe("Baileys optional webhook events", () => {
     expect(posts).toEqual([]);
   });
 
-  it("emits local follow, unfollow, create, and invite-join once across a protocol echo", async () => {
+  it("does not emit group.joined for a local invite or a group this account creates", async () => {
+    vi.stubEnv("WA_GROUP_WRITES_ENABLED", "true");
+    const { adapter, socket } = useFixture();
+    const joined = collect(adapter, "group.joined");
+    socket.groupCreate = vi.fn(async () => ({ id: "120363000000000130@g.us" }));
+
+    await adapter.joinGroup("AbCdEfGh");
+    await adapter.createGroup("Created", [OTHER]);
+
+    expect(joined).toEqual([]);
+  });
+
+  it("treats phone mute and follow as best-effort on rc14", async () => {
+    const { adapter, dispatch } = useFixture();
+    const muted = collect(adapter, "newsletter.mute");
+    const joined = collect(adapter, "newsletter.joined");
+
+    await dispatch({
+      "newsletter-settings.update": {
+        id: NEWSLETTER_ID,
+        update: { name: "From phone", description: "Only name and description" },
+      },
+    });
+    await dispatch({
+      "newsletter-settings.update": {
+        id: NEWSLETTER_ID,
+        update: { follow: true, subscribed: true },
+      },
+    });
+    await dispatch({
+      "newsletter-settings.update": {
+        id: NEWSLETTER_ID,
+        update: { mute_state: "ON" },
+      },
+    });
+
+    expect(joined).toEqual([]);
+    expect(muted).toEqual([
+      expect.objectContaining({ newsletterId: NEWSLETTER_ID, mute: "on" }),
+    ]);
+    expect(newsletterMuteState({ name: "From phone", description: "Only name and description" })).toBe(
+      null,
+    );
+  });
+
+  it("emits local follow, unfollow, create, and a later roster join once across a protocol echo", async () => {
     vi.stubEnv("WA_GROUP_WRITES_ENABLED", "true");
     const { adapter, socket, dispatch } = useFixture();
     const joined = collect(adapter, "newsletter.joined");
