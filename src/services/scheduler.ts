@@ -27,7 +27,12 @@ import {
   schedulerDisabledMessage,
   type SchedulerConfig,
 } from "./schedule-config.js";
-import { ScheduleStore, type ScheduleRecord, type ScheduleStatus } from "./schedule-store.js";
+import {
+  ScheduleStore,
+  type ScheduleRecord,
+  type ScheduleSqlDialect,
+  type ScheduleStatus,
+} from "./schedule-store.js";
 
 const logger = createChildLogger({ service: "scheduler" });
 
@@ -110,6 +115,11 @@ export interface MessageSchedulerOptions {
   pollMs?: number;
   /** Messages per minute for one instance. Defaults to the channel outbound limiter. */
   rateLimitFor?: (instanceId: string) => number;
+  /**
+   * Claim statement dialect. SQLite by default. Pass postgres when
+   * WA_DATABASE_URL is set so locked rows are skipped instead of ending the tick.
+   */
+  driver?: ScheduleSqlDialect;
 }
 
 export class MessageScheduler {
@@ -126,7 +136,7 @@ export class MessageScheduler {
   private activeTick: Promise<void> | null = null;
 
   constructor(options: MessageSchedulerOptions) {
-    this.store = new ScheduleStore(options.sqlite);
+    this.store = new ScheduleStore(options.sqlite, options.driver ?? "sqlite");
     this.enqueue = options.enqueue;
     this.resolveChannel = options.resolveChannel;
     this.instanceExists = options.instanceExists;
@@ -263,15 +273,18 @@ export class MessageScheduler {
   private async runTick(): Promise<TickResult> {
     if (!this.settings().enabled) return { dispatched: 0, skipped: 0 };
     const result: TickResult = { dispatched: 0, skipped: 0 };
-    for (const expired of this.store.listExpiredLeases(this.now())) {
-      this.advanceWithoutSend(expired, INTERRUPTED_REASON, "failed");
+    for (const expired of await this.store.listExpiredLeases(this.now())) {
+      await this.advanceWithoutSend(expired, INTERRUPTED_REASON, "failed");
       result.skipped += 1;
     }
     const blocked = new Set<string>();
     for (let count = 0; count < SCHEDULER_MAX_PER_TICK; count++) {
-      const job = this.store.claimNext(this.now(), this.now() + SCHEDULER_LEASE_MS, randomUUID(), [
-        ...blocked,
-      ]);
+      const job = await this.store.claimNext(
+        this.now(),
+        this.now() + SCHEDULER_LEASE_MS,
+        randomUUID(),
+        [...blocked],
+      );
       if (!job) break;
       const outcome = await this.processClaimed(job);
       if (outcome === "sent") result.dispatched += 1;
@@ -283,16 +296,20 @@ export class MessageScheduler {
 
   private async processClaimed(job: ScheduleRecord): Promise<"sent" | "skipped" | "deferred"> {
     if (this.shouldSkipMissed(job)) {
-      this.advanceWithoutSend(job, SKIPPED_REASON, "skipped");
+      await this.advanceWithoutSend(job, SKIPPED_REASON, "skipped");
       return "skipped";
     }
     if (job.endAt != null && this.now() > job.endAt) {
-      this.advanceWithoutSend(job, "schedule ended before the occurrence was sent", "completed");
+      await this.advanceWithoutSend(
+        job,
+        "schedule ended before the occurrence was sent",
+        "completed",
+      );
       return "skipped";
     }
     try {
       if (!this.hasDispatchBudget(job.instanceId)) {
-        this.releaseClaim(job);
+        await this.releaseClaim(job);
         logger.debug(
           { scheduleId: job.id, instanceId: job.instanceId },
           "Scheduled send left active until the outbound window has room",
@@ -302,14 +319,14 @@ export class MessageScheduler {
       // Lateness is decided again at send time. A row can cross the slack
       // window while earlier sends in this tick are still in flight.
       if (this.shouldSkipMissed(job)) {
-        this.advanceWithoutSend(job, SKIPPED_REASON, "skipped");
+        await this.advanceWithoutSend(job, SKIPPED_REASON, "skipped");
         return "skipped";
       }
       const channel = this.resolveChannel(job.instanceId);
       const content = parsePayload(job.payloadJson);
       const queued = await this.enqueue(job.instanceId, job.recipient, content, channel);
       this.noteDispatch(job.instanceId);
-      this.markSent(job, queued.jobId);
+      await this.markSent(job, queued.jobId);
       logger.info(
         { scheduleId: job.id, instanceId: job.instanceId, jobId: queued.jobId },
         "Scheduled send queued",
@@ -318,15 +335,15 @@ export class MessageScheduler {
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       if (isPermanent(err)) {
-        this.advanceWithoutSend(job, message, "failed");
+        await this.advanceWithoutSend(job, message, "failed");
         return "skipped";
       }
       const attempts = job.attempts + 1;
       if (attempts >= SCHEDULER_MAX_ATTEMPTS) {
-        this.advanceWithoutSend(job, message, "failed");
+        await this.advanceWithoutSend(job, message, "failed");
         return "skipped";
       }
-      this.store.retry(
+      await this.store.retry(
         job.id,
         job.leaseToken,
         this.now() + SCHEDULER_RETRY_DELAY_MS,
@@ -339,7 +356,7 @@ export class MessageScheduler {
     }
   }
 
-  private markSent(job: ScheduleRecord, jobId: string): void {
+  private async markSent(job: ScheduleRecord, jobId: string): Promise<void> {
     const now = this.now();
     const count = job.occurrenceCount + 1;
     const spec = specOf(job);
@@ -353,7 +370,7 @@ export class MessageScheduler {
         nextRunAt = next;
       }
     }
-    this.store.finish({
+    await this.store.finish({
       id: job.id,
       leaseToken: job.leaseToken,
       status,
@@ -368,14 +385,14 @@ export class MessageScheduler {
   }
 
   /** Drop the current occurrence. Recurring rows move to the next future slot. */
-  private advanceWithoutSend(
+  private async advanceWithoutSend(
     job: ScheduleRecord,
     reason: string,
     terminalStatus: ScheduleStatus,
-  ): void {
+  ): Promise<void> {
     const now = this.now();
     if (job.recurrence === "once") {
-      this.store.finish({
+      await this.store.finish({
         id: job.id,
         leaseToken: job.leaseToken,
         status: terminalStatus,
@@ -391,7 +408,7 @@ export class MessageScheduler {
     }
     const next = nextOccurrence(specOf(job), now);
     if (next == null) {
-      this.store.finish({
+      await this.store.finish({
         id: job.id,
         leaseToken: job.leaseToken,
         status: "completed",
@@ -405,7 +422,7 @@ export class MessageScheduler {
       });
       return;
     }
-    this.store.finish({
+    await this.store.finish({
       id: job.id,
       leaseToken: job.leaseToken,
       status: "active",
@@ -491,13 +508,13 @@ export class MessageScheduler {
     return outboundRateLimit(this.resolveChannel(instanceId));
   }
 
-  private releaseClaim(job: ScheduleRecord): void {
+  private async releaseClaim(job: ScheduleRecord): Promise<void> {
     const now = this.now();
     // The row was not late when it was picked up. Waiting for the outbound
     // limiter must not turn that wait into a missed run.
     const nextRunAt = Math.max(job.nextRunAt, now);
-    if (this.store.release(job.id, job.leaseToken, now, nextRunAt)) return;
-    this.store.setStatus(job.instanceId, job.id, ["running"], "active", now);
+    if (await this.store.release(job.id, job.leaseToken, now, nextRunAt)) return;
+    await this.store.setStatus(job.instanceId, job.id, ["running"], "active", now);
   }
 }
 

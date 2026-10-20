@@ -47,12 +47,7 @@ CREATE TABLE IF NOT EXISTS scheduled_messages (
 );
 `;
 
-/**
- * Adds columns missing from tables created before seq existed.
- * Run this before SCHEDULED_MESSAGES_INDEX_DDL. On SQLite, check
- * PRAGMA table_info first. On Postgres, check information_schema.columns.
- * The only expected repeat is "duplicate column".
- */
+/** Adds seq on a table created before that column existed. */
 export const SCHEDULED_MESSAGES_UPGRADE_SQL = `ALTER TABLE scheduled_messages ADD COLUMN seq BIGINT NOT NULL DEFAULT 0`;
 
 export const SCHEDULED_MESSAGES_INDEX_DDL = `
@@ -70,12 +65,6 @@ export function createScheduledMessagesTable(sqlite: Database.Database): void {
 }
 
 function ensureScheduledMessageColumns(sqlite: Database.Database): void {
-  const table = sqlite
-    .prepare(
-      `SELECT 1 AS present FROM sqlite_master WHERE type = 'table' AND name = 'scheduled_messages'`,
-    )
-    .get() as { present: number } | undefined;
-  if (!table) return;
   const columns = sqlite.prepare(`PRAGMA table_info(scheduled_messages)`).all() as Array<{
     name: string;
   }>;

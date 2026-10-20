@@ -22,22 +22,7 @@ FROM node:24-alpine AS deps
 
 WORKDIR /app
 COPY package.json package-lock.json ./
-# pg is only the test client. drizzle-orm and bullmq declare it as an optional
-# peer, so this install still places it in node_modules. The server does not
-# open Postgres from this image.
-RUN npm ci --omit=dev --ignore-scripts \
- && rm -rf \
-      node_modules/pg \
-      node_modules/pg-connection-string \
-      node_modules/pg-int8 \
-      node_modules/pg-pool \
-      node_modules/pg-protocol \
-      node_modules/pg-types \
-      node_modules/pgpass \
-      node_modules/postgres-array \
-      node_modules/postgres-bytea \
-      node_modules/postgres-date \
-      node_modules/postgres-interval
+RUN npm ci --omit=dev --ignore-scripts
 
 FROM node:24-alpine AS runtime
 

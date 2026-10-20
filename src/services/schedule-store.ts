@@ -92,8 +92,23 @@ export interface FinishScheduleUpdate {
   now: number;
 }
 
+/** Sync result, or a promise from a Postgres store. The worker awaits these. */
+export type Awaitable<T> = T | Promise<T>;
+
+/**
+ * Unset or blank WA_DATABASE_URL keeps SQLite. Any other value selects Postgres.
+ * This branch still opens SQLite; the driver only chooses the claim statement.
+ */
+export function databaseDialect(env: NodeJS.ProcessEnv = process.env): ScheduleSqlDialect {
+  const url = env.WA_DATABASE_URL?.trim() ?? "";
+  return url === "" ? "sqlite" : "postgres";
+}
+
 export class ScheduleStore {
-  constructor(private readonly sqlite: Database.Database) {
+  constructor(
+    private readonly sqlite: Database.Database,
+    private readonly dialect: ScheduleSqlDialect = "sqlite",
+  ) {
     createScheduledMessagesTable(sqlite);
   }
 
@@ -167,22 +182,27 @@ export class ScheduleStore {
     leaseUntil: number,
     token: string,
     excludeInstanceIds: readonly string[] = [],
-  ): ScheduleRecord | null {
+  ): Awaitable<ScheduleRecord | null> {
     const params: Array<string | number> = [token, leaseUntil, now, now];
     if (excludeInstanceIds.length > 0) params.push(...excludeInstanceIds);
     const row = this.sqlite
-      .prepare(claimNextScheduleSql(excludeInstanceIds.length))
+      .prepare(claimNextScheduleSql(excludeInstanceIds.length, this.dialect))
       .get(...params) as ScheduleRow | undefined;
     return row ? mapRow(row) : null;
   }
 
   /** Put a claimed row back to active. `nextRunAt` is the due time to keep. */
-  release(id: string, leaseToken: string | null, now: number, nextRunAt: number): boolean {
+  release(
+    id: string,
+    leaseToken: string | null,
+    now: number,
+    nextRunAt: number,
+  ): Awaitable<boolean> {
     const result = this.sqlite.prepare(releaseScheduleSql()).run(nextRunAt, now, id, leaseToken);
     return result.changes > 0;
   }
 
-  listExpiredLeases(now: number): ScheduleRecord[] {
+  listExpiredLeases(now: number): Awaitable<ScheduleRecord[]> {
     const rows = this.sqlite
       .prepare(
         `SELECT * FROM scheduled_messages
@@ -210,7 +230,7 @@ export class ScheduleStore {
     return result.changes > 0;
   }
 
-  finish(update: FinishScheduleUpdate): boolean {
+  finish(update: FinishScheduleUpdate): Awaitable<boolean> {
     const result = this.sqlite
       .prepare(finishScheduleSql())
       .run(
@@ -235,7 +255,7 @@ export class ScheduleStore {
     attempts: number,
     lastError: string,
     now: number,
-  ): boolean {
+  ): Awaitable<boolean> {
     const result = this.sqlite
       .prepare(retryScheduleSql())
       .run(nextRunAt, attempts, lastError, now, id, leaseToken);
