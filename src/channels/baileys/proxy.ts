@@ -148,6 +148,28 @@ export function createBaileysProxyAgents(proxyUrl: string): BaileysProxyAgents {
   }
 }
 
+/** How long to wait for a graceful dispatcher close before aborting in-flight requests. */
+export const PROXY_DISPATCHER_CLOSE_TIMEOUT_MS = 1_000;
+
+async function closeDispatcher(dispatcher: Dispatcher): Promise<void> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const closed = dispatcher.close().then(
+    () => true,
+    () => false,
+  );
+  try {
+    const finished = await Promise.race([
+      closed,
+      new Promise<false>((resolve) => {
+        timer = setTimeout(() => resolve(false), PROXY_DISPATCHER_CLOSE_TIMEOUT_MS);
+      }),
+    ]);
+    if (!finished) await dispatcher.destroy();
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
 export async function closeBaileysProxyAgents(
   agents: BaileysProxyAgents | undefined,
 ): Promise<void> {
@@ -156,7 +178,7 @@ export async function closeBaileysProxyAgents(
     agents.agent.destroy();
     agents.fetchAgent.destroy();
   } finally {
-    await agents.dispatcher.close();
+    await closeDispatcher(agents.dispatcher);
   }
 }
 

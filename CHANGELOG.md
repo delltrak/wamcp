@@ -9,9 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- Added optional `WA_PROXY_URL` for a SOCKS5 or HTTP(S) proxy on the Baileys WebSocket and media
-  transfers. The connection stays direct when the variable is unset or empty. Proxy credentials are
-  redacted from logs, tool errors, and `GET /health`.
+- Added optional `WA_PROXY_URL` (#146) for a SOCKS5 or HTTP(S) proxy on the Baileys WebSocket and
+  media transfers. The connection stays direct when the variable is unset or empty. Proxy
+  credentials are redacted from logs, tool errors, and `GET /health`.
 - Added Baileys instance lifecycle webhooks for connection, disconnect, pairing-code, and QR events,
   plus the read-only `wa_get_instance_status` tool. Pairing and QR challenge data is omitted from
   webhook payloads and status output.
@@ -37,9 +37,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- Percent-encoded proxy credentials are decoded before the SOCKS5 handshake. Proxy agents are closed
-  when the socket closes and before each reconnect. `WA_PROXY_URL` is validated at startup, and a
-  configured username or password of at least 4 characters is redacted on its own.
+- (#146) Percent-encoded proxy credentials are decoded before the SOCKS5 handshake. A dispatcher
+  with a stuck request is destroyed instead of waiting, and reconnect does not block on that
+  cleanup. `WA_PROXY_URL` is validated at startup. Usernames and passwords of at least 4 characters
+  are redacted as whole words; shorter ones are removed only from the proxy URL and from a
+  user:password pair. History-sync and app-state blob downloads use the proxy dispatcher.
 - App-state writes now run through a per-instance queue with configurable spacing and a resync
   preflight that requires a retrievable current key, a positive collection version, a 128-byte hash,
   and no Baileys-reported sync, decode, missing-key, or hash-verification failure. Successful writes

@@ -1739,17 +1739,16 @@ export class BaileysAdapter implements ChannelAdapter {
     }
   }
 
-  private async releaseProxyAgents(): Promise<void> {
+  private releaseProxyAgents(): void {
     const agents = this.proxyAgents;
     this.proxyAgents = undefined;
-    try {
-      await closeBaileysProxyAgents(agents);
-    } catch (error) {
+    if (!agents) return;
+    void closeBaileysProxyAgents(agents).catch((error: unknown) => {
       logger.warn(
         { err: redactError(error, this.proxyUrl), instanceId: this.instanceId },
         "Failed to close outbound proxy agents",
       );
-    }
+    });
   }
 
   async connect(): Promise<void> {
@@ -1759,7 +1758,7 @@ export class BaileysAdapter implements ChannelAdapter {
     }
 
     this.status = "connecting";
-    await this.releaseProxyAgents();
+    this.releaseProxyAgents();
 
     const { state, saveCreds } = await useSqliteAuthState(this.instanceId);
     this.saveCreds = saveCreds;
@@ -1789,7 +1788,13 @@ export class BaileysAdapter implements ChannelAdapter {
         shouldSyncHistoryMessage: ({ syncType }) =>
           syncType !== proto.HistorySync.HistorySyncType.FULL || requestFullHistory,
         markOnlineOnConnect: this.markOnlineOnConnect,
-        ...(proxyAgents ? { agent: proxyAgents.agent, fetchAgent: proxyAgents.fetchAgent } : {}),
+        ...(proxyAgents
+          ? {
+              agent: proxyAgents.agent,
+              fetchAgent: proxyAgents.fetchAgent,
+              options: { dispatcher: proxyAgents.dispatcher } as unknown as RequestInit,
+            }
+          : {}),
         getMessage: async (key: WAMessageKey): Promise<proto.IMessage | undefined> => {
           if (!key.id) return undefined;
           const conditions = [
@@ -6001,7 +6006,7 @@ export class BaileysAdapter implements ChannelAdapter {
   }
 
   private bindEvents(sock: WASocket): void {
-    sock.ev.on("connection.update", async (update) => {
+    sock.ev.on("connection.update", (update) => {
       const { connection, lastDisconnect, qr } = update;
 
       if (qr) {
@@ -6082,9 +6087,8 @@ export class BaileysAdapter implements ChannelAdapter {
         logger.info({ instanceId: this.instanceId, offlineDurationMs }, "Connected to WhatsApp");
       }
 
-      let releasingProxyAgents: Promise<void> | undefined;
       if (connection === "close") {
-        releasingProxyAgents = this.releaseProxyAgents();
+        this.releaseProxyAgents();
         this.clearHealthWatchdog();
         this.clearEventBufferStallWatchdog();
         this.resetActivityPresence();
@@ -6147,7 +6151,6 @@ export class BaileysAdapter implements ChannelAdapter {
       if (normalized) {
         this.emit("connection.changed", normalized);
       }
-      await releasingProxyAgents;
     });
 
     // creds.update is not buffered — use ev.on directly
@@ -6828,7 +6831,7 @@ export class BaileysAdapter implements ChannelAdapter {
     this.reconnectTimer = setTimeout(async () => {
       try {
         this.sock = null;
-        await this.releaseProxyAgents();
+        this.releaseProxyAgents();
         await this.connect();
       } catch (err) {
         logger.error({ err, instanceId: this.instanceId }, "Reconnect failed");

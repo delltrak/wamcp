@@ -25,18 +25,28 @@ function addVariant(
 }
 
 const BARE_SECRET_MIN_LENGTH = 4;
-const variantCache = new Map<string, Array<[string, string]>>();
 
-function addBareSecret(variants: Map<string, string>, value: string): void {
-  if (value.length < BARE_SECRET_MIN_LENGTH) return;
-  addVariant(variants, value, "***");
+interface RedactionPlan {
+  substrings: Array<[string, string]>;
+  tokens: string[];
 }
 
-function secretVariants(proxyUrl: string): Array<[string, string]> {
-  const variants = new Map<string, string>();
+const variantCache = new Map<string, RedactionPlan>();
+
+function addBareSecret(tokens: Set<string>, value: string): void {
+  // Shorter credentials stay visible unless they are inside a proxy URL or a user:password pair.
+  if (value.length < BARE_SECRET_MIN_LENGTH) return;
+  tokens.add(value);
+  const escaped = JSON.stringify(value).slice(1, -1);
+  if (escaped !== value && escaped.length >= BARE_SECRET_MIN_LENGTH) tokens.add(escaped);
+}
+
+function secretVariants(proxyUrl: string): RedactionPlan {
+  const substrings = new Map<string, string>();
+  const tokens = new Set<string>();
   const redacted = redactProxyUrl(proxyUrl);
-  addVariant(variants, proxyUrl, redacted);
-  addVariant(variants, proxyUrl.endsWith("/") ? proxyUrl.slice(0, -1) : `${proxyUrl}/`, redacted);
+  addVariant(substrings, proxyUrl, redacted);
+  addVariant(substrings, proxyUrl.endsWith("/") ? proxyUrl.slice(0, -1) : `${proxyUrl}/`, redacted);
 
   try {
     const url = new URL(proxyUrl);
@@ -45,18 +55,34 @@ function secretVariants(proxyUrl: string): Array<[string, string]> {
     const decodedUser = decodeURIComponent(encodedUser);
     const decodedPass = decodeURIComponent(encodedPass);
     if (encodedPass || decodedPass) {
-      addVariant(variants, `${encodedUser}:${encodedPass}`, "***:***");
-      addVariant(variants, `${decodedUser}:${decodedPass}`, "***:***");
+      addVariant(substrings, `${encodedUser}:${encodedPass}`, "***:***");
+      addVariant(substrings, `${decodedUser}:${decodedPass}`, "***:***");
     }
-    addBareSecret(variants, encodedUser);
-    addBareSecret(variants, decodedUser);
-    addBareSecret(variants, encodedPass);
-    addBareSecret(variants, decodedPass);
+    addBareSecret(tokens, encodedUser);
+    addBareSecret(tokens, decodedUser);
+    addBareSecret(tokens, encodedPass);
+    addBareSecret(tokens, decodedPass);
   } catch {
     // The URL regex above still covers well-formed proxy URLs.
   }
 
-  return [...variants.entries()].sort((left, right) => right[0].length - left[0].length);
+  return {
+    substrings: [...substrings.entries()].sort((left, right) => right[0].length - left[0].length),
+    tokens: [...tokens].sort((left, right) => right.length - left.length),
+  };
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function redactWholeTokens(text: string, tokens: string[]): string {
+  let result = text;
+  for (const token of tokens) {
+    const pattern = new RegExp(`(?<![A-Za-z0-9])${escapeRegExp(token)}(?![A-Za-z0-9])`, "g");
+    result = result.replace(pattern, "***");
+  }
+  return result;
 }
 
 /** Proxy URL safe to log. Unparseable values are replaced entirely. */
@@ -78,25 +104,32 @@ export function redactProxyUrl(raw: string): string {
 export function redactProxyCredentials(text: string, proxyUrl?: string): string {
   const redacted = redactProxyUserinfo(text);
   if (!proxyUrl) return redacted;
-  let variants = variantCache.get(proxyUrl);
-  if (!variants) {
-    variants = secretVariants(proxyUrl);
+  let plan = variantCache.get(proxyUrl);
+  if (!plan) {
+    plan = secretVariants(proxyUrl);
     if (variantCache.size > 8) variantCache.clear();
-    variantCache.set(proxyUrl, variants);
+    variantCache.set(proxyUrl, plan);
   }
   let result = redacted;
-  for (const [secret, replacement] of variants) {
+  for (const [secret, replacement] of plan.substrings) {
     result = result.split(secret).join(replacement);
   }
-  return result;
+  return redactWholeTokens(result, plan.tokens);
 }
 
-export function redactError(error: unknown, proxyUrl?: string): Error {
+export function redactError(error: unknown, proxyUrl?: string, seen = new Set<unknown>()): Error {
+  if (seen.has(error)) return new Error("Circular error");
   const message = error instanceof Error ? error.message : String(error);
   const redacted = new Error(redactProxyCredentials(message, proxyUrl));
   redacted.name = error instanceof Error ? error.name : "Error";
-  if (error instanceof Error && error.stack) {
-    redacted.stack = redactProxyCredentials(error.stack, proxyUrl);
+  if (!(error instanceof Error)) return redacted;
+  seen.add(error);
+  if (error.stack) redacted.stack = redactProxyCredentials(error.stack, proxyUrl);
+  if (error.cause !== undefined) {
+    redacted.cause =
+      error.cause instanceof Error
+        ? redactError(error.cause, proxyUrl, seen)
+        : redactProxyCredentials(String(error.cause), proxyUrl);
   }
   return redacted;
 }
