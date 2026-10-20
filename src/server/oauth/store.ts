@@ -1,11 +1,12 @@
 import { createHash, randomBytes } from "node:crypto";
-import { mkdirSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import Database from "better-sqlite3";
 import { verifyPkceS256 } from "./pkce.js";
 
 const CODE_TTL_SECONDS = 5 * 60;
 const ACCESS_TTL_SECONDS = 60 * 60;
+const ROTATED_ACCESS_TTL_SECONDS = 15 * 60;
 const REFRESH_TTL_SECONDS = 30 * 24 * 60 * 60;
 
 const SCHEMA = `
@@ -30,6 +31,8 @@ CREATE TABLE IF NOT EXISTS oauth_authorization_codes (
   expires_at INTEGER NOT NULL,
   used_at INTEGER,
   created_at INTEGER NOT NULL,
+  family_id TEXT,
+  credential_version TEXT NOT NULL DEFAULT '',
   FOREIGN KEY (client_id) REFERENCES oauth_clients(client_id) ON DELETE CASCADE
 );
 CREATE INDEX IF NOT EXISTS idx_oauth_codes_expires_at ON oauth_authorization_codes(expires_at);
@@ -46,11 +49,19 @@ CREATE TABLE IF NOT EXISTS oauth_tokens (
   expires_at INTEGER NOT NULL,
   revoked_at INTEGER,
   created_at INTEGER NOT NULL,
+  credential_version TEXT NOT NULL DEFAULT '',
   FOREIGN KEY (client_id) REFERENCES oauth_clients(client_id) ON DELETE CASCADE
 );
 CREATE INDEX IF NOT EXISTS idx_oauth_tokens_family ON oauth_tokens(family_id);
 CREATE INDEX IF NOT EXISTS idx_oauth_tokens_expires_at ON oauth_tokens(expires_at);
 CREATE INDEX IF NOT EXISTS idx_oauth_tokens_client_id ON oauth_tokens(client_id);
+
+CREATE TABLE IF NOT EXISTS oauth_registration_attempts (
+  ip TEXT NOT NULL,
+  created_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_oauth_registration_attempts_ip
+  ON oauth_registration_attempts(ip, created_at);
 `;
 
 export type OAuthApplicationType = "web" | "native";
@@ -71,7 +82,11 @@ export interface AuthorizationGrant {
   codeChallenge: string;
   resource: string;
   scope: string;
+  credentialVersion?: string;
 }
+
+/** Returns the current credential version, or undefined when the subject no longer exists. */
+export type CredentialVersionResolver = (subject: string) => string | undefined;
 
 export interface CodeExchange {
   clientId: string;
@@ -127,6 +142,8 @@ interface CodeRow {
   scope: string;
   expires_at: number;
   used_at: number | null;
+  family_id: string | null;
+  credential_version: string;
 }
 
 interface RefreshRow {
@@ -137,15 +154,18 @@ interface RefreshRow {
   scope: string;
   expires_at: number;
   revoked_at: number | null;
+  credential_version: string;
 }
 
 interface AccessRow {
+  family_id: string;
   subject: string;
   client_id: string;
   scope: string;
   resource: string;
   expires_at: number;
   revoked_at: number | null;
+  credential_version: string;
 }
 
 interface CountRow {
@@ -174,8 +194,12 @@ export class OAuthStore {
   maxRegistrationsPerWindow = 40;
   registrationWindowMs = 60 * 60 * 1000;
   unusedClientTtlMs = 24 * 60 * 60 * 1000;
+  credentialVersion: CredentialVersionResolver | undefined;
 
-  constructor(private readonly db: Database.Database) {}
+  constructor(
+    private readonly db: Database.Database,
+    private readonly filePath?: string,
+  ) {}
 
   close(): void {
     this.db.close();
@@ -211,22 +235,31 @@ export class OAuthStore {
     return JSON.stringify({ clients, codes, tokens });
   }
 
-  registerClient(client: OAuthClient): void {
+  registerClient(client: OAuthClient, ip: string): void {
+    const clientIp = normalizeRegistrationIp(ip);
     const insert = this.db.prepare(`
       INSERT INTO oauth_clients (
         client_id, client_name, redirect_uris_json, application_type,
         token_endpoint_auth_method, created_at
       ) VALUES (?, ?, ?, ?, ?, ?)
     `);
+    const insertAttempt = this.db.prepare(
+      "INSERT INTO oauth_registration_attempts (ip, created_at) VALUES (?, ?)",
+    );
     const register = this.db.transaction(() => {
       this.deleteExpired(client.createdAt);
       this.deleteUnusedClients(client.createdAt - Math.floor(this.unusedClientTtlMs / 1000));
       const total = this.db.prepare("SELECT COUNT(*) AS n FROM oauth_clients").get() as CountRow;
       if (total.n >= this.maxClients) throw new OAuthFlowError("registration_limit");
       const windowStart = client.createdAt - Math.floor(this.registrationWindowMs / 1000);
+      this.db
+        .prepare("DELETE FROM oauth_registration_attempts WHERE created_at <= ?")
+        .run(windowStart);
       const recent = this.db
-        .prepare("SELECT COUNT(*) AS n FROM oauth_clients WHERE created_at > ?")
-        .get(windowStart) as CountRow;
+        .prepare(
+          "SELECT COUNT(*) AS n FROM oauth_registration_attempts WHERE ip = ? AND created_at > ?",
+        )
+        .get(clientIp, windowStart) as CountRow;
       if (recent.n >= this.maxRegistrationsPerWindow)
         throw new OAuthFlowError("registration_limit");
       insert.run(
@@ -237,8 +270,10 @@ export class OAuthStore {
         client.tokenEndpointAuthMethod,
         client.createdAt,
       );
+      insertAttempt.run(clientIp, client.createdAt);
     });
     register.immediate();
+    this.tightenPermissions();
   }
 
   getClient(clientId: string): OAuthClient | undefined {
@@ -266,11 +301,12 @@ export class OAuthStore {
   issueAuthorizationCode(grant: AuthorizationGrant, now: Date): string {
     const code = randomSecret("wamcp_code_", 32);
     const issuedAt = unixSeconds(now);
+    const version = grant.credentialVersion ?? this.currentCredentialVersion(grant.subject);
     const insert = this.db.prepare(`
       INSERT INTO oauth_authorization_codes (
         code_hash, client_id, subject, redirect_uri, code_challenge,
-        resource, scope, expires_at, created_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        resource, scope, expires_at, created_at, credential_version
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
     const issue = this.db.transaction(() => {
       this.deleteExpired(issuedAt);
@@ -284,105 +320,147 @@ export class OAuthStore {
         grant.scope,
         issuedAt + CODE_TTL_SECONDS,
         issuedAt,
+        version,
       );
     });
     issue.immediate();
+    this.tightenPermissions();
     return code;
   }
 
   exchangeAuthorizationCode(request: CodeExchange, now: Date): TokenPair {
     const nowSec = unixSeconds(now);
-    const exchange = this.db.transaction((): TokenPair => {
-      this.deleteExpired(nowSec);
-      const row = this.db
-        .prepare(
-          `SELECT client_id, subject, redirect_uri, code_challenge, resource, scope, expires_at, used_at
+    const codeHash = hashSecret(request.code);
+    const exchange = this.db.transaction(
+      (): { kind: "issued"; pair: TokenPair } | { kind: "rejected" } => {
+        this.deleteExpired(nowSec);
+        const row = this.db
+          .prepare(
+            `SELECT client_id, subject, redirect_uri, code_challenge, resource, scope,
+                  expires_at, used_at, family_id, credential_version
            FROM oauth_authorization_codes WHERE code_hash = ?`,
-        )
-        .get(hashSecret(request.code)) as CodeRow | undefined;
-      if (!row) throw new OAuthFlowError("invalid_grant");
-      if (
-        row.used_at !== null ||
-        nowSec >= row.expires_at ||
-        row.client_id !== request.clientId ||
-        row.redirect_uri !== request.redirectUri
-      ) {
-        throw new OAuthFlowError("invalid_grant");
-      }
-      if (row.resource !== request.resource) throw new OAuthFlowError("invalid_target");
-      if (!verifyPkceS256(request.codeVerifier, row.code_challenge))
-        throw new OAuthFlowError("invalid_grant");
+          )
+          .get(codeHash) as CodeRow | undefined;
+        if (!row) throw new OAuthFlowError("invalid_grant");
+        if (row.used_at !== null) {
+          if (row.family_id) this.revokeFamily(row.family_id, nowSec);
+          return { kind: "rejected" };
+        }
+        if (
+          nowSec >= row.expires_at ||
+          row.client_id !== request.clientId ||
+          row.redirect_uri !== request.redirectUri
+        ) {
+          throw new OAuthFlowError("invalid_grant");
+        }
+        if (row.resource !== request.resource) throw new OAuthFlowError("invalid_target");
+        if (!verifyPkceS256(request.codeVerifier, row.code_challenge))
+          throw new OAuthFlowError("invalid_grant");
+        if (!this.subjectCredentialCurrent(row.subject, row.credential_version)) {
+          this.db
+            .prepare(
+              "UPDATE oauth_authorization_codes SET used_at = ? WHERE code_hash = ? AND used_at IS NULL",
+            )
+            .run(nowSec, codeHash);
+          return { kind: "rejected" };
+        }
 
-      const marked = this.db
-        .prepare(
-          "UPDATE oauth_authorization_codes SET used_at = ? WHERE code_hash = ? AND used_at IS NULL",
-        )
-        .run(nowSec, hashSecret(request.code));
-      if (marked.changes !== 1) throw new OAuthFlowError("invalid_grant");
-      return this.insertTokenPair(
-        randomSecret("wamcp_family_", 18),
-        row.client_id,
-        row.subject,
-        row.resource,
-        row.scope,
-        nowSec,
-      );
-    });
-    return exchange.immediate();
+        const familyId = randomSecret("wamcp_family_", 18);
+        const marked = this.db
+          .prepare(
+            `UPDATE oauth_authorization_codes
+           SET used_at = ?, family_id = ?
+           WHERE code_hash = ? AND used_at IS NULL`,
+          )
+          .run(nowSec, familyId, codeHash);
+        if (marked.changes !== 1) {
+          const current = this.db
+            .prepare("SELECT family_id FROM oauth_authorization_codes WHERE code_hash = ?")
+            .get(codeHash) as { family_id: string | null } | undefined;
+          if (current?.family_id) this.revokeFamily(current.family_id, nowSec);
+          return { kind: "rejected" };
+        }
+        return {
+          kind: "issued",
+          pair: this.insertTokenPair(
+            familyId,
+            row.client_id,
+            row.subject,
+            row.resource,
+            row.scope,
+            row.credential_version,
+            nowSec,
+            ACCESS_TTL_SECONDS,
+          ),
+        };
+      },
+    );
+    const result = exchange.immediate();
+    this.tightenPermissions();
+    if (result.kind === "rejected") throw new OAuthFlowError("invalid_grant");
+    return result.pair;
   }
 
   rotateRefreshToken(request: RefreshExchange, now: Date): TokenPair {
     const nowSec = unixSeconds(now);
-    const rotate = this.db.transaction((): { reuse: true } | { reuse: false; pair: TokenPair } => {
-      this.deleteExpired(nowSec);
-      const row = this.db
-        .prepare(
-          `SELECT family_id, client_id, subject, resource, scope, expires_at, revoked_at
-           FROM oauth_tokens WHERE token_hash = ? AND token_type = 'refresh'`,
-        )
-        .get(hashSecret(request.refreshToken)) as RefreshRow | undefined;
-      if (!row) throw new OAuthFlowError("invalid_grant");
-      if (row.revoked_at !== null) {
-        this.db
+    const rotate = this.db.transaction(
+      (): { kind: "reuse" } | { kind: "rejected" } | { kind: "issued"; pair: TokenPair } => {
+        this.deleteExpired(nowSec);
+        const row = this.db
           .prepare(
-            "UPDATE oauth_tokens SET revoked_at = ? WHERE family_id = ? AND revoked_at IS NULL",
+            `SELECT family_id, client_id, subject, resource, scope, expires_at, revoked_at,
+                    credential_version
+             FROM oauth_tokens WHERE token_hash = ? AND token_type = 'refresh'`,
           )
-          .run(nowSec, row.family_id);
-        return { reuse: true };
-      }
-      if (nowSec >= row.expires_at || row.client_id !== request.clientId) {
-        throw new OAuthFlowError("invalid_grant");
-      }
-      if (row.resource !== request.resource) throw new OAuthFlowError("invalid_target");
+          .get(hashSecret(request.refreshToken)) as RefreshRow | undefined;
+        if (!row) throw new OAuthFlowError("invalid_grant");
+        if (row.revoked_at !== null) {
+          this.revokeFamily(row.family_id, nowSec);
+          return { kind: "reuse" };
+        }
+        if (nowSec >= row.expires_at || row.client_id !== request.clientId) {
+          throw new OAuthFlowError("invalid_grant");
+        }
+        if (row.resource !== request.resource) throw new OAuthFlowError("invalid_target");
+        if (!this.subjectCredentialCurrent(row.subject, row.credential_version)) {
+          this.revokeFamily(row.family_id, nowSec);
+          return { kind: "rejected" };
+        }
 
-      const revoked = this.db
-        .prepare(
-          `UPDATE oauth_tokens SET revoked_at = ?
-           WHERE token_hash = ? AND token_type = 'refresh' AND revoked_at IS NULL`,
-        )
-        .run(nowSec, hashSecret(request.refreshToken));
-      if (revoked.changes !== 1) throw new OAuthFlowError("invalid_grant");
-      return {
-        reuse: false,
-        pair: this.insertTokenPair(
-          row.family_id,
-          row.client_id,
-          row.subject,
-          row.resource,
-          row.scope,
-          nowSec,
-        ),
-      };
-    });
+        const revoked = this.db
+          .prepare(
+            `UPDATE oauth_tokens SET revoked_at = ?
+             WHERE token_hash = ? AND token_type = 'refresh' AND revoked_at IS NULL`,
+          )
+          .run(nowSec, hashSecret(request.refreshToken));
+        if (revoked.changes !== 1) throw new OAuthFlowError("invalid_grant");
+        return {
+          kind: "issued",
+          pair: this.insertTokenPair(
+            row.family_id,
+            row.client_id,
+            row.subject,
+            row.resource,
+            row.scope,
+            row.credential_version,
+            nowSec,
+            ROTATED_ACCESS_TTL_SECONDS,
+          ),
+        };
+      },
+    );
     const result = rotate.immediate();
-    if (result.reuse) throw new OAuthFlowError("refresh_reuse");
+    this.tightenPermissions();
+    if (result.kind === "reuse") throw new OAuthFlowError("refresh_reuse");
+    if (result.kind === "rejected") throw new OAuthFlowError("invalid_grant");
     return result.pair;
   }
 
   validateAccessToken(token: string, resource: string, now: Date): OAuthPrincipal | undefined {
     const row = this.db
       .prepare(
-        `SELECT subject, client_id, scope, resource, expires_at, revoked_at
+        `SELECT family_id, subject, client_id, scope, resource, expires_at, revoked_at,
+                credential_version
          FROM oauth_tokens WHERE token_hash = ? AND token_type = 'access'`,
       )
       .get(hashSecret(token)) as AccessRow | undefined;
@@ -394,7 +472,56 @@ export class OAuthStore {
     ) {
       return undefined;
     }
+    if (!this.subjectCredentialCurrent(row.subject, row.credential_version)) {
+      const nowSec = unixSeconds(now);
+      const revoke = this.db.transaction(() => {
+        this.revokeFamily(row.family_id, nowSec);
+      });
+      revoke.immediate();
+      this.tightenPermissions();
+      return undefined;
+    }
     return { subject: row.subject, clientId: row.client_id, scope: row.scope };
+  }
+
+  /** RFC 7009. Unknown tokens and client mismatches are ignored. */
+  revokePresentedToken(token: string, clientId: string, now: Date): void {
+    if (token.length < 1 || token.length > 4096) return;
+    const nowSec = unixSeconds(now);
+    const revoke = this.db.transaction(() => {
+      const row = this.db
+        .prepare("SELECT family_id, client_id FROM oauth_tokens WHERE token_hash = ?")
+        .get(hashSecret(token)) as { family_id: string; client_id: string } | undefined;
+      if (!row || (clientId !== "" && row.client_id !== clientId)) return;
+      this.revokeFamily(row.family_id, nowSec);
+    });
+    revoke.immediate();
+    this.tightenPermissions();
+  }
+
+  revokeSubject(subject: string, now: Date): void {
+    if (subject.length < 1 || subject.length > 128) return;
+    this.db
+      .prepare("UPDATE oauth_tokens SET revoked_at = ? WHERE subject = ? AND revoked_at IS NULL")
+      .run(unixSeconds(now), subject);
+    this.tightenPermissions();
+  }
+
+  private currentCredentialVersion(subject: string): string {
+    if (!this.credentialVersion) return "";
+    return this.credentialVersion(subject) ?? "";
+  }
+
+  private subjectCredentialCurrent(subject: string, version: string): boolean {
+    if (!this.credentialVersion) return true;
+    const current = this.credentialVersion(subject);
+    return current !== undefined && version !== "" && current === version;
+  }
+
+  private revokeFamily(familyId: string, nowSec: number): void {
+    this.db
+      .prepare("UPDATE oauth_tokens SET revoked_at = ? WHERE family_id = ? AND revoked_at IS NULL")
+      .run(nowSec, familyId);
   }
 
   private insertTokenPair(
@@ -403,14 +530,17 @@ export class OAuthStore {
     subject: string,
     resource: string,
     scope: string,
+    credentialVersion: string,
     nowSec: number,
+    accessTtlSeconds: number,
   ): TokenPair {
     const accessToken = randomSecret("wamcp_at_", 32);
     const refreshToken = randomSecret("wamcp_rt_", 32);
     const insert = this.db.prepare(`
       INSERT INTO oauth_tokens (
-        token_hash, token_type, family_id, client_id, subject, resource, scope, expires_at, created_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        token_hash, token_type, family_id, client_id, subject, resource, scope,
+        expires_at, created_at, credential_version
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
     insert.run(
       hashSecret(accessToken),
@@ -420,8 +550,9 @@ export class OAuthStore {
       subject,
       resource,
       scope,
-      nowSec + ACCESS_TTL_SECONDS,
+      nowSec + accessTtlSeconds,
       nowSec,
+      credentialVersion,
     );
     insert.run(
       hashSecret(refreshToken),
@@ -433,12 +564,19 @@ export class OAuthStore {
       scope,
       nowSec + REFRESH_TTL_SECONDS,
       nowSec,
+      credentialVersion,
     );
-    return { accessToken, refreshToken, expiresIn: ACCESS_TTL_SECONDS, scope };
+    return { accessToken, refreshToken, expiresIn: accessTtlSeconds, scope };
   }
 
   private deleteExpired(nowSec: number): void {
-    this.db.prepare("DELETE FROM oauth_authorization_codes WHERE expires_at <= ?").run(nowSec);
+    this.db
+      .prepare(
+        `DELETE FROM oauth_authorization_codes
+         WHERE (used_at IS NULL AND expires_at <= ?)
+            OR (used_at IS NOT NULL AND created_at <= ?)`,
+      )
+      .run(nowSec, nowSec - REFRESH_TTL_SECONDS);
     this.db.prepare("DELETE FROM oauth_tokens WHERE expires_at <= ?").run(nowSec);
   }
 
@@ -458,16 +596,70 @@ export class OAuthStore {
       )
       .run(cutoffSec);
   }
+
+  private tightenPermissions(): void {
+    if (!this.filePath) return;
+    tightenOAuthFile(this.filePath);
+  }
+}
+
+function normalizeRegistrationIp(ip: string): string {
+  const trimmed = ip.trim();
+  if (!trimmed || trimmed.length > 128) return "unknown";
+  return trimmed;
+}
+
+export function migrateOAuthSchema(db: Database.Database): void {
+  ensureColumn(db, "oauth_authorization_codes", "family_id", "family_id TEXT");
+  ensureColumn(
+    db,
+    "oauth_authorization_codes",
+    "credential_version",
+    "credential_version TEXT NOT NULL DEFAULT ''",
+  );
+  ensureColumn(
+    db,
+    "oauth_tokens",
+    "credential_version",
+    "credential_version TEXT NOT NULL DEFAULT ''",
+  );
+}
+
+function ensureColumn(
+  db: Database.Database,
+  table: string,
+  column: string,
+  definition: string,
+): void {
+  const columns = db.prepare(`PRAGMA table_info(${table})`).all() as { name: string }[];
+  if (columns.some((entry) => entry.name === column)) return;
+  db.exec(`ALTER TABLE ${table} ADD COLUMN ${definition}`);
+}
+
+function tightenOAuthFile(filePath: string): void {
+  chmodSync(filePath, 0o600);
+  for (const suffix of ["-wal", "-shm"]) {
+    const sibling = `${filePath}${suffix}`;
+    if (existsSync(sibling)) chmodSync(sibling, 0o600);
+  }
 }
 
 export function openOAuthStore(filename: string): OAuthStore {
-  if (filename !== ":memory:") mkdirSync(dirname(filename), { recursive: true });
+  const memory = filename === ":memory:";
+  if (!memory) {
+    const directory = dirname(filename);
+    mkdirSync(directory, { recursive: true });
+    chmodSync(directory, 0o700);
+  }
   const db = new Database(filename);
   db.pragma("journal_mode = WAL");
   db.pragma("foreign_keys = ON");
   db.pragma("busy_timeout = 5000");
   db.exec(SCHEMA);
-  return new OAuthStore(db);
+  migrateOAuthSchema(db);
+  const store = new OAuthStore(db, memory ? undefined : filename);
+  if (!memory) tightenOAuthFile(filename);
+  return store;
 }
 
 export function newOAuthClientId(): string {

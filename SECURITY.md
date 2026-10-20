@@ -46,7 +46,8 @@ When deploying WA MCP in production:
 
 - Always set `WA_MCP_API_KEY`, `WA_BASIC_AUTH`, or `WA_MCP_OAUTH_ENABLED=true` before exposing the HTTP transport
 - Keep OAuth disabled unless remote MCP clients need the authorization-code flow
-- Do not point `WA_MCP_OAUTH_DB_PATH` at the WhatsApp database
+- Do not point `WA_MCP_OAUTH_DB_PATH` at the WhatsApp database. The OAuth file is stored mode 0600
+- Set `WA_MCP_OAUTH_DCR=disabled` or `WA_MCP_OAUTH_REDIRECT_HOST_ALLOWLIST` when open registration is not required
 - Use HTTPS (reverse proxy) for the HTTP transport
 - Restrict network access to the MCP server
 - Keep dependencies up to date

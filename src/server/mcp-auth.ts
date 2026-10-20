@@ -1,12 +1,14 @@
 import { timingSafeEqual } from "node:crypto";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { logger } from "../utils/logger.js";
+import { AuthAttemptLimiter, clientAddress } from "./auth-limiter.js";
 import { verifyBasicCredentials, type BasicAuthUser } from "./basic-auth.js";
 import type { McpOAuthServer } from "./oauth/server.js";
 
 export interface McpHttpAuth {
   apiKey?: string;
   basicUsers: readonly BasicAuthUser[];
+  limiter?: AuthAttemptLimiter;
 }
 
 function verifyApiKey(provided: string, expected: string): boolean {
@@ -52,17 +54,29 @@ function writeUnauthorized(res: ServerResponse, challenges: string[]): void {
   res.end(JSON.stringify({ error: "Unauthorized" }));
 }
 
+function writeTooMany(res: ServerResponse, waitMs: number, challenges: string[]): void {
+  const headers: Record<string, string | string[]> = {
+    "Content-Type": "application/json",
+    "Cache-Control": "no-store",
+    "Retry-After": String(Math.max(1, Math.ceil(waitMs / 1000))),
+  };
+  if (challenges.length === 1) headers["WWW-Authenticate"] = challenges[0]!;
+  else if (challenges.length > 1) headers["WWW-Authenticate"] = challenges;
+  res.writeHead(429, headers);
+  res.end(JSON.stringify({ error: "too_many_requests" }));
+}
+
 /**
  * Authenticate one MCP HTTP request.
  * With no API key, Basic users, or OAuth server, the historical open behavior is preserved.
  * A configured API key still matches `Authorization: Bearer` or `x-api-key`.
  */
-export function authorizeMcpHttpRequest(
+export async function authorizeMcpHttpRequest(
   req: IncomingMessage,
   res: ServerResponse,
   auth: McpHttpAuth,
   oauth: McpOAuthServer | null,
-): boolean {
+): Promise<boolean> {
   if (!auth.apiKey && auth.basicUsers.length === 0 && !oauth) return true;
 
   const challenges = oauth
@@ -97,10 +111,25 @@ export function authorizeMcpHttpRequest(
 
   if (authorization?.scheme === "basic" && auth.basicUsers.length > 0) {
     const decoded = decodeBasic(authorization.credentials);
-    if (decoded && verifyBasicCredentials(auth.basicUsers, decoded.username, decoded.password))
+    const ip = clientAddress(req);
+    const username = decoded?.username ?? "\0invalid";
+    const wait = auth.limiter?.retryAfterMs(ip, username) ?? 0;
+    if (wait > 0) {
+      logger.warn("MCP Basic authentication is rate limited");
+      writeTooMany(res, wait, challenges);
+      return false;
+    }
+    const accepted = decoded
+      ? await verifyBasicCredentials(auth.basicUsers, decoded.username, decoded.password)
+      : false;
+    if (accepted && decoded) {
+      auth.limiter?.recordSuccess(decoded.username);
       return true;
+    }
+    const lockedFor = auth.limiter?.recordFailure(ip, username) ?? 0;
     logger.warn("Unauthorized MCP request");
-    writeUnauthorized(res, challenges);
+    if (lockedFor > 0) writeTooMany(res, lockedFor, challenges);
+    else writeUnauthorized(res, challenges);
     return false;
   }
 

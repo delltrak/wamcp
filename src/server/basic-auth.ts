@@ -1,4 +1,4 @@
-import { createHash, scryptSync, timingSafeEqual } from "node:crypto";
+import { createHash, scrypt, timingSafeEqual, type ScryptOptions } from "node:crypto";
 
 export const BASIC_AUTH_SCRYPT = {
   N: 16_384,
@@ -10,12 +10,14 @@ export const BASIC_AUTH_SCRYPT = {
 
 const USERNAME_PATTERN = /^[A-Za-z0-9._~@+-]{1,128}$/;
 const DUMMY_SALT = Buffer.from("0123456789abcdef");
-const DUMMY_HASH = scryptSync("wamcp-basic-auth-dummy", DUMMY_SALT, BASIC_AUTH_SCRYPT.keylen, {
+const SCRYPT_OPTIONS: ScryptOptions = {
   N: BASIC_AUTH_SCRYPT.N,
   r: BASIC_AUTH_SCRYPT.r,
   p: BASIC_AUTH_SCRYPT.p,
   maxmem: BASIC_AUTH_SCRYPT.maxmem,
-});
+};
+const SUCCESS_CACHE_TTL_MS = 30_000;
+const SUCCESS_CACHE_MAX = 256;
 
 export interface BasicAuthUser {
   username: string;
@@ -23,6 +25,42 @@ export interface BasicAuthUser {
   password?: string;
   salt?: Buffer;
   hash?: Buffer;
+}
+
+export interface VerifyBasicOptions {
+  now?: number;
+}
+
+interface SuccessCacheEntry {
+  expiresAt: number;
+}
+
+const successCache = new Map<string, SuccessCacheEntry>();
+let scryptOperations = 0;
+let dummyHashPromise: Promise<Buffer> | undefined;
+
+function deriveKey(password: string, salt: Buffer): Promise<Buffer> {
+  scryptOperations += 1;
+  return new Promise((resolve, reject) => {
+    scrypt(password, salt, BASIC_AUTH_SCRYPT.keylen, SCRYPT_OPTIONS, (error, derived) => {
+      if (error) reject(error);
+      else resolve(derived);
+    });
+  });
+}
+
+function dummyHash(): Promise<Buffer> {
+  dummyHashPromise ??= deriveKey("wamcp-basic-auth-dummy", DUMMY_SALT);
+  return dummyHashPromise;
+}
+
+/** Successful scrypt derivations since process start. Failures are not cached. */
+export function basicAuthScryptOperations(): number {
+  return scryptOperations;
+}
+
+export function clearBasicAuthSuccessCache(): void {
+  successCache.clear();
 }
 
 function safeEqual(left: string, right: string): boolean {
@@ -86,32 +124,75 @@ export function parseBasicAuthUsers(raw: string | undefined): BasicAuthUser[] {
   return users;
 }
 
-function verifyScrypt(password: string, salt: Buffer, expected: Buffer): boolean {
-  const actual = scryptSync(password, salt, expected.length, {
-    N: BASIC_AUTH_SCRYPT.N,
-    r: BASIC_AUTH_SCRYPT.r,
-    p: BASIC_AUTH_SCRYPT.p,
-    maxmem: BASIC_AUTH_SCRYPT.maxmem,
-  });
-  return timingSafeEqual(actual, expected);
-}
-
-export function verifyBasicCredentials(
+export function findBasicUser(
   users: readonly BasicAuthUser[],
   username: string,
-  password: string,
-): boolean {
-  const bounded = password.length > 0 && password.length <= 256 ? password : "invalid-password";
+): BasicAuthUser | undefined {
   let matched: BasicAuthUser | undefined;
   for (const candidate of users) {
     if (safeEqual(candidate.username, username)) matched = candidate;
   }
+  return matched;
+}
 
-  const scryptMatch =
-    matched?.kind === "scrypt" && matched.salt && matched.hash
-      ? verifyScrypt(bounded, matched.salt, matched.hash)
-      : verifyScrypt(bounded, DUMMY_SALT, DUMMY_HASH);
-  if (!matched || password.length < 1 || password.length > 256) return false;
-  if (matched.kind === "scrypt") return scryptMatch;
-  return matched.password !== undefined && safeEqual(matched.password, password);
+/** Stable id for the configured verifier. Password rotation changes it. */
+export function credentialFingerprint(user: BasicAuthUser): string {
+  const material =
+    user.kind === "scrypt"
+      ? `scrypt\0${user.salt?.toString("base64url") ?? ""}\0${user.hash?.toString("base64url") ?? ""}`
+      : `plain\0${user.password ?? ""}`;
+  return createHash("sha256").update(`${user.username}\0${material}`).digest("hex");
+}
+
+function successCacheKey(username: string, password: string, fingerprint: string): string {
+  return createHash("sha256").update(`${username}\0${password}\0${fingerprint}`).digest("hex");
+}
+
+function rememberSuccess(key: string, now: number): void {
+  if (successCache.has(key)) successCache.delete(key);
+  successCache.set(key, { expiresAt: now + SUCCESS_CACHE_TTL_MS });
+  while (successCache.size > SUCCESS_CACHE_MAX) {
+    const oldest = successCache.keys().next().value;
+    if (oldest === undefined) break;
+    successCache.delete(oldest);
+  }
+}
+
+async function verifyScrypt(password: string, salt: Buffer, expected: Buffer): Promise<boolean> {
+  const actual = await deriveKey(password, salt);
+  return actual.length === expected.length && timingSafeEqual(actual, expected);
+}
+
+export async function verifyBasicCredentials(
+  users: readonly BasicAuthUser[],
+  username: string,
+  password: string,
+  options?: VerifyBasicOptions,
+): Promise<boolean> {
+  const now = options?.now ?? Date.now();
+  const bounded = password.length > 0 && password.length <= 256 ? password : "invalid-password";
+  const matched = findBasicUser(users, username);
+  if (!matched || password.length < 1 || password.length > 256) {
+    await verifyScrypt(bounded, DUMMY_SALT, await dummyHash());
+    return false;
+  }
+
+  const fingerprint = credentialFingerprint(matched);
+  const key = successCacheKey(username, bounded, fingerprint);
+  const cached = successCache.get(key);
+  if (cached && cached.expiresAt > now) {
+    rememberSuccess(key, cached.expiresAt - SUCCESS_CACHE_TTL_MS);
+    return true;
+  }
+  if (cached) successCache.delete(key);
+
+  if (matched.kind === "scrypt" && matched.salt && matched.hash) {
+    const accepted = await verifyScrypt(bounded, matched.salt, matched.hash);
+    if (accepted) rememberSuccess(key, now);
+    return accepted;
+  }
+  await verifyScrypt(bounded, DUMMY_SALT, await dummyHash());
+  const accepted = matched.password !== undefined && safeEqual(matched.password, password);
+  if (accepted) rememberSuccess(key, now);
+  return accepted;
 }

@@ -22,6 +22,32 @@ export function hasControlCharacter(value: string): boolean {
   return false;
 }
 
+const BLOCKED_NATIVE_SCHEMES = new Set([
+  "javascript",
+  "data",
+  "file",
+  "blob",
+  "about",
+  "chrome",
+  "chrome-extension",
+  "filesystem",
+  "vbscript",
+  "ws",
+  "wss",
+]);
+
+function schemeName(url: URL): string {
+  return url.protocol.slice(0, -1).toLowerCase();
+}
+
+/** Private-use native schemes such as `app:/cb` (RFC 8252). Loopback HTTP is separate. */
+function validNativeScheme(url: URL): boolean {
+  const scheme = schemeName(url);
+  if (!/^[a-z][a-z0-9+.-]*$/.test(scheme) || BLOCKED_NATIVE_SCHEMES.has(scheme)) return false;
+  if (url.hostname) return true;
+  return url.pathname.length > 1;
+}
+
 export function validRedirectUri(raw: string, applicationType: "web" | "native"): boolean {
   if (raw.length > 2048 || raw.includes("\\") || raw.includes(" ") || hasControlCharacter(raw))
     return false;
@@ -31,11 +57,36 @@ export function validRedirectUri(raw: string, applicationType: "web" | "native")
   } catch {
     return false;
   }
-  if (url.username || url.password || url.hash || !url.hostname) return false;
-  if (url.protocol === "https:") return true;
-  if (applicationType !== "native" || url.protocol !== "http:") return false;
-  if (url.hostname.toLowerCase() === "localhost") return url.port !== "";
-  return isLoopbackAddress(url.hostname);
+  if (url.username || url.password || url.hash) return false;
+  if (url.protocol === "https:") return Boolean(url.hostname);
+  if (url.protocol === "http:") {
+    if (applicationType !== "native" || !url.hostname) return false;
+    if (url.hostname.toLowerCase() === "localhost") return url.port !== "";
+    return isLoopbackAddress(url.hostname);
+  }
+  return applicationType === "native" && validNativeScheme(url);
+}
+
+/**
+ * Empty allowlist permits every otherwise-valid redirect.
+ * HTTP(S) entries match the hostname (or hostname:port). Other entries match a native scheme.
+ */
+export function redirectHostAllowed(uri: string, allowlist: readonly string[]): boolean {
+  if (allowlist.length === 0) return true;
+  let url: URL;
+  try {
+    url = new URL(uri);
+  } catch {
+    return false;
+  }
+  const allowed = new Set(allowlist.map((entry) => entry.trim().toLowerCase()).filter(Boolean));
+  const scheme = schemeName(url);
+  if (scheme === "http" || scheme === "https") {
+    const host = url.hostname.toLowerCase();
+    const hostPort = url.port ? `${host}:${url.port}` : host;
+    return allowed.has(host) || allowed.has(hostPort);
+  }
+  return allowed.has(scheme);
 }
 
 export function redirectUriMatches(client: OAuthClient, requested: string): boolean {

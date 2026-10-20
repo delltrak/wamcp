@@ -20,6 +20,8 @@ export interface EnabledOAuthConfig {
   issuerUrl: string;
   resourceUrl: string;
   dbPath: string;
+  dynamicRegistration: "open" | "disabled";
+  redirectHostAllowlist: string[];
 }
 
 export interface HttpTransportConfig {
@@ -101,7 +103,42 @@ function loadOAuthConfig(
     issuerUrl: issuer.href,
     resourceUrl: resource.href,
     dbPath,
+    dynamicRegistration: parseDynamicRegistration(env.WA_MCP_OAUTH_DCR),
+    redirectHostAllowlist: parseRedirectHostAllowlist(env.WA_MCP_OAUTH_REDIRECT_HOST_ALLOWLIST),
   };
+}
+
+function parseDynamicRegistration(raw: string | undefined): "open" | "disabled" {
+  if (raw === undefined || raw.trim() === "" || raw.trim().toLowerCase() === "open") return "open";
+  if (raw.trim().toLowerCase() === "disabled") return "disabled";
+  throw new Error("Invalid WA_MCP_OAUTH_DCR; expected open or disabled");
+}
+
+function parseRedirectHostAllowlist(raw: string | undefined): string[] {
+  if (raw === undefined || raw.trim() === "") return [];
+  const entries = raw
+    .split(",")
+    .map((entry) => entry.trim().toLowerCase())
+    .filter(Boolean);
+  for (const entry of entries) {
+    if (entry.length > 253 || !/^[a-z0-9._~:-]+$/.test(entry)) {
+      throw new Error(
+        "Invalid WA_MCP_OAUTH_REDIRECT_HOST_ALLOWLIST; expected comma-separated hosts or native schemes",
+      );
+    }
+  }
+  return entries;
+}
+
+/**
+ * stdio does not serve HTTP auth. Invalid HTTP auth settings must not prevent that mode from starting.
+ */
+export function loadHttpTransportConfigForTransport(
+  transport: string | undefined,
+  env: NodeJS.ProcessEnv = process.env,
+): HttpTransportConfig | undefined {
+  if ((transport ?? "http") === "stdio") return undefined;
+  return loadHttpTransportConfig(env);
 }
 
 export function loadHttpTransportConfig(env: NodeJS.ProcessEnv = process.env): HttpTransportConfig {

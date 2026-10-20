@@ -570,16 +570,6 @@ describe("OAuth 2.1 authorization server", () => {
     expect(JSON.stringify(logs)).not.toContain(accessToken);
     expect(JSON.stringify(logs)).not.toContain(code);
 
-    const reused = await exchange(harness, {
-      grant_type: "authorization_code",
-      client_id: clientId,
-      code,
-      redirect_uri: REDIRECT,
-      code_verifier: verifier,
-      resource: RESOURCE,
-    });
-    expect(reused.json.error).toBe("invalid_grant");
-
     const headers = {
       Accept: "application/json, text/event-stream",
       "Content-Type": "application/json",
@@ -633,6 +623,7 @@ describe("OAuth 2.1 authorization server", () => {
       resource: RESOURCE,
     });
     expect(rotated.status).toBe(200);
+    expect(rotated.json.expires_in).toBe(900);
     const rotatedAccess = String(rotated.json.access_token);
     const rotatedRefresh = String(rotated.json.refresh_token);
     const reuse = await exchange(harness, {
@@ -656,6 +647,15 @@ describe("OAuth 2.1 authorization server", () => {
       resource: RESOURCE,
     });
     expect(revokedRefresh.json.error).toBe("invalid_grant");
+    const reused = await exchange(harness, {
+      grant_type: "authorization_code",
+      client_id: clientId,
+      code,
+      redirect_uri: REDIRECT,
+      code_verifier: verifier,
+      resource: RESOURCE,
+    });
+    expect(reused.json.error).toBe("invalid_grant");
     expect(harness.errors).toEqual([]);
   });
 

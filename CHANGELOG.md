@@ -38,6 +38,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Basic Auth password checks no longer block the event loop, and failed sign-in attempts on
+  `POST /oauth/authorize` and on Basic authentication for `/mcp` back off per address and per user.
+  OAuth tokens are bound to the current Basic Auth credential, so removing or rotating a user
+  revokes that user's tokens. `POST /oauth/revoke` revokes a token or a user. Dynamic client
+  registration is limited per IP, can be disabled, and can restrict redirect hosts. Reusing an
+  authorization code revokes the tokens issued from it. The OAuth database file is mode 0600.
+  Native redirect schemes such as `app:/cb` are accepted. Invalid `WA_BASIC_AUTH` does not prevent
+  the stdio transport from starting.
 - App-state writes now run through a per-instance queue with configurable spacing and a resync
   preflight that requires a retrievable current key, a positive collection version, a 128-byte hash,
   and no Baileys-reported sync, decode, missing-key, or hash-verification failure. Successful writes

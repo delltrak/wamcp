@@ -22,8 +22,16 @@ import { logger } from "./utils/logger.js";
 import { getAutoReadMode } from "./services/auto-read.js";
 import { bootEventWebhook, type EventWebhookStatus } from "./services/event-webhook-config.js";
 import { buildHealthBody } from "./server/health.js";
-import { verifyBasicCredentials } from "./server/basic-auth.js";
-import { loadHttpTransportConfig, type HttpTransportConfig } from "./server/http-config.js";
+import { AuthAttemptLimiter } from "./server/auth-limiter.js";
+import {
+  credentialFingerprint,
+  findBasicUser,
+  verifyBasicCredentials,
+} from "./server/basic-auth.js";
+import {
+  loadHttpTransportConfigForTransport,
+  type HttpTransportConfig,
+} from "./server/http-config.js";
 import { createHttpRequestHandler } from "./server/http-listener.js";
 import { authorizeMcpHttpRequest } from "./server/mcp-auth.js";
 import { createMcpOAuthServer, type McpOAuthServer } from "./server/oauth/server.js";
@@ -55,14 +63,25 @@ async function initServices() {
   return { instanceManager, messageQueue, eventWebhook, maintenance };
 }
 
-function openOAuth(httpConfig: HttpTransportConfig): McpOAuthServer | null {
+function openOAuth(
+  httpConfig: HttpTransportConfig,
+  limiter: AuthAttemptLimiter,
+): McpOAuthServer | null {
   if (!httpConfig.oauth.enabled) return null;
   return createMcpOAuthServer({
     issuerUrl: httpConfig.oauth.issuerUrl,
     resourceUrl: httpConfig.oauth.resourceUrl,
     dbPath: httpConfig.oauth.dbPath,
+    dynamicRegistration: httpConfig.oauth.dynamicRegistration,
+    redirectHostAllowlist: httpConfig.oauth.redirectHostAllowlist,
+    ...(httpConfig.apiKey ? { apiKey: httpConfig.apiKey } : {}),
+    limiter,
     validateCredential: (username, password) =>
       verifyBasicCredentials(httpConfig.basicUsers, username, password),
+    resolveCredentialVersion: (username) => {
+      const user = findBasicUser(httpConfig.basicUsers, username);
+      return user ? credentialFingerprint(user) : undefined;
+    },
   });
 }
 
@@ -142,7 +161,8 @@ async function startHttp(
   webhookStatus: EventWebhookStatus,
   httpConfig: HttpTransportConfig,
 ): Promise<void> {
-  const oauth = openOAuth(httpConfig);
+  const signInLimiter = new AuthAttemptLimiter();
+  const oauth = openOAuth(httpConfig, signInLimiter);
   let services: Awaited<ReturnType<typeof initServices>>;
   try {
     services = await initServices();
@@ -163,6 +183,7 @@ async function startHttp(
         {
           ...(httpConfig.apiKey ? { apiKey: httpConfig.apiKey } : {}),
           basicUsers: httpConfig.basicUsers,
+          limiter: signInLimiter,
         },
         oauth,
       ),
@@ -283,15 +304,15 @@ async function startStdio(): Promise<void> {
 }
 
 async function main(): Promise<void> {
-  const httpConfig = loadHttpTransportConfig(process.env);
+  const httpConfig = loadHttpTransportConfigForTransport(transport, process.env);
   logger.info({ transport, version: VERSION }, "Starting WA MCP server");
   const webhookStatus = bootEventWebhook();
 
-  if (transport === "stdio") {
+  if (!httpConfig) {
     await startStdio();
-  } else {
-    await startHttp(webhookStatus, httpConfig);
+    return;
   }
+  await startHttp(webhookStatus, httpConfig);
 }
 
 main().catch((err) => {

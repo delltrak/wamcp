@@ -1,9 +1,12 @@
+import { timingSafeEqual } from "node:crypto";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { logger as appLogger } from "../../utils/logger.js";
+import { AuthAttemptLimiter, clientAddress } from "../auth-limiter.js";
 import { validPkceChallenge, validPkceVerifier } from "./pkce.js";
 import {
   hasControlCharacter,
   redirectDisplay,
+  redirectHostAllowed,
   redirectOrigin,
   redirectUriMatches,
   validRedirectUri,
@@ -31,7 +34,12 @@ export interface McpOAuthServerOptions {
   issuerUrl: string;
   resourceUrl: string;
   store: OAuthStore;
-  validateCredential: (username: string, password: string) => boolean;
+  validateCredential: (username: string, password: string) => boolean | Promise<boolean>;
+  resolveCredentialVersion?: (username: string) => string | undefined;
+  limiter?: AuthAttemptLimiter;
+  dynamicRegistration?: "open" | "disabled";
+  redirectHostAllowlist?: readonly string[];
+  apiKey?: string;
   now?: () => Date;
   log?: OAuthLogger;
 }
@@ -141,7 +149,14 @@ export class McpOAuthServer {
   readonly store: OAuthStore;
   private readonly issuerUrl: string;
   private readonly resourceUrl: string;
-  private readonly validateCredential: (username: string, password: string) => boolean;
+  private readonly validateCredential: (
+    username: string,
+    password: string,
+  ) => boolean | Promise<boolean>;
+  private readonly limiter: AuthAttemptLimiter | undefined;
+  private readonly dynamicRegistration: "open" | "disabled";
+  private readonly redirectHostAllowlist: readonly string[];
+  private readonly apiKey: string | undefined;
   private readonly now: () => Date;
   private readonly log: OAuthLogger;
   private readonly paths: {
@@ -150,6 +165,7 @@ export class McpOAuthServer {
     register: string;
     authorize: string;
     token: string;
+    revoke: string;
   };
 
   constructor(options: McpOAuthServerOptions) {
@@ -159,6 +175,13 @@ export class McpOAuthServer {
     this.resourceUrl = resource.href;
     this.store = options.store;
     this.validateCredential = options.validateCredential;
+    this.limiter = options.limiter;
+    this.dynamicRegistration = options.dynamicRegistration ?? "open";
+    this.redirectHostAllowlist = options.redirectHostAllowlist ?? [];
+    this.apiKey = options.apiKey;
+    if (options.resolveCredentialVersion) {
+      this.store.credentialVersion = options.resolveCredentialVersion;
+    }
     this.now = options.now ?? (() => new Date());
     this.log = options.log ?? defaultLogger;
     this.paths = {
@@ -167,6 +190,7 @@ export class McpOAuthServer {
       register: `${issuer.path}/oauth/register`,
       authorize: `${issuer.path}/oauth/authorize`,
       token: `${issuer.path}/oauth/token`,
+      revoke: `${issuer.path}/oauth/revoke`,
     };
   }
 
@@ -185,7 +209,8 @@ export class McpOAuthServer {
       pathname === this.paths.protectedResourceMetadata ||
       pathname === this.paths.register ||
       pathname === this.paths.authorize ||
-      pathname === this.paths.token
+      pathname === this.paths.token ||
+      pathname === this.paths.revoke
     );
   }
 
@@ -205,6 +230,17 @@ export class McpOAuthServer {
       url = new URL(requestUrl, "http://127.0.0.1");
     } catch {
       sendOAuthError(res, 400, "invalid_request", "invalid request target");
+      return;
+    }
+
+    const cors = this.corsScope(url.pathname);
+    if (cors) this.applyCors(res);
+    if (req.method === "OPTIONS" && cors) {
+      res.writeHead(204, {
+        "Cache-Control": "no-store",
+        "Content-Length": "0",
+      });
+      res.end();
       return;
     }
 
@@ -236,7 +272,30 @@ export class McpOAuthServer {
       await this.token(req, res);
       return;
     }
+    if (url.pathname === this.paths.revoke) {
+      await this.revoke(req, res);
+      return;
+    }
     sendOAuthError(res, 404, "invalid_request", "unknown OAuth endpoint");
+  }
+
+  private corsScope(pathname: string): "metadata" | "register" | "token" | undefined {
+    if (
+      pathname === this.paths.authorizationServerMetadata ||
+      pathname === this.paths.protectedResourceMetadata
+    ) {
+      return "metadata";
+    }
+    if (pathname === this.paths.register) return "register";
+    if (pathname === this.paths.token) return "token";
+    return undefined;
+  }
+
+  private applyCors(res: ServerResponse): void {
+    res.setHeader("Access-Control-Allow-Origin", "*");
+    res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+    res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
+    res.setHeader("Access-Control-Max-Age", "600");
   }
 
   private serveAuthorizationServerMetadata(req: IncomingMessage, res: ServerResponse): void {
@@ -248,7 +307,10 @@ export class McpOAuthServer {
       issuer: this.issuerUrl,
       authorization_endpoint: `${this.issuerUrl}/oauth/authorize`,
       token_endpoint: `${this.issuerUrl}/oauth/token`,
-      registration_endpoint: `${this.issuerUrl}/oauth/register`,
+      ...(this.dynamicRegistration === "open"
+        ? { registration_endpoint: `${this.issuerUrl}/oauth/register` }
+        : {}),
+      revocation_endpoint: `${this.issuerUrl}/oauth/revoke`,
       response_types_supported: ["code"],
       grant_types_supported: ["authorization_code", "refresh_token"],
       token_endpoint_auth_methods_supported: ["none"],
@@ -275,6 +337,11 @@ export class McpOAuthServer {
   private async register(req: IncomingMessage, res: ServerResponse): Promise<void> {
     if (req.method !== "POST") {
       sendOAuthError(res, 405, "invalid_request", "method not allowed");
+      return;
+    }
+    if (this.dynamicRegistration === "disabled") {
+      req.resume();
+      sendOAuthError(res, 403, "access_denied", "dynamic client registration is disabled");
       return;
     }
     const body = await readLimitedBody(req, MAX_OAUTH_BODY_BYTES);
@@ -351,8 +418,12 @@ export class McpOAuthServer {
           res,
           400,
           "invalid_redirect_uri",
-          "redirect URI must use HTTPS, except native loopback redirects",
+          "redirect URI must use HTTPS, a native custom scheme, or a native loopback callback",
         );
+        return;
+      }
+      if (!redirectHostAllowed(redirectUri, this.redirectHostAllowlist)) {
+        sendOAuthError(res, 400, "invalid_redirect_uri", "redirect URI host is not allowed");
         return;
       }
     }
@@ -372,7 +443,7 @@ export class McpOAuthServer {
       createdAt: Math.floor(this.now().getTime() / 1000),
     };
     try {
-      this.store.registerClient(client);
+      this.store.registerClient(client, clientAddress(req));
     } catch (error) {
       if (error instanceof OAuthFlowError && error.oauthCode === "registration_limit") {
         this.log.warn(
@@ -435,20 +506,32 @@ export class McpOAuthServer {
     const form = new URLSearchParams(body.toString("utf8"));
     const username = form.get("username") ?? "";
     const password = form.get("password") ?? "";
-    if (
-      username.length < 1 ||
-      username.length > 128 ||
-      password.length < 1 ||
-      password.length > 256 ||
-      !this.validateCredential(username, password)
-    ) {
+    const ip = clientAddress(req);
+    const lockedFor = this.limiter?.retryAfterMs(ip, username) ?? 0;
+    if (lockedFor > 0) {
+      this.sendRateLimited(res, lockedFor);
+      return;
+    }
+    const credentialsAccepted =
+      username.length >= 1 &&
+      username.length <= 128 &&
+      password.length >= 1 &&
+      password.length <= 256 &&
+      (await this.validateCredential(username, password));
+    if (!credentialsAccepted) {
+      const retryAfter = this.limiter?.recordFailure(ip, username) ?? 0;
       this.log.warn(
         { event: "oauth_authorize_rejected" },
         "OAuth authorization credentials were rejected",
       );
+      if (retryAfter > 0) {
+        this.sendRateLimited(res, retryAfter);
+        return;
+      }
       this.renderAuthorize(res, 401, input, validated.client, "Invalid username or password.");
       return;
     }
+    this.limiter?.recordSuccess(username);
 
     let code: string;
     try {
@@ -608,6 +691,14 @@ export class McpOAuthServer {
         redirect: false,
       };
     }
+    if (!redirectHostAllowed(input.redirectUri, this.redirectHostAllowlist)) {
+      return {
+        ok: false,
+        error: "invalid_request",
+        description: "redirect_uri host is not allowed",
+        redirect: false,
+      };
+    }
     if (input.responseType !== "code") {
       return {
         ok: false,
@@ -736,6 +827,91 @@ ${error}
     res.end(html);
   }
 
+  private sendRateLimited(res: ServerResponse, waitMs: number): void {
+    sendJson(
+      res,
+      429,
+      {
+        error: "temporarily_unavailable",
+        error_description: "too many sign-in attempts; retry later",
+      },
+      { "Retry-After": String(Math.max(1, Math.ceil(waitMs / 1000))) },
+    );
+  }
+
+  private async revoke(req: IncomingMessage, res: ServerResponse): Promise<void> {
+    if (req.method !== "POST") {
+      sendOAuthError(res, 405, "invalid_request", "method not allowed");
+      return;
+    }
+    if (!contentTypeIs(req, "application/x-www-form-urlencoded")) {
+      sendOAuthError(res, 400, "invalid_request", "invalid revocation request");
+      return;
+    }
+    const body = await readLimitedBody(req, MAX_OAUTH_BODY_BYTES);
+    if (body === "too_large") {
+      sendOAuthError(res, 413, "invalid_request", "request is too large");
+      return;
+    }
+    const form = new URLSearchParams(body.toString("utf8"));
+    const token = form.get("token") ?? "";
+    if (token) {
+      this.store.revokePresentedToken(token, form.get("client_id") ?? "", this.now());
+      this.log.info({ event: "oauth_token_revoked" }, "OAuth token revocation processed");
+      sendJson(res, 200, {});
+      return;
+    }
+
+    const username = form.get("username") ?? "";
+    if (!username) {
+      sendOAuthError(res, 400, "invalid_request", "token is required");
+      return;
+    }
+    const allowed = await this.mayRevokeSubject(req, username);
+    if (allowed === "limited") {
+      this.sendRateLimited(res, this.limiter?.retryAfterMs(clientAddress(req), username) ?? 1000);
+      return;
+    }
+    if (allowed !== "yes") {
+      this.log.warn({ event: "oauth_revoke_rejected" }, "OAuth subject revocation was rejected");
+      sendOAuthError(
+        res,
+        401,
+        "invalid_client",
+        "revoking a user requires that user's credentials or the MCP API key",
+      );
+      return;
+    }
+    this.store.revokeSubject(username, this.now());
+    this.log.info({ event: "oauth_subject_revoked" }, "OAuth subject tokens revoked");
+    sendJson(res, 200, {});
+  }
+
+  private async mayRevokeSubject(
+    req: IncomingMessage,
+    username: string,
+  ): Promise<"yes" | "no" | "limited"> {
+    const header = typeof req.headers.authorization === "string" ? req.headers.authorization : "";
+    const parts = header.trim().split(/\s+/);
+    if (parts.length !== 2 || !parts[0] || !parts[1]) return "no";
+    const scheme = parts[0].toLowerCase();
+    if (scheme === "bearer") {
+      return this.apiKey && safeTokenEqual(parts[1], this.apiKey) ? "yes" : "no";
+    }
+    if (scheme !== "basic") return "no";
+    const decoded = decodeBasicCredentials(parts[1]);
+    if (!decoded || decoded.username !== username) return "no";
+    const ip = clientAddress(req);
+    if ((this.limiter?.retryAfterMs(ip, decoded.username) ?? 0) > 0) return "limited";
+    const accepted = await this.validateCredential(decoded.username, decoded.password);
+    if (accepted) {
+      this.limiter?.recordSuccess(decoded.username);
+      return "yes";
+    }
+    this.limiter?.recordFailure(ip, decoded.username);
+    return "no";
+  }
+
   private redirect(res: ServerResponse, location: string): void {
     res.writeHead(302, {
       Location: location,
@@ -781,11 +957,38 @@ function redirectLocation(redirectUri: string, params: Record<string, string>): 
   return url.toString();
 }
 
+function safeTokenEqual(provided: string, expected: string): boolean {
+  if (provided.length !== expected.length || provided.length > 4096) return false;
+  try {
+    return timingSafeEqual(Buffer.from(provided), Buffer.from(expected));
+  } catch {
+    return false;
+  }
+}
+
+function decodeBasicCredentials(
+  credentials: string,
+): { username: string; password: string } | undefined {
+  if (credentials.length > 4096) return undefined;
+  const decoded = Buffer.from(credentials, "base64").toString("utf8");
+  const separator = decoded.indexOf(":");
+  if (separator <= 0) return undefined;
+  const username = decoded.slice(0, separator);
+  const password = decoded.slice(separator + 1);
+  if (!username || username.length > 128 || password.length > 256) return undefined;
+  return { username, password };
+}
+
 export function createMcpOAuthServer(options: {
   issuerUrl: string;
   resourceUrl: string;
   dbPath: string;
-  validateCredential: (username: string, password: string) => boolean;
+  validateCredential: (username: string, password: string) => boolean | Promise<boolean>;
+  resolveCredentialVersion?: (username: string) => string | undefined;
+  limiter?: AuthAttemptLimiter;
+  dynamicRegistration?: "open" | "disabled";
+  redirectHostAllowlist?: readonly string[];
+  apiKey?: string;
   now?: () => Date;
   log?: OAuthLogger;
 }): McpOAuthServer {

@@ -4,7 +4,7 @@ import type { McpOAuthServer } from "./oauth/server.js";
 
 export interface HttpListenerDeps {
   routes: HttpRoutes;
-  authorize: (req: IncomingMessage, res: ServerResponse) => boolean;
+  authorize: (req: IncomingMessage, res: ServerResponse) => boolean | Promise<boolean>;
   oauth: McpOAuthServer | null;
   health: (req: IncomingMessage, res: ServerResponse) => void;
   mcp: (req: IncomingMessage, res: ServerResponse) => Promise<void>;
@@ -33,7 +33,7 @@ export function createHttpRequestHandler(
       return;
     }
     if (url.pathname === deps.routes.mcp) {
-      if (!deps.authorize(req, res)) return;
+      if (!(await deps.authorize(req, res))) return;
       await deps.mcp(req, res);
       return;
     }
