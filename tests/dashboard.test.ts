@@ -17,6 +17,7 @@ import { dashboardPage } from "../src/server/dashboard-page.js";
 import { renderQrDataUrl } from "../src/server/dashboard-qr.js";
 import {
   createDashboardHandler,
+  dashboardClientKey,
   dashboardOriginAllowed,
   type DashboardHandler,
   type DashboardInstances,
@@ -76,6 +77,12 @@ function handlerFor(input: {
   mountPath?: string;
   maxLoginFailures?: number;
   loginWindowMs?: number;
+  loginProbeIntervalMs?: number;
+  matchCredentials?: (
+    users: DashboardConfig["users"],
+    username: string,
+    password: string,
+  ) => boolean;
   now?: () => number;
 }): { handle: DashboardHandler; calls: string[] } {
   const calls = input.calls ?? [];
@@ -141,6 +148,8 @@ function handlerFor(input: {
       ...(input.mountPath ? { mountPath: input.mountPath } : {}),
       ...(input.maxLoginFailures ? { maxLoginFailures: input.maxLoginFailures } : {}),
       ...(input.loginWindowMs ? { loginWindowMs: input.loginWindowMs } : {}),
+      ...(input.loginProbeIntervalMs ? { loginProbeIntervalMs: input.loginProbeIntervalMs } : {}),
+      ...(input.matchCredentials ? { matchCredentials: input.matchCredentials } : {}),
       now: input.now ?? (() => 6_000),
     }),
   };
@@ -195,20 +204,23 @@ describe("dashboard configuration", () => {
     expect(() => loadDashboardConfig({ WA_DASHBOARD_USERS: "ops:" })).toThrow(
       /Invalid WA_DASHBOARD_USERS/,
     );
-    expect(() => loadDashboardConfig({ WA_DASHBOARD_USERS: "ops:one,ops:two" })).toThrow(
-      /usernames must be unique/,
+    expect(() =>
+      loadDashboardConfig({ WA_DASHBOARD_USERS: "ops:correct-horse,ops:another-secret" }),
+    ).toThrow(/usernames must be unique/);
+    expect(() => loadDashboardConfig({ WA_DASHBOARD_USERS: "ops:short-pass" })).toThrow(
+      /password must be at least 12 characters/,
     );
   });
 
   it("parses one or more user:password entries", () => {
     const config = loadDashboardConfig({
       WA_DASHBOARD_ENABLED: "true",
-      WA_DASHBOARD_USERS: "ops:correct-horse,night:pass:word",
+      WA_DASHBOARD_USERS: "ops:correct-horse,night:pass:word-ok",
     });
     expect(config.enabled).toBe(true);
     expect(config.users).toEqual([
       { username: "ops", password: "correct-horse" },
-      { username: "night", password: "pass:word" },
+      { username: "night", password: "pass:word-ok" },
     ]);
     expect(assertDashboardTransport(config, "http")).toBeUndefined();
     expect(() => assertDashboardTransport(config, "stdio")).toThrow(/requires WA_TRANSPORT=http/);
@@ -584,48 +596,56 @@ describe("dashboard HTTP", () => {
     expect(calls).toContain("connect:inst_aabbccdd");
   });
 
-  it("limits wrong passwords without locking out a missing or valid login", async () => {
-    let clock = 10_000;
+  it("checks a limited address at most once per minute", async () => {
+    let clock = 1_000_000;
+    let comparisons = 0;
     const { handle } = handlerFor({
-      maxLoginFailures: 2,
-      loginWindowMs: 1_000,
+      maxLoginFailures: 8,
+      loginProbeIntervalMs: 60_000,
       now: () => clock,
+      matchCredentials(list, username, password) {
+        comparisons += 1;
+        return dashboardCredentialsMatch(list, username, password);
+      },
     });
     const base = await serve(handle);
-    for (let attempt = 0; attempt < 5; attempt += 1) {
-      const missing = await fetch(`${base}/dashboard/`);
-      expect(missing.status).toBe(401);
-      expect(missing.headers.get("www-authenticate")).toContain("Basic");
+    const missing = await fetch(`${base}/dashboard/`);
+    expect(missing.status).toBe(401);
+    expect(missing.headers.get("www-authenticate")).toContain("Basic");
+    expect(comparisons).toBe(0);
+    for (let attempt = 0; attempt < 8; attempt += 1) {
+      const wrong = await fetch(`${base}/dashboard/`, {
+        headers: { Authorization: basic("ops", "wrong-horse") },
+      });
+      expect(wrong.status).toBe(401);
     }
-    const firstWrong = await fetch(`${base}/dashboard/`, {
+    expect(comparisons).toBe(8);
+    const probe = await fetch(`${base}/dashboard/`, {
       headers: { Authorization: basic("ops", "wrong-horse") },
     });
-    expect(firstWrong.status).toBe(401);
-    const secondWrong = await fetch(`${base}/dashboard/`, {
-      headers: { Authorization: basic("ops", "wrong-horse") },
-    });
-    expect(secondWrong.status).toBe(429);
-    expect(secondWrong.headers.get("www-authenticate")).toBeNull();
-    expect(await secondWrong.json()).toEqual({ error: "Too many login attempts" });
-    const stillMissing = await fetch(`${base}/dashboard/`);
-    expect(stillMissing.status).toBe(401);
-    clock += 1_001;
-    const afterWindow = await fetch(`${base}/dashboard/`, {
-      headers: { Authorization: basic("ops", "wrong-horse") },
-    });
-    expect(afterWindow.status).toBe(401);
-    const limitedAgain = await fetch(`${base}/dashboard/`, {
-      headers: { Authorization: basic("ops", "wrong-horse") },
-    });
-    expect(limitedAgain.status).toBe(429);
-    const correct = await fetch(`${base}/dashboard/`, {
+    expect(probe.status).toBe(429);
+    expect(probe.headers.get("www-authenticate")).toBeNull();
+    expect(comparisons).toBe(9);
+    const blocked = await fetch(`${base}/dashboard/`, {
       headers: { Authorization: basic("ops", "correct-horse") },
     });
-    expect(correct.status).toBe(200);
+    expect(blocked.status).toBe(429);
+    expect(await blocked.json()).toEqual({ error: "Too many login attempts" });
+    expect(comparisons).toBe(9);
+    const stillMissing = await fetch(`${base}/dashboard/`);
+    expect(stillMissing.status).toBe(401);
+    expect(comparisons).toBe(9);
+    clock += 60_000;
+    const accepted = await fetch(`${base}/dashboard/`, {
+      headers: { Authorization: basic("ops", "correct-horse") },
+    });
+    expect(accepted.status).toBe(200);
+    expect(comparisons).toBe(10);
     const afterSuccess = await fetch(`${base}/dashboard/`, {
       headers: { Authorization: basic("ops", "wrong-horse") },
     });
     expect(afterSuccess.status).toBe(401);
+    expect(comparisons).toBe(11);
   });
 
   it("uses relative API URLs under its mount path", async () => {
@@ -742,6 +762,16 @@ describe("dashboard HTTP", () => {
     });
     expect(forwarded.status).toBe(200);
     expect(calls.filter((call) => call.startsWith("connect:"))).toEqual(["connect:inst_aabbccdd"]);
+  });
+});
+
+describe("dashboard client key", () => {
+  it("groups IPv6 addresses by the /64 prefix", () => {
+    expect(dashboardClientKey("2001:db8:1:2::1")).toBe(dashboardClientKey("2001:db8:1:2:ffff::9"));
+    expect(dashboardClientKey("2001:DB8:1:2::1")).toBe("2001:db8:1:2::/64");
+    expect(dashboardClientKey("2001:db8:1:3::1")).not.toBe(dashboardClientKey("2001:db8:1:2::1"));
+    expect(dashboardClientKey("::ffff:127.0.0.1")).toBe("127.0.0.1");
+    expect(dashboardClientKey("10.0.0.8")).toBe("10.0.0.8");
   });
 });
 

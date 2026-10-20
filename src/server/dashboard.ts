@@ -21,6 +21,7 @@ const JSON_LIMIT = 4096;
 const DEFAULT_MOUNT = "/dashboard";
 const LOGIN_FAILURE_LIMIT = 8;
 const LOGIN_WINDOW_MS = 15 * 60 * 1000;
+const LOGIN_PROBE_INTERVAL_MS = 60_000;
 const LOGIN_TRACKED_ADDRESSES = 1024;
 const INSTANCE_ID_RE = /^inst_[0-9a-f]{8}$/;
 const SAFE_EVENT = /^[a-z][a-z0-9._-]{0,63}$/i;
@@ -84,6 +85,13 @@ export interface DashboardHandlerOptions {
   mountPath?: string;
   maxLoginFailures?: number;
   loginWindowMs?: number;
+  /** Minimum time between password checks after the failure limit is reached. */
+  loginProbeIntervalMs?: number;
+  matchCredentials?: (
+    users: DashboardConfig["users"],
+    username: string,
+    password: string,
+  ) => boolean;
   now?: () => number;
 }
 
@@ -215,7 +223,37 @@ function headerToken(value: string | string[] | undefined): string {
 
 function clientAddress(req: IncomingMessage): string {
   const raw = req.socket.remoteAddress ?? "unknown";
-  return raw.startsWith("::ffff:") ? raw.slice("::ffff:".length) : raw;
+  return dashboardClientKey(raw);
+}
+
+/** IPv4 stays as itself. IPv6 shares one bucket per /64. IPv4-mapped addresses stay IPv4. */
+export function dashboardClientKey(address: string): string {
+  const withoutZone = address.split("%", 1)[0] ?? address;
+  const mapped = withoutZone.toLowerCase().startsWith("::ffff:")
+    ? withoutZone.slice("::ffff:".length)
+    : withoutZone;
+  if (/^\d{1,3}(?:\.\d{1,3}){3}$/.test(mapped)) return mapped;
+  const prefix = ipv6Prefix64(mapped);
+  return prefix ?? mapped.toLowerCase();
+}
+
+function ipv6Prefix64(address: string): string | null {
+  if (!address.includes(":")) return null;
+  const halves = address.split("::");
+  if (halves.length > 2) return null;
+  const head = halves[0] ? halves[0].split(":") : [];
+  const tail = halves.length === 2 && halves[1] ? halves[1].split(":") : [];
+  if (halves.length === 1 && head.length !== 8) return null;
+  const missing = 8 - head.length - tail.length;
+  if (missing < 0) return null;
+  const groups = [...head, ...Array<string>(missing).fill("0"), ...tail];
+  if (groups.length !== 8) return null;
+  const normalized: string[] = [];
+  for (const group of groups) {
+    if (!/^[0-9a-fA-F]{1,4}$/.test(group)) return null;
+    normalized.push(Number.parseInt(group, 16).toString(16));
+  }
+  return `${normalized.slice(0, 4).join(":")}::/64`;
 }
 
 function parseHostHeader(value: string): { hostname: string; port: string } | null {
@@ -371,10 +409,12 @@ function normalizeOptionalPhone(value: unknown): string | undefined {
 
 class LoginAttemptLimiter {
   private readonly failures = new Map<string, number[]>();
+  private readonly probedAt = new Map<string, number>();
 
   constructor(
     private readonly maxFailures: number,
     private readonly windowMs: number,
+    private readonly probeIntervalMs: number,
     private readonly now: () => number,
   ) {}
 
@@ -382,30 +422,50 @@ class LoginAttemptLimiter {
     return this.recent(address).length >= this.maxFailures;
   }
 
-  /** Returns true when this failure reaches the limit. */
-  recordFailure(address: string): boolean {
+  /**
+   * While limited, allow one password comparison per interval.
+   * Returns false when this request must be rejected before comparing.
+   */
+  allowProbe(address: string): boolean {
+    const previous = this.probedAt.get(address);
+    const current = this.now();
+    if (previous !== undefined && current - previous < this.probeIntervalMs) return false;
+    this.probedAt.set(address, current);
+    this.prune(this.probedAt);
+    return true;
+  }
+
+  recordFailure(address: string): void {
     const recent = this.recent(address);
     recent.push(this.now());
     this.failures.delete(address);
     this.failures.set(address, recent);
-    while (this.failures.size > LOGIN_TRACKED_ADDRESSES) {
-      const oldest = this.failures.keys().next().value;
-      if (oldest === undefined) break;
-      this.failures.delete(oldest);
-    }
-    return recent.length >= this.maxFailures;
+    this.prune(this.failures);
   }
 
   recordSuccess(address: string): void {
     this.failures.delete(address);
+    this.probedAt.delete(address);
   }
 
   private recent(address: string): number[] {
     const cutoff = this.now() - this.windowMs;
     const kept = (this.failures.get(address) ?? []).filter((at) => at > cutoff);
-    if (kept.length === 0) this.failures.delete(address);
-    else this.failures.set(address, kept);
+    if (kept.length === 0) {
+      this.failures.delete(address);
+      this.probedAt.delete(address);
+    } else {
+      this.failures.set(address, kept);
+    }
     return kept;
+  }
+
+  private prune(entries: Map<string, unknown>): void {
+    while (entries.size > LOGIN_TRACKED_ADDRESSES) {
+      const oldest = entries.keys().next().value;
+      if (oldest === undefined) break;
+      entries.delete(oldest);
+    }
   }
 }
 
@@ -416,8 +476,10 @@ export function createDashboardHandler(options: DashboardHandlerOptions): Dashbo
   const loginAttempts = new LoginAttemptLimiter(
     options.maxLoginFailures ?? LOGIN_FAILURE_LIMIT,
     options.loginWindowMs ?? LOGIN_WINDOW_MS,
+    options.loginProbeIntervalMs ?? LOGIN_PROBE_INTERVAL_MS,
     now,
   );
+  const matchCredentials = options.matchCredentials ?? dashboardCredentialsMatch;
 
   function readSnapshot(instanceId: string): InstanceLifecycleStatusSnapshot {
     try {
@@ -626,8 +688,8 @@ export function createDashboardHandler(options: DashboardHandlerOptions): Dashbo
   }
 
   function retryAfterSeconds(): string {
-    const windowMs = options.loginWindowMs ?? LOGIN_WINDOW_MS;
-    return String(Math.max(1, Math.ceil(windowMs / 1000)));
+    const probeMs = options.loginProbeIntervalMs ?? LOGIN_PROBE_INTERVAL_MS;
+    return String(Math.max(1, Math.ceil(probeMs / 1000)));
   }
 
   function tooManyLogins(res: ServerResponse): void {
@@ -682,27 +744,30 @@ export function createDashboardHandler(options: DashboardHandlerOptions): Dashbo
       const rawAuthorization = req.headers.authorization;
       const header = typeof rawAuthorization === "string" ? rawAuthorization : "";
       const presented = header.trim() !== "";
-      const parsed = presented ? parseBasicAuthorization(header) : null;
-      const allowed =
-        options.config.users.length > 0 &&
-        parsed !== null &&
-        dashboardCredentialsMatch(options.config.users, parsed.username, parsed.password);
-      if (allowed) {
-        loginAttempts.recordSuccess(address);
-        await route(req, res, url);
-        return true;
-      }
       // A browser visits without Authorization so it can show the login prompt.
       // Those requests must not lock the operator, or everyone behind one proxy.
       if (!presented) {
         unauthorized(res);
         return true;
       }
-      if (loginAttempts.isLimited(address) || loginAttempts.recordFailure(address)) {
+      const parsed = parseBasicAuthorization(header);
+      const limited = loginAttempts.isLimited(address);
+      if (limited && (parsed === null || !loginAttempts.allowProbe(address))) {
         tooManyLogins(res);
-      } else {
-        unauthorized(res);
+        return true;
       }
+      const allowed =
+        parsed !== null &&
+        options.config.users.length > 0 &&
+        matchCredentials(options.config.users, parsed.username, parsed.password);
+      if (allowed) {
+        loginAttempts.recordSuccess(address);
+        await route(req, res, url);
+        return true;
+      }
+      loginAttempts.recordFailure(address);
+      if (limited) tooManyLogins(res);
+      else unauthorized(res);
       return true;
     } catch (err) {
       const httpError = err instanceof DashboardHttpError ? err : null;

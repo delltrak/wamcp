@@ -947,14 +947,14 @@ See [Baileys presence](docs/baileys-presence.md) for online status configuration
 
 ## Operations dashboard
 
-`WA_DASHBOARD_ENABLED` defaults to `false`. Set it to `true` only with `WA_TRANSPORT=http` and `WA_DASHBOARD_USERS`. The value is one `user:password` pair, or several pairs separated by commas. Passwords may contain colons and cannot contain commas. Leading and trailing spaces are trimmed.
+`WA_DASHBOARD_ENABLED` defaults to `false`. Set it to `true` only with `WA_TRANSPORT=http` and `WA_DASHBOARD_USERS`. The value is one `user:password` pair, or several pairs separated by commas. Each password must be at least 12 characters. Passwords may contain colons and cannot contain commas. Leading and trailing spaces are trimmed.
 
 ```bash
 WA_DASHBOARD_ENABLED=true
 WA_DASHBOARD_USERS=operator:replace-with-a-long-password
 ```
 
-Open `http://<host>:3000/dashboard`. The browser asks for that username and password. Without them the server returns `401`. When the flag is off, `/dashboard` does not exist and returns `404`, the same as any other unknown path. Basic authentication repeats the password on every request, so terminate TLS in front of the server before exposing the page. The process does not redirect to HTTPS by itself. Wrong `Authorization` headers are limited to 8 per connecting IP in 15 minutes. A request with no `Authorization` header is the browser login challenge and is not counted, and a correct password is accepted even while that address is limited. The limit uses the socket address, so clients that share a proxy share that counter.
+Open `http://<host>:3000/dashboard`. The browser asks for that username and password. Without them the server returns `401`. When the flag is off, `/dashboard` does not exist and returns `404`, the same as any other unknown path. Basic authentication repeats the password on every request, so terminate TLS in front of the server before exposing the page. The process does not redirect to HTTPS by itself. Eight wrong `Authorization` headers per address in 15 minutes return `401`. Further guesses return `429`. While the address is limited, the password is checked at most once per 60 seconds, and any other guess is rejected before the password is compared. A correct password on an allowed check clears the counter. A request with no `Authorization` header is the browser login challenge and is not counted. The limit uses the socket address, with IPv6 grouped by `/64`, so clients that share a proxy share that counter.
 
 The page shows connection health, each instance's state, last connect and disconnect, webhook configuration, dropped events, recent delivery successes and failures, and recent channel events. It does not show webhook URLs, tokens, header values, or signing secrets. Cloud webhook settings appear only as yes/no configured flags. Its API calls are relative to the page URL, so the same handler can be mounted under a path prefix.
 

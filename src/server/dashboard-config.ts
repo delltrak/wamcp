@@ -22,6 +22,7 @@ type Environment = Record<string, string | undefined>;
 
 const USERNAME_RE = /^[A-Za-z0-9._@+-]{1,64}$/;
 const MAX_USERS = 20;
+const MIN_PASSWORD_LENGTH = 12;
 const MAX_PASSWORD_LENGTH = 256;
 
 function parseBoolean(env: Environment, key: string, fallback: boolean): boolean {
@@ -46,13 +47,14 @@ export function parseDashboardUsers(value: string): DashboardUser[] {
     }
     const username = trimmed.slice(0, separator).trim();
     const password = trimmed.slice(separator + 1).trim();
-    if (
-      !USERNAME_RE.test(username) ||
-      password.length < 1 ||
-      password.length > MAX_PASSWORD_LENGTH
-    ) {
+    if (!USERNAME_RE.test(username) || password.length > MAX_PASSWORD_LENGTH) {
       throw new Error(
         "Invalid WA_DASHBOARD_USERS; expected user:password entries separated by commas",
+      );
+    }
+    if (password.length < MIN_PASSWORD_LENGTH) {
+      throw new Error(
+        `Invalid WA_DASHBOARD_USERS; password must be at least ${MIN_PASSWORD_LENGTH} characters`,
       );
     }
     if (seen.has(username)) {
