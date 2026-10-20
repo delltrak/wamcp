@@ -287,4 +287,33 @@ describe("ContactStore", () => {
 
     sqlite.close();
   });
+
+  it("finds a contact by LID and keeps the saved name separate from the push name", async () => {
+    const { sqlite, store } = createStore();
+    await store.upsertContacts([
+      {
+        id: "15555550199@s.whatsapp.net",
+        name: "Saved Name",
+        notify: "Push Name",
+        lid: "155500000000099@lid",
+        phoneNumber: "15555550199@s.whatsapp.net",
+      },
+    ]);
+
+    expect(store.findByIdentities(["155500000000099@lid"])).toEqual([
+      {
+        jid: "15555550199@s.whatsapp.net",
+        lid: "155500000000099@lid",
+        phone: "15555550199",
+        name: "Saved Name",
+        notifyName: "Push Name",
+      },
+    ]);
+    expect(store.findByIdentities(["15555550199"])).toEqual([
+      expect.objectContaining({ name: "Saved Name", notifyName: "Push Name" }),
+    ]);
+    expect(store.findByIdentities([])).toEqual([]);
+
+    sqlite.close();
+  });
 });

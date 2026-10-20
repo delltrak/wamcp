@@ -70,6 +70,13 @@ export interface NewsletterPostsPage {
   };
 }
 
+export interface NewsletterMediaDownload {
+  data: Buffer;
+  mimeType: string;
+  fileName?: string;
+  mediaType: string;
+}
+
 export interface CatalogProductCreateInput extends CatalogProductFields {
   originCountryCode?: string;
 }
@@ -448,6 +455,20 @@ export interface GroupParticipant {
   isAdmin: boolean;
   isSuperAdmin: boolean;
   memberLabel?: string;
+}
+
+export interface GroupParticipantExport {
+  jid: string;
+  phone: string | null;
+  lid: string | null;
+  name: string | null;
+  pushName: string | null;
+  role: "admin" | "superadmin" | "member";
+}
+
+export interface GroupParticipantsExport {
+  groupJid: string;
+  participants: GroupParticipantExport[];
 }
 
 export interface NormalizedGroupMemberLabelEvent {

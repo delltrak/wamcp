@@ -3,7 +3,7 @@
 // Persists contacts received from Baileys and serves local lookups.
 // ============================================================
 
-import { and, count, eq, isNotNull, isNull, like, or, sql } from "drizzle-orm";
+import { and, count, eq, inArray, isNotNull, isNull, like, or, sql } from "drizzle-orm";
 import type { db as applicationDb } from "../db/client.js";
 import { chats as chatsTable, contacts as contactsTable } from "../db/schema.js";
 import type { Contact } from "../types/channel.types.js";
@@ -25,6 +25,14 @@ export interface ContactHistorySync {
 }
 
 export type ContactPnResolver = (lid: string) => Promise<string | null>;
+
+export interface StoredContactIdentity {
+  jid: string;
+  lid: string | null;
+  phone: string | null;
+  name: string | null;
+  notifyName: string | null;
+}
 
 export interface ContactRecoverySourceResult {
   candidates: number;
@@ -247,6 +255,50 @@ export class ContactStore {
       isBusiness: row.isBusiness === 1,
       isBlocked: row.isBlocked === 1,
     }));
+  }
+
+  /** Match stored contacts by JID, LID, or phone digits. Names stay separate from push names. */
+  findByIdentities(identities: string[]): StoredContactIdentity[] {
+    const keys = [...new Set(identities.map((identity) => identity.trim()).filter(Boolean))].slice(
+      0,
+      5_000,
+    );
+    if (keys.length === 0) return [];
+
+    const phones = [
+      ...new Set(
+        keys.flatMap((key) => {
+          if (/^\d+$/.test(key)) return [key];
+          if (!key.endsWith("@s.whatsapp.net")) return [];
+          const user = key.split("@")[0]?.split(":")[0];
+          return user && /^\d+$/.test(user) ? [user] : [];
+        }),
+      ),
+    ];
+    const identityMatch = [
+      inArray(contactsTable.jid, keys),
+      inArray(contactsTable.lid, keys),
+      ...(phones.length > 0 ? [inArray(contactsTable.phone, phones)] : []),
+    ];
+
+    return this.database
+      .select({
+        jid: contactsTable.jid,
+        lid: contactsTable.lid,
+        phone: contactsTable.phone,
+        name: contactsTable.name,
+        notifyName: contactsTable.notifyName,
+      })
+      .from(contactsTable)
+      .where(and(eq(contactsTable.instanceId, this.instanceId), or(...identityMatch)))
+      .all()
+      .map((row) => ({
+        jid: row.jid,
+        lid: row.lid ?? null,
+        phone: row.phone ?? null,
+        name: row.name ?? null,
+        notifyName: row.notifyName ?? null,
+      }));
   }
 
   private upsertContact(contact: ContactSyncRecord): void {
