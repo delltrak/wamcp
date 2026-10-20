@@ -396,8 +396,9 @@ Send an image to a WhatsApp contact or group.
 | `hd`              | boolean | No      | Send the original image. Overrides `compress` and `WA_MEDIA_COMPRESS` |
 
 Compression re-encodes to JPEG, limits the longest edge to `WA_MEDIA_IMAGE_MAX_EDGE` (default 600),
-and uses `WA_MEDIA_IMAGE_QUALITY` (default 75). The original is sent when the result is not smaller.
-`hd: true` skips compression.
+and uses `WA_MEDIA_IMAGE_QUALITY` (default 75). The original is sent when the PNG has transparency,
+ffmpeg fails, or the result is not smaller. `hd: true` skips compression. Edge and quality are
+validated only when compression runs.
 
 **Channel support:** Both. A compressed Cloud API image is uploaded and sent by media id.
 
@@ -428,8 +429,10 @@ Send a video to a WhatsApp contact or group.
 | `hd`              | boolean | No      | Send the original video. Overrides `compress` and `WA_MEDIA_COMPRESS` |
 
 Compression re-encodes to H.264/AAC MP4, limits the longest edge to `WA_MEDIA_VIDEO_MAX_EDGE`
-(default 720), and uses `WA_MEDIA_VIDEO_CRF` (default 28). The original is sent when the result is
-not smaller. `hd: true` skips compression.
+(default 720), and uses `WA_MEDIA_VIDEO_CRF` (default 28). The source is read from a private
+temporary file so an MP4 with its `moov` atom at the end still decodes. The original is sent when
+ffmpeg fails or the result is not smaller. `hd: true` skips compression. Edge and CRF are validated
+only when compression runs.
 
 **Channel support:** Both. A compressed Cloud API video is uploaded and sent by media id.
 
@@ -464,7 +467,8 @@ Send a round video note through the normal queued video path. Baileys sends it w
 
 Send a native WhatsApp sticker. PNG, JPG, GIF, and short MP4 inputs are converted to 512x512 WebP
 with transparent padding. GIF and MP4 sources stay animated unless `animated` is false. MP4 input
-is trimmed to 10 seconds. Static stickers are limited to 100 KB and animated stickers to 500 KB.
+is read from a private temporary file and trimmed to 10 seconds, including files whose `moov` atom
+follows `mdat`. Static stickers are limited to 100 KB and animated stickers to 500 KB.
 Static WebP files that are not 512x512 are normalized with ffmpeg; animated WebP passes through only
 at 512x512 because ffmpeg cannot safely resize animated WebP. Send a GIF or short MP4 to convert an
 animated sticker to 512x512. Correctly sized WebP files pass through unchanged when they are within

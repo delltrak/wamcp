@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- MP4 sticker conversion and video compression read the source from a private temporary file, so an
+  MP4 with the `moov` atom after `mdat` decodes. Image and video compression sends the original and
+  logs a warning when ffmpeg fails. PNG files with transparency are not re-encoded to JPEG. Image
+  edge, JPEG quality, and video edge and CRF are validated only when a message is compressed.
+
 ### Added
 
 - `wa_send_sticker` accepts PNG, JPG, GIF, WebP, and short MP4 input and converts it to 512x512 WebP.

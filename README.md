@@ -862,7 +862,8 @@ and reconnect logs include the disconnect reason, status code, and offline durat
 
 `wa_send_sticker` accepts PNG, JPG, GIF, WebP, and short MP4 URLs or base64. PNG, JPG, GIF, and
 MP4 inputs are converted to 512x512 WebP with transparent padding. A GIF or MP4 stays animated
-unless `animated` is false. MP4 stickers are trimmed to 10 seconds. Static stickers are limited to
+unless `animated` is false. MP4 stickers are read from a private temporary file and trimmed to 10
+seconds, including files whose `moov` atom follows `mdat`. Static stickers are limited to
 100 KB and animated stickers to 500 KB. Static WebP files that are not 512x512 are normalized with
 ffmpeg; animated WebP files pass through only when they are already 512x512, since ffmpeg cannot
 safely resize animated WebP. Send a GIF or short MP4 to convert an animated sticker to 512x512.
@@ -873,14 +874,18 @@ does not support the GIF playback option.
 `wa_send_image` and `wa_send_video` send the original media unless compression is requested.
 `WA_MEDIA_COMPRESS=false` is the default. Set it to `true`, or pass `compress: true` on the call,
 to re-encode before sending. `hd: true` always sends the original, including when compression is
-otherwise enabled. Compressed images become JPEG and are scaled so the longest edge is at most
-`WA_MEDIA_IMAGE_MAX_EDGE` (default 600) at `WA_MEDIA_IMAGE_QUALITY` (default 75). Compressed videos
-become H.264/AAC MP4, scaled to `WA_MEDIA_VIDEO_MAX_EDGE` (default 720) at `WA_MEDIA_VIDEO_CRF`
-(default 28). If the compressed result is not smaller, the original input is sent. These calls need
-ffmpeg with `mjpeg` for images and `libx264` plus `aac` for videos. Sticker conversion needs
-`libwebp` and `libwebp_anim`. The Docker image installs Alpine `ffmpeg`, which provides those
-encoders. Sharp and the libwebp command-line tools are not used. On a host install, use
-`ffmpeg` from `PATH` or set `WA_MEDIA_FFMPEG_PATH`.
+otherwise enabled. `hd: true` and `compress: false` do not read the numeric compression settings.
+Those settings are validated only when a message is actually compressed. Compressed images become
+JPEG and are scaled so the longest edge is at most `WA_MEDIA_IMAGE_MAX_EDGE` (default 600) at
+`WA_MEDIA_IMAGE_QUALITY` (default 75). PNG files with transparency are left unchanged, because JPEG
+has no alpha channel. Compressed videos become H.264/AAC MP4, scaled to `WA_MEDIA_VIDEO_MAX_EDGE`
+(default 720) at `WA_MEDIA_VIDEO_CRF` (default 28). Video compression and MP4 sticker conversion
+read the input from a private temporary file, so an MP4 whose `moov` atom follows `mdat` still
+decodes. If ffmpeg fails, or the compressed result is not smaller, the original input is sent and
+the failure is logged. These calls need ffmpeg with `mjpeg` for images and `libx264` plus `aac`
+for videos. Sticker conversion needs `libwebp` and `libwebp_anim`. The Docker image installs
+Alpine `ffmpeg`, which provides those encoders. Sharp and the libwebp command-line tools are not
+used. On a host install, use `ffmpeg` from `PATH` or set `WA_MEDIA_FFMPEG_PATH`.
 
 `wa_download_media` locates a received media message by `messageId` and optional `chatId`. File
 mode saves it under `WA_MEDIA_DOWNLOAD_DIR` and returns a path; base64 mode returns inline data and

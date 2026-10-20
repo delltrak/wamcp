@@ -1,4 +1,7 @@
 import { execFileSync, spawnSync } from "node:child_process";
+import { existsSync, mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { WASocket } from "@whiskeysockets/baileys";
@@ -13,6 +16,7 @@ import {
 import { SendImageSchema, SendVideoSchema } from "../src/schemas/messaging.schema.js";
 import { registerMessagingTools } from "../src/tools/messaging.tools.js";
 import * as audioTools from "../src/tts/audio.js";
+import { logger } from "../src/utils/logger.js";
 
 const ffmpegAvailable = spawnSync("ffmpeg", ["-version"], { stdio: "ignore" }).status === 0;
 const ffprobeAvailable = spawnSync("ffprobe", ["-version"], { stdio: "ignore" }).status === 0;
@@ -44,6 +48,82 @@ function fakeMp4(): Buffer {
   const buffer = Buffer.alloc(16);
   buffer.write("ftyp", 4, "ascii");
   return buffer;
+}
+
+function pngChunk(type: string, data: Buffer): Buffer {
+  const chunk = Buffer.alloc(12 + data.length);
+  chunk.writeUInt32BE(data.length, 0);
+  chunk.write(type, 4, "ascii");
+  data.copy(chunk, 8);
+  return chunk;
+}
+
+function pngWithColorType(colorType: number, extra?: { type: string; data: Buffer }): Buffer {
+  const signature = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+  const ihdr = Buffer.alloc(13);
+  ihdr.writeUInt32BE(1, 0);
+  ihdr.writeUInt32BE(1, 4);
+  ihdr[8] = 8;
+  ihdr[9] = colorType;
+  const chunks = [pngChunk("IHDR", ihdr)];
+  if (extra) chunks.push(pngChunk(extra.type, extra.data));
+  chunks.push(pngChunk("IDAT", Buffer.from([0])), pngChunk("IEND", Buffer.alloc(0)));
+  return Buffer.concat([signature, ...chunks]);
+}
+
+function topLevelAtomOffset(data: Buffer, name: string): number {
+  let offset = 0;
+  while (offset + 8 <= data.length) {
+    const size = data.readUInt32BE(offset);
+    const type = data.toString("ascii", offset + 4, offset + 8);
+    if (type === name) return offset;
+    if (size < 8) return -1;
+    offset += size;
+  }
+  return -1;
+}
+
+function moovAtEndMp4(options: {
+  size: string;
+  duration: string;
+  rate: string;
+  videoBitrate?: string;
+}): Buffer {
+  const directory = mkdtempSync(join(tmpdir(), "wamcp-fixture-"));
+  const file = join(directory, "clip.mp4");
+  try {
+    execFileSync("ffmpeg", [
+      "-y",
+      "-v",
+      "error",
+      "-f",
+      "lavfi",
+      "-i",
+      `testsrc2=duration=${options.duration}:size=${options.size}:rate=${options.rate}`,
+      "-f",
+      "lavfi",
+      "-i",
+      `sine=frequency=440:duration=${options.duration}`,
+      "-shortest",
+      "-map",
+      "0:v:0",
+      "-map",
+      "1:a:0",
+      "-c:v",
+      "libx264",
+      "-preset",
+      "ultrafast",
+      "-pix_fmt",
+      "yuv420p",
+      ...(options.videoBitrate ? ["-b:v", options.videoBitrate] : []),
+      "-c:a",
+      "aac",
+      file,
+    ]);
+    return readFileSync(file);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
 }
 
 function webp512(): Buffer {
@@ -108,6 +188,25 @@ describe("outgoing media compression settings", () => {
     expect(shouldCompressOutgoingMedia({ hd: true, compress: true })).toBe(false);
   });
 
+  it("reads compression settings only after the send has opted in", () => {
+    expect(
+      shouldCompressOutgoingMedia(
+        { hd: true },
+        { WA_MEDIA_COMPRESS: "yes", WA_MEDIA_IMAGE_QUALITY: "nope" },
+      ),
+    ).toBe(false);
+    expect(
+      shouldCompressOutgoingMedia({ compress: false }, { WA_MEDIA_IMAGE_QUALITY: "nope" }),
+    ).toBe(false);
+    expect(shouldCompressOutgoingMedia({}, { WA_MEDIA_IMAGE_QUALITY: "nope" })).toBe(false);
+    expect(shouldCompressOutgoingMedia({ compress: true }, { WA_MEDIA_IMAGE_QUALITY: "nope" })).toBe(
+      true,
+    );
+    expect(() => shouldCompressOutgoingMedia({}, { WA_MEDIA_COMPRESS: "yes" })).toThrow(
+      /Invalid WA_MEDIA_COMPRESS/,
+    );
+  });
+
   it("rejects invalid compression settings", () => {
     expect(() => getMediaCompressionSettings({ WA_MEDIA_COMPRESS: "yes" })).toThrow(
       /Invalid WA_MEDIA_COMPRESS/,
@@ -160,7 +259,16 @@ describe("outgoing media compression settings", () => {
     process.env.WA_MEDIA_VIDEO_MAX_EDGE = "480";
     process.env.WA_MEDIA_VIDEO_CRF = "30";
     const output = fakeMp4();
-    const runner = vi.spyOn(audioTools, "runFfmpegCommand").mockResolvedValue(output);
+    let inputPath = "";
+    const runner = vi.spyOn(audioTools, "runFfmpegCommand").mockImplementation(async (chunks, args) => {
+      expect(chunks).toEqual([]);
+      inputPath = String(args[args.indexOf("-i") + 1]);
+      expect(inputPath.endsWith("input.mp4")).toBe(true);
+      expect(args).toContain("-nostdin");
+      expect(args).not.toContain("pipe:0");
+      expect(statSync(inputPath).mode & 0o777).toBe(0o600);
+      return output;
+    });
     const input = Buffer.concat([fakeMp4(), Buffer.alloc(32)]).toString("base64");
 
     await expect(new MediaService().prepareOutgoingVideo(input)).resolves.toEqual({
@@ -174,11 +282,21 @@ describe("outgoing media compression settings", () => {
     expect(args).toContain(
       "scale='min(480,iw)':'min(480,ih)':force_original_aspect_ratio=decrease:force_divisible_by=2",
     );
+    expect(existsSync(inputPath)).toBe(false);
   });
 
   it("converts a short MP4 to an animated sticker and can flatten it", async () => {
     const output = webp512();
-    const runner = vi.spyOn(audioTools, "runFfmpegCommand").mockResolvedValue(output);
+    const paths: string[] = [];
+    const runner = vi.spyOn(audioTools, "runFfmpegCommand").mockImplementation(async (chunks, args) => {
+      expect(chunks).toEqual([]);
+      const filePath = String(args[args.indexOf("-i") + 1]);
+      expect(filePath.endsWith("input.mp4")).toBe(true);
+      expect(args).toContain("-nostdin");
+      expect(statSync(filePath).mode & 0o777).toBe(0o600);
+      paths.push(filePath);
+      return output;
+    });
     const service = new MediaService();
     const input = fakeMp4().toString("base64");
 
@@ -194,6 +312,98 @@ describe("outgoing media compression settings", () => {
     });
     expect(runner.mock.calls[1]?.[1]).toContain("libwebp");
     expect(runner.mock.calls[1]?.[1]).not.toContain("libwebp_anim");
+    expect(paths.every((filePath) => !existsSync(filePath))).toBe(true);
+  });
+
+  it("sends the original image or video when ffmpeg fails", async () => {
+    const warn = vi.spyOn(logger, "warn").mockImplementation(() => undefined);
+    const runner = vi
+      .spyOn(audioTools, "runFfmpegCommand")
+      .mockRejectedValue(new Error("ffmpeg exited with code 183. partial file"));
+    const image = jpeg(40).toString("base64");
+    const video = Buffer.concat([fakeMp4(), Buffer.alloc(32)]).toString("base64");
+
+    await expect(new MediaService().prepareOutgoingImage(image)).resolves.toEqual({
+      compressed: false,
+      input: image,
+    });
+    await expect(new MediaService().prepareOutgoingVideo(video)).resolves.toEqual({
+      compressed: false,
+      input: video,
+    });
+    expect(runner).toHaveBeenCalledTimes(2);
+    expect(warn).toHaveBeenCalledWith(
+      expect.objectContaining({ kind: "image" }),
+      "ffmpeg media compression failed; sending the original",
+    );
+    expect(warn).toHaveBeenCalledWith(
+      expect.objectContaining({ kind: "video" }),
+      "ffmpeg media compression failed; sending the original",
+    );
+  });
+
+  it("sends the original image when ffmpeg does not return a JPEG", async () => {
+    const warn = vi.spyOn(logger, "warn").mockImplementation(() => undefined);
+    vi.spyOn(audioTools, "runFfmpegCommand").mockResolvedValue(Buffer.from("not-a-jpeg"));
+    const image = jpeg(40).toString("base64");
+
+    await expect(new MediaService().prepareOutgoingImage(image)).resolves.toEqual({
+      compressed: false,
+      input: image,
+    });
+    expect(warn).toHaveBeenCalledWith(
+      expect.objectContaining({ kind: "image" }),
+      "ffmpeg media compression failed; sending the original",
+    );
+  });
+
+  it("still rejects invalid quality when an image is actually compressed", async () => {
+    process.env.WA_MEDIA_IMAGE_QUALITY = "nope";
+    const runner = vi.spyOn(audioTools, "runFfmpegCommand");
+    await expect(new MediaService().prepareOutgoingImage(jpeg(8).toString("base64"))).rejects.toThrow(
+      /Invalid WA_MEDIA_IMAGE_QUALITY/,
+    );
+    expect(runner).not.toHaveBeenCalled();
+  });
+
+  it("skips JPEG compression for a PNG with an alpha channel or tRNS chunk", async () => {
+    const runner = vi.spyOn(audioTools, "runFfmpegCommand");
+    const alpha = pngWithColorType(6).toString("base64");
+    const paletteTransparency = pngWithColorType(2, {
+      type: "tRNS",
+      data: Buffer.from([0, 0, 0]),
+    }).toString("base64");
+
+    await expect(new MediaService().prepareOutgoingImage(alpha)).resolves.toEqual({
+      compressed: false,
+      input: alpha,
+    });
+    await expect(new MediaService().prepareOutgoingImage(paletteTransparency)).resolves.toEqual({
+      compressed: false,
+      input: paletteTransparency,
+    });
+    expect(runner).not.toHaveBeenCalled();
+
+    const opaque = pngWithColorType(2);
+    runner.mockResolvedValue(jpeg(1));
+    await expect(new MediaService().prepareOutgoingImage(opaque.toString("base64"))).resolves.toMatchObject(
+      { compressed: true, mimeType: "image/jpeg" },
+    );
+    expect(runner).toHaveBeenCalledTimes(1);
+  });
+
+  it("removes the temporary MP4 when sticker conversion fails", async () => {
+    let inputPath = "";
+    vi.spyOn(audioTools, "runFfmpegCommand").mockImplementation(async (_chunks, args) => {
+      inputPath = String(args[args.indexOf("-i") + 1]);
+      throw new Error("ffmpeg exited with code 183");
+    });
+
+    await expect(new MediaService().prepareSticker(fakeMp4().toString("base64"))).rejects.toThrow(
+      /code 183/,
+    );
+    expect(inputPath.endsWith("input.mp4")).toBe(true);
+    expect(existsSync(inputPath)).toBe(false);
   });
 });
 
@@ -271,6 +481,31 @@ describe("send tools keep the original media unless compression is enabled", () 
     );
 
     expect(response).toMatchObject({ isError: true });
+  });
+
+  it("queues the original image when quality is invalid and compression is off", async () => {
+    clearCompressionEnv();
+    process.env.WA_MEDIA_IMAGE_QUALITY = "nope";
+    process.env.WA_MEDIA_VIDEO_CRF = "nope";
+    const queued: unknown[] = [];
+    const enqueueMessage = vi.fn(async (_instanceId: string, _to: string, content: unknown) => {
+      queued.push(content);
+      return { status: "queued", jobId: "job" };
+    });
+    const tools = registerTools(enqueueMessage);
+    const image = "https://example.com/photo.jpg";
+
+    const response = await tools.get("wa_send_image")!(
+      SendImageSchema.parse({
+        instanceId: "inst_test",
+        to: "5511999999999",
+        image,
+      }),
+    );
+
+    expect(response).not.toMatchObject({ isError: true });
+    expect(queued[0]).toMatchObject({ type: "image", image });
+    expect(queued[0]).not.toHaveProperty("compress");
   });
 });
 
@@ -461,6 +696,49 @@ describe.skipIf(!ffmpegAvailable || !ffprobeAvailable)(
             "error",
             "-show_entries",
             "stream=codec_name,codec_type,width,height",
+            "-of",
+            "json",
+            "-i",
+            "pipe:0",
+          ],
+          { input: compressed.data, encoding: "utf8" },
+        ),
+      ) as { streams: Array<{ codec_name: string; codec_type: string; width?: number }> };
+      expect(probe.streams.map((stream) => stream.codec_name).sort()).toEqual(["aac", "h264"]);
+      const videoStream = probe.streams.find((stream) => stream.codec_type === "video");
+      expect(videoStream?.width).toBeLessThanOrEqual(720);
+    });
+
+    it("converts an MP4 whose moov atom follows mdat", async () => {
+      clearCompressionEnv();
+      const stickerSource = moovAtEndMp4({ size: "64x48", duration: "0.4", rate: "8" });
+      expect(topLevelAtomOffset(stickerSource, "moov")).toBeGreaterThan(
+        topLevelAtomOffset(stickerSource, "mdat"),
+      );
+      const sticker = await new MediaService().prepareSticker(stickerSource.toString("base64"));
+      expect(sticker.animated).toBe(true);
+      expect(getWebPInfo(sticker.data)).toMatchObject({ animated: true, width: 512, height: 512 });
+      expect(sticker.data.length).toBeLessThanOrEqual(500 * 1024);
+
+      const video = moovAtEndMp4({
+        size: "1280x720",
+        duration: "1",
+        rate: "12",
+        videoBitrate: "4M",
+      });
+      expect(topLevelAtomOffset(video, "moov")).toBeGreaterThan(topLevelAtomOffset(video, "mdat"));
+      const compressed = await new MediaService().prepareOutgoingVideo(video.toString("base64"));
+      expect(compressed.compressed).toBe(true);
+      if (!compressed.compressed) return;
+      expect(compressed.data.length).toBeLessThan(video.length);
+      const probe = JSON.parse(
+        execFileSync(
+          "ffprobe",
+          [
+            "-v",
+            "error",
+            "-show_entries",
+            "stream=codec_name,codec_type,width",
             "-of",
             "json",
             "-i",
