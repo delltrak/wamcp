@@ -22,6 +22,7 @@ const DEFAULT_MOUNT = "/dashboard";
 const LOGIN_FAILURE_LIMIT = 8;
 const LOGIN_WINDOW_MS = 15 * 60 * 1000;
 const LOGIN_PROBE_INTERVAL_MS = 60_000;
+const LOGIN_MAX_COMPARISONS_PER_MINUTE = 60;
 const LOGIN_TRACKED_ADDRESSES = 1024;
 const INSTANCE_ID_RE = /^inst_[0-9a-f]{8}$/;
 const SAFE_EVENT = /^[a-z][a-z0-9._-]{0,63}$/i;
@@ -87,6 +88,7 @@ export interface DashboardHandlerOptions {
   loginWindowMs?: number;
   /** Minimum time between password checks after the failure limit is reached. */
   loginProbeIntervalMs?: number;
+  maxComparisonsPerMinute?: number;
   matchCredentials?: (
     users: DashboardConfig["users"],
     username: string,
@@ -407,66 +409,125 @@ function normalizeOptionalPhone(value: unknown): string | undefined {
   return digits;
 }
 
+/** Drop oldest unlocked buckets. Limited buckets stay even when the map is over the cap. */
+export function pruneLoginBuckets<T>(
+  entries: Map<string, T>,
+  maxEntries: number,
+  keep: (key: string, value: T) => boolean,
+): void {
+  if (entries.size <= maxEntries) return;
+  for (const [key, value] of entries) {
+    if (entries.size <= maxEntries) return;
+    if (keep(key, value)) continue;
+    entries.delete(key);
+  }
+}
+
 class LoginAttemptLimiter {
-  private readonly failures = new Map<string, number[]>();
+  private readonly byAddress = new Map<string, number[]>();
+  private readonly byPair = new Map<string, number[]>();
   private readonly probedAt = new Map<string, number>();
+  private readonly comparisons: number[] = [];
 
   constructor(
     private readonly maxFailures: number,
     private readonly windowMs: number,
     private readonly probeIntervalMs: number,
+    private readonly maxComparisonsPerMinute: number,
     private readonly now: () => number,
   ) {}
 
-  isLimited(address: string): boolean {
-    return this.recent(address).length >= this.maxFailures;
+  isLimited(address: string, username: string | null): boolean {
+    if (this.recent(this.byAddress, address).length >= this.maxFailures) return true;
+    if (username === null) return false;
+    return this.recent(this.byPair, pairKey(address, username)).length >= this.maxFailures;
   }
 
   /**
-   * While limited, allow one password comparison per interval.
+   * While an address is limited, allow one password comparison per interval.
    * Returns false when this request must be rejected before comparing.
+   * A caller who wins this slot occupies it for the whole address.
    */
   allowProbe(address: string): boolean {
     const previous = this.probedAt.get(address);
     const current = this.now();
     if (previous !== undefined && current - previous < this.probeIntervalMs) return false;
     this.probedAt.set(address, current);
-    this.prune(this.probedAt);
+    this.pruneProbes();
     return true;
   }
 
-  recordFailure(address: string): void {
-    const recent = this.recent(address);
+  canCompare(): boolean {
+    this.pruneComparisons();
+    return this.comparisons.length < this.maxComparisonsPerMinute;
+  }
+
+  recordComparison(): void {
+    this.comparisons.push(this.now());
+    this.pruneComparisons();
+  }
+
+  recordFailure(address: string, username: string): void {
+    this.push(this.byAddress, address);
+    this.push(this.byPair, pairKey(address, username));
+  }
+
+  /**
+   * A success clears only this username, and only when that pair is already limited.
+   * It does not clear the address total or any other username.
+   */
+  recordSuccess(address: string, username: string): void {
+    const key = pairKey(address, username);
+    if (this.recent(this.byPair, key).length < this.maxFailures) return;
+    this.byPair.delete(key);
+  }
+
+  private push(entries: Map<string, number[]>, key: string): void {
+    const recent = this.recent(entries, key);
     recent.push(this.now());
-    this.failures.delete(address);
-    this.failures.set(address, recent);
-    this.prune(this.failures);
+    entries.delete(key);
+    entries.set(key, recent);
+    this.pruneFailures(entries);
   }
 
-  recordSuccess(address: string): void {
-    this.failures.delete(address);
-    this.probedAt.delete(address);
-  }
-
-  private recent(address: string): number[] {
+  private recent(entries: Map<string, number[]>, key: string): number[] {
     const cutoff = this.now() - this.windowMs;
-    const kept = (this.failures.get(address) ?? []).filter((at) => at > cutoff);
-    if (kept.length === 0) {
-      this.failures.delete(address);
-      this.probedAt.delete(address);
-    } else {
-      this.failures.set(address, kept);
-    }
+    const kept = (entries.get(key) ?? []).filter((at) => at > cutoff);
+    if (kept.length === 0) entries.delete(key);
+    else entries.set(key, kept);
     return kept;
   }
 
-  private prune(entries: Map<string, unknown>): void {
-    while (entries.size > LOGIN_TRACKED_ADDRESSES) {
-      const oldest = entries.keys().next().value;
-      if (oldest === undefined) break;
-      entries.delete(oldest);
+  private pruneFailures(entries: Map<string, number[]>): void {
+    pruneLoginBuckets(entries, LOGIN_TRACKED_ADDRESSES, (_key, samples) => this.hot(samples));
+  }
+
+  private pruneProbes(): void {
+    pruneLoginBuckets(
+      this.probedAt,
+      LOGIN_TRACKED_ADDRESSES,
+      (address) => this.recent(this.byAddress, address).length >= this.maxFailures,
+    );
+  }
+
+  private pruneComparisons(): void {
+    const cutoff = this.now() - LOGIN_PROBE_INTERVAL_MS;
+    while (this.comparisons.length > 0 && (this.comparisons[0] ?? 0) <= cutoff) {
+      this.comparisons.shift();
     }
   }
+
+  private hot(samples: number[]): boolean {
+    const cutoff = this.now() - this.windowMs;
+    let count = 0;
+    for (const at of samples) if (at > cutoff) count += 1;
+    return count >= this.maxFailures;
+  }
+}
+
+function pairKey(address: string, username: string): string {
+  const name = username.length > 0 && username.length <= 128 ? username : "\0invalid";
+  return `${address}\0${name}`;
 }
 
 export function createDashboardHandler(options: DashboardHandlerOptions): DashboardHandler {
@@ -477,6 +538,7 @@ export function createDashboardHandler(options: DashboardHandlerOptions): Dashbo
     options.maxLoginFailures ?? LOGIN_FAILURE_LIMIT,
     options.loginWindowMs ?? LOGIN_WINDOW_MS,
     options.loginProbeIntervalMs ?? LOGIN_PROBE_INTERVAL_MS,
+    options.maxComparisonsPerMinute ?? LOGIN_MAX_COMPARISONS_PER_MINUTE,
     now,
   );
   const matchCredentials = options.matchCredentials ?? dashboardCredentialsMatch;
@@ -751,21 +813,32 @@ export function createDashboardHandler(options: DashboardHandlerOptions): Dashbo
         return true;
       }
       const parsed = parseBasicAuthorization(header);
-      const limited = loginAttempts.isLimited(address);
+      const username = parsed?.username ?? "\0invalid";
+      const limited = loginAttempts.isLimited(address, parsed ? username : null);
+      if (!loginAttempts.canCompare()) {
+        tooManyLogins(res);
+        return true;
+      }
       if (limited && (parsed === null || !loginAttempts.allowProbe(address))) {
         tooManyLogins(res);
         return true;
       }
+      if (parsed === null) {
+        loginAttempts.recordFailure(address, username);
+        if (limited) tooManyLogins(res);
+        else unauthorized(res);
+        return true;
+      }
+      loginAttempts.recordComparison();
       const allowed =
-        parsed !== null &&
         options.config.users.length > 0 &&
         matchCredentials(options.config.users, parsed.username, parsed.password);
       if (allowed) {
-        loginAttempts.recordSuccess(address);
+        loginAttempts.recordSuccess(address, parsed.username);
         await route(req, res, url);
         return true;
       }
-      loginAttempts.recordFailure(address);
+      loginAttempts.recordFailure(address, parsed.username);
       if (limited) tooManyLogins(res);
       else unauthorized(res);
       return true;

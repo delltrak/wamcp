@@ -19,6 +19,7 @@ import {
   createDashboardHandler,
   dashboardClientKey,
   dashboardOriginAllowed,
+  pruneLoginBuckets,
   type DashboardHandler,
   type DashboardInstances,
 } from "../src/server/dashboard.js";
@@ -78,6 +79,8 @@ function handlerFor(input: {
   maxLoginFailures?: number;
   loginWindowMs?: number;
   loginProbeIntervalMs?: number;
+  maxComparisonsPerMinute?: number;
+  users?: DashboardConfig["users"];
   matchCredentials?: (
     users: DashboardConfig["users"],
     username: string,
@@ -119,7 +122,7 @@ function handlerFor(input: {
   };
   const config: DashboardConfig = {
     enabled: input.enabled ?? true,
-    users,
+    users: input.users ?? users,
   };
   return {
     calls,
@@ -149,6 +152,9 @@ function handlerFor(input: {
       ...(input.maxLoginFailures ? { maxLoginFailures: input.maxLoginFailures } : {}),
       ...(input.loginWindowMs ? { loginWindowMs: input.loginWindowMs } : {}),
       ...(input.loginProbeIntervalMs ? { loginProbeIntervalMs: input.loginProbeIntervalMs } : {}),
+      ...(input.maxComparisonsPerMinute
+        ? { maxComparisonsPerMinute: input.maxComparisonsPerMinute }
+        : {}),
       ...(input.matchCredentials ? { matchCredentials: input.matchCredentials } : {}),
       now: input.now ?? (() => 6_000),
     }),
@@ -644,8 +650,86 @@ describe("dashboard HTTP", () => {
     const afterSuccess = await fetch(`${base}/dashboard/`, {
       headers: { Authorization: basic("ops", "wrong-horse") },
     });
-    expect(afterSuccess.status).toBe(401);
-    expect(comparisons).toBe(11);
+    expect(afterSuccess.status).toBe(429);
+    expect(comparisons).toBe(10);
+  });
+
+  it("keeps the address limited when a correct login is not itself limited", async () => {
+    const { handle } = handlerFor({ maxLoginFailures: 8 });
+    const base = await serve(handle);
+    const wrong = { Authorization: basic("ops", "wrong-horse") };
+    for (let attempt = 0; attempt < 7; attempt += 1) {
+      expect((await fetch(`${base}/dashboard/`, { headers: wrong })).status).toBe(401);
+    }
+    const success = await fetch(`${base}/dashboard/`, {
+      headers: { Authorization: basic("ops", "correct-horse") },
+    });
+    expect(success.status).toBe(200);
+    expect((await fetch(`${base}/dashboard/`, { headers: wrong })).status).toBe(401);
+    expect((await fetch(`${base}/dashboard/`, { headers: wrong })).status).toBe(429);
+  });
+
+  it("does not let a polled login free guesses from the same address", async () => {
+    let clock = 1_000_000;
+    let comparisons = 0;
+    const { handle } = handlerFor({
+      maxLoginFailures: 8,
+      loginProbeIntervalMs: 60_000,
+      now: () => clock,
+      users: [
+        { username: "ops", password: "correct-horse" },
+        { username: "night", password: "night-password" },
+      ],
+      matchCredentials(list, username, password) {
+        comparisons += 1;
+        return dashboardCredentialsMatch(list, username, password);
+      },
+    });
+    const base = await serve(handle);
+    for (let attempt = 0; attempt < 8; attempt += 1) {
+      expect(
+        (
+          await fetch(`${base}/dashboard/`, {
+            headers: { Authorization: basic("night", "wrong-horse") },
+          })
+        ).status,
+      ).toBe(401);
+    }
+    expect(comparisons).toBe(8);
+    const poll = await fetch(`${base}/dashboard/`, {
+      headers: { Authorization: basic("ops", "correct-horse") },
+    });
+    expect(poll.status).toBe(200);
+    expect(comparisons).toBe(9);
+    clock += 3_000;
+    const polledAgain = await fetch(`${base}/dashboard/`, {
+      headers: { Authorization: basic("ops", "correct-horse") },
+    });
+    expect(polledAgain.status).toBe(429);
+    const attacker = await fetch(`${base}/dashboard/`, {
+      headers: { Authorization: basic("night", "wrong-horse") },
+    });
+    expect(attacker.status).toBe(429);
+    expect(comparisons).toBe(9);
+  });
+
+  it("limits password comparisons across addresses", async () => {
+    let comparisons = 0;
+    const { handle } = handlerFor({
+      maxLoginFailures: 8,
+      maxComparisonsPerMinute: 2,
+      matchCredentials(list, username, password) {
+        comparisons += 1;
+        return dashboardCredentialsMatch(list, username, password);
+      },
+    });
+    const base = await serve(handle);
+    const wrong = { Authorization: basic("ops", "wrong-horse") };
+    expect((await fetch(`${base}/dashboard/`, { headers: wrong })).status).toBe(401);
+    expect((await fetch(`${base}/dashboard/`, { headers: wrong })).status).toBe(401);
+    const blocked = await fetch(`${base}/dashboard/`, { headers: wrong });
+    expect(blocked.status).toBe(429);
+    expect(comparisons).toBe(2);
   });
 
   it("uses relative API URLs under its mount path", async () => {
@@ -762,6 +846,25 @@ describe("dashboard HTTP", () => {
     });
     expect(forwarded.status).toBe(200);
     expect(calls.filter((call) => call.startsWith("connect:"))).toEqual(["connect:inst_aabbccdd"]);
+  });
+});
+
+describe("dashboard login buckets", () => {
+  it("keeps limited buckets when the map is over the cap", () => {
+    const entries = new Map<string, number[]>();
+    for (let index = 0; index < 1025; index += 1) entries.set(`open-${index}`, [1]);
+    entries.set("limited", [1, 1, 1, 1, 1, 1, 1, 1]);
+    pruneLoginBuckets(entries, 1024, (_key, samples) => samples.length >= 8);
+    expect(entries.has("limited")).toBe(true);
+    expect(entries.has("open-0")).toBe(false);
+    expect(entries.size).toBe(1024);
+
+    const locked = new Map<string, number[]>();
+    for (let index = 0; index < 1025; index += 1) {
+      locked.set(`locked-${index}`, [1, 1, 1, 1, 1, 1, 1, 1]);
+    }
+    pruneLoginBuckets(locked, 1024, (_key, samples) => samples.length >= 8);
+    expect(locked.size).toBe(1025);
   });
 });
 
