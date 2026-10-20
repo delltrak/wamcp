@@ -299,12 +299,15 @@ export function parseIgnoreJidEntry(entry: string, label: string): string {
     return value;
   }
   if (value.includes("*")) {
-    const domain = STAR_JID_RE.exec(value)?.[3];
+    const match = STAR_JID_RE.exec(value);
+    const domain = match?.[3];
     if (!domain || !(JID_DOMAINS as readonly string[]).includes(domain)) {
       throw new Error(
         `Invalid ${label}; invalid JID wildcard "${value}". Use one * in the user part, for example 5577*@s.whatsapp.net`,
       );
     }
+    // #140: *@domain has an empty user part, so it is the chat-only address wildcard.
+    if ((match?.[1] ?? "") === "" && (match?.[2] ?? "") === "") return `@${domain}`;
     return value;
   }
   if (!EXACT_JID_RE.test(value)) {

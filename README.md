@@ -549,8 +549,9 @@ entry to limit which chats or people wake that routine. If both are set, a
 message must match both lists. Set `WA_EVENT_WEBHOOK_IGNORE_JIDS` (#140) to a
 comma-separated list of exact JIDs, address wildcards (`@g.us`,
 `@s.whatsapp.net`, `@lid`, `@newsletter`, `@broadcast`, `@c.us`), or one `*` in
-the user part (`5577*@s.whatsapp.net`). Address wildcards match only the chat
-JID, so `@lid` does not hide a phone chat that also has a LID alias and
+the user part (`5577*@s.whatsapp.net`). `*@domain` is stored as `@domain`.
+Address wildcards match only the chat JID, so `@lid` does not hide a phone
+chat that also has a LID alias and
 `@s.whatsapp.net` does not hide a group message from a phone sender. Exact and
 starred entries still match the chat, the sender, and LID aliases. Matching is
 case-insensitive and ignores a `:device` suffix. A LID-only message is also

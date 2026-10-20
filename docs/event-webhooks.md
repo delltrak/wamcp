@@ -57,7 +57,10 @@ the sender or a LID alias, so `@lid` does not hide a phone chat that also carrie
 `@s.whatsapp.net` does not hide a group message sent from a phone JID.
 
 An entry with one `*` in the user part is a prefix or suffix wildcard, for example
-`5577*@s.whatsapp.net`. Every other entry is an exact JID. Exact and starred entries match the
+`5577*@s.whatsapp.net`. A star with nothing before it and nothing between it and `@`
+(`*@lid`, `*@s.whatsapp.net`) is stored as the address wildcard (`@lid`,
+`@s.whatsapp.net`) and follows the chat-only rule. Every other entry is an exact JID.
+Exact and starred entries match the
 chat, the sender (`message.sender`, `participant`, `callerId`, `reactedBy`, `deletedBy`, `author`,
 `contactId`), and LID aliases (`chatLid`, `senderLid`, `fromLid`, `participantLid`). Participant
 arrays are not scanned. Comparison is case-insensitive, and a device suffix (`:12` immediately
@@ -72,9 +75,9 @@ with `Invalid WA_EVENT_WEBHOOK_IGNORE_JIDS`. Matching chats are still stored; on
 is skipped. `instance.*` events are never dropped by this list. A multi-destination `ignoreJids`
 array is unioned with the global list for that destination only.
 
-`@g.us` mutes group traffic because the group id ends in `@g.us`. `@s.whatsapp.net` also matches
-the sender of a group message, so it suppresses those group events too. Use an exact JID to mute
-one direct chat. `@lid` matches LID identities kept alongside a resolved phone JID.
+`@g.us` mutes group traffic because the group id ends in `@g.us`. `@s.whatsapp.net` mutes
+direct phone chats and does not mute a group message from a phone sender. Use an exact JID
+to mute one direct chat. `@lid` matches a chat whose id ends in `@lid`.
 
 Startup logs a warning when no destination is configured, when the single-destination
 auth header and value are not set together, when the event set is empty, or when a

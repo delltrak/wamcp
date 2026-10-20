@@ -164,6 +164,63 @@ describe("WA_EVENT_WEBHOOK_IGNORE_JIDS", () => {
     ).toBe(true);
   });
 
+  it("stores a bare *@domain star as a chat-only address wildcard", () => {
+    expect(
+      loadEventWebhookConfig({
+        WA_EVENT_WEBHOOK_URL: URL,
+        WA_EVENT_WEBHOOK_IGNORE_JIDS: "*@lid,*@s.whatsapp.net",
+      }).destinations[0]?.ignoreJids,
+    ).toEqual(["@lid", "@s.whatsapp.net"]);
+    expect(
+      loadEventWebhookConfig({
+        WA_EVENT_WEBHOOKS: JSON.stringify([{ id: "owner", url: URL, ignoreJids: ["*@LID"] }]),
+      }).destinations[0]?.ignoreJids,
+    ).toEqual(["@lid"]);
+
+    const lidGroup = message({
+      chatId: "120363999000111@g.us",
+      isGroup: true,
+      message: { ...message().message, sender: "111222333@lid" },
+    });
+    expect(
+      shouldSendEventWebhook(
+        "message.received",
+        lidGroup,
+        destination({ WA_EVENT_WEBHOOK_IGNORE_JIDS: "*@lid" }),
+      ),
+    ).toBe(true);
+    expect(
+      shouldSendEventWebhook(
+        "message.received",
+        message({
+          chatId: "111222333@lid",
+          message: { ...message().message, sender: "111222333@lid" },
+        }),
+        destination({ WA_EVENT_WEBHOOK_IGNORE_JIDS: "*@lid" }),
+      ),
+    ).toBe(false);
+
+    const phoneGroup = message({
+      chatId: "120363999000111@g.us",
+      isGroup: true,
+      message: { ...message().message, sender: "5511999999999@s.whatsapp.net" },
+    });
+    expect(
+      shouldSendEventWebhook(
+        "message.received",
+        phoneGroup,
+        destination({ WA_EVENT_WEBHOOK_IGNORE_JIDS: "*@s.whatsapp.net" }),
+      ),
+    ).toBe(true);
+    expect(
+      shouldSendEventWebhook(
+        "message.received",
+        message(),
+        destination({ WA_EVENT_WEBHOOK_IGNORE_JIDS: "*@s.whatsapp.net" }),
+      ),
+    ).toBe(false);
+  });
+
   it("does not let @s.whatsapp.net hide a group message from a phone sender", () => {
     const target = destination({ WA_EVENT_WEBHOOK_IGNORE_JIDS: "@s.whatsapp.net" });
     const group = message({
@@ -350,16 +407,18 @@ describe("WA_EVENT_WEBHOOK_IGNORE_JIDS", () => {
     expect(() => loadEventWebhookConfig({ WA_EVENT_WEBHOOK_IGNORE_JIDS: "not-a-jid" })).toThrow(
       /invalid JID "not-a-jid"/,
     );
-    expect(() => loadEventWebhookConfig({ WA_EVENT_WEBHOOK_IGNORE_JIDS: "@g.us,not-a-jid" })).toThrow(
-      /invalid JID "not-a-jid"/,
-    );
+    expect(() =>
+      loadEventWebhookConfig({ WA_EVENT_WEBHOOK_IGNORE_JIDS: "@g.us,not-a-jid" }),
+    ).toThrow(/invalid JID "not-a-jid"/);
     const skipped = loadEventWebhookConfig({
       WA_EVENT_WEBHOOK_URL: URL,
       WA_EVENT_WEBHOOK_IGNORE_JIDS: "@g.us,",
     });
     expect(skipped.destinations[0]?.ignoreJids).toEqual(["@g.us"]);
     const blanks = loadEventWebhookConfig({
-      WA_EVENT_WEBHOOKS: JSON.stringify([{ id: "owner", url: URL, ignoreJids: ["@g.us", "", " "] }]),
+      WA_EVENT_WEBHOOKS: JSON.stringify([
+        { id: "owner", url: URL, ignoreJids: ["@g.us", "", " "] },
+      ]),
     });
     expect(blanks.destinations[0]?.ignoreJids).toEqual(["@g.us"]);
     expect(() =>
