@@ -116,8 +116,8 @@ export interface MessageSchedulerOptions {
   /** Messages per minute for one instance. Defaults to the channel outbound limiter. */
   rateLimitFor?: (instanceId: string) => number;
   /**
-   * Claim statement dialect. SQLite by default. Pass postgres when
-   * WA_DATABASE_URL is set so locked rows are skipped instead of ending the tick.
+   * Claim statement dialect for the database that is open. This process opens
+   * SQLite. Postgres storage passes "postgres" so locked rows are skipped.
    */
   driver?: ScheduleSqlDialect;
 }

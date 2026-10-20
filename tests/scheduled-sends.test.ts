@@ -17,7 +17,7 @@ import {
   zonedWallTimeToEpoch,
 } from "../src/services/schedule-clock.js";
 import { readSchedulerConfig } from "../src/services/schedule-config.js";
-import { databaseDialect, type ScheduleSqlDialect } from "../src/services/schedule-store.js";
+import { claimNextScheduleSql } from "../src/services/schedule-store.js";
 import { MessageScheduler, SCHEDULE_PERMANENT_CODE } from "../src/services/scheduler.js";
 import { registerScheduleTools } from "../src/tools/schedule.tools.js";
 import type { ChannelType, MessageContent } from "../src/types/channel.types.js";
@@ -54,7 +54,6 @@ function harness(options: {
   path?: string;
   maxActive?: number;
   rateLimit?: number;
-  driver?: ScheduleSqlDialect;
 }) {
   const sent: Array<{ to: string; content: MessageContent; channel: ChannelType }> = [];
   const sqlite = openDatabase(options.path);
@@ -78,7 +77,6 @@ function harness(options: {
       maxActive: options.maxActive ?? 100,
     },
     rateLimitFor: options.rateLimit === undefined ? undefined : () => options.rateLimit ?? 1,
-    driver: options.driver,
   });
   return { scheduler, sent, enqueue, sqlite };
 }
@@ -295,12 +293,6 @@ describe("scheduler config", () => {
     else process.env.WA_SCHEDULER_MISSED_POLICY = previousPolicy;
     if (previousMax === undefined) delete process.env.WA_SCHEDULER_MAX_ACTIVE;
     else process.env.WA_SCHEDULER_MAX_ACTIVE = previousMax;
-  });
-
-  it("selects postgres only when WA_DATABASE_URL is set", () => {
-    expect(databaseDialect({})).toBe("sqlite");
-    expect(databaseDialect({ WA_DATABASE_URL: "  " })).toBe("sqlite");
-    expect(databaseDialect({ WA_DATABASE_URL: "postgres://localhost/db" })).toBe("postgres");
   });
 
   it("defaults to disabled, skip, and 100 active schedules", () => {
@@ -702,17 +694,34 @@ describe("scheduled sends", () => {
     expect(scheduler.list({ instanceId: INSTANCE_ID, status: "cancelled" }).total).toBe(1);
   });
 
-  it("uses postgres row locks when that driver is selected", async () => {
-    let now = Date.parse("2026-10-20T12:00:00Z");
-    const { scheduler } = harness({ now: () => now, driver: "postgres" });
-    scheduler.create({
-      instanceId: INSTANCE_ID,
-      to: "5500000000001",
-      scheduledAt: "2026-10-21T09:00:00-03:00",
-      content: { type: "text", text: "locked" },
-    });
-    now = Date.parse("2026-10-21T12:00:00Z");
-    await expect(scheduler.tick()).rejects.toThrow(/syntax error/);
+  it("builds sqlite claims without row locks and postgres claims that skip locked rows", () => {
+    const sqliteSql = claimNextScheduleSql(0, "sqlite");
+    expect(sqliteSql).toMatch(/AND status = 'active'\s+RETURNING \*/);
+    expect(sqliteSql).not.toMatch(/FOR UPDATE/);
+    const postgresSql = claimNextScheduleSql(0, "postgres");
+    expect(postgresSql).toMatch(/LIMIT 1 FOR UPDATE SKIP LOCKED/);
+    expect(postgresSql).toMatch(/AND status = 'active'\s+RETURNING \*/);
+  });
+
+  it("sends from the open SQLite database when WA_DATABASE_URL is set", async () => {
+    const previous = process.env.WA_DATABASE_URL;
+    process.env.WA_DATABASE_URL = "postgres://localhost/db";
+    try {
+      let now = Date.parse("2026-10-20T12:00:00Z");
+      const { scheduler, sent } = harness({ now: () => now });
+      scheduler.create({
+        instanceId: INSTANCE_ID,
+        to: "5500000000001",
+        scheduledAt: "2026-10-21T09:00:00-03:00",
+        content: { type: "text", text: "still sqlite" },
+      });
+      now = Date.parse("2026-10-21T12:00:00Z");
+      await scheduler.tick();
+      expect(sent.map((row) => row.content)).toEqual([{ type: "text", text: "still sqlite" }]);
+    } finally {
+      if (previous === undefined) delete process.env.WA_DATABASE_URL;
+      else process.env.WA_DATABASE_URL = previous;
+    }
   });
 
   it("claims sends that share a due time in creation order", async () => {

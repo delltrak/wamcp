@@ -27,7 +27,6 @@ import { bootEventWebhook, type EventWebhookStatus } from "./services/event-webh
 import { buildHealthBody } from "./server/health.js";
 import { sqlite } from "./db/client.js";
 import { MessageScheduler } from "./services/scheduler.js";
-import { databaseDialect } from "./services/schedule-store.js";
 
 const CLOUD_WEBHOOK_PATH = "/cloud-webhook";
 
@@ -97,7 +96,7 @@ async function initServices() {
     instanceExists: (instanceId) => {
       instanceManager.getInstance(instanceId);
     },
-    driver: databaseDialect(),
+    driver: "sqlite",
   });
   scheduler.start();
 

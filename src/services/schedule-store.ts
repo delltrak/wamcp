@@ -95,15 +95,6 @@ export interface FinishScheduleUpdate {
 /** Sync result, or a promise from a Postgres store. The worker awaits these. */
 export type Awaitable<T> = T | Promise<T>;
 
-/**
- * Unset or blank WA_DATABASE_URL keeps SQLite. Any other value selects Postgres.
- * This branch still opens SQLite; the driver only chooses the claim statement.
- */
-export function databaseDialect(env: NodeJS.ProcessEnv = process.env): ScheduleSqlDialect {
-  const url = env.WA_DATABASE_URL?.trim() ?? "";
-  return url === "" ? "sqlite" : "postgres";
-}
-
 export class ScheduleStore {
   constructor(
     private readonly sqlite: Database.Database,
