@@ -1622,6 +1622,14 @@
           "primaryKey": false,
           "notNull": true,
           "autoincrement": false
+        },
+        "seq": {
+          "name": "seq",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": 0
         }
       },
       "indexes": {
@@ -1629,7 +1637,9 @@
           "name": "idx_scheduled_messages_due",
           "columns": [
             "status",
-            "next_run_at"
+            "next_run_at",
+            "created_at",
+            "seq"
           ],
           "isUnique": false
         },

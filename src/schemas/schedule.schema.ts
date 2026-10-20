@@ -98,7 +98,7 @@ export const ScheduleMessageSchema = z
       .min(1)
       .default("America/Bahia")
       .describe(
-        "IANA timezone such as America/Bahia. Stored in canonical form. Etc/UTC is accepted as UTC. Numeric offsets, abbreviations such as EST, and other Etc/* zones are rejected. Default America/Bahia",
+        "IANA timezone such as America/Bahia. Stored in canonical form. UTC, GMT, UCT, Zulu, Etc/UTC, and Etc/GMT are stored as UTC. Numeric offsets, abbreviations such as EST, and Etc/* zones that do not resolve to UTC are rejected. Default America/Bahia",
       ),
     recurrence: z
       .enum(["once", "daily", "weekly", "monthly"])

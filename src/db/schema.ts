@@ -364,6 +364,9 @@ export const pendingPollVotes = sqliteTable(
 // ============================================================
 // SCHEDULED MESSAGES
 // One-shot and recurring outbound sends. Lives in the existing database file.
+// Runtime DDL declares millisecond timestamps and seq as BIGINT (64-bit on
+// both SQLite and Postgres). Drizzle's SQLite integer column is that same
+// 64-bit storage; migration 0004 spells those columns as bigint.
 // ============================================================
 export const scheduledMessages = sqliteTable(
   "scheduled_messages",
@@ -399,9 +402,15 @@ export const scheduledMessages = sqliteTable(
     lastError: text("last_error"),
     createdAt: integer("created_at").notNull(),
     updatedAt: integer("updated_at").notNull(),
+    seq: integer("seq").notNull().default(0),
   },
   (table) => [
-    index("idx_scheduled_messages_due").on(table.status, table.nextRunAt),
+    index("idx_scheduled_messages_due").on(
+      table.status,
+      table.nextRunAt,
+      table.createdAt,
+      table.seq,
+    ),
     index("idx_scheduled_messages_instance").on(table.instanceId, table.status),
   ],
 );

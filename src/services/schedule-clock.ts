@@ -47,17 +47,20 @@ const OFFSET_ZONE = /^[+-]\d{2}:?\d{2}$/;
 
 /**
  * Canonical IANA name, or null.
- * `america/bahia` becomes `America/Bahia`. `Etc/UTC` becomes `UTC`.
- * Numeric offsets, abbreviations such as EST, and other Etc/* zones are rejected.
+ * `america/bahia` becomes `America/Bahia`.
+ * Names Intl resolves to UTC are stored as `UTC`, including `UTC`, `GMT`,
+ * `UCT`, `Zulu`, `Etc/UTC`, and `Etc/GMT`.
+ * Numeric offsets, abbreviations that resolve to a regional zone (such as EST),
+ * and `Etc/*` zones that stay under `Etc/` (such as `Etc/GMT+3`) are rejected.
  */
 export function canonicalTimeZone(timeZone: string): string | null {
   const value = timeZone.trim();
   if (value === "" || OFFSET_ZONE.test(value)) return null;
-  if (!value.includes("/") && value.toUpperCase() !== "UTC") return null;
   try {
     const resolved = new Intl.DateTimeFormat("en-US", { timeZone: value }).resolvedOptions()
       .timeZone;
     if (!resolved || resolved.startsWith("Etc/")) return null;
+    if (!value.includes("/") && resolved !== "UTC") return null;
     return resolved;
   } catch {
     return null;

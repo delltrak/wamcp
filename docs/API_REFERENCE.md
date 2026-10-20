@@ -111,8 +111,9 @@ Tools marked **Baileys only** are not available on Cloud API instances.
   anything. `wa_pause_scheduled` and `wa_cancel_scheduled` work while the gate is false, so overdue
   rows can be stopped before it is turned on. `wa_list_scheduled` still reads rows.
   Schedules persist in the existing SQLite database (`scheduled_messages`). The timezone is an IANA
-  name; the default is `America/Bahia`. It is stored in canonical form. `Etc/UTC` is accepted as
-  `UTC`. Numeric offsets, abbreviations such as `EST`, and other `Etc/*` zones are rejected.
+  name; the default is `America/Bahia`. It is stored in canonical form. Names that resolve to `UTC`
+  are stored as `UTC`, including `UTC`, `GMT`, `UCT`, `Zulu`, `Etc/UTC`, and `Etc/GMT`. Numeric
+  offsets, abbreviations such as `EST`, and `Etc/*` zones that do not resolve to `UTC` are rejected.
   `WA_SCHEDULER_MISSED_POLICY` is `skip` or `send` (default `skip`). A due time
   within 2 minutes is sent. Older than that, `skip` drops the occurrence and waits for the next
   future slot (a one-shot becomes `skipped`); `send` queues that one occurrence and then advances
@@ -2652,8 +2653,9 @@ existing SQLite file; the database path is unchanged.
 `scheduledAt` is RFC3339, must be in the future, and must be at most 1 year ahead. `to` is a phone
 number or a group JID. Phone numbers are stored as `<digits>@s.whatsapp.net`. `status@broadcast`
 and `@newsletter` are rejected. `timezone` is an IANA name such as `America/Bahia` (the default)
-and is stored in canonical form. `Etc/UTC` is accepted as `UTC`. Numeric offsets (`+03:00`),
-abbreviations such as `EST`, and other `Etc/*` zones are rejected. `once` sends a single time. `daily`,
+and is stored in canonical form. Names that resolve to `UTC` are stored as `UTC`, including `UTC`,
+`GMT`, `UCT`, `Zulu`, `Etc/UTC`, and `Etc/GMT`. Numeric offsets (`+03:00`), abbreviations such as
+`EST`, and `Etc/*` zones that do not resolve to `UTC` (such as `Etc/GMT+3`) are rejected. `once` sends a single time. `daily`,
 `weekly`, and `monthly` repeat that instant's wall clock in the schedule timezone. The first weekly
 or monthly run is the first matching weekday or day of month at or after `scheduledAt`. Weekly
 `weekdays` use `0` for Sunday through `6` for Saturday. Monthly `dayOfMonth` is clamped to the last
@@ -2688,7 +2690,7 @@ given up (one-shot `failed`, recurring advances).
 | `instanceId`      | string | Yes      | Instance to send from |
 | `to`              | string | Yes      | Phone number or group JID. Not `status@broadcast` or `@newsletter` |
 | `scheduledAt`     | string | Yes      | RFC3339 instant, in the future and at most 1 year ahead |
-| `timezone`        | string | No       | IANA name such as `America/Bahia`. `Etc/UTC` becomes `UTC`. Not `+03:00`, `EST`, or other `Etc/*` |
+| `timezone`        | string | No       | IANA name such as `America/Bahia`. `UTC`, `GMT`, `UCT`, `Zulu`, `Etc/UTC`, and `Etc/GMT` are stored as `UTC`. Not `+03:00`, `EST`, or `Etc/GMT+3` |
 | `recurrence`      | string | No       | `once` (default), `daily`, `weekly`, or `monthly` |
 | `weekdays`        | number[] | No    | Weekly only. Unique values `0`–`6` |
 | `dayOfMonth`      | number | No       | Monthly only. `1`–`31` |

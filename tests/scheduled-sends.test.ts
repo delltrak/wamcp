@@ -229,8 +229,14 @@ describe("schedule clock", () => {
     expect(isValidTimeZone("Etc/UTC")).toBe(true);
     expect(canonicalTimeZone("america/bahia")).toBe("America/Bahia");
     expect(canonicalTimeZone("Etc/UTC")).toBe("UTC");
+    expect(canonicalTimeZone("Etc/GMT")).toBe("UTC");
+    expect(canonicalTimeZone("GMT")).toBe("UTC");
+    expect(canonicalTimeZone("gmt")).toBe("UTC");
+    expect(canonicalTimeZone("UCT")).toBe("UTC");
+    expect(canonicalTimeZone("Zulu")).toBe("UTC");
     expect(isValidTimeZone("+03:00")).toBe(false);
     expect(isValidTimeZone("EST")).toBe(false);
+    expect(isValidTimeZone("WET")).toBe(false);
     expect(isValidTimeZone("Etc/GMT+3")).toBe(false);
     const now = Date.parse("2026-10-20T12:00:00Z");
     expect(() =>
@@ -254,6 +260,15 @@ describe("schedule clock", () => {
     expect(
       parseScheduleRequest({ scheduledAt: "2026-10-21T09:00:00Z", timezone: "Etc/UTC" }, now)
         .timezone,
+    ).toBe("UTC");
+    expect(
+      parseScheduleRequest({ scheduledAt: "2026-10-21T09:00:00Z", timezone: "GMT" }, now).timezone,
+    ).toBe("UTC");
+    expect(
+      parseScheduleRequest({ scheduledAt: "2026-10-21T09:00:00Z", timezone: "UCT" }, now).timezone,
+    ).toBe("UTC");
+    expect(
+      parseScheduleRequest({ scheduledAt: "2026-10-21T09:00:00Z", timezone: "Zulu" }, now).timezone,
     ).toBe("UTC");
   });
 
@@ -676,6 +691,36 @@ describe("scheduled sends", () => {
     expect(sent).toHaveLength(2);
     expect(scheduler.list({ instanceId: INSTANCE_ID, status: "active" }).total).toBe(0);
     expect(scheduler.list({ instanceId: INSTANCE_ID, status: "cancelled" }).total).toBe(1);
+  });
+
+  it("claims sends that share a due time in creation order", async () => {
+    let now = Date.parse("2026-10-20T12:00:00Z");
+    const { scheduler, sent } = harness({ now: () => now, rateLimit: 1 });
+    const first = scheduler.create({
+      instanceId: INSTANCE_ID,
+      to: "5500000000001",
+      scheduledAt: "2026-10-21T09:00:00-03:00",
+      content: { type: "text", text: "first" },
+    });
+    const second = scheduler.create({
+      instanceId: INSTANCE_ID,
+      to: "5500000000002",
+      scheduledAt: "2026-10-21T09:00:00-03:00",
+      content: { type: "text", text: "second" },
+    });
+    expect(scheduler.list({ instanceId: INSTANCE_ID }).schedules.map((row) => row.id)).toEqual([
+      first.id,
+      second.id,
+    ]);
+    now = Date.parse("2026-10-21T12:00:00Z");
+    await scheduler.tick();
+    expect(sent.map((row) => row.content)).toEqual([{ type: "text", text: "first" }]);
+    now += 60_000;
+    await scheduler.tick();
+    expect(sent.map((row) => row.content)).toEqual([
+      { type: "text", text: "first" },
+      { type: "text", text: "second" },
+    ]);
   });
 
   it("does not skip on-time rows that wait for the send rate limit", async () => {

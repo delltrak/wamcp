@@ -59,6 +59,7 @@ interface ScheduleRow {
   last_error: string | null;
   created_at: number;
   updated_at: number;
+  seq: number;
 }
 
 export interface NewScheduleRow {
@@ -99,17 +100,7 @@ export class ScheduleStore {
   insert(row: NewScheduleRow): ScheduleRecord {
     const weekdaysJson = row.weekdays.length > 0 ? JSON.stringify(row.weekdays) : null;
     this.sqlite
-      .prepare(
-        `INSERT INTO scheduled_messages (
-          id, instance_id, recipient, message_type, payload_json, timezone, recurrence,
-          scheduled_at, next_run_at, weekdays_json, day_of_month, end_at, occurrence_limit,
-          occurrence_count, attempts, status, created_at, updated_at
-        ) VALUES (
-          ?, ?, ?, ?, ?, ?, ?,
-          ?, ?, ?, ?, ?, ?,
-          0, 0, 'active', ?, ?
-        )`,
-      )
+      .prepare(insertScheduleSql())
       .run(
         row.id,
         row.instanceId,
@@ -145,20 +136,13 @@ export class ScheduleStore {
     limit: number,
     offset: number,
   ): { rows: ScheduleRecord[]; total: number } {
+    const statusParams = status === null ? [] : [status];
     const totalRow = this.sqlite
-      .prepare(
-        `SELECT COUNT(*) AS total FROM scheduled_messages
-         WHERE instance_id = ? AND (? IS NULL OR status = ?)`,
-      )
-      .get(instanceId, status, status) as { total: number };
+      .prepare(listScheduleCountSql(status))
+      .get(instanceId, ...statusParams) as { total: number };
     const rows = this.sqlite
-      .prepare(
-        `SELECT * FROM scheduled_messages
-         WHERE instance_id = ? AND (? IS NULL OR status = ?)
-         ORDER BY next_run_at ASC, id ASC
-         LIMIT ? OFFSET ?`,
-      )
-      .all(instanceId, status, status, limit, offset) as ScheduleRow[];
+      .prepare(listScheduleRowsSql(status))
+      .all(instanceId, ...statusParams, limit, offset) as ScheduleRow[];
     return { rows: rows.map(mapRow), total: totalRow.total };
   }
 
@@ -184,37 +168,16 @@ export class ScheduleStore {
     excludeInstanceIds: readonly string[] = [],
   ): ScheduleRecord | null {
     const params: Array<string | number> = [token, leaseUntil, now, now];
-    let excludeSql = "";
-    if (excludeInstanceIds.length > 0) {
-      excludeSql = `AND instance_id NOT IN (${excludeInstanceIds.map(() => "?").join(", ")})`;
-      params.push(...excludeInstanceIds);
-    }
+    if (excludeInstanceIds.length > 0) params.push(...excludeInstanceIds);
     const row = this.sqlite
-      .prepare(
-        `UPDATE scheduled_messages
-         SET status = 'running', lease_token = ?, lease_until = ?, updated_at = ?
-         WHERE id = (
-           SELECT id FROM scheduled_messages
-           WHERE status = 'active' AND next_run_at <= ?
-           ${excludeSql}
-           ORDER BY next_run_at ASC, id ASC
-           LIMIT 1
-         )
-         RETURNING *`,
-      )
+      .prepare(claimNextScheduleSql(excludeInstanceIds.length))
       .get(...params) as ScheduleRow | undefined;
     return row ? mapRow(row) : null;
   }
 
   /** Put a claimed row back to active. `nextRunAt` is the due time to keep. */
   release(id: string, leaseToken: string | null, now: number, nextRunAt: number): boolean {
-    const result = this.sqlite
-      .prepare(
-        `UPDATE scheduled_messages
-         SET status = 'active', next_run_at = ?, lease_token = NULL, lease_until = NULL, updated_at = ?
-         WHERE id = ? AND status = 'running' AND lease_token IS ?`,
-      )
-      .run(nextRunAt, now, id, leaseToken);
+    const result = this.sqlite.prepare(releaseScheduleSql()).run(nextRunAt, now, id, leaseToken);
     return result.changes > 0;
   }
 
@@ -248,20 +211,7 @@ export class ScheduleStore {
 
   finish(update: FinishScheduleUpdate): boolean {
     const result = this.sqlite
-      .prepare(
-        `UPDATE scheduled_messages
-         SET status = ?,
-             occurrence_count = ?,
-             next_run_at = ?,
-             last_run_at = ?,
-             last_job_id = ?,
-             last_error = ?,
-             attempts = ?,
-             lease_token = NULL,
-             lease_until = NULL,
-             updated_at = ?
-         WHERE id = ? AND status = 'running' AND lease_token IS ?`,
-      )
+      .prepare(finishScheduleSql())
       .run(
         update.status,
         update.occurrenceCount,
@@ -286,17 +236,7 @@ export class ScheduleStore {
     now: number,
   ): boolean {
     const result = this.sqlite
-      .prepare(
-        `UPDATE scheduled_messages
-         SET status = 'active',
-             next_run_at = ?,
-             attempts = ?,
-             last_error = ?,
-             lease_token = NULL,
-             lease_until = NULL,
-             updated_at = ?
-         WHERE id = ? AND status = 'running' AND lease_token IS ?`,
-      )
+      .prepare(retryScheduleSql())
       .run(nextRunAt, attempts, lastError, now, id, leaseToken);
     return result.changes > 0;
   }
@@ -339,4 +279,85 @@ function mapRow(row: ScheduleRow): ScheduleRecord {
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
+}
+
+const DUE_ORDER = "next_run_at ASC, created_at ASC, seq ASC";
+
+/** Insert one row. `seq` is one past the current maximum, including on an empty table. */
+export function insertScheduleSql(): string {
+  return `INSERT INTO scheduled_messages (
+          id, instance_id, recipient, message_type, payload_json, timezone, recurrence,
+          scheduled_at, next_run_at, weekdays_json, day_of_month, end_at, occurrence_limit,
+          occurrence_count, attempts, status, created_at, updated_at, seq
+        )
+        SELECT
+          ?, ?, ?, ?, ?, ?, ?,
+          ?, ?, ?, ?, ?, ?,
+          0, 0, 'active', ?, ?,
+          COALESCE(MAX(seq), 0) + 1
+        FROM scheduled_messages`;
+}
+
+export function listScheduleCountSql(status: ScheduleStatus | null): string {
+  const statusSql = status === null ? "" : " AND status = ?";
+  return `SELECT COUNT(*) AS total FROM scheduled_messages
+         WHERE instance_id = ?${statusSql}`;
+}
+
+export function listScheduleRowsSql(status: ScheduleStatus | null): string {
+  const statusSql = status === null ? "" : " AND status = ?";
+  return `SELECT * FROM scheduled_messages
+         WHERE instance_id = ?${statusSql}
+         ORDER BY ${DUE_ORDER}
+         LIMIT ? OFFSET ?`;
+}
+
+export function claimNextScheduleSql(excludeCount: number): string {
+  const excludeSql =
+    excludeCount > 0
+      ? `AND instance_id NOT IN (${Array.from({ length: excludeCount }, () => "?").join(", ")})`
+      : "";
+  return `UPDATE scheduled_messages
+         SET status = 'running', lease_token = ?, lease_until = ?, updated_at = ?
+         WHERE id = (
+           SELECT id FROM scheduled_messages
+           WHERE status = 'active' AND next_run_at <= ?
+           ${excludeSql}
+           ORDER BY ${DUE_ORDER}
+           LIMIT 1
+         )
+         RETURNING *`;
+}
+
+export function releaseScheduleSql(): string {
+  return `UPDATE scheduled_messages
+         SET status = 'active', next_run_at = ?, lease_token = NULL, lease_until = NULL, updated_at = ?
+         WHERE id = ? AND status = 'running' AND lease_token = ?`;
+}
+
+export function finishScheduleSql(): string {
+  return `UPDATE scheduled_messages
+         SET status = ?,
+             occurrence_count = ?,
+             next_run_at = ?,
+             last_run_at = ?,
+             last_job_id = ?,
+             last_error = ?,
+             attempts = ?,
+             lease_token = NULL,
+             lease_until = NULL,
+             updated_at = ?
+         WHERE id = ? AND status = 'running' AND lease_token = ?`;
+}
+
+export function retryScheduleSql(): string {
+  return `UPDATE scheduled_messages
+         SET status = 'active',
+             next_run_at = ?,
+             attempts = ?,
+             last_error = ?,
+             lease_token = NULL,
+             lease_until = NULL,
+             updated_at = ?
+         WHERE id = ? AND status = 'running' AND lease_token = ?`;
 }

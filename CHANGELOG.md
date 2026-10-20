@@ -16,12 +16,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   controls occurrences missed while the process is down. A catch-up backlog is queued no faster
   than the outbound rate limit. `WA_SCHEDULER_MAX_ACTIVE` (default 100) caps schedules per
   instance, and `scheduledAt` must fall within a year. The timezone is an IANA name, default
-  `America/Bahia` (canonical form; `Etc/UTC` is stored as `UTC`; offsets, `EST`, and other
-  `Etc/*` zones are rejected). The first weekly or monthly run is the first matching slot at or
-  after `scheduledAt`. Due sends use the existing outbound rate limiter. A row that was on time
-  when the limiter held it is not later skipped. Scheduled-send queries use positional `?`
-  parameters. The table DDL stays outside the shared schema until that schema absorbs it, which
-  is what widens its integer timestamps to BIGINT on Postgres.
+  `America/Bahia`, stored in canonical form. Names that resolve to `UTC` are stored as `UTC`,
+  including `UTC`, `GMT`, `UCT`, `Zulu`, `Etc/UTC`, and `Etc/GMT`. Offsets, abbreviations such as
+  `EST`, and `Etc/*` zones that do not resolve to `UTC` are rejected. The first weekly or monthly
+  run is the first matching slot at or after `scheduledAt`. Due sends use the existing outbound
+  rate limiter. A row that was on time when the limiter held it is not later skipped. Sends that
+  share a due time are claimed in `next_run_at`, `created_at`, then insert-sequence order.
+  Scheduled-send queries use positional `?` parameters. The exported table DDL declares
+  millisecond timestamps and that sequence as `BIGINT`. SQLite stores `BIGINT` as a 64-bit
+  integer. The shared schema can append that constant directly; on Postgres those columns stay
+  64-bit instead of overflowing 32-bit `INTEGER`.
 
 - Added Baileys instance lifecycle webhooks for connection, disconnect, pairing-code, and QR events,
   plus the read-only `wa_get_instance_status` tool. Pairing and QR challenge data is omitted from
