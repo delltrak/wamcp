@@ -734,7 +734,14 @@ export function eventJidCandidates(payload: ChannelEventPayload[ChannelEvent]): 
 }
 
 export function jidMatchesIgnorePattern(jid: string, pattern: string): boolean {
-  return pattern.startsWith("@") ? jid.endsWith(pattern) : jid === pattern;
+  if (pattern.startsWith("@")) return jid.endsWith(pattern);
+  const star = pattern.indexOf("*");
+  if (star === -1) return jid === pattern;
+  const prefix = pattern.slice(0, star);
+  const suffix = pattern.slice(star + 1);
+  return (
+    jid.length >= prefix.length + suffix.length && jid.startsWith(prefix) && jid.endsWith(suffix)
+  );
 }
 
 export function eventMatchesIgnoreJids(

@@ -283,6 +283,8 @@ export const JID_ADDRESS_WILDCARDS = [
 ] as const;
 
 const EXACT_JID_RE = /^[0-9A-Za-z][0-9A-Za-z._:-]{0,180}@[A-Za-z0-9][A-Za-z0-9.-]{0,80}$/;
+const STAR_JID_RE = /^([0-9A-Za-z._:-]*)\*([0-9A-Za-z._:-]*)@([A-Za-z0-9][A-Za-z0-9.-]{0,80})$/;
+const JID_DOMAINS = ["g.us", "s.whatsapp.net", "lid", "newsletter", "broadcast", "c.us"] as const;
 
 export function parseIgnoreJidEntry(entry: string, label: string): string {
   const value = entry.trim();
@@ -292,6 +294,15 @@ export function parseIgnoreJidEntry(entry: string, label: string): string {
     if (!(JID_ADDRESS_WILDCARDS as readonly string[]).includes(value)) {
       throw new Error(
         `Invalid ${label}; unsupported wildcard "${value}". Supported wildcards: ${JID_ADDRESS_WILDCARDS.join(", ")}`,
+      );
+    }
+    return value;
+  }
+  if (value.includes("*")) {
+    const domain = STAR_JID_RE.exec(value)?.[3];
+    if (!domain || !(JID_DOMAINS as readonly string[]).includes(domain)) {
+      throw new Error(
+        `Invalid ${label}; invalid JID wildcard "${value}". Use one * in the user part, for example 5577*@s.whatsapp.net`,
       );
     }
     return value;

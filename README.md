@@ -547,10 +547,11 @@ top level and a `messages` array.
 You can add `chatAllowlist` and/or `senderAllowlist` to a multi-destination
 entry to limit which chats or people wake that routine. If both are set, a
 message must match both lists. Set `WA_EVENT_WEBHOOK_IGNORE_JIDS` to a
-comma-separated list of exact JIDs or address wildcards (`@g.us`,
-`@s.whatsapp.net`, `@lid`, `@newsletter`, `@broadcast`, `@c.us`) to drop matching
-chats or senders before delivery. Unset or empty keeps the current behavior and
-forwards every chat. A destination `ignoreJids` array is added to that global
+comma-separated list of exact JIDs, address wildcards (`@g.us`,
+`@s.whatsapp.net`, `@lid`, `@newsletter`, `@broadcast`, `@c.us`), or one `*` in
+the user part (`5577*@s.whatsapp.net`) to drop matching chats or senders before
+delivery. Unset or empty keeps the current behavior and forwards every chat.
+Messages stay stored; only the webhook is skipped. A destination `ignoreJids` array is added to that global
 list. The filter matches `chatId`, `groupId`, sender, and LID fields
 (`chatLid`, `senderLid`) and is independent of the event allowlist. Lifecycle
 `instance.*` events are not filtered. `@s.whatsapp.net` also matches group
@@ -769,7 +770,7 @@ Copy `.env.example` to `.env` and configure:
 | `WA_EVENT_WEBHOOK_PRESET` | — | `grok-bot` uses compact message and lifecycle payloads with incoming-message filters |
 | `WA_EVENT_WEBHOOK_EVENTS` | `message.received` | Comma-separated events to forward |
 | `WA_EVENT_WEBHOOK_IGNORE_FROM_ME` | `true` | Ignore messages sent by this instance |
-| `WA_EVENT_WEBHOOK_IGNORE_JIDS` | — | Comma-separated exact JIDs or address wildcards to drop; unset forwards every chat |
+| `WA_EVENT_WEBHOOK_IGNORE_JIDS` | — | Comma-separated exact JIDs, `@` address wildcards, or one `*` in the user part; unset forwards every chat |
 | `WA_EVENT_WEBHOOK_HEADERS` | — | Additional request headers as a JSON object of string values |
 | `WA_EVENT_WEBHOOK_AUTH_HEADER` / `WA_EVENT_WEBHOOK_AUTH_VALUE` | — | Authentication header name and value; Grok Bot defaults the name to `X-Grok-Bot-Key` when its preset is enabled |
 | `WA_EVENT_WEBHOOK_SECRET` | — | HMAC-SHA256 signing secret; adds timestamp and signature headers |

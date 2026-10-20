@@ -27,7 +27,7 @@ HTTP Host header.
 | `WA_EVENT_WEBHOOK_PRESET` | unset | `grok-bot` selects compact Grok Bot message and lifecycle payloads plus incoming-message filters. |
 | `WA_EVENT_WEBHOOK_EVENTS` | `message.received` | Comma-separated events for the single destination and multi-destination defaults. |
 | `WA_EVENT_WEBHOOK_IGNORE_FROM_ME` | `true` | Ignore messages sent by this WhatsApp instance. |
-| `WA_EVENT_WEBHOOK_IGNORE_JIDS` | unset | Comma-separated exact JIDs or address wildcards to drop. Unset forwards every chat. |
+| `WA_EVENT_WEBHOOK_IGNORE_JIDS` | unset | Comma-separated exact JIDs, `@` address wildcards, or one `*` in the user part. Unset forwards every chat. |
 | `WA_EVENT_WEBHOOK_HEADERS` | unset | JSON object of extra headers for the single destination. |
 | `WA_EVENT_WEBHOOK_AUTH_HEADER` | unset | Single-destination authentication header. Grok Bot defaults to `X-Grok-Bot-Key` when the preset and auth value are set. |
 | `WA_EVENT_WEBHOOK_AUTH_VALUE` | unset | Single-destination authentication value. |
@@ -51,8 +51,11 @@ independent of `WA_EVENT_WEBHOOK_EVENTS`: an event is delivered only when its na
 none of its JIDs are ignored. Unset or empty applies no JID filter.
 
 An entry that starts with `@` is an address-space wildcard. Supported wildcards are `@g.us`,
-`@s.whatsapp.net`, `@lid`, `@newsletter`, `@broadcast`, and `@c.us`. Every other entry is an exact,
-case-sensitive JID. Invalid entries fail startup with `Invalid WA_EVENT_WEBHOOK_IGNORE_JIDS`.
+`@s.whatsapp.net`, `@lid`, `@newsletter`, `@broadcast`, and `@c.us`. An entry with one `*` in the
+user part is a prefix or suffix wildcard, for example `5577*@s.whatsapp.net`. Every other entry
+is an exact, case-sensitive JID. Invalid entries fail startup with
+`Invalid WA_EVENT_WEBHOOK_IGNORE_JIDS`. Matching chats are still stored; only webhook delivery
+is skipped.
 
 The match covers `chatId`, `groupId`, `newsletterId`, the sender (`message.sender`, `participant`,
 `callerId`, `reactedBy`, `deletedBy`, `author`, `contactId`), association `chatId`, and LID fields

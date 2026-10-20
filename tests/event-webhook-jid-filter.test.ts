@@ -1,5 +1,11 @@
+import { randomUUID } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
+import type { BaileysEventMap, WAMessage, WASocket } from "@whiskeysockets/baileys";
+import { eq } from "drizzle-orm";
+import { BaileysAdapter } from "../src/channels/baileys/baileys.adapter.js";
 import { normalizeMessagesUpsert } from "../src/channels/baileys/baileys.events.js";
+import { db } from "../src/db/client.js";
+import { instances, messages } from "../src/db/schema.js";
 import { loadEventWebhookConfig } from "../src/services/event-webhook-config.js";
 import {
   registerEventWebhookHandler,
@@ -51,6 +57,38 @@ describe("WA_EVENT_WEBHOOK_IGNORE_JIDS", () => {
     expect(loadEventWebhookConfig({ WA_EVENT_WEBHOOK_IGNORE_JIDS: "   " }).destinations).toEqual(
       [],
     );
+  });
+
+  it("drops newsletter chats for @newsletter and keeps direct chats", () => {
+    const target = destination({ WA_EVENT_WEBHOOK_IGNORE_JIDS: "@newsletter" });
+    const channel = message({ chatId: "120363000000000119@newsletter" });
+    expect(shouldSendEventWebhook("message.received", channel, target)).toBe(false);
+    expect(shouldSendEventWebhook("message.received", message(), target)).toBe(true);
+  });
+
+  it("drops a prefix wildcard on the chat or the sender", () => {
+    const target = destination({ WA_EVENT_WEBHOOK_IGNORE_JIDS: "5577*@s.whatsapp.net" });
+    const byChat = message({
+      chatId: "557712345678@s.whatsapp.net",
+      message: { ...message().message, sender: "5511888888888@s.whatsapp.net" },
+    });
+    const bySender = message({
+      chatId: "5511888888888@s.whatsapp.net",
+      message: { ...message().message, sender: "557700000000@s.whatsapp.net" },
+    });
+    const other = message({
+      chatId: "1557712345678@s.whatsapp.net",
+      message: { ...message().message, sender: "1557712345678@s.whatsapp.net" },
+    });
+    expect(shouldSendEventWebhook("message.received", byChat, target)).toBe(false);
+    expect(shouldSendEventWebhook("message.received", bySender, target)).toBe(false);
+    expect(shouldSendEventWebhook("message.received", other, target)).toBe(true);
+    expect(() =>
+      loadEventWebhookConfig({ WA_EVENT_WEBHOOK_IGNORE_JIDS: "5577*@evil.com" }),
+    ).toThrow(/invalid JID wildcard/);
+    expect(() =>
+      loadEventWebhookConfig({ WA_EVENT_WEBHOOK_IGNORE_JIDS: "5577**@s.whatsapp.net" }),
+    ).toThrow(/invalid JID wildcard/);
   });
 
   it("drops group chats for @g.us and keeps direct chats", () => {
@@ -242,6 +280,95 @@ describe("WA_EVENT_WEBHOOK_IGNORE_JIDS", () => {
     });
     unsubscribe();
     await unsubscribe.flush();
+  });
+
+  it("stores an ignored group message and still stores and forwards a direct chat", async () => {
+    const instanceId = `ignore_jid_${randomUUID()}`;
+    const now = Date.now();
+    db.insert(instances)
+      .values({
+        id: instanceId,
+        name: "Ignore JID fixture",
+        createdAt: now,
+        updatedAt: now,
+      })
+      .run();
+    let processEvents: ((events: Partial<BaileysEventMap>) => Promise<void> | void) | undefined;
+    const socket = {
+      ev: {
+        on: vi.fn(),
+        process: vi.fn((handler: (events: Partial<BaileysEventMap>) => Promise<void> | void) => {
+          processEvents = handler;
+        }),
+      },
+    } as unknown as WASocket;
+    const adapter = new BaileysAdapter(instanceId);
+    (adapter as unknown as { bindEvents: (sock: WASocket) => void }).bindEvents(socket);
+    const received: ChannelEventPayload["message.received"][] = [];
+    adapter.on("message.received", (event) => {
+      received.push(event);
+    });
+    const groupMessage = {
+      key: {
+        id: "group-stored",
+        remoteJid: "120363999000111@g.us",
+        participant: "5511999999999@s.whatsapp.net",
+        fromMe: false,
+      },
+      message: { conversation: "group hello" },
+      messageTimestamp: Math.floor(now / 1000),
+    } as WAMessage;
+    const directMessage = {
+      key: {
+        id: "direct-stored",
+        remoteJid: "5511888888888@s.whatsapp.net",
+        fromMe: false,
+      },
+      message: { conversation: "direct hello" },
+      messageTimestamp: Math.floor(now / 1000),
+    } as WAMessage;
+
+    try {
+      if (!processEvents) throw new Error("Baileys event processor was not registered");
+      await processEvents({
+        "messages.upsert": { type: "notify", messages: [groupMessage, directMessage] },
+      });
+      const stored = db
+        .select({ id: messages.id, content: messages.content })
+        .from(messages)
+        .where(eq(messages.instanceId, instanceId))
+        .all();
+      expect(stored).toEqual(
+        expect.arrayContaining([
+          { id: "group-stored", content: "group hello" },
+          { id: "direct-stored", content: "direct hello" },
+        ]),
+      );
+
+      let handler: Parameters<InstanceManager["onAnyEvent"]>[0] | undefined;
+      const instanceManager = {
+        onAnyEvent: (next: Parameters<InstanceManager["onAnyEvent"]>[0]) => {
+          handler = next;
+          return () => undefined;
+        },
+      } as unknown as InstanceManager;
+      const config = loadEventWebhookConfig({
+        WA_EVENT_WEBHOOK_URL: URL,
+        WA_EVENT_WEBHOOK_IGNORE_JIDS: "@g.us",
+      });
+      const enqueue = vi.fn((_: EventWebhookJob) => Promise.resolve());
+      const unsubscribe = registerEventWebhookHandler(instanceManager, config, enqueue);
+      for (const event of received) handler?.("message.received", instanceId, event);
+      await Promise.resolve();
+      expect(enqueue).toHaveBeenCalledTimes(1);
+      expect(enqueue.mock.calls[0]?.[0].payload).toMatchObject({
+        chat: "5511888888888@s.whatsapp.net",
+      });
+      unsubscribe();
+      await unsubscribe.flush();
+    } finally {
+      db.delete(instances).where(eq(instances.id, instanceId)).run();
+    }
   });
 
   it("keeps the LID on a normalized message after the phone JID becomes primary", () => {
