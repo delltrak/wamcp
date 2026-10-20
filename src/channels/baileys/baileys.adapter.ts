@@ -4489,6 +4489,10 @@ export class BaileysAdapter implements ChannelAdapter {
       }
     }
     const oldestKey = this.resolveMessageKey(jid, oldest.id, false, oldest);
+    const connectedUserId = sock.user?.id;
+    if (jid.endsWith("@g.us") && oldestKey.fromMe && !oldestKey.participant && connectedUserId) {
+      oldestKey.participant = connectedUserId;
+    }
     const oldestTimestamp = messageTimestampToMilliseconds(
       raw?.messageTimestamp ?? oldest.timestamp,
       Number(oldest.timestamp) * 1000,
