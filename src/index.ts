@@ -24,7 +24,7 @@ import { installShutdownHandlers, SHUTDOWN_TIMEOUT_MS } from "./utils/shutdown.j
 import { logger } from "./utils/logger.js";
 import { getAutoReadMode } from "./services/auto-read.js";
 import { bootEventWebhook, type EventWebhookStatus } from "./services/event-webhook-config.js";
-import { buildHealthBody } from "./server/health.js";
+import { buildHealthBody, renderHealthBody } from "./server/health.js";
 
 const CLOUD_WEBHOOK_PATH = "/cloud-webhook";
 
@@ -114,7 +114,7 @@ async function startHttp(webhookStatus: EventWebhookStatus): Promise<void> {
         webhook: webhookStatus,
       });
       res.writeHead(200, { "Content-Type": "application/json" });
-      res.end(JSON.stringify(health));
+      res.end(renderHealthBody(health));
       return;
     }
 

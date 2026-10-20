@@ -1,8 +1,10 @@
 // ============================================================
 // WA MCP — Proxy credential redaction
-// Removes userinfo from proxy URLs before it reaches logs or
-// agent-visible errors. Host and port stay visible.
+// Removes userinfo from proxy URLs before it reaches logs,
+// tool errors, or GET /health. Host and port stay visible.
 // ============================================================
+
+export const PROXY_URL_ENV = "WA_PROXY_URL";
 
 function redactProxyUserinfo(text: string): string {
   return text.replace(

@@ -8,6 +8,7 @@ import pino from "pino";
 import { SocksProxyAgent } from "socks-proxy-agent";
 import { ProxyAgent } from "undici";
 import { sqlite } from "../src/db/client.js";
+import { buildHealthBody, renderHealthBody } from "../src/server/health.js";
 import {
   closeBaileysProxyAgents,
   createBaileysProxyAgents,
@@ -163,7 +164,7 @@ describe("proxy credential redaction", () => {
   it("redacts credentials in the application log hook and tool errors", () => {
     const hooks = logger[pino.symbols.hooksSym] as { streamWrite?: (line: string) => string };
     expect(typeof hooks.streamWrite).toBe("function");
-    vi.stubEnv("WA_BAILEYS_PROXY", configured);
+    vi.stubEnv("WA_PROXY_URL", configured);
     const logged = hooks.streamWrite!(
       JSON.stringify({ msg: `dial ${configured}`, proxyUrl: configured }),
     );
@@ -172,6 +173,58 @@ describe("proxy credential redaction", () => {
 
     const response = toolError(`Instance failed: ${configured}`);
     expectNoSecret(JSON.stringify(response));
+    vi.unstubAllEnvs();
+  });
+
+  it("redacts proxy credentials from GET /health", () => {
+    vi.stubEnv("WA_PROXY_URL", configured);
+    const body = buildHealthBody({
+      uptimeSeconds: 3,
+      instances: { total: 1, connected: 1, disconnected: 0 },
+      version: `2.0.0 via ${configured}`,
+      webhook: {
+        configured: false,
+        destinationCount: 0,
+        eventCount: 1,
+        authConfigured: false,
+        warnings: [],
+        droppedEvents: [],
+      },
+    });
+    const json = renderHealthBody(body);
+    expectNoSecret(json);
+    expectNoSecret(JSON.stringify(body));
+    expect(json).toContain("socks5://***:***@127.0.0.1:1080");
+    expect(body.version).not.toContain(SECRET);
+
+    vi.stubEnv("WA_PROXY_URL", "");
+    const direct = buildHealthBody({
+      uptimeSeconds: 3,
+      instances: { total: 0, connected: 0, disconnected: 0 },
+      version: "2.0.0",
+      webhook: {
+        configured: false,
+        destinationCount: 0,
+        eventCount: 1,
+        authConfigured: false,
+        warnings: ["not_configured"],
+        droppedEvents: [],
+      },
+    });
+    expect(renderHealthBody(direct)).toBe(JSON.stringify(direct));
+    expect(direct).toEqual({
+      status: "ok",
+      uptime: 3,
+      instances: { total: 0, connected: 0, disconnected: 0 },
+      version: "2.0.0",
+      webhook: {
+        configured: false,
+        destinationCount: 0,
+        eventCount: 1,
+        authConfigured: false,
+        warnings: ["not_configured"],
+      },
+    });
     vi.unstubAllEnvs();
   });
 });
@@ -261,7 +314,7 @@ describe("BaileysAdapter proxy wiring", () => {
   }
 
   it("omits agent and fetchAgent when no proxy is configured", async () => {
-    vi.stubEnv("WA_BAILEYS_PROXY", "");
+    vi.stubEnv("WA_PROXY_URL", "");
     await connectAdapter();
     const options = socketOptions();
     expect(options).not.toHaveProperty("agent");
@@ -270,7 +323,7 @@ describe("BaileysAdapter proxy wiring", () => {
   });
 
   it("passes SOCKS and HTTP agents to the socket", async () => {
-    vi.stubEnv("WA_BAILEYS_PROXY", proxyUrl("socks5", 1080));
+    vi.stubEnv("WA_PROXY_URL", proxyUrl("socks5", 1080));
     await connectAdapter();
     const socks = socketOptions();
     expect(socks.agent).toBeInstanceOf(SocksProxyAgent);
@@ -279,7 +332,7 @@ describe("BaileysAdapter proxy wiring", () => {
     await activeAdapter?.disconnect();
     activeAdapter = undefined;
 
-    vi.stubEnv("WA_BAILEYS_PROXY", proxyUrl("http", 8080));
+    vi.stubEnv("WA_PROXY_URL", proxyUrl("http", 8080));
     await connectAdapter();
     const http = socketOptions();
     expect(http.agent).toBeInstanceOf(HttpsProxyAgent);
@@ -287,7 +340,7 @@ describe("BaileysAdapter proxy wiring", () => {
   });
 
   it("refuses an invalid proxy before opening a socket", () => {
-    vi.stubEnv("WA_BAILEYS_PROXY", `socks5://user:${SECRET}@127.0.0.1:1080/extra`);
+    vi.stubEnv("WA_PROXY_URL", `socks5://user:${SECRET}@127.0.0.1:1080/extra`);
     expect(() => new BaileysAdapter("invalid-proxy")).toThrow(/path is not allowed/);
     try {
       new BaileysAdapter("invalid-proxy");
@@ -344,9 +397,16 @@ describe("BaileysAdapter proxy wiring", () => {
           is_from_me, status, timestamp, raw_data
         ) VALUES (?, ?, ?, ?, 'audio', NULL, ?, 'audio/ogg', 0, 'received', 1700000000, ?)`,
       )
-      .run(audioId, instanceId, CHAT, CHAT, "https://mmg.whatsapp.net/audio.ogg", JSON.stringify(audio));
+      .run(
+        audioId,
+        instanceId,
+        CHAT,
+        CHAT,
+        "https://mmg.whatsapp.net/audio.ogg",
+        JSON.stringify(audio),
+      );
 
-    vi.stubEnv("WA_BAILEYS_PROXY", proxyUrl("socks5", 1080));
+    vi.stubEnv("WA_PROXY_URL", proxyUrl("socks5", 1080));
     const adapter = await connectAdapter(instanceId);
     Object.assign(adapter, { status: "connected" });
     await adapter.downloadMessageMedia(messageId, CHAT);
@@ -362,7 +422,7 @@ describe("BaileysAdapter proxy wiring", () => {
     activeAdapter = undefined;
     mocks.downloadMediaMessage.mockClear();
 
-    vi.stubEnv("WA_BAILEYS_PROXY", "");
+    vi.stubEnv("WA_PROXY_URL", "");
     const direct = await connectAdapter(instanceId);
     Object.assign(direct, { status: "connected" });
     await direct.downloadMessageMedia(messageId, CHAT, undefined, 1500);
@@ -378,9 +438,12 @@ describe("proxy documentation", () => {
   it("documents the opt-in variable without enabling it", () => {
     const readme = readFileSync(new URL("../README.md", import.meta.url), "utf8");
     const example = readFileSync(new URL("../.env.example", import.meta.url), "utf8");
-    expect(readme).toContain("WA_BAILEYS_PROXY");
+    expect(readme).toContain("WA_PROXY_URL");
+    expect(readme).not.toContain("WA_BAILEYS_PROXY");
+    expect(readme).toContain("from `GET /health`");
     expect(readme).toContain("fetchAgent");
-    expect(example).toContain("# WA_BAILEYS_PROXY=socks5://user:pass@proxy.example:1080");
+    expect(example).toContain("# WA_PROXY_URL=socks5://user:pass@proxy.example:1080");
+    expect(example).not.toContain("WA_BAILEYS_PROXY");
     expect(example).not.toContain(SECRET);
   });
 });

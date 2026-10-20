@@ -9,9 +9,9 @@ import type { Agent as HttpsAgent } from "node:https";
 import { HttpsProxyAgent } from "https-proxy-agent";
 import { SocksProxyAgent } from "socks-proxy-agent";
 import { ProxyAgent, type Dispatcher } from "undici";
-import { redactError, redactProxyUrl } from "../../utils/proxy-redact.js";
+import { PROXY_URL_ENV, redactError, redactProxyUrl } from "../../utils/proxy-redact.js";
 
-export const BAILEYS_PROXY_ENV = "WA_BAILEYS_PROXY";
+export { PROXY_URL_ENV };
 
 const ALLOWED_SCHEMES = new Set(["socks5", "socks5h", "http", "https"]);
 
@@ -27,7 +27,7 @@ export interface BaileysProxyAgents {
 }
 
 function invalidProxy(reason: string): Error {
-  return new Error(`Invalid ${BAILEYS_PROXY_ENV}; ${reason}`);
+  return new Error(`Invalid ${PROXY_URL_ENV}; ${reason}`);
 }
 
 function hasControlCharacter(value: string): boolean {

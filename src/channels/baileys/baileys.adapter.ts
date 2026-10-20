@@ -46,6 +46,7 @@ import {
   closeBaileysProxyAgents,
   createBaileysProxyAgents,
   mediaDownloadOptions,
+  PROXY_URL_ENV,
   parseBaileysProxyUrl,
   type BaileysProxyAgents,
 } from "./proxy.js";
@@ -1063,7 +1064,7 @@ export class BaileysAdapter implements ChannelAdapter {
       "WA_AUTO_REJECT_CALLS",
       false,
     );
-    this.proxyUrl = parseBaileysProxyUrl(process.env.WA_BAILEYS_PROXY);
+    this.proxyUrl = parseBaileysProxyUrl(process.env[PROXY_URL_ENV]);
   }
 
   // ---- Private helpers ----
