@@ -726,9 +726,10 @@ Copy `.env.example` to `.env` and configure:
 | `WA_PRESENCE_MODE` | `on_activity` | Baileys presence policy: `on_activity` marks online around sends and typing/recording indicators; `always` preserves the legacy behavior |
 | `WA_PRESENCE_IDLE_SECONDS` | `30` | Seconds after activity before Baileys presence returns to unavailable; must be a positive integer no greater than `2147483` |
 | `WA_MARK_ONLINE_ON_CONNECT` | `false` | In `always` mode, mark the Baileys account online when its socket connects; `on_activity` forces this off |
-| `WA_PRESENCE_PULSE_ENABLED` | `false` | Briefly mark connected Baileys accounts available, then unavailable. Cloud API is skipped |
-| `WA_PRESENCE_PULSE_INTERVAL_MS` | `86400000` | Minimum delay after a pulse finishes before the next one (15 minutes to 7 days) |
-| `WA_PRESENCE_PULSE_DURATION_MS` | `300000` | How long a pulse stays available (5 seconds to 15 minutes); must be below the interval |
+| `WA_PRESENCE_PULSE_ENABLED` | `false` | Briefly mark connected Baileys accounts available inside a daily window. Cloud API is skipped |
+| `WA_PRESENCE_PULSE_TIMES_PER_DAY` | `2` | How many pulses to place in the window (1–12), with at least 15 minutes offline between them |
+| `WA_PRESENCE_PULSE_MINUTES` | `5` | How long each pulse stays available (1–15 minutes) |
+| `WA_PRESENCE_PULSE_WINDOW` | `08:00-22:00` | Local-time window. Must be `HH:MM-HH:MM` and end after it starts |
 | `WA_AUTO_REJECT_CALLS`      | `false`                  | Automatically reject incoming one-to-one Baileys call offers |
 | `WA_STATUS_MAX_RECIPIENTS`  | `256`                    | Maximum recipients per Baileys status; excess recipients are truncated and reported |
 | `WA_AUTO_READ`              | `false`                  | `on_fetch` marks incoming messages read when fetched; `on_receive` marks them read on arrival |
@@ -890,17 +891,21 @@ to `false`. In `always`, presence changes are left to Baileys and explicit prese
 do not block outgoing messages. Incoming messages and webhook delivery do not change presence.
 
 `WA_PRESENCE_PULSE_ENABLED` defaults to `false`. Set it to `true` to mark each connected Baileys
-account available, keep it available for `WA_PRESENCE_PULSE_DURATION_MS` (default 5 minutes), then
-return it to unavailable. The next pulse waits until `WA_PRESENCE_PULSE_INTERVAL_MS` (default 24
-hours) after the previous pulse finishes. The scheduler checks about once a minute, and the first
-pulse runs when a connected Baileys adapter is found rather than after a full interval. The
-interval must be an integer from 900000 (15 minutes) to 604800000 (7 days). The duration must be
-an integer from 5000 (5 seconds) to 900000 (15 minutes) and must be shorter than the interval.
-Invalid values stop startup with an error that names the variable and the accepted range. In
-`on_activity`, the idle timeout does not end a pulse early; an explicit `unavailable` presence
-request does. A send or typing indicator that is still active when the pulse ends keeps the
-existing idle timer. The pulse uses normal presence updates, not app-state writes, and Cloud API
-instances are skipped.
+account available `WA_PRESENCE_PULSE_TIMES_PER_DAY` times (default 2) for
+`WA_PRESENCE_PULSE_MINUTES` (default 5) inside `WA_PRESENCE_PULSE_WINDOW` (default `08:00-22:00`,
+server local time). Each start is placed at random in that window. Pulses cannot overlap: the
+next one starts at least 15 minutes after the previous one ends, and every pulse ends by the
+window's end. Times per day must be an integer from 1 to 12. Minutes must be an integer from 1 to
+15. The window must be `HH:MM-HH:MM` and end after it starts on the same day. A schedule that
+cannot fit those pulses and gaps is rejected. Invalid values stop startup with an error that names
+the variable and the accepted range. The scheduler checks about once a minute and logs one short
+line when a pulse starts. It does not change `WA_MARK_ONLINE_ON_CONNECT`. In `on_activity`, that
+option stays forced off and the idle timeout does not end a pulse early; an explicit `unavailable`
+presence request does. A send or typing indicator that is still active when the pulse ends keeps
+the existing idle timer, which then returns the account to unavailable. Otherwise the pulse sends
+unavailable when it ends. In `always`, the pulse sends global available and then unavailable
+without changing the socket's `markOnlineOnConnect` flag. The pulse uses normal presence updates,
+not app-state writes, and Cloud API instances are skipped.
 
 `WA_APP_STATE_WRITES_ENABLED` accepts `true` or `false` and defaults to `false`. It enables
 `wa_archive_chat`, `wa_pin_chat`, `wa_mute_chat`, `wa_delete_chat`, `wa_clear_chat`,
