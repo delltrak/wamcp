@@ -220,6 +220,7 @@ generic shape:
   "type": "image",
   "text": "Synthetic account notice\nReview the details below.",
   "timestamp": 1700000000,
+  "isFromMe": false,
   "mediaUrl": "https://example.com/synthetic-header.jpg",
   "buttons": [
     {
@@ -232,7 +233,7 @@ generic shape:
 }
 ```
 
-`buttons`, `rawType`, `mediaUrl`, and `mediaMimetype` are optional additive fields. Business
+`message.received` includes `isFromMe`. `buttons`, `rawType`, `mediaUrl`, and `mediaMimetype` are optional additive fields. Business
 template and interactive message text is flattened into `text`; action labels and links are also
 available in `buttons`. Unrecognized Baileys content types use `type: "text"`; their source content
 name is available in `rawType`.

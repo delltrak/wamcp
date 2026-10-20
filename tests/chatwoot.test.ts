@@ -1,4 +1,6 @@
 import { createHmac } from "node:crypto";
+import { Readable } from "node:stream";
+import type { IncomingMessage, ServerResponse } from "node:http";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { Agent } from "undici";
@@ -18,12 +20,14 @@ import {
   ChatwootClient,
   ChatwootRequestError,
   createChatwootTransport,
+  fetchPinnedResource,
   type ChatwootRequest,
   type ChatwootTransport,
 } from "../src/services/chatwoot-client.js";
 import {
   ChatwootService,
-  chatwootWebhookAuthorized,
+  authorizeChatwootWebhook,
+  handleChatwootHttpRequest,
   renderChatwootText,
   type ChatwootRuntime,
 } from "../src/services/chatwoot.js";
@@ -110,6 +114,22 @@ function recordingTransport(): { transport: ChatwootTransport; calls: ChatwootRe
     },
   };
   return { transport, calls };
+}
+
+function signedWebhook(
+  body: Buffer,
+  nowSeconds = 1_700_000_000,
+  deliveryId = "delivery-1",
+): {
+  rawBody: Buffer;
+  signature: string;
+  timestamp: string;
+  deliveryId: string;
+  nowSeconds: number;
+} {
+  const timestamp = String(nowSeconds);
+  const signature = `sha256=${createHmac("sha256", SECRET).update(`${timestamp}.`).update(body).digest("hex")}`;
+  return { rawBody: body, signature, timestamp, deliveryId, nowSeconds };
 }
 
 function webhookBody(overrides: Record<string, unknown> = {}): Buffer {
@@ -301,12 +321,33 @@ describe("Chatwoot agent replies", () => {
     expect(queue.enqueueMessage).toHaveBeenCalledTimes(1);
   });
 
-  it("accepts an HMAC signature and ignores echoes, private notes, and filtered JIDs", async () => {
+  it("accepts the Chatwoot signature and ignores echoes, private notes, and filtered JIDs", async () => {
     const body = webhookBody();
-    const signature = `sha256=${createHmac("sha256", SECRET).update(body).digest("hex")}`;
-    expect(chatwootWebhookAuthorized({ secret: SECRET, rawBody: body, signature })).toBe(true);
+    const signed = signedWebhook(body);
+    expect(authorizeChatwootWebhook({ secret: SECRET, ...signed }).ok).toBe(true);
     expect(
-      chatwootWebhookAuthorized({ secret: SECRET, rawBody: body, signature: "sha256=00" }),
+      authorizeChatwootWebhook({
+        secret: SECRET,
+        ...signed,
+        signature: "sha256=00",
+      }).ok,
+    ).toBe(false);
+    expect(
+      authorizeChatwootWebhook({
+        secret: SECRET,
+        ...signed,
+        nowSeconds: signed.nowSeconds + 301,
+      }).ok,
+    ).toBe(false);
+    expect(
+      authorizeChatwootWebhook({
+        secret: SECRET,
+        rawBody: body,
+        signature: signed.signature,
+        timestamp: signed.timestamp,
+        querySecret: SECRET,
+        nowSeconds: signed.nowSeconds + 301,
+      }).ok,
     ).toBe(false);
 
     const queue = runtime();
@@ -367,6 +408,124 @@ describe("Chatwoot agent replies", () => {
       "baileys",
     );
   });
+
+  it("requires the configured inbox and ignores agent-edited chat attributes", async () => {
+    const queue = runtime(["inst_0123abcd", "inst_89abcdef"]);
+    const service = new ChatwootService(enabledConfig(), queue);
+    const missingInbox = await service.handleWebhook({
+      rawBody: webhookBody({
+        conversation: { contact_inbox: { source_id: "15551234567@s.whatsapp.net" } },
+      }),
+      headerSecret: SECRET,
+    });
+    expect(missingInbox.body).toMatchObject({ reason: "inbox" });
+
+    const edited = await service.handleWebhook({
+      rawBody: webhookBody({
+        id: 77,
+        conversation: {
+          inbox_id: 34,
+          additional_attributes: {
+            wamcp_chat_id: "15550000000@s.whatsapp.net",
+            wamcp_instance_id: "inst_89abcdef",
+          },
+          contact_inbox: { source_id: "inst_0123abcd|15551234567@s.whatsapp.net" },
+        },
+      }),
+      headerSecret: SECRET,
+    });
+    expect(edited.status).toBe(202);
+    expect(queue.enqueueMessage).toHaveBeenCalledWith(
+      "inst_0123abcd",
+      "15551234567@s.whatsapp.net",
+      expect.objectContaining({ type: "text" }),
+      "baileys",
+    );
+  });
+
+  it("deduplicates X-Chatwoot-Delivery and sends attachment bytes", async () => {
+    const queue = runtime();
+    const fetchAttachment = vi.fn(async () => ({
+      data: Buffer.from("png-bytes"),
+      contentType: "image/png",
+    }));
+    const service = new ChatwootService(enabledConfig(), queue, undefined, fetchAttachment);
+    const body = webhookBody({
+      id: 80,
+      content: "see this",
+      attachments: [{ file_type: "image", data_url: "https://files.example.com/a.png" }],
+    });
+    const first = await service.handleWebhook(signedWebhook(body, 1_700_000_100, "delivery-80"));
+    expect(first.status).toBe(202);
+    expect(fetchAttachment).toHaveBeenCalledWith(
+      "https://files.example.com/a.png",
+      16 * 1024 * 1024,
+    );
+    expect(queue.enqueueMessage).toHaveBeenCalledWith(
+      "inst_0123abcd",
+      "15551234567@s.whatsapp.net",
+      {
+        type: "image",
+        image: Buffer.from("png-bytes").toString("base64"),
+        caption: "see this",
+      },
+      "baileys",
+    );
+
+    const replay = webhookBody({ id: 81, content: "again" });
+    const second = await service.handleWebhook(
+      signedWebhook(replay, 1_700_000_100, "delivery-80"),
+    );
+    expect(second.body).toMatchObject({ reason: "duplicate" });
+    expect(queue.enqueueMessage).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not queue an attachment URL when the pinned download fails", async () => {
+    const queue = runtime();
+    const service = new ChatwootService(enabledConfig(), queue, undefined, async () => {
+      throw new Error("blocked");
+    });
+    const result = await service.handleWebhook({
+      rawBody: webhookBody({
+        id: 82,
+        content: "",
+        attachments: [{ file_type: "image", data_url: "https://localtest.me/secret" }],
+      }),
+      headerSecret: SECRET,
+    });
+    expect(result.body).toMatchObject({ reason: "empty" });
+    expect(queue.enqueueMessage).not.toHaveBeenCalled();
+  });
+
+  it("reads the Chatwoot signature headers from the HTTP request", async () => {
+    const queue = runtime();
+    const service = new ChatwootService(enabledConfig(), queue);
+    const body = webhookBody({ id: 90 });
+    const signed = signedWebhook(body, Math.floor(Date.now() / 1000), "delivery-http");
+    const req = Readable.from([body]) as Readable & IncomingMessage;
+    req.headers = {
+      "x-chatwoot-signature": signed.signature,
+      "x-chatwoot-timestamp": signed.timestamp,
+      "x-chatwoot-delivery": signed.deliveryId,
+      "x-hub-signature-256": "sha256=deadbeef",
+    };
+    req.url = "/chatwoot/webhook";
+    req.method = "POST";
+    const chunks: string[] = [];
+    let statusCode = 0;
+    const res = {
+      writeHead(status: number) {
+        statusCode = status;
+      },
+      end(payload?: string) {
+        if (payload) chunks.push(payload);
+      },
+    } as unknown as ServerResponse;
+    await handleChatwootHttpRequest(req, res, service);
+    expect(statusCode).toBe(202);
+    expect(JSON.parse(chunks.join(""))).toEqual({ status: "accepted" });
+    expect(queue.enqueueMessage).toHaveBeenCalledTimes(1);
+  });
 });
 
 describe("Chatwoot transport", () => {
@@ -416,6 +575,66 @@ describe("Chatwoot transport", () => {
       metadata.request({ method: "GET", path: "/api/v1/accounts/12" }),
     ).rejects.toBeInstanceOf(ChatwootRequestError);
     expect(fetchImpl).toHaveBeenCalledTimes(1);
+  });
+
+  it("downloads attachments only after DNS pinning and refuses redirects", async () => {
+    const fetchImpl = vi.fn(async () => new Response(Buffer.from("file-bytes"), { status: 200 }));
+    const downloaded = await fetchPinnedResource(
+      new URL("https://cdn.example.com/a.png"),
+      enabledConfig(),
+      1024,
+      {
+        fetchImpl: fetchImpl as typeof fetch,
+        resolveDns: async () => [{ address: "1.1.1.1", family: 4 }],
+      },
+    );
+    expect(downloaded.data).toEqual(Buffer.from("file-bytes"));
+    expect(fetchImpl).toHaveBeenCalledWith(
+      expect.any(URL),
+      expect.objectContaining({
+        redirect: "error",
+        dispatcher: expect.any(Agent),
+        headers: { accept: "*/*" },
+      }),
+    );
+
+    const sameOrigin = vi.fn(
+      async () =>
+        new Response(Buffer.from("blob"), {
+          status: 200,
+          headers: { "content-type": "image/png" },
+        }),
+    );
+    await fetchPinnedResource(
+      new URL("https://chatwoot.example.com/rails/active_storage/blobs/a"),
+      enabledConfig(),
+      1024,
+      {
+        fetchImpl: sameOrigin as typeof fetch,
+        resolveDns: async () => [{ address: "1.1.1.1", family: 4 }],
+      },
+    );
+    expect(sameOrigin).toHaveBeenCalledWith(
+      expect.any(URL),
+      expect.objectContaining({
+        headers: expect.objectContaining({ api_access_token: "token-token-token" }),
+      }),
+    );
+
+    const blocked = vi.fn(async () => new Response("nope"));
+    await expect(
+      fetchPinnedResource(new URL("https://localtest.me/secret"), enabledConfig(), 1024, {
+        fetchImpl: blocked as typeof fetch,
+        resolveDns: async () => [{ address: "127.0.0.1", family: 4 }],
+      }),
+    ).rejects.toBeInstanceOf(ChatwootRequestError);
+    await expect(
+      fetchPinnedResource(new URL("https://cdn.example.com/big"), enabledConfig(), 4, {
+        fetchImpl: (async () => new Response(Buffer.from("too-big"))) as typeof fetch,
+        resolveDns: async () => [{ address: "1.1.1.1", family: 4 }],
+      }),
+    ).rejects.toBeInstanceOf(ChatwootRequestError);
+    expect(blocked).not.toHaveBeenCalled();
   });
 });
 

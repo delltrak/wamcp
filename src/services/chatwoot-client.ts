@@ -299,6 +299,95 @@ export function createChatwootTransport(
   };
 }
 
+function sharesChatwootOrigin(target: URL, config: EnabledChatwootConfig): boolean {
+  let base: URL;
+  try {
+    base = new URL(config.url);
+  } catch {
+    return false;
+  }
+  const host = (value: string): string => value.replace(/^\[|\]$/g, "").toLowerCase();
+  if (target.protocol !== base.protocol || host(target.hostname) !== host(base.hostname)) {
+    return false;
+  }
+  const port = (url: URL): string => url.port || (url.protocol === "https:" ? "443" : "80");
+  return port(target) === port(base);
+}
+
+async function readLimitedResponse(response: Response, maxBytes: number): Promise<Buffer> {
+  const reader = response.body?.getReader();
+  if (!reader) {
+    const buffer = Buffer.from(await response.arrayBuffer());
+    if (buffer.length > maxBytes) throw new ChatwootRequestError(0);
+    return buffer;
+  }
+  const chunks: Uint8Array[] = [];
+  let size = 0;
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (!value) continue;
+      size += value.byteLength;
+      if (size > maxBytes) {
+        await reader.cancel();
+        throw new ChatwootRequestError(0);
+      }
+      chunks.push(value);
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  return Buffer.concat(
+    chunks.map((chunk) => Buffer.from(chunk)),
+    size,
+  );
+}
+
+/**
+ * Download one URL with the same pinned DNS, metadata block, and redirect refusal
+ * as the Chatwoot API client. The API token is sent only to the configured origin.
+ */
+export async function fetchPinnedResource(
+  target: URL,
+  config: EnabledChatwootConfig,
+  maxBytes: number,
+  deps: ChatwootTransportDeps = {},
+): Promise<{ data: Buffer; contentType: string | null }> {
+  if (target.protocol !== "https:" && !(config.allowHttp && target.protocol === "http:")) {
+    throw new ChatwootRequestError(0);
+  }
+  if (target.username || target.password) throw new ChatwootRequestError(0);
+  const fetchImpl = deps.fetchImpl ?? fetch;
+  const pinned = await pinAddress(target, config, deps.resolveDns ?? defaultResolve);
+  const agent = new Agent({
+    connect: pinnedConnect(target.hostname, pinned.address, pinned.family, target.protocol),
+  });
+  const headers: Record<string, string> = { accept: "*/*" };
+  if (sharesChatwootOrigin(target, config)) headers.api_access_token = config.token;
+  try {
+    const response = await fetchImpl(target, {
+      method: "GET",
+      headers,
+      redirect: "error",
+      signal: AbortSignal.timeout(config.timeoutMs),
+      dispatcher: agent,
+    } as RequestInit & { dispatcher: Agent });
+    if (!response.ok) throw new ChatwootRequestError(response.status);
+    const declared = Number(response.headers.get("content-length"));
+    if (Number.isFinite(declared) && declared > maxBytes) throw new ChatwootRequestError(0);
+    const data = await readLimitedResponse(response, maxBytes);
+    const rawType = response.headers.get("content-type");
+    const contentType = rawType?.split(";")[0]?.trim() || null;
+    return { data, contentType };
+  } catch (error) {
+    if (error instanceof ChatwootRequestError) throw error;
+    throw new ChatwootRequestError(0);
+  } finally {
+    await agent.close();
+  }
+}
+
 /** Finds or creates the Chatwoot contact and conversation for one WhatsApp chat. */
 export class ChatwootClient {
   private readonly conversations = new Map<string, number>();

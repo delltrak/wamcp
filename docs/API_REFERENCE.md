@@ -3402,7 +3402,7 @@ These integrations are not MCP tools. The tool count stays **137**. Neither path
 | `WA_CHATWOOT_ALLOW_PRIVATE_URL` | `false` | no |
 | `WA_CHATWOOT_TIMEOUT_MS` | `10000` | no |
 
-`POST /chatwoot/webhook` accepts `message_created` agent replies. The secret may arrive as `X-Chatwoot-Webhook-Secret`, `X-Wa-Chatwoot-Secret`, `?secret=`, or `X-Hub-Signature-256` (`sha256=` HMAC-SHA256 of the raw body). Messages this server created in Chatwoot use source id `WAID:<whatsapp message id>` and are not sent back to WhatsApp.
+`POST /chatwoot/webhook` accepts `message_created` agent replies. Chatwoot v4.13+ signs the raw body: `X-Chatwoot-Signature` is `sha256=` plus HMAC-SHA256 of `<X-Chatwoot-Timestamp>.<raw body>`, and `X-Chatwoot-Delivery` is deduplicated. The timestamp must be within 300 seconds. `?secret=` is a legacy fallback and should not be used. The conversation `inbox_id` must equal `WA_CHATWOOT_INBOX_ID`. Messages this server created in Chatwoot use source id `WAID:<whatsapp message id>` and are not sent back to WhatsApp. Attachments are downloaded with pinned DNS and sent as bytes.
 
 `WA_CHATWOOT_IGNORE_JIDS` is a comma-separated list of exact JIDs, `@domain` suffixes, or `*` wildcards. `status@broadcast`, other `@broadcast` chats, and `@newsletter` chats are always ignored.
 
@@ -3412,7 +3412,7 @@ Details and the Chatwoot inbox checklist are in [docs/chatwoot.md](chatwoot.md).
 
 ### n8n community nodes
 
-`integrations/n8n-nodes-wamcp` is a local package (`private: true`) and is not published to npm. The action node calls the existing `POST /mcp` session (`wa_send_text`, `wa_send_image`, `wa_send_audio`, `wa_send_document`, `wa_get_instance_status`). The trigger is a webhook. Import `integrations/n8n-nodes-wamcp/examples/reply-on-message.json` for a flow that starts on `message.received` and sends a text reply. Set `WA_EVENT_WEBHOOK_URL` to that trigger's production URL.
+`integrations/n8n-nodes-wamcp` is a local package (`private: true`) and is not published to npm. The action node calls the existing `POST /mcp` session (`wa_send_text`, `wa_send_image`, `wa_send_audio`, `wa_send_document`, `wa_get_instance_status`). The trigger is a webhook and checks `x-wa-event-signature` (HMAC-SHA256 of `<x-wa-event-timestamp>.<raw body>`, 300 second window) against its Webhook Secret. Import `integrations/n8n-nodes-wamcp/examples/reply-on-message.json` for a flow that starts on `message.received`, drops groups, status broadcasts, and `isFromMe`, then sends a text reply. Set `WA_EVENT_WEBHOOK_URL` to that trigger's production URL and `WA_EVENT_WEBHOOK_SECRET` to the same secret.
 
 ---
 

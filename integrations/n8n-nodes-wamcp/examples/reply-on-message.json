@@ -1,10 +1,13 @@
 {
-  "name": "Reply to a WhatsApp message",
+  "name": "Reply to a direct WhatsApp message",
   "active": false,
   "settings": { "executionOrder": "v1" },
   "nodes": [
     {
-      "parameters": { "events": "message.received" },
+      "parameters": {
+        "events": "message.received",
+        "webhookSecret": "replace-with-webhook-secret"
+      },
       "id": "8f0c1a2e-6b4d-4e1a-9c3f-1a2b3c4d5e6f",
       "name": "WhatsApp event",
       "type": "n8n-nodes-wamcp.wamcpTrigger",
@@ -14,16 +17,26 @@
     },
     {
       "parameters": {
+        "jsCode": "const items = $input.all();\nreturn items.filter((item) => {\n  const chat = String(item.json.chat || item.json.chatId || '').toLowerCase();\n  const fromMe = item.json.isFromMe === true || item.json.fromMe === true;\n  const group = chat.endsWith('@g.us');\n  const status = chat === 'status@broadcast' || chat.endsWith('@broadcast');\n  return Boolean(chat) && !fromMe && !group && !status;\n});"
+      },
+      "id": "7e6d5c4b-3a29-4810-9f8e-7d6c5b4a3928",
+      "name": "Direct chats only",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [520, 300]
+    },
+    {
+      "parameters": {
         "operation": "sendText",
         "instanceId": "={{$json.instanceId}}",
         "to": "={{$json.chat}}",
-        "text": "=Received: {{$json.text}}"
+        "text": "Thanks for your message."
       },
       "id": "9a1b2c3d-4e5f-6789-abcd-ef0123456789",
       "name": "Send text",
       "type": "n8n-nodes-wamcp.wamcp",
       "typeVersion": 1,
-      "position": [560, 300],
+      "position": [780, 300],
       "credentials": {
         "wamcpApi": { "id": "replace-me", "name": "WA MCP" }
       }
@@ -31,6 +44,9 @@
   ],
   "connections": {
     "WhatsApp event": {
+      "main": [[{ "node": "Direct chats only", "type": "main", "index": 0 }]]
+    },
+    "Direct chats only": {
       "main": [[{ "node": "Send text", "type": "main", "index": 0 }]]
     }
   },
@@ -44,6 +60,7 @@
           "sender": "15551234567@s.whatsapp.net",
           "type": "text",
           "text": "Hello",
+          "isFromMe": false,
           "timestamp": 1700000000
         }
       }

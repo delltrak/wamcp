@@ -32,6 +32,7 @@ export const logger = pino(
       "req.headers['x-chatwoot-webhook-secret']",
       "req.headers['x-wa-chatwoot-secret']",
       "req.headers['x-hub-signature-256']",
+      "req.headers['x-chatwoot-signature']",
     ],
   },
   pino.destination(isStdio ? 2 : 1),

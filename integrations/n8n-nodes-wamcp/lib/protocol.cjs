@@ -1,6 +1,9 @@
 "use strict";
 
+const crypto = require("node:crypto");
+
 const PROTOCOL_VERSION = "2024-11-05";
+const EVENT_SIGNATURE_WINDOW_SECONDS = 300;
 
 function isObject(value) {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
@@ -165,6 +168,40 @@ function extractTriggerItems(body) {
   return [body];
 }
 
+/** HMAC-SHA256 of `${timestamp}.${rawBody}`, matching x-wa-event-signature. */
+function verifyEventSignature(input) {
+  const secret = String(input.secret || "");
+  if (!secret) return false;
+  const timestamp = String(input.timestamp || "").trim();
+  if (!/^\d{1,12}$/.test(timestamp)) return false;
+  const seconds = Number(timestamp);
+  if (!Number.isSafeInteger(seconds)) return false;
+  const now = Number.isFinite(input.nowSeconds) ? input.nowSeconds : Math.floor(Date.now() / 1000);
+  if (Math.abs(now - seconds) > EVENT_SIGNATURE_WINDOW_SECONDS) return false;
+  const match = /^sha256=([0-9a-f]{64})$/i.exec(String(input.signature || "").trim());
+  if (!match) return false;
+  const rawBody = Buffer.isBuffer(input.rawBody)
+    ? input.rawBody
+    : typeof input.rawBody === "string"
+      ? Buffer.from(input.rawBody, "utf8")
+      : null;
+  if (!rawBody) return false;
+  const digest = crypto.createHmac("sha256", secret).update(`${timestamp}.`).update(rawBody).digest();
+  const provided = Buffer.from(match[1], "hex");
+  if (digest.length !== provided.length) return false;
+  return crypto.timingSafeEqual(digest, provided);
+}
+
+/** Direct incoming chats. Groups, status broadcasts, and fromMe events stay out. */
+function isDirectIncomingEvent(item) {
+  if (!isObject(item)) return false;
+  const chat = String(item.chat || item.chatId || "").toLowerCase();
+  const fromMe = item.isFromMe === true || item.fromMe === true;
+  const group = chat.endsWith("@g.us");
+  const status = chat === "status@broadcast" || chat.endsWith("@broadcast");
+  return Boolean(chat) && !fromMe && !group && !status;
+}
+
 /** Keep webhook deliveries whose event is selected on the trigger. */
 function filterTriggerEvents(body, eventsCsv) {
   const allowed = new Set(
@@ -185,6 +222,9 @@ module.exports = {
   buildToolCallRequest,
   callWamcpTool,
   filterTriggerEvents,
+  headerValue,
+  isDirectIncomingEvent,
   parseMcpBody,
   toolResultData,
+  verifyEventSignature,
 };

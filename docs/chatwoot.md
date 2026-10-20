@@ -33,7 +33,7 @@ Database path, Baileys auth, and Docker volumes are unchanged. Chatwoot state is
 ## Chatwoot inbox
 
 1. In Chatwoot, add an inbox and choose **API**.
-2. Set the inbox webhook URL to `https://<your-wamcp-host>/chatwoot/webhook?secret=<WA_CHATWOOT_WEBHOOK_SECRET>`.
+2. Set the inbox webhook URL to `https://<your-wamcp-host>/chatwoot/webhook` with no query string. Put the same value in the Chatwoot webhook secret and in `WA_CHATWOOT_WEBHOOK_SECRET`.
 3. Copy the numeric account id and inbox id into `WA_CHATWOOT_ACCOUNT_ID` and `WA_CHATWOOT_INBOX_ID`.
 4. Copy a user access token into `WA_CHATWOOT_TOKEN`.
 5. Set `WA_CHATWOOT_ENABLED=true` and restart WA MCP.
@@ -42,16 +42,17 @@ The HTTP transport is required for agent replies. On stdio, inbound sync can sti
 
 ## Webhook secret
 
-When the integration is enabled, every `POST /chatwoot/webhook` must present `WA_CHATWOOT_WEBHOOK_SECRET` in one of these ways:
+Chatwoot v4.13+ signs each API-channel delivery. The webhook URL must not contain the secret.
 
-| Method | Example |
+| Header | Value |
 | --- | --- |
-| Header | `X-Chatwoot-Webhook-Secret: <secret>` |
-| Header | `X-Wa-Chatwoot-Secret: <secret>` |
-| Query | `/chatwoot/webhook?secret=<secret>` |
-| HMAC | `X-Hub-Signature-256: sha256=<hex hmac of the raw body>` |
+| `X-Chatwoot-Timestamp` | Unix time, in seconds |
+| `X-Chatwoot-Signature` | `sha256=` plus HMAC-SHA256 of `<timestamp>.<raw body>` using `WA_CHATWOOT_WEBHOOK_SECRET` |
+| `X-Chatwoot-Delivery` | Delivery id. A repeat within the process is ignored |
 
-A missing or wrong secret returns `401` and does not send a WhatsApp message. The MCP API key is not used for this route.
+The timestamp must be within 300 seconds of the server clock. The comparison uses `timingSafeEqual`. A missing or wrong signature returns `401` and does not send a WhatsApp message.
+
+`?secret=` still authenticates when the signature headers are absent. Leave it unused: the value is stored in proxy and access logs. `X-Chatwoot-Webhook-Secret` and `X-Wa-Chatwoot-Secret` are the same kind of legacy header, for a caller that is not Chatwoot. `X-Hub-Signature-256` is not accepted. The MCP API key is not used for this route.
 
 ## What is synced
 
@@ -81,17 +82,16 @@ Chatwoot `message_created` events are sent only when all of the following are tr
 - the note is not private and not marked deleted
 - `source_id` does not start with `WAID:`
 - the sender is not a contact
-- the conversation inbox matches `WA_CHATWOOT_INBOX_ID` when Chatwoot includes it
+- `conversation.inbox_id` is present and equal to `WA_CHATWOOT_INBOX_ID`
 - the destination chat is not filtered
 
-Text is queued with `wa_send_text` semantics through the existing per-instance BullMQ queue. Public `https` image, video, audio, and file attachments are queued as media. Private or non-HTTPS attachment URLs are not fetched.
+Text is queued with `wa_send_text` semantics through the existing per-instance BullMQ queue. Image, video, audio, and file attachments are downloaded by WA MCP and queued as bytes. The download resolves DNS, pins that address, refuses redirects, and always blocks link-local and metadata addresses. A URL that fails those checks is dropped and is not passed to WhatsApp. The Chatwoot API token is sent only when the attachment URL is on the configured Chatwoot origin.
 
-The reply target is resolved in this order:
+The reply target is the contact-inbox `source_id` written by this bridge. Conversation `additional_attributes` are not used, because an agent can edit them. The instance is then:
 
-1. `additional_attributes.wamcp_instance_id` and `wamcp_chat_id` on the conversation
-2. the contact-inbox `source_id`
-3. `WA_CHATWOOT_INSTANCE_ID`
-4. the only configured instance, when exactly one exists
+1. the instance encoded in that source id
+2. `WA_CHATWOOT_INSTANCE_ID`
+3. the only configured instance, when exactly one exists
 
 Without a pinned instance, the contact source id is `inst_<id>|<chat jid>`, so two instances can share one inbox and replies return to the instance that received the chat. With `WA_CHATWOOT_INSTANCE_ID` set, the source id is the bare chat JID and other instances are ignored.
 

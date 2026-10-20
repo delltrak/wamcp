@@ -15,6 +15,7 @@ import type {
   MessageContent,
   NormalizedMessageEvent,
 } from "../types/channel.types.js";
+import { MEDIA_LIMITS } from "../constants.js";
 import { isValidInstanceId, validateMediaUrl } from "../utils/validation.js";
 import { createChildLogger } from "../utils/logger.js";
 import {
@@ -26,12 +27,14 @@ import {
 import {
   ChatwootClient,
   createChatwootTransport,
+  fetchPinnedResource,
   type ChatwootTransport,
 } from "./chatwoot-client.js";
 
 const logger = createChildLogger({ service: "chatwoot" });
 const MAX_WEBHOOK_BYTES = 1_048_576;
 const MAX_SEEN = 2_000;
+export const CHATWOOT_SIGNATURE_WINDOW_SECONDS = 300;
 
 export interface ChatwootRuntime {
   enqueueMessage(
@@ -44,12 +47,31 @@ export interface ChatwootRuntime {
   listInstanceIds(): string[];
 }
 
+export interface ChatwootDownloadedAttachment {
+  data: Buffer;
+  contentType: string | null;
+}
+
+export type ChatwootAttachmentFetcher = (
+  url: string,
+  maxBytes: number,
+) => Promise<ChatwootDownloadedAttachment>;
+
 export interface ChatwootWebhookInput {
   rawBody: Buffer;
   headerSecret?: string;
+  /** Legacy. The value is visible in proxy logs. Prefer the Chatwoot signature headers. */
   querySecret?: string;
   signature?: string;
+  timestamp?: string;
+  deliveryId?: string;
+  nowSeconds?: number;
 }
+
+export type ChatwootAuthResult =
+  | { ok: true; method: "signature"; deliveryId: string }
+  | { ok: true; method: "legacy" }
+  | { ok: false };
 
 export interface ChatwootWebhookResult {
   status: number;
@@ -71,8 +93,6 @@ interface ParsedChatwootWebhook {
   senderType: string;
   inboxId: string | null;
   sourceChatId: string;
-  hintedInstanceId?: string;
-  hintedChatId?: string;
   attachments: ChatwootAttachment[];
 }
 
@@ -94,21 +114,66 @@ function sameSecret(expected: string, candidate: string | undefined): boolean {
   return timingSafeEqual(left, right);
 }
 
-/** Header, query secret, or HMAC of the raw body. */
-export function chatwootWebhookAuthorized(input: {
+function digestMatches(expected: Buffer, signature: string | undefined): boolean {
+  const match = /^sha256=([0-9a-f]{64})$/i.exec(signature?.trim() ?? "");
+  const hex = match?.[1];
+  if (!hex) return false;
+  const provided = Buffer.from(hex, "hex");
+  if (provided.length !== expected.length) return false;
+  return timingSafeEqual(expected, provided);
+}
+
+function validDeliveryId(value: string | undefined): string | null {
+  const id = value?.trim() ?? "";
+  if (!id || id.length > 200) return null;
+  for (const char of id) {
+    const code = char.charCodeAt(0);
+    if (code < 32 || code === 127) return null;
+  }
+  return id;
+}
+
+function signatureTimestamp(value: string | undefined, nowSeconds: number): string | null {
+  const timestamp = value?.trim() ?? "";
+  if (!/^\d{1,12}$/.test(timestamp)) return null;
+  const seconds = Number(timestamp);
+  if (!Number.isSafeInteger(seconds)) return null;
+  if (Math.abs(nowSeconds - seconds) > CHATWOOT_SIGNATURE_WINDOW_SECONDS) return null;
+  return timestamp;
+}
+
+/**
+ * Chatwoot v4.13+ sends X-Chatwoot-Signature: sha256=HMAC(secret, "<timestamp>.<raw body>").
+ * A header secret or ?secret= is accepted only when those signature headers are absent.
+ */
+export function authorizeChatwootWebhook(input: {
   secret: string;
   rawBody: Buffer;
   headerSecret?: string;
   querySecret?: string;
   signature?: string;
-}): boolean {
-  if (sameSecret(input.secret, input.headerSecret) || sameSecret(input.secret, input.querySecret)) {
-    return true;
+  timestamp?: string;
+  deliveryId?: string;
+  nowSeconds?: number;
+}): ChatwootAuthResult {
+  const nowSeconds = input.nowSeconds ?? Math.floor(Date.now() / 1000);
+  const timestamp = signatureTimestamp(input.timestamp, nowSeconds);
+  const deliveryId = validDeliveryId(input.deliveryId);
+  const signatureAttempt = Boolean(
+    input.signature?.trim() || input.timestamp?.trim() || input.deliveryId?.trim(),
+  );
+  if (signatureAttempt) {
+    if (!timestamp || !deliveryId || !input.signature?.trim()) return { ok: false };
+    const digest = createHmac("sha256", input.secret)
+      .update(Buffer.concat([Buffer.from(`${timestamp}.`, "utf8"), input.rawBody]))
+      .digest();
+    if (!digestMatches(digest, input.signature)) return { ok: false };
+    return { ok: true, method: "signature", deliveryId };
   }
-  const signature = input.signature?.trim();
-  if (!signature) return false;
-  const digest = createHmac("sha256", input.secret).update(input.rawBody).digest("hex");
-  return sameSecret(`sha256=${digest}`, signature);
+  if (sameSecret(input.secret, input.headerSecret) || sameSecret(input.secret, input.querySecret)) {
+    return { ok: true, method: "legacy" };
+  }
+  return { ok: false };
 }
 
 function messageType(value: unknown): ParsedChatwootWebhook["messageType"] {
@@ -134,15 +199,8 @@ export function parseChatwootWebhook(body: unknown): ChatwootWebhookDecision {
   }
 
   const conversation = isRecord(body.conversation) ? body.conversation : {};
-  const attributes = isRecord(conversation.additional_attributes)
-    ? conversation.additional_attributes
-    : {};
   const contactInbox = isRecord(conversation.contact_inbox) ? conversation.contact_inbox : {};
-  const meta = isRecord(conversation.meta) ? conversation.meta : {};
-  const metaSender = isRecord(meta.sender) ? meta.sender : {};
   const sender = isRecord(body.sender) ? body.sender : {};
-  const hintedInstanceId = stringOf(attributes.wamcp_instance_id);
-  const hintedChatId = stringOf(attributes.wamcp_chat_id);
   const inboxRaw = conversation.inbox_id;
   const attachments = Array.isArray(body.attachments)
     ? body.attachments.filter(isRecord).flatMap((item) => {
@@ -164,10 +222,7 @@ export function parseChatwootWebhook(body: unknown): ChatwootWebhookDecision {
       senderType: stringOf(sender.type).toLowerCase(),
       inboxId:
         typeof inboxRaw === "number" || typeof inboxRaw === "string" ? String(inboxRaw) : null,
-      sourceChatId:
-        stringOf(contactInbox.source_id) || stringOf(metaSender.identifier) || hintedChatId,
-      ...(hintedInstanceId ? { hintedInstanceId } : {}),
-      ...(hintedChatId ? { hintedChatId } : {}),
+      sourceChatId: stringOf(contactInbox.source_id),
       attachments,
     },
   };
@@ -244,34 +299,73 @@ function fileNameFromUrl(url: string): string {
   }
 }
 
-function attachmentContent(attachment: ChatwootAttachment, baseUrl: string): MessageContent | null {
-  const url = absoluteAttachmentUrl(attachment.dataUrl, baseUrl);
-  if (!url || validateMediaUrl(url) !== null) return null;
-  const kind = attachment.fileType.toLowerCase();
-  if (kind === "image") return { type: "image", image: url };
-  if (kind === "video") return { type: "video", video: url };
-  if (kind === "audio") return { type: "audio", audio: url };
-  if (kind === "file" || kind === "document") {
-    return {
-      type: "document",
-      document: url,
-      fileName: fileNameFromUrl(url),
-      mimeType: "application/octet-stream",
-    };
+function attachmentMaxBytes(fileType: string): number | null {
+  switch (fileType.toLowerCase()) {
+    case "image":
+      return MEDIA_LIMITS.image;
+    case "video":
+      return MEDIA_LIMITS.video;
+    case "audio":
+      return MEDIA_LIMITS.audio;
+    case "file":
+    case "document":
+      return MEDIA_LIMITS.document;
+    default:
+      return null;
   }
-  return null;
 }
 
-/** WhatsApp messages queued for one agent reply. Private attachment URLs are dropped. */
-export function chatwootReplyContents(
+function mimeTypeOf(value: string | null): string {
+  const mime = value?.split(";")[0]?.trim().toLowerCase() ?? "";
+  return /^[\w!#$&^_.+-]+\/[\w!#$&^_.+-]+$/.test(mime) ? mime : "application/octet-stream";
+}
+
+async function downloadedAttachment(
+  attachment: ChatwootAttachment,
+  baseUrl: string,
+  fetchAttachment: ChatwootAttachmentFetcher,
+): Promise<MessageContent | null> {
+  const maxBytes = attachmentMaxBytes(attachment.fileType);
+  const url = absoluteAttachmentUrl(attachment.dataUrl, baseUrl);
+  if (maxBytes === null || !url) return null;
+  let downloaded: ChatwootDownloadedAttachment;
+  try {
+    downloaded = await fetchAttachment(url, maxBytes);
+  } catch (error) {
+    logger.warn(
+      { err: error, fileType: attachment.fileType },
+      "Chatwoot attachment was not downloaded",
+    );
+    return null;
+  }
+  if (downloaded.data.length === 0 || downloaded.data.length > maxBytes) return null;
+  const encoded = downloaded.data.toString("base64");
+  const kind = attachment.fileType.toLowerCase();
+  if (kind === "image") return { type: "image", image: encoded };
+  if (kind === "video") return { type: "video", video: encoded };
+  if (kind === "audio") {
+    return { type: "audio", audio: encoded, mimeType: mimeTypeOf(downloaded.contentType) };
+  }
+  return {
+    type: "document",
+    document: encoded,
+    fileName: fileNameFromUrl(url),
+    mimeType: mimeTypeOf(downloaded.contentType),
+  };
+}
+
+/** WhatsApp messages queued for one agent reply. Attachments are bytes, never remote URLs. */
+export async function buildChatwootReplyContents(
   parsed: ParsedChatwootWebhook,
   baseUrl: string,
-): MessageContent[] {
+  fetchAttachment: ChatwootAttachmentFetcher,
+): Promise<MessageContent[]> {
   const text = chatwootMarkdownToWhatsApp(parsed.content).trim().slice(0, 65_536);
-  const attachments = parsed.attachments.flatMap((attachment) => {
-    const content = attachmentContent(attachment, baseUrl);
-    return content ? [content] : [];
-  });
+  const attachments: MessageContent[] = [];
+  for (const attachment of parsed.attachments) {
+    const content = await downloadedAttachment(attachment, baseUrl, fetchAttachment);
+    if (content) attachments.push(content);
+  }
   if (attachments.length === 0) return text ? [{ type: "text", text }] : [];
   const first = attachments[0];
   if (first && text && (first.type === "image" || first.type === "video")) {
@@ -325,17 +419,27 @@ export class ChatwootService {
   private readonly seenWaSet = new Set<string>();
   private readonly seenChatwoot: number[] = [];
   private readonly seenChatwootSet = new Set<number>();
+  private readonly seenDelivery: string[] = [];
+  private readonly seenDeliverySet = new Set<string>();
   private readonly client: ChatwootClient | null;
+  private readonly fetchAttachment: ChatwootAttachmentFetcher;
 
   constructor(
     private readonly config: ChatwootConfig,
     private readonly runtime: ChatwootRuntime,
     transport?: ChatwootTransport,
+    attachments?: ChatwootAttachmentFetcher,
   ) {
     if (!config.enabled) {
       this.client = null;
+      this.fetchAttachment = async () => {
+        throw new Error("Chatwoot is disabled");
+      };
       return;
     }
+    const enabled = config;
+    this.fetchAttachment =
+      attachments ?? ((url, maxBytes) => fetchPinnedResource(new URL(url), enabled, maxBytes));
     this.client = new ChatwootClient(config, transport ?? createChatwootTransport(config));
     logger.info(
       {
@@ -403,29 +507,50 @@ export class ChatwootService {
     if (!this.config.enabled || !this.client) {
       return { status: 404, body: { error: "Not found" } };
     }
-    if (
-      !chatwootWebhookAuthorized({
-        secret: this.config.webhookSecret,
-        rawBody: input.rawBody,
-        ...(input.headerSecret === undefined ? {} : { headerSecret: input.headerSecret }),
-        ...(input.querySecret === undefined ? {} : { querySecret: input.querySecret }),
-        ...(input.signature === undefined ? {} : { signature: input.signature }),
-      })
-    ) {
-      return { status: 401, body: { error: "Unauthorized" } };
+    const auth = authorizeChatwootWebhook({
+      secret: this.config.webhookSecret,
+      rawBody: input.rawBody,
+      ...(input.headerSecret === undefined ? {} : { headerSecret: input.headerSecret }),
+      ...(input.querySecret === undefined ? {} : { querySecret: input.querySecret }),
+      ...(input.signature === undefined ? {} : { signature: input.signature }),
+      ...(input.timestamp === undefined ? {} : { timestamp: input.timestamp }),
+      ...(input.deliveryId === undefined ? {} : { deliveryId: input.deliveryId }),
+      ...(input.nowSeconds === undefined ? {} : { nowSeconds: input.nowSeconds }),
+    });
+    if (!auth.ok) return { status: 401, body: { error: "Unauthorized" } };
+    if (auth.method === "signature" && this.seenDeliverySet.has(auth.deliveryId)) {
+      return { status: 200, body: { status: "ignored", reason: "duplicate" } };
+    }
+    if (auth.method === "signature") {
+      this.remember(this.seenDeliverySet, this.seenDelivery, auth.deliveryId);
     }
 
-    let parsedJson: unknown;
     try {
-      parsedJson = JSON.parse(input.rawBody.toString("utf8")) as unknown;
-    } catch {
-      return { status: 400, body: { error: "Invalid JSON" } };
+      let parsedJson: unknown;
+      try {
+        parsedJson = JSON.parse(input.rawBody.toString("utf8")) as unknown;
+      } catch {
+        if (auth.method === "signature") {
+          this.forget(this.seenDeliverySet, this.seenDelivery, auth.deliveryId);
+        }
+        return { status: 400, body: { error: "Invalid JSON" } };
+      }
+      const decision = parseChatwootWebhook(parsedJson);
+      if (decision.action === "ignore") {
+        return { status: 200, body: { status: "ignored", reason: decision.reason } };
+      }
+      // A non-2xx result drops the delivery id so Chatwoot can retry.
+      const result = await this.deliverReply(this.config, decision.parsed);
+      if (auth.method === "signature" && (result.status < 200 || result.status >= 300)) {
+        this.forget(this.seenDeliverySet, this.seenDelivery, auth.deliveryId);
+      }
+      return result;
+    } catch (error) {
+      if (auth.method === "signature") {
+        this.forget(this.seenDeliverySet, this.seenDelivery, auth.deliveryId);
+      }
+      throw error;
     }
-    const decision = parseChatwootWebhook(parsedJson);
-    if (decision.action === "ignore") {
-      return { status: 200, body: { status: "ignored", reason: decision.reason } };
-    }
-    return this.deliverReply(this.config, decision.parsed);
   }
 
   private async deliverReply(
@@ -438,7 +563,7 @@ export class ChatwootService {
     if (parsed.messageType !== "outgoing" || parsed.senderType === "contact") {
       return { status: 200, body: { status: "ignored", reason: "not_agent_reply" } };
     }
-    if (parsed.inboxId && parsed.inboxId !== config.inboxId) {
+    if (parsed.inboxId !== config.inboxId) {
       return { status: 200, body: { status: "ignored", reason: "inbox" } };
     }
     if (this.seenChatwootSet.has(parsed.id)) {
@@ -452,7 +577,7 @@ export class ChatwootService {
     if (isChatwootJidIgnored(destination.chatId, config.ignoreJids)) {
       return { status: 200, body: { status: "ignored", reason: "jid_filter" } };
     }
-    const contents = chatwootReplyContents(parsed, config.url);
+    const contents = await buildChatwootReplyContents(parsed, config.url, this.fetchAttachment);
     if (contents.length === 0) {
       return { status: 200, body: { status: "ignored", reason: "empty" } };
     }
@@ -490,14 +615,9 @@ export class ChatwootService {
     parsed: ParsedChatwootWebhook,
   ): { instanceId: string; chatId: string } | null {
     const fromSource = parseChatwootSourceId(parsed.sourceChatId, config.instanceId);
-    const chatId = parsed.hintedChatId || fromSource.chatId;
+    const chatId = fromSource.chatId;
     if (!chatId) return null;
-    const instanceId = [
-      parsed.hintedInstanceId,
-      fromSource.instanceId,
-      config.instanceId,
-      this.onlyInstanceId(),
-    ].find(
+    const instanceId = [fromSource.instanceId, config.instanceId, this.onlyInstanceId()].find(
       (candidate): candidate is string => candidate !== undefined && isValidInstanceId(candidate),
     );
     if (!instanceId) return null;
@@ -564,14 +684,20 @@ export async function handleChatwootHttpRequest(
   const url = new URL(req.url ?? "/", "http://localhost");
   const headerSecret =
     headerValue(req, "x-chatwoot-webhook-secret") ?? headerValue(req, "x-wa-chatwoot-secret");
+  // ?secret= remains only so older inboxes keep working. It shows up in proxy logs.
+  const querySecret = url.searchParams.get("secret");
   const result = await service.handleWebhook({
     rawBody,
     ...(headerSecret === undefined ? {} : { headerSecret }),
-    ...(url.searchParams.get("secret")
-      ? { querySecret: url.searchParams.get("secret") ?? undefined }
+    ...(querySecret ? { querySecret } : {}),
+    ...(headerValue(req, "x-chatwoot-signature")
+      ? { signature: headerValue(req, "x-chatwoot-signature") }
       : {}),
-    ...(headerValue(req, "x-hub-signature-256")
-      ? { signature: headerValue(req, "x-hub-signature-256") }
+    ...(headerValue(req, "x-chatwoot-timestamp")
+      ? { timestamp: headerValue(req, "x-chatwoot-timestamp") }
+      : {}),
+    ...(headerValue(req, "x-chatwoot-delivery")
+      ? { deliveryId: headerValue(req, "x-chatwoot-delivery") }
       : {}),
   });
   res.writeHead(result.status, { "Content-Type": "application/json" });

@@ -661,7 +661,7 @@ Chatwoot and n8n are optional and do not change `WA_EVENT_WEBHOOK_*` delivery.
 
 `WA_CHATWOOT_ENABLED=false` by default. While it is false, WhatsApp messages are not copied to Chatwoot and `POST /chatwoot/webhook` stays a 404, so agent replies are not sent.
 
-When enabled, incoming WhatsApp messages create or reuse a contact and conversation in a Chatwoot API inbox. An agent reply on that inbox is queued to WhatsApp after the webhook secret matches. `WA_CHATWOOT_IGNORE_JIDS` drops selected chats in both directions. Setup, the secret header, and the multi-instance source id are documented in [docs/chatwoot.md](docs/chatwoot.md).
+When enabled, incoming WhatsApp messages create or reuse a contact and conversation in a Chatwoot API inbox. An agent reply on that inbox is queued to WhatsApp after the Chatwoot signature matches and `inbox_id` equals `WA_CHATWOOT_INBOX_ID`. `WA_CHATWOOT_IGNORE_JIDS` drops selected chats in both directions. Setup, the signed webhook, and the multi-instance source id are documented in [docs/chatwoot.md](docs/chatwoot.md).
 
 ### n8n
 
