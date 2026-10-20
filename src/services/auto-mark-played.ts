@@ -48,7 +48,7 @@ export function isAutoMarkPlayedEnabled(): boolean {
 export async function markTranscribedAudioPlayed(
   getAdapter: () => Pick<ChannelAdapter, "markPlayedMessage">,
   messageId: string,
-  options: { isFromMe?: boolean } = {},
+  options: { isFromMe?: boolean; chatId?: string } = {},
 ): Promise<void> {
   if (options.isFromMe) return;
 
@@ -67,7 +67,7 @@ export async function markTranscribedAudioPlayed(
   const id = messageId.trim();
   if (!id) return;
   try {
-    await getAdapter().markPlayedMessage(id);
+    await getAdapter().markPlayedMessage(id, options.chatId);
   } catch (error) {
     logger.warn(
       { err: error instanceof Error ? error.message : String(error), messageId: id },

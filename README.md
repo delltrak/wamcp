@@ -877,10 +877,13 @@ directory.
 read receipts and produce a warning. Automatic receipts never delay message delivery or tool
 responses; receipt failures are logged. Played receipts are separate. `wa_mark_played` is always
 available and sends a played receipt for stored incoming audio, voice notes (PTT), and video on
-Baileys, including in groups when `participant` or the stored sender is present. Nothing is marked
+Baileys, including in groups when `participant` or the stored sender is present. Receipts are sent
+only to `@s.whatsapp.net`, `@lid`, and `@g.us` chats, plus optional `@hosted` and `@hosted.lid`
+chats. Status broadcasts and newsletters are rejected. Nothing is marked
 played automatically unless `WA_AUTO_MARK_PLAYED=true`. That flag defaults to `false`. When it is
-`true`, a successful transcription of a stored incoming audio message also sends a played receipt.
-The transcription result is kept if that receipt fails. `WA_AUTO_MARK_PLAYED` must be `true` or
+`true`, a successful transcription of a stored incoming audio message also sends a played receipt
+for that chat, without delaying the transcription text. The transcription result is kept if that
+receipt fails. `WA_AUTO_MARK_PLAYED` must be `true` or
 `false`; any other value stops startup with an error that names the variable.
 
 `WA_PRESENCE_MODE` accepts `on_activity` or `always`. In `on_activity`, Baileys sends one global

@@ -59,9 +59,10 @@ export function transcribeIncomingAudioIfConfigured(
       );
     const result = await state.transcriptionService.transcribe(media.data, media.mimeType);
     if (!messageEvent.message.isFromMe && isAutoMarkPlayedEnabled()) {
-      await markTranscribedAudioPlayed(
+      void markTranscribedAudioPlayed(
         () => instanceManager.getAdapter(instanceId),
         messageEvent.message.id,
+        { chatId: messageEvent.chatId },
       );
     }
     return result.text;

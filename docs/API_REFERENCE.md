@@ -1017,7 +1017,7 @@ Mark specific messages as read in a chat.
 
 #### `wa_mark_played`
 
-Send WhatsApp's played receipt for stored incoming audio, voice notes (PTT), or video. The tool is always available. Each ID must already be stored for the instance and chat, must be incoming playable media, and group messages need a sender JID from storage or `participant`. Set `WA_AUTO_MARK_PLAYED=true` to also send this receipt after a stored incoming audio message is transcribed. That flag defaults to `false`.
+Send WhatsApp's played receipt for stored incoming audio, voice notes (PTT), or video. The tool is always available. Each ID must already be stored for the instance and chat, must be incoming playable media, and group messages need a sender JID from storage or `participant`. `chatJid` must be `@s.whatsapp.net`, `@lid`, or `@g.us` (`@hosted` and `@hosted.lid` are also accepted). Status broadcasts and newsletters are rejected. Set `WA_AUTO_MARK_PLAYED=true` to also send this receipt after a stored incoming audio message is transcribed. That flag defaults to `false`, and the receipt does not delay the transcription text.
 
 | Parameter     | Type     | Required | Description                                                      |
 | ------------- | -------- | -------- | ---------------------------------------------------------------- |

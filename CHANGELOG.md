@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- Added `wa_mark_played` to send a played receipt for stored incoming audio, voice notes, and video on Baileys. `WA_AUTO_MARK_PLAYED` defaults to false and, when enabled, sends that receipt after a stored audio message is transcribed.
+- Added `wa_mark_played` to send a played receipt for stored incoming audio, voice notes, and video on Baileys. Receipts are limited to user, hosted, and group chats. `WA_AUTO_MARK_PLAYED` defaults to false and, when enabled, sends that receipt after a stored audio message is transcribed without delaying the transcription.
 - Added Baileys instance lifecycle webhooks for connection, disconnect, pairing-code, and QR events,
   plus the read-only `wa_get_instance_status` tool. Pairing and QR challenge data is omitted from
   webhook payloads and status output.

@@ -125,13 +125,21 @@ describe("wa_transcribe_audio", () => {
     expect(markPlayedMessage).not.toHaveBeenCalled();
 
     process.env.WA_AUTO_MARK_PLAYED = "true";
-    markPlayedMessage.mockRejectedValueOnce(new Error("socket down"));
+    let releaseReceipt: () => void = () => undefined;
+    markPlayedMessage.mockImplementationOnce(
+      () =>
+        new Promise<void>((resolve) => {
+          releaseReceipt = resolve;
+        }),
+    );
     const enabled = (await handler!({
       instanceId: "inst_audio",
       messageId: "voice-1",
     })) as { isError?: boolean; content: Array<{ text: string }> };
     expect(enabled.isError).toBeUndefined();
     expect(enabled.content[0]?.text).toContain("voice text");
-    expect(markPlayedMessage).toHaveBeenCalledWith("voice-1");
+    expect(markPlayedMessage).toHaveBeenCalledWith("voice-1", undefined);
+    releaseReceipt();
+    await Promise.resolve();
   });
 });

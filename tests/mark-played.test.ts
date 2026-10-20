@@ -245,6 +245,95 @@ describe("BaileysAdapter.markPlayed", () => {
     ]);
   });
 
+  it("rejects status broadcasts and newsletters without sending a receipt", async () => {
+    const statusKey: WAMessageKey = {
+      remoteJid: "status@broadcast",
+      id: "status-voice",
+      fromMe: false,
+    };
+    insertAudio({
+      id: "status-voice",
+      chatId: "status@broadcast",
+      rawData: JSON.stringify({
+        key: statusKey,
+        message: { audioMessage: { ptt: true, mimetype: "audio/ogg" } },
+        messageTimestamp: 1_700_000_000,
+      }),
+    });
+    insertAudio({ id: "newsletter-voice", chatId: "12345@newsletter" });
+    insertAudio({ id: "list-voice", chatId: "12345@broadcast" });
+    const { adapter, sendNode, sendReceipt } = connectedAdapter();
+
+    await expect(adapter.markPlayed("status@broadcast", ["status-voice"])).rejects.toThrow(
+      "Played receipts are not sent to status broadcasts or newsletters (status@broadcast)",
+    );
+    await expect(adapter.markPlayed("12345@newsletter", ["newsletter-voice"])).rejects.toThrow(
+      "Played receipts are not sent to status broadcasts or newsletters (12345@newsletter)",
+    );
+    await expect(adapter.markPlayed("12345@broadcast", ["list-voice"])).rejects.toThrow(
+      /status broadcasts or newsletters/,
+    );
+    await expect(adapter.markPlayedMessage("status-voice", "status@broadcast")).rejects.toThrow(
+      /status broadcasts or newsletters/,
+    );
+    expect(sendNode).not.toHaveBeenCalled();
+    expect(sendReceipt).not.toHaveBeenCalled();
+  });
+
+  it("rejects a playable message whose stored address is a status broadcast", async () => {
+    const statusKey: WAMessageKey = {
+      remoteJid: "status@broadcast",
+      id: "wrapped-status",
+      fromMe: false,
+    };
+    insertAudio({
+      id: "wrapped-status",
+      chatId: PN_JID,
+      rawData: JSON.stringify({
+        key: statusKey,
+        message: { audioMessage: { ptt: true } },
+        messageTimestamp: 1_700_000_000,
+      }),
+    });
+    const { adapter, sendNode } = connectedAdapter();
+
+    await expect(adapter.markPlayed(PN_JID, ["wrapped-status"])).rejects.toThrow(
+      "Played receipts are not sent to status broadcasts or newsletters (status@broadcast)",
+    );
+    expect(sendNode).not.toHaveBeenCalled();
+  });
+
+  it("sends a played receipt to an optional hosted chat", async () => {
+    const hosted = "123456789@hosted.lid";
+    insertAudio({ id: "hosted-voice", chatId: hosted });
+    const { adapter, sendNode } = connectedAdapter();
+
+    await adapter.markPlayed(hosted, ["hosted-voice"]);
+
+    expect(sendNode.mock.calls[0]?.[0]).toMatchObject({
+      attrs: { id: "hosted-voice", to: hosted, type: "played" },
+    });
+  });
+
+  it("marks a stored incoming message only when the chat matches", async () => {
+    insertAudio({ id: "voice-stored", chatId: PN_JID });
+    insertAudio({ id: "outgoing-only", chatId: PN_JID, isFromMe: 1 });
+    const { adapter, sendNode } = connectedAdapter();
+
+    await expect(adapter.markPlayedMessage("voice-stored", LID_JID)).rejects.toThrow(
+      "Message voice-stored is not stored in this chat",
+    );
+    await expect(adapter.markPlayedMessage("outgoing-only", PN_JID)).rejects.toThrow(
+      "Message outgoing-only is not stored in this chat",
+    );
+    expect(sendNode).not.toHaveBeenCalled();
+
+    await adapter.markPlayedMessage("voice-stored", PN_JID);
+    expect(sendNode.mock.calls[0]?.[0]).toMatchObject({
+      attrs: { id: "voice-stored", to: PN_JID, type: "played" },
+    });
+  });
+
   it("marks a stored message from its saved chat without a separate chat argument", async () => {
     insertAudio({ id: "voice-stored", chatId: PN_JID });
     const { adapter, sendNode } = connectedAdapter();

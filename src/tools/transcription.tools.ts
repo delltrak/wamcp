@@ -106,7 +106,7 @@ export function registerTranscriptionTools(
         const messageId = params.messageId;
         const instanceId = params.instanceId;
         if (messageId && instanceId && isAutoMarkPlayedEnabled()) {
-          await markTranscribedAudioPlayed(() => instanceManager.getAdapter(instanceId), messageId);
+          void markTranscribedAudioPlayed(() => instanceManager.getAdapter(instanceId), messageId);
         }
         log.info({ duration: Date.now() - start, bytes: audio.length }, "Audio transcribed");
         return toolSuccess({ text: result.text });

@@ -241,6 +241,26 @@ interface StoredAppStateMessage {
   messageTimestamp: number;
 }
 
+const PLAYED_RECEIPT_SERVERS = new Set(["s.whatsapp.net", "lid", "g.us", "hosted", "hosted.lid"]);
+
+function chatServer(jid: string): string {
+  const normalized = jid.trim().toLowerCase();
+  const at = normalized.lastIndexOf("@");
+  return at === -1 ? "" : normalized.slice(at + 1);
+}
+
+/** Played receipts go to user, hosted, and group chats. Status and newsletters are refused. */
+function assertPlayedReceiptChat(jid: string): void {
+  const normalized = jid.trim().toLowerCase();
+  const server = chatServer(normalized);
+  if (normalized === "status@broadcast" || server === "broadcast" || server === "newsletter") {
+    throw new Error(`Played receipts are not sent to status broadcasts or newsletters (${jid})`);
+  }
+  if (!PLAYED_RECEIPT_SERVERS.has(server)) {
+    throw new Error(`Played receipts only support @s.whatsapp.net, @lid, and @g.us chats (${jid})`);
+  }
+}
+
 function isPlayableMedia(type: string, rawMessage: WAMessage | undefined): boolean {
   if (type === "audio" || type === "video") return true;
   const content = unwrapMessageContent(rawMessage?.message);
@@ -2987,6 +3007,7 @@ export class BaileysAdapter implements ChannelAdapter {
     }
     const sock = this.getSock();
     const jid = this.normalizeJid(chatId);
+    assertPlayedReceiptChat(jid);
     const chatAliases = await this.getChatJidAliases(jid);
     const batches = new Map<string, { jid: string; participant?: string; messageIds: string[] }>();
 
@@ -3020,6 +3041,7 @@ export class BaileysAdapter implements ChannelAdapter {
       }
 
       const remoteJid = rawMessage?.key.remoteJid ?? storedMessage.chatId;
+      assertPlayedReceiptChat(remoteJid);
       let receiptParticipant: string | undefined;
       if (remoteJid.endsWith("@g.us")) {
         const storedSender =
@@ -3048,16 +3070,32 @@ export class BaileysAdapter implements ChannelAdapter {
     }
   }
 
-  /** Mark one stored message played, using the chat and sender saved with it. */
-  async markPlayedMessage(messageId: string): Promise<void> {
-    const row = db
+  /**
+   * Mark one stored incoming message played.
+   * chatId limits the lookup to that chat and its PN/LID aliases.
+   */
+  async markPlayedMessage(messageId: string, chatId?: string): Promise<void> {
+    const requested = chatId ? this.normalizeJid(chatId) : undefined;
+    if (requested) assertPlayedReceiptChat(requested);
+    const aliases = requested ? await this.getChatJidAliases(requested) : undefined;
+    const rows = db
       .select({
         chatId: messagesTable.chatId,
         senderId: messagesTable.senderId,
       })
       .from(messagesTable)
-      .where(and(eq(messagesTable.instanceId, this.instanceId), eq(messagesTable.id, messageId)))
-      .get();
+      .where(
+        and(
+          eq(messagesTable.instanceId, this.instanceId),
+          eq(messagesTable.id, messageId),
+          eq(messagesTable.isFromMe, 0),
+          aliases ? inArray(messagesTable.chatId, aliases) : undefined,
+        ),
+      )
+      .all();
+    const row = requested
+      ? (rows.find((candidate) => candidate.chatId === requested) ?? rows[0])
+      : rows[0];
     if (!row) throw new Error(`Message ${messageId} is not stored in this chat`);
     const participant =
       row.chatId.endsWith("@g.us") && row.senderId && row.senderId !== "me"
