@@ -143,7 +143,7 @@ describe("async Basic Auth verification", () => {
 });
 
 describe("sign-in backoff", () => {
-  it("backs off per address and per user, and a success clears that user only", () => {
+  it("backs off per address and per user, and a success undoes only that attempt", () => {
     let now = 1_000_000;
     const limiter = new AuthAttemptLimiter({
       freeFailures: 1,
@@ -152,12 +152,14 @@ describe("sign-in backoff", () => {
     });
     expect(limiter.beginAttempt("203.0.113.5", "alice")).toBe(0);
     expect(limiter.beginAttempt("203.0.113.5", "alice")).toBe(1000);
-    expect(limiter.retryAfterMs("203.0.113.9", "alice")).toBe(1000);
+    expect(limiter.retryAfterMs("203.0.113.9", "alice")).toBe(0);
     expect(limiter.retryAfterMs("203.0.113.5", "bob")).toBe(1000);
-    now += 1000;
     limiter.recordSuccess("203.0.113.5", "alice");
+    expect(limiter.retryAfterMs("203.0.113.5", "bob")).toBe(1000);
+    expect(limiter.retryAfterMs("203.0.113.5", "alice")).toBe(0);
+    now += 1000;
     expect(limiter.retryAfterMs("198.51.100.4", "alice")).toBe(0);
-    expect(limiter.beginAttempt("203.0.113.5", "bob")).toBe(2000);
+    expect(limiter.beginAttempt("203.0.113.5", "bob")).toBe(1000);
     expect(limiter.retryAfterMs("198.51.100.8", "bob")).toBe(0);
     const forwarded = {
       socket: { remoteAddress: "203.0.113.10" },
@@ -212,7 +214,7 @@ describe("sign-in backoff", () => {
     const scaled = await basic(PASSWORD);
     expect(scaled.status).toBe(429);
     expect(scaled.headers.get("retry-after")).toBe("4");
-    now += 60_000;
+    now += 4_000 + 60_000;
     expect((await basic(PASSWORD)).status).toBe(200);
   });
 
@@ -294,7 +296,7 @@ describe("sign-in backoff", () => {
     const scaled = await authorize(PASSWORD);
     expect(scaled.status).toBe(429);
     expect(scaled.headers.get("retry-after")).toBe("4");
-    now += 60_000;
+    now += 4_000 + 60_000;
     expect((await authorize(PASSWORD)).status).toBe(302);
   });
 });

@@ -2,12 +2,7 @@ import { timingSafeEqual } from "node:crypto";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { logger } from "../utils/logger.js";
 import { AuthAttemptLimiter, clientAddress, type TrustedProxy } from "./auth-limiter.js";
-import {
-  ScryptBusyError,
-  findBasicUser,
-  verifyBasicCredentials,
-  type BasicAuthUser,
-} from "./basic-auth.js";
+import { ScryptBusyError, verifyBasicCredentials, type BasicAuthUser } from "./basic-auth.js";
 import type { McpOAuthServer } from "./oauth/server.js";
 
 export interface McpHttpAuth {
@@ -118,8 +113,7 @@ export async function authorizeMcpHttpRequest(
   if (authorization?.scheme === "basic" && auth.basicUsers.length > 0) {
     const decoded = decodeBasic(authorization.credentials);
     const ip = clientAddress(req, auth.trustProxy);
-    const username =
-      decoded && findBasicUser(auth.basicUsers, decoded.username) ? decoded.username : "\0unknown";
+    const username = decoded ? decoded.username : "\0unknown";
     const priority = auth.limiter?.hasRecentSuccess(ip, username) ?? false;
     const reserved = auth.limiter?.beginAttempt(ip, username) ?? 0;
     if (reserved > 0) {
@@ -134,12 +128,13 @@ export async function authorizeMcpHttpRequest(
           })
         : false;
       if (accepted && decoded) {
-        auth.limiter?.recordSuccess(ip, decoded.username);
+        auth.limiter?.recordSuccess(ip, username);
         return true;
       }
       auth.limiter?.recordFailure(ip, username);
     } catch (error) {
       if (error instanceof ScryptBusyError) {
+        auth.limiter?.recordBusy(ip, username);
         logger.warn("MCP Basic authentication is rate limited");
         writeTooMany(res, 1000, challenges);
         return false;

@@ -1,5 +1,5 @@
 import { randomBytes } from "node:crypto";
-import { chmodSync, existsSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, linkSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import { logger } from "../../utils/logger.js";
 
@@ -12,29 +12,44 @@ export function credentialMacKeyPath(dbPath: string): string {
 
 /**
  * Load or create the key used to bind tokens to a Basic Auth credential.
- * The file is mode 0600. An in-memory database gets an ephemeral key.
- * Creating a key beside an existing database invalidates sessions that were
- * issued under a missing or different key.
+ * The file is mode 0600. Bytes are written to a temporary file and linked into
+ * place, so a reader never observes an empty key. An in-memory database gets
+ * an ephemeral key. Creating a key beside an existing database invalidates
+ * sessions that were issued under a missing or different key.
  */
 export function loadCredentialMacKey(dbPath: string): Buffer {
   if (dbPath === ":memory:") return randomBytes(KEY_BYTES);
   const path = credentialMacKeyPath(dbPath);
   const key = randomBytes(KEY_BYTES);
   const databaseExisted = existsSync(dbPath);
+  const temporary = `${path}.${randomBytes(8).toString("hex")}.tmp`;
   try {
-    writeFileSync(path, key, { mode: 0o600, flag: "wx" });
-  } catch (error) {
-    const code = (error as NodeJS.ErrnoException).code;
-    if (code !== "EEXIST") throw error;
-    return readCredentialMacKey(path);
+    writeFileSync(temporary, key, { mode: 0o600, flag: "wx" });
+    chmodSync(temporary, 0o600);
+    try {
+      linkSync(temporary, path);
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code !== "EEXIST") throw error;
+      return readCredentialMacKey(path);
+    }
+    chmodSync(path, 0o600);
+    if (databaseExisted) {
+      logger.warn(
+        "OAuth credential key was created beside an existing database; back up oauth.db.mac with oauth.db, because losing the key signs every session out",
+      );
+    }
+    return key;
+  } finally {
+    try {
+      unlinkSync(temporary);
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code !== "ENOENT") {
+        logger.warn({ code }, "OAuth credential key temporary file could not be removed");
+      }
+    }
   }
-  chmodSync(path, 0o600);
-  if (databaseExisted) {
-    logger.warn(
-      "OAuth credential key was created beside an existing database; back up oauth.db.mac with oauth.db, because losing the key signs every session out",
-    );
-  }
-  return key;
 }
 
 function readCredentialMacKey(path: string): Buffer {

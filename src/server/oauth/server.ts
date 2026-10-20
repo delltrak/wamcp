@@ -41,8 +41,6 @@ export interface McpOAuthServerOptions {
     context?: { priority: boolean },
   ) => boolean | Promise<boolean>;
   resolveCredentialVersion?: (username: string, macKey: Buffer) => string | undefined;
-  /** Configured Basic Auth accounts. Unknown names share one limiter bucket. */
-  knownUser?: (username: string) => boolean;
   limiter?: AuthAttemptLimiter;
   dynamicRegistration?: "open" | "disabled";
   redirectHostAllowlist?: readonly string[];
@@ -162,7 +160,6 @@ export class McpOAuthServer {
     password: string,
     context?: { priority: boolean },
   ) => boolean | Promise<boolean>;
-  private readonly knownUser: ((username: string) => boolean) | undefined;
   private readonly limiter: AuthAttemptLimiter | undefined;
   private readonly dynamicRegistration: "open" | "disabled";
   private readonly redirectHostAllowlist: readonly string[];
@@ -186,7 +183,6 @@ export class McpOAuthServer {
     this.resourceUrl = resource.href;
     this.store = options.store;
     this.validateCredential = options.validateCredential;
-    this.knownUser = options.knownUser;
     this.limiter = options.limiter;
     this.dynamicRegistration = options.dynamicRegistration ?? "open";
     this.redirectHostAllowlist = options.redirectHostAllowlist ?? [];
@@ -541,6 +537,7 @@ export class McpOAuthServer {
         credentialsWellFormed && (await this.validateCredential(username, password, { priority }));
     } catch (error) {
       if (error instanceof ScryptBusyError) {
+        this.limiter?.recordBusy(ip, subject);
         this.sendRateLimited(res, 1000);
         return;
       }
@@ -943,16 +940,18 @@ ${error}
       }
       this.limiter?.recordFailure(ip, subject);
     } catch (error) {
-      if (error instanceof ScryptBusyError) return "limited";
+      if (error instanceof ScryptBusyError) {
+        this.limiter?.recordBusy(ip, subject);
+        return "limited";
+      }
       throw error;
     }
     return "no";
   }
 
-  /** Unknown and malformed names share one bucket so they cannot evict a real user. */
+  /** Malformed names share one bucket. A presented name is limited as given. */
   private attemptSubject(username: string): string {
     if (!username || username.length > 128) return "\0unknown";
-    if (this.knownUser && !this.knownUser(username)) return "\0unknown";
     return username;
   }
 
@@ -1033,7 +1032,6 @@ export function createMcpOAuthServer(options: {
     context?: { priority: boolean },
   ) => boolean | Promise<boolean>;
   resolveCredentialVersion?: (username: string, macKey: Buffer) => string | undefined;
-  knownUser?: (username: string) => boolean;
   limiter?: AuthAttemptLimiter;
   dynamicRegistration?: "open" | "disabled";
   redirectHostAllowlist?: readonly string[];

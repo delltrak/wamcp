@@ -76,7 +76,6 @@ function openOAuth(
     redirectHostAllowlist: httpConfig.oauth.redirectHostAllowlist,
     ...(httpConfig.apiKey ? { apiKey: httpConfig.apiKey } : {}),
     limiter,
-    knownUser: (username) => findBasicUser(httpConfig.basicUsers, username) !== undefined,
     validateCredential: (username, password, context) =>
       verifyBasicCredentials(httpConfig.basicUsers, username, password, {
         priority: context?.priority === true,
