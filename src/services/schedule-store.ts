@@ -148,8 +148,36 @@ export class ScheduleStore {
     return { rows: rows.map(mapRow), total: totalRow.total };
   }
 
-  /** Move one due active row to running. Returns null when nothing is due. */
-  claimNext(now: number, leaseUntil: number, token: string): ScheduleRecord | null {
+  /** Active, paused, and running rows. Terminal rows do not occupy a slot. */
+  countOccupying(instanceId: string): number {
+    const row = this.sqlite
+      .prepare(
+        `SELECT COUNT(*) AS total FROM scheduled_messages
+         WHERE instance_id = ? AND status IN ('active', 'paused', 'running')`,
+      )
+      .get(instanceId) as { total: number };
+    return row.total;
+  }
+
+  /**
+   * Move one due active row to running. Returns null when nothing is due.
+   * `excludeInstanceIds` skips instances that already used their send budget this tick.
+   */
+  claimNext(
+    now: number,
+    leaseUntil: number,
+    token: string,
+    excludeInstanceIds: readonly string[] = [],
+  ): ScheduleRecord | null {
+    const params: Record<string, string | number> = { now, leaseUntil, token };
+    const excludeNames: string[] = [];
+    excludeInstanceIds.forEach((instanceId, index) => {
+      const name = `exclude${index}`;
+      params[name] = instanceId;
+      excludeNames.push(`@${name}`);
+    });
+    const excludeSql =
+      excludeNames.length > 0 ? `AND instance_id NOT IN (${excludeNames.join(", ")})` : "";
     const row = this.sqlite
       .prepare(
         `UPDATE scheduled_messages
@@ -157,13 +185,26 @@ export class ScheduleStore {
          WHERE id = (
            SELECT id FROM scheduled_messages
            WHERE status = 'active' AND next_run_at <= @now
+           ${excludeSql}
            ORDER BY next_run_at ASC, id ASC
            LIMIT 1
          )
          RETURNING *`,
       )
-      .get({ now, leaseUntil, token }) as ScheduleRow | undefined;
+      .get(params) as ScheduleRow | undefined;
     return row ? mapRow(row) : null;
+  }
+
+  /** Put a claimed row back to active without moving next_run_at. */
+  release(id: string, leaseToken: string | null, now: number): boolean {
+    const result = this.sqlite
+      .prepare(
+        `UPDATE scheduled_messages
+         SET status = 'active', lease_token = NULL, lease_until = NULL, updated_at = @now
+         WHERE id = @id AND status = 'running' AND lease_token IS @leaseToken`,
+      )
+      .run({ id, leaseToken, now });
+    return result.changes > 0;
   }
 
   listExpiredLeases(now: number): ScheduleRecord[] {

@@ -7,15 +7,19 @@
 import { randomUUID } from "node:crypto";
 import Database from "better-sqlite3";
 import {
+  DEFAULT_BAILEYS_RATE_LIMIT,
+  DEFAULT_CLOUD_RATE_LIMIT,
+  DEFAULT_SCHEDULER_MAX_ACTIVE,
   SCHEDULER_LEASE_MS,
   SCHEDULER_MAX_ATTEMPTS,
   SCHEDULER_MAX_PER_TICK,
   SCHEDULER_ON_TIME_SLACK_MS,
   SCHEDULER_POLL_MS,
+  SCHEDULER_RATE_WINDOW_MS,
   SCHEDULER_RETRY_DELAY_MS,
 } from "../constants.js";
 import type { ChannelType, MessageContent } from "../types/channel.types.js";
-import { validateMediaInput } from "../utils/validation.js";
+import { normalizeScheduledRecipient, validateMediaInput } from "../utils/validation.js";
 import { createChildLogger } from "../utils/logger.js";
 import { nextOccurrence, parseScheduleRequest, type ScheduleSpec } from "./schedule-clock.js";
 import {
@@ -29,6 +33,16 @@ const logger = createChildLogger({ service: "scheduler" });
 
 const INTERRUPTED_REASON = "execution interrupted before completion";
 const SKIPPED_REASON = "missed occurrence skipped by WA_SCHEDULER_MISSED_POLICY=skip";
+/** Set on errors that must fail the occurrence instead of retrying. */
+export const SCHEDULE_PERMANENT_CODE = "schedule_permanent";
+
+export class SchedulePermanentError extends Error {
+  readonly code = SCHEDULE_PERMANENT_CODE;
+  constructor(message: string, options?: { cause?: unknown }) {
+    super(message, options);
+    this.name = "SchedulePermanentError";
+  }
+}
 
 export type ScheduleEnqueue = (
   instanceId: string,
@@ -94,6 +108,8 @@ export interface MessageSchedulerOptions {
   now?: () => number;
   config?: SchedulerConfig;
   pollMs?: number;
+  /** Messages per minute for one instance. Defaults to the channel outbound limiter. */
+  rateLimitFor?: (instanceId: string) => number;
 }
 
 export class MessageScheduler {
@@ -104,8 +120,10 @@ export class MessageScheduler {
   private readonly now: () => number;
   private readonly configOverride?: SchedulerConfig;
   private readonly pollMs: number;
+  private readonly rateLimitFor?: (instanceId: string) => number;
+  private readonly dispatchedAt = new Map<string, number[]>();
   private timer: ReturnType<typeof setInterval> | null = null;
-  private ticking = false;
+  private activeTick: Promise<void> | null = null;
 
   constructor(options: MessageSchedulerOptions) {
     this.store = new ScheduleStore(options.sqlite);
@@ -115,6 +133,7 @@ export class MessageScheduler {
     this.now = options.now ?? (() => Date.now());
     this.configOverride = options.config;
     this.pollMs = options.pollMs ?? SCHEDULER_POLL_MS;
+    this.rateLimitFor = options.rateLimitFor;
     if (!options.config) readSchedulerConfig();
   }
 
@@ -134,29 +153,40 @@ export class MessageScheduler {
     this.timer.unref();
   }
 
-  stop(): void {
-    if (!this.timer) return;
-    clearInterval(this.timer);
-    this.timer = null;
+  /** Stop the poll timer and wait for a tick that has already claimed work. */
+  async stop(): Promise<void> {
+    if (this.timer) {
+      clearInterval(this.timer);
+      this.timer = null;
+    }
+    const pending = this.activeTick;
+    if (pending) await pending;
   }
 
   create(input: CreateScheduleInput): ScheduleView {
     this.assertEnabled();
     this.instanceExists?.(input.instanceId);
+    const recipient = normalizeScheduledRecipient(input.to);
     assertScheduledContent(input.content);
     const now = this.now();
     const parsed = parseScheduleRequest(input, now);
+    const maxActive = this.settings().maxActive;
+    if (this.store.countOccupying(input.instanceId) >= maxActive) {
+      throw new Error(
+        `Invalid schedule; this instance already has the maximum of ${maxActive} active schedules`,
+      );
+    }
     const id = `sched_${randomUUID()}`;
     const stored = this.store.insert({
       id,
       instanceId: input.instanceId,
-      recipient: input.to,
+      recipient,
       messageType: input.content.type,
       payloadJson: JSON.stringify(input.content),
       timezone: parsed.timezone,
       recurrence: parsed.recurrence,
       scheduledAt: parsed.scheduledAt,
-      nextRunAt: parsed.scheduledAt,
+      nextRunAt: parsed.nextRunAt,
       weekdays: parsed.weekdays,
       dayOfMonth: parsed.dayOfMonth,
       endAt: parsed.endAt,
@@ -193,8 +223,9 @@ export class MessageScheduler {
     };
   }
 
+  // Pause and cancel stay available while the worker is off so overdue rows
+  // can be stopped before WA_SCHEDULER_ENABLED is turned back on.
   pause(instanceId: string, id: string): ScheduleView {
-    this.assertEnabled();
     return this.transition(instanceId, id, ["active"], "paused", "paused");
   }
 
@@ -204,7 +235,6 @@ export class MessageScheduler {
   }
 
   cancel(instanceId: string, id: string): ScheduleView {
-    this.assertEnabled();
     return this.transition(
       instanceId,
       id,
@@ -216,31 +246,43 @@ export class MessageScheduler {
 
   /** Claim due rows and either enqueue them or apply the missed-run policy. */
   async tick(): Promise<TickResult> {
-    if (this.ticking) return { dispatched: 0, skipped: 0 };
-    this.ticking = true;
+    if (this.activeTick) return { dispatched: 0, skipped: 0 };
+    let resolveDone!: () => void;
+    const done = new Promise<void>((resolve) => {
+      resolveDone = resolve;
+    });
+    this.activeTick = done;
     try {
-      if (!this.settings().enabled) return { dispatched: 0, skipped: 0 };
-      const result: TickResult = { dispatched: 0, skipped: 0 };
-      for (const expired of this.store.listExpiredLeases(this.now())) {
-        this.advanceWithoutSend(expired, INTERRUPTED_REASON, "failed");
-        result.skipped += 1;
-      }
-      for (let count = 0; count < SCHEDULER_MAX_PER_TICK; count++) {
-        const job = this.store.claimNext(this.now(), this.now() + SCHEDULER_LEASE_MS, randomUUID());
-        if (!job) break;
-        const outcome = await this.processClaimed(job);
-        if (outcome === "sent") result.dispatched += 1;
-        else result.skipped += 1;
-      }
-      return result;
+      return await this.runTick();
     } finally {
-      this.ticking = false;
+      this.activeTick = null;
+      resolveDone();
     }
   }
 
-  private async processClaimed(job: ScheduleRecord): Promise<"sent" | "skipped"> {
-    const missed = this.now() - job.nextRunAt > SCHEDULER_ON_TIME_SLACK_MS;
-    if (missed && this.settings().missedPolicy === "skip") {
+  private async runTick(): Promise<TickResult> {
+    if (!this.settings().enabled) return { dispatched: 0, skipped: 0 };
+    const result: TickResult = { dispatched: 0, skipped: 0 };
+    for (const expired of this.store.listExpiredLeases(this.now())) {
+      this.advanceWithoutSend(expired, INTERRUPTED_REASON, "failed");
+      result.skipped += 1;
+    }
+    const blocked = new Set<string>();
+    for (let count = 0; count < SCHEDULER_MAX_PER_TICK; count++) {
+      const job = this.store.claimNext(this.now(), this.now() + SCHEDULER_LEASE_MS, randomUUID(), [
+        ...blocked,
+      ]);
+      if (!job) break;
+      const outcome = await this.processClaimed(job);
+      if (outcome === "sent") result.dispatched += 1;
+      else if (outcome === "skipped") result.skipped += 1;
+      else blocked.add(job.instanceId);
+    }
+    return result;
+  }
+
+  private async processClaimed(job: ScheduleRecord): Promise<"sent" | "skipped" | "deferred"> {
+    if (this.shouldSkipMissed(job)) {
       this.advanceWithoutSend(job, SKIPPED_REASON, "skipped");
       return "skipped";
     }
@@ -249,9 +291,24 @@ export class MessageScheduler {
       return "skipped";
     }
     try {
+      if (!this.hasDispatchBudget(job.instanceId)) {
+        this.releaseClaim(job);
+        logger.debug(
+          { scheduleId: job.id, instanceId: job.instanceId },
+          "Scheduled send left active until the outbound window has room",
+        );
+        return "deferred";
+      }
+      // Lateness is decided again at send time. A row can cross the slack
+      // window while earlier sends in this tick are still in flight.
+      if (this.shouldSkipMissed(job)) {
+        this.advanceWithoutSend(job, SKIPPED_REASON, "skipped");
+        return "skipped";
+      }
       const channel = this.resolveChannel(job.instanceId);
       const content = parsePayload(job.payloadJson);
       const queued = await this.enqueue(job.instanceId, job.recipient, content, channel);
+      this.noteDispatch(job.instanceId);
       this.markSent(job, queued.jobId);
       logger.info(
         { scheduleId: job.id, instanceId: job.instanceId, jobId: queued.jobId },
@@ -260,7 +317,7 @@ export class MessageScheduler {
       return "sent";
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
-      if (isPermanent(message)) {
+      if (isPermanent(err)) {
         this.advanceWithoutSend(job, message, "failed");
         return "skipped";
       }
@@ -391,7 +448,52 @@ export class MessageScheduler {
   }
 
   private settings(): SchedulerConfig {
-    return this.configOverride ?? readSchedulerConfig();
+    const config = this.configOverride ?? readSchedulerConfig();
+    return {
+      enabled: config.enabled,
+      missedPolicy: config.missedPolicy,
+      maxActive: config.maxActive ?? DEFAULT_SCHEDULER_MAX_ACTIVE,
+    };
+  }
+
+  private shouldSkipMissed(job: ScheduleRecord): boolean {
+    const late = this.now() - job.nextRunAt > SCHEDULER_ON_TIME_SLACK_MS;
+    return late && this.settings().missedPolicy === "skip";
+  }
+
+  private hasDispatchBudget(instanceId: string): boolean {
+    const limit = this.limitFor(instanceId);
+    const now = this.now();
+    const recent = (this.dispatchedAt.get(instanceId) ?? []).filter(
+      (at) => now - at < SCHEDULER_RATE_WINDOW_MS,
+    );
+    this.dispatchedAt.set(instanceId, recent);
+    return recent.length < limit;
+  }
+
+  private noteDispatch(instanceId: string): void {
+    const now = this.now();
+    const recent = (this.dispatchedAt.get(instanceId) ?? []).filter(
+      (at) => now - at < SCHEDULER_RATE_WINDOW_MS,
+    );
+    recent.push(now);
+    this.dispatchedAt.set(instanceId, recent);
+  }
+
+  private limitFor(instanceId: string): number {
+    if (this.rateLimitFor) {
+      const limit = this.rateLimitFor(instanceId);
+      if (!Number.isSafeInteger(limit) || limit < 1) {
+        return outboundRateLimit("baileys");
+      }
+      return limit;
+    }
+    return outboundRateLimit(this.resolveChannel(instanceId));
+  }
+
+  private releaseClaim(job: ScheduleRecord): void {
+    if (this.store.release(job.id, job.leaseToken, this.now())) return;
+    this.store.setStatus(job.instanceId, job.id, ["running"], "active", this.now());
   }
 }
 
@@ -400,8 +502,17 @@ export function createIdleScheduler(): MessageScheduler {
     sqlite: new Database(":memory:"),
     enqueue: async () => ({ jobId: "idle" }),
     resolveChannel: () => "baileys",
-    config: { enabled: false, missedPolicy: "skip" },
+    config: { enabled: false, missedPolicy: "skip", maxActive: DEFAULT_SCHEDULER_MAX_ACTIVE },
   });
+}
+
+function outboundRateLimit(channel: ChannelType): number {
+  const cloud = channel === "cloud";
+  const fallback = cloud ? DEFAULT_CLOUD_RATE_LIMIT : DEFAULT_BAILEYS_RATE_LIMIT;
+  const variable = cloud ? "WA_CLOUD_RATE_LIMIT" : "WA_BAILEYS_RATE_LIMIT";
+  const parsed = Number(process.env[variable] ?? fallback);
+  if (!Number.isSafeInteger(parsed) || parsed < 1) return fallback;
+  return parsed;
 }
 
 function specOf(job: ScheduleRecord): ScheduleSpec {
@@ -419,17 +530,23 @@ function parsePayload(payloadJson: string): MessageContent {
   try {
     const value = JSON.parse(payloadJson) as MessageContent;
     if (!value || typeof value !== "object" || typeof value.type !== "string") {
-      throw new Error("Invalid scheduled payload");
+      throw new SchedulePermanentError("Invalid scheduled payload");
     }
     return value;
   } catch (err) {
-    if (err instanceof Error && err.message === "Invalid scheduled payload") throw err;
-    throw new Error("Invalid scheduled payload", { cause: err });
+    if (isPermanent(err)) throw err;
+    throw new SchedulePermanentError("Invalid scheduled payload", { cause: err });
   }
 }
 
-function isPermanent(message: string): boolean {
-  return message.includes("not found") || message.includes("Invalid scheduled payload");
+function isPermanent(err: unknown): boolean {
+  if (err instanceof SchedulePermanentError) return true;
+  return (
+    typeof err === "object" &&
+    err !== null &&
+    "code" in err &&
+    (err as { code?: unknown }).code === SCHEDULE_PERMANENT_CODE
+  );
 }
 
 function assertScheduledContent(content: MessageContent): void {

@@ -3,7 +3,7 @@
 // once, daily, weekly, and monthly. Weekday 0 is Sunday.
 // ============================================================
 
-import { DEFAULT_SCHEDULER_TIMEZONE } from "../constants.js";
+import { DEFAULT_SCHEDULER_TIMEZONE, SCHEDULER_MAX_HORIZON_MS } from "../constants.js";
 
 export type Recurrence = "once" | "daily" | "weekly" | "monthly";
 
@@ -18,6 +18,8 @@ export interface ScheduleSpec {
 
 export interface ParsedSchedule extends ScheduleSpec {
   occurrenceLimit: number | null;
+  /** First slot at or after scheduledAt that satisfies weekdays or dayOfMonth. */
+  nextRunAt: number;
 }
 
 export interface ZonedParts {
@@ -41,11 +43,21 @@ const WEEKDAY_INDEX: Record<string, number> = {
 };
 
 const RFC3339 = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(\.\d{1,9})?(Z|[+-]\d{2}:\d{2})$/;
+const OFFSET_ZONE = /^[+-]\d{2}:?\d{2}$/;
 
+/**
+ * Accept IANA names such as America/Bahia or UTC.
+ * Numeric offsets (+03:00) and Etc/* zones are rejected.
+ */
 export function isValidTimeZone(timeZone: string): boolean {
-  if (timeZone.trim() === "") return false;
+  const value = timeZone.trim();
+  if (value === "" || OFFSET_ZONE.test(value) || value === "Etc" || value.startsWith("Etc/")) {
+    return false;
+  }
   try {
-    new Intl.DateTimeFormat("en-US", { timeZone }).format(0);
+    const resolved = new Intl.DateTimeFormat("en-US", { timeZone: value }).resolvedOptions()
+      .timeZone;
+    if (!resolved || resolved.startsWith("Etc/")) return false;
     return true;
   } catch {
     return false;
@@ -140,6 +152,23 @@ export function zonedWallTimeToEpoch(
   return candidate;
 }
 
+/**
+ * First slot at or after `scheduledAt`. Weekly and monthly schedules skip
+ * `scheduledAt` when that civil day is not one of the requested days.
+ * One-shot and daily schedules keep `scheduledAt`.
+ */
+export function firstOccurrence(spec: ScheduleSpec): number | null {
+  if (spec.recurrence === "once" || spec.recurrence === "daily") {
+    if (spec.endAt != null && spec.scheduledAt > spec.endAt) return null;
+    return spec.scheduledAt;
+  }
+  if (matchesSlot(spec, spec.scheduledAt)) {
+    if (spec.endAt != null && spec.scheduledAt > spec.endAt) return null;
+    return spec.scheduledAt;
+  }
+  return nextOccurrence(spec, spec.scheduledAt);
+}
+
 /** Next occurrence strictly after `afterMs`. One-shot schedules have none. */
 export function nextOccurrence(spec: ScheduleSpec, afterMs: number): number | null {
   if (spec.recurrence === "once") return null;
@@ -203,6 +232,9 @@ export function parseScheduleRequest(input: ScheduleRequestInput, now: number): 
   if (scheduledAt <= now) {
     throw new Error("Invalid scheduledAt; it must be in the future");
   }
+  if (scheduledAt > now + SCHEDULER_MAX_HORIZON_MS) {
+    throw new Error("Invalid scheduledAt; it must be at most 1 year in the future");
+  }
   const recurrence = input.recurrence ?? "once";
   if (!["once", "daily", "weekly", "monthly"].includes(recurrence)) {
     throw new Error("Invalid recurrence; expected once, daily, weekly, or monthly");
@@ -258,15 +290,37 @@ export function parseScheduleRequest(input: ScheduleRequestInput, now: number): 
     occurrenceLimit = input.occurrenceLimit;
   }
 
-  return {
+  const weekdaysSorted = weekdays.sort((left, right) => left - right);
+  const draft: ScheduleSpec = {
     scheduledAt,
     timezone,
     recurrence,
-    weekdays: weekdays.sort((left, right) => left - right),
+    weekdays: weekdaysSorted,
     dayOfMonth,
     endAt,
-    occurrenceLimit,
   };
+  const nextRunAt = firstOccurrence(draft);
+  if (nextRunAt == null) {
+    throw new Error("Invalid schedule; no occurrence falls before endAt");
+  }
+  if (nextRunAt > now + SCHEDULER_MAX_HORIZON_MS) {
+    throw new Error(
+      "Invalid scheduledAt; the first occurrence must be at most 1 year in the future",
+    );
+  }
+
+  return {
+    ...draft,
+    occurrenceLimit,
+    nextRunAt,
+  };
+}
+
+function matchesSlot(spec: ScheduleSpec, epochMs: number): boolean {
+  const parts = zonedParts(epochMs, spec.timezone);
+  if (spec.recurrence === "weekly") return spec.weekdays.includes(parts.weekday);
+  const dayOfMonth = spec.dayOfMonth ?? parts.day;
+  return parts.day === Math.min(dayOfMonth, daysInMonth(parts.year, parts.month));
 }
 
 function atWall(

@@ -106,15 +106,19 @@ Tools marked **Baileys only** are not available on Cloud API instances.
   real-number check has been performed for this change.
 - **Real WhatsApp checks** -- Run real integration tests only with a throwaway number. Automated
   tests use mocked sockets and do not connect to WhatsApp.
-- **Scheduled sends** -- `WA_SCHEDULER_ENABLED=false` by default. `wa_schedule_message`,
-  `wa_pause_scheduled`, `wa_resume_scheduled`, and `wa_cancel_scheduled` refuse until it is `true`,
-  and the worker does not claim or enqueue anything. `wa_list_scheduled` still reads rows.
-  Schedules persist in the existing SQLite database (`scheduled_messages`). The default timezone
-  is `America/Bahia`. `WA_SCHEDULER_MISSED_POLICY` is `skip` or `send` (default `skip`). A due time
+- **Scheduled sends** -- `WA_SCHEDULER_ENABLED=false` by default. `wa_schedule_message` and
+  `wa_resume_scheduled` refuse until it is `true`, and the worker does not claim or enqueue
+  anything. `wa_pause_scheduled` and `wa_cancel_scheduled` work while the gate is false, so overdue
+  rows can be stopped before it is turned on. `wa_list_scheduled` still reads rows.
+  Schedules persist in the existing SQLite database (`scheduled_messages`). The timezone is an IANA
+  name; the default is `America/Bahia`. Numeric offsets and `Etc/*` zones are rejected.
+  `WA_SCHEDULER_MISSED_POLICY` is `skip` or `send` (default `skip`). A due time
   within 2 minutes is sent. Older than that, `skip` drops the occurrence and waits for the next
   future slot (a one-shot becomes `skipped`); `send` queues that one occurrence and then advances
-  a recurring schedule to the next slot after now. A claimed row whose lease expires is not sent
-  again. Due sends go through the existing outbound rate limiter.
+  a recurring schedule to the next slot after now. A catch-up backlog is not enqueued faster than
+  the instance outbound rate limit. `WA_SCHEDULER_MAX_ACTIVE` (default 100) caps active, paused,
+  and running rows per instance. `scheduledAt` must be within 1 year. A claimed row whose lease
+  expires is not sent again. Due sends go through the existing outbound rate limiter.
 
 ---
 
@@ -2644,12 +2648,23 @@ when `WA_SCHEDULER_ENABLED=true`. Each due message calls the same outbound queue
 send, so `WA_BAILEYS_RATE_LIMIT` and `WA_CLOUD_RATE_LIMIT` still apply. Rows are created in the
 existing SQLite file; the database path is unchanged.
 
-`scheduledAt` is RFC3339 and must be in the future. `timezone` defaults to `America/Bahia`. `once`
-sends a single time. `daily`, `weekly`, and `monthly` repeat that instant's wall clock in the
-schedule timezone. Weekly `weekdays` use `0` for Sunday through `6` for Saturday. Monthly
-`dayOfMonth` is clamped to the last day of a short month. Optional `endAt` (RFC3339) and
-`occurrenceLimit` stop the series. Supported `content.type` values are `text`, `image`, `video`,
-`audio`, `document`, and `sticker`.
+`scheduledAt` is RFC3339, must be in the future, and must be at most 1 year ahead. `to` is a phone
+number or a group JID. Phone numbers are stored as `<digits>@s.whatsapp.net`. `status@broadcast`
+and `@newsletter` are rejected. `timezone` is an IANA name such as `America/Bahia` (the default).
+Numeric offsets (`+03:00`) and `Etc/*` zones are rejected. `once` sends a single time. `daily`,
+`weekly`, and `monthly` repeat that instant's wall clock in the schedule timezone. The first weekly
+or monthly run is the first matching weekday or day of month at or after `scheduledAt`. Weekly
+`weekdays` use `0` for Sunday through `6` for Saturday. Monthly `dayOfMonth` is clamped to the last
+day of a short month. Optional `endAt` (RFC3339) and `occurrenceLimit` stop the series. Each
+instance can hold `WA_SCHEDULER_MAX_ACTIVE` schedules in `active`, `paused`, or `running` (default
+100). Recurring rows stay in that count and can still be cancelled. Supported `content.type` values
+are `text`, `image`, `video`, `audio`, `document`, and `sticker`.
+
+A due backlog is enqueued at most as fast as `WA_BAILEYS_RATE_LIMIT` or `WA_CLOUD_RATE_LIMIT`
+(messages per minute for that instance). Rows past that budget stay `active` with the same
+`nextRunAt` and are claimed again on a later tick. The missed-run policy is applied when a row is
+taken for dispatch, including a second check immediately before enqueue. `skip` does not wait on
+the send budget: overdue rows are dropped up to 50 per tick.
 
 Missed-run policy (`WA_SCHEDULER_MISSED_POLICY`, default `skip`):
 
@@ -2658,7 +2673,7 @@ Missed-run policy (`WA_SCHEDULER_MISSED_POLICY`, default `skip`):
 | Due time is at most 2 minutes ago | Send | Send |
 | Due time is older than 2 minutes | Do not send. One-shot becomes `skipped`. Recurring moves to the next future slot | Enqueue that occurrence once, then move a recurring schedule to the next slot after now |
 | Process died after the row was claimed (`running` lease expired) | Do not send again. One-shot becomes `failed`. Recurring moves to the next future slot | Same. The queue may already have accepted the message |
-| Gate is false | Nothing is claimed or queued | Nothing is claimed or queued |
+| Gate is false | Nothing is claimed or queued. Pause and cancel still work | Nothing is claimed or queued. Pause and cancel still work |
 
 Enqueue failures stay active and retry up to 5 times, 30 seconds apart, then that occurrence is
 given up (one-shot `failed`, recurring advances).
@@ -2668,9 +2683,9 @@ given up (one-shot `failed`, recurring advances).
 | Parameter         | Type   | Required | Description |
 | ----------------- | ------ | -------- | ----------- |
 | `instanceId`      | string | Yes      | Instance to send from |
-| `to`              | string | Yes      | Phone number or group JID |
-| `scheduledAt`     | string | Yes      | RFC3339 first run, in the future |
-| `timezone`        | string | No       | IANA timezone. Default `America/Bahia` |
+| `to`              | string | Yes      | Phone number or group JID. Not `status@broadcast` or `@newsletter` |
+| `scheduledAt`     | string | Yes      | RFC3339 instant, in the future and at most 1 year ahead |
+| `timezone`        | string | No       | IANA name such as `America/Bahia`. Not `+03:00` or `Etc/*` |
 | `recurrence`      | string | No       | `once` (default), `daily`, `weekly`, or `monthly` |
 | `weekdays`        | number[] | No    | Weekly only. Unique values `0`–`6` |
 | `dayOfMonth`      | number | No       | Monthly only. `1`–`31` |
@@ -2700,7 +2715,7 @@ Listing does not require the scheduler gate.
 | `instanceId` | string | Yes      | Owning instance |
 | `scheduleId` | string | Yes      | Schedule id |
 
-Only an `active` schedule can be paused. Paused rows are not sent.
+Only an `active` schedule can be paused. Paused rows are not sent. Pause works while `WA_SCHEDULER_ENABLED` is false.
 
 #### `wa_resume_scheduled`
 
@@ -2718,7 +2733,7 @@ Only a `paused` schedule can be resumed. If it is already due, the next tick app
 | `instanceId` | string | Yes      | Owning instance |
 | `scheduleId` | string | Yes      | Schedule id |
 
-Cancels an `active`, `paused`, or `failed` schedule. A cancelled row is never sent.
+Cancels an `active`, `paused`, or `failed` schedule. A cancelled row is never sent. Cancel works while `WA_SCHEDULER_ENABLED` is false.
 
 ---
 

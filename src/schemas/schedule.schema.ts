@@ -81,17 +81,24 @@ const ScheduleContentSchema = z.discriminatedUnion("type", [
 export const ScheduleMessageSchema = z
   .object({
     instanceId: z.string().min(1).describe("The instance ID to send from"),
-    to: z.string().min(5).describe("Recipient phone number or group JID"),
+    to: z
+      .string()
+      .min(5)
+      .describe(
+        "Recipient phone number or group JID. Phone numbers are stored as <digits>@s.whatsapp.net. status@broadcast and @newsletter are rejected",
+      ),
     scheduledAt: z
       .string()
       .min(1)
-      .describe("First send time as an RFC3339 timestamp. Must be in the future"),
+      .describe(
+        "RFC3339 instant, in the future and at most 1 year ahead. Weekly and monthly schedules fire on the first matching weekday or day of month at or after this time",
+      ),
     timezone: z
       .string()
       .min(1)
       .default("America/Bahia")
       .describe(
-        "IANA timezone used for daily, weekly, and monthly wall-clock times. Default America/Bahia",
+        "IANA timezone such as America/Bahia. Numeric offsets and Etc/* zones are rejected. Default America/Bahia",
       ),
     recurrence: z
       .enum(["once", "daily", "weekly", "monthly"])

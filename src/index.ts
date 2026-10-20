@@ -223,12 +223,13 @@ async function startHttp(webhookStatus: EventWebhookStatus): Promise<void> {
 
   let servicesClosePromise: Promise<void> | null = null;
   const closeServices = (): Promise<void> => {
-    servicesClosePromise ??= Promise.all([
-      messageQueue.close(),
-      eventWebhook.close(),
-      maintenance.stop(),
-      Promise.resolve(scheduler.stop()),
-    ]).then(() => undefined);
+    servicesClosePromise ??= scheduler
+      .stop()
+      .then(() =>
+        Promise.all([messageQueue.close(), eventWebhook.close(), maintenance.stop()]).then(
+          () => undefined,
+        ),
+      );
     return servicesClosePromise;
   };
   httpServer.on("close", () => {
@@ -270,12 +271,13 @@ async function startStdio(): Promise<void> {
   const onServerClose = mcpServer.server.onclose;
   let servicesClosePromise: Promise<void> | null = null;
   const closeServices = (): Promise<void> => {
-    servicesClosePromise ??= Promise.all([
-      messageQueue.close(),
-      eventWebhook.close(),
-      maintenance.stop(),
-      Promise.resolve(scheduler.stop()),
-    ]).then(() => undefined);
+    servicesClosePromise ??= scheduler
+      .stop()
+      .then(() =>
+        Promise.all([messageQueue.close(), eventWebhook.close(), maintenance.stop()]).then(
+          () => undefined,
+        ),
+      );
     return servicesClosePromise;
   };
   mcpServer.server.onclose = () => {

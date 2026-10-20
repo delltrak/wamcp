@@ -216,9 +216,9 @@ WA MCP exposes **142 tools** across 16 domains. All tools use the `wa_` prefix.
 | `wa_resume_scheduled` | Resume a paused schedule                                                    |
 | `wa_cancel_scheduled` | Cancel a schedule so it is not sent                                         |
 
-Schedules are stored in the existing SQLite file (`WA_DATABASE_PATH`, default `data/whatsapp.db`). The database path and Docker volume do not change. `WA_SCHEDULER_ENABLED=false` by default: create, pause, resume, and cancel refuse, the worker does not run, and nothing is queued. Listing still works. When the gate is on, a due send is handed to the same per-instance BullMQ limiter as `wa_send_text` (`WA_BAILEYS_RATE_LIMIT` / `WA_CLOUD_RATE_LIMIT`).
+Schedules are stored in the existing SQLite file (`WA_DATABASE_PATH`, default `data/whatsapp.db`). The database path and Docker volume do not change. `WA_SCHEDULER_ENABLED=false` by default: create and resume refuse, the worker does not run, and nothing is queued. Pause and cancel still work, so overdue rows can be stopped before the worker is turned on. Listing still works. When the gate is on, a due send is handed to the same per-instance BullMQ limiter as `wa_send_text` (`WA_BAILEYS_RATE_LIMIT` / `WA_CLOUD_RATE_LIMIT`). A catch-up backlog is not enqueued faster than that per-minute limit; rows that do not fit stay active and are considered again on a later tick, under the missed-run policy.
 
-`scheduledAt` is an RFC3339 instant. Daily, weekly, and monthly repeats use that instant's wall clock in the schedule timezone (`America/Bahia` when omitted). Weekly `weekdays` are `0` (Sunday) through `6` (Saturday). Monthly `dayOfMonth` uses the last day of a short month. Text is supported, as are image, video, audio, document, and sticker inputs (HTTPS or base64, same rules as immediate sends).
+`scheduledAt` is an RFC3339 instant at most one year ahead. The recipient is a phone number (stored as `<digits>@s.whatsapp.net`) or a group JID. `status@broadcast` and `@newsletter` are rejected. Daily, weekly, and monthly repeats use that instant's wall clock in the schedule timezone. The timezone is an IANA name (`America/Bahia` when omitted). Numeric offsets such as `+03:00` and `Etc/*` zones are rejected. The first weekly or monthly run is the first matching weekday or day of month at or after `scheduledAt`, not `scheduledAt` itself when that civil day does not match. Weekly `weekdays` are `0` (Sunday) through `6` (Saturday). Monthly `dayOfMonth` uses the last day of a short month. Each instance can hold `WA_SCHEDULER_MAX_ACTIVE` schedules that are active, paused, or running (default 100). Recurring rows stay in that count until they are cancelled or finish. Text is supported, as are image, video, audio, document, and sticker inputs (HTTPS or base64, same rules as immediate sends).
 
 **Missed runs.** A due time less than 2 minutes old is on time and is sent, including after a short restart. Older than that, `WA_SCHEDULER_MISSED_POLICY` applies:
 
@@ -737,8 +737,9 @@ Copy `.env.example` to `.env` and configure:
 | `WA_DATABASE_PATH`          | `data/whatsapp.db`       | SQLite database path; in Docker this resolves under `/app` |
 | `WA_BAILEYS_HISTORY_SYNC_MAX_MESSAGES` | `100` | Maximum messages requested per chat by automatic and on-demand history fetches (1–10000) |
 | `WA_DATA_DIR`               | `wa-data` in Compose     | Optional absolute host directory mounted at `/app/data`; unset preserves the existing named volume |
-| `WA_SCHEDULER_ENABLED`      | `false`                  | Allow scheduled sends. While false, nothing is queued |
+| `WA_SCHEDULER_ENABLED`      | `false`                  | Allow scheduled sends. While false, nothing is queued. Pause and cancel still work |
 | `WA_SCHEDULER_MISSED_POLICY` | `skip`                  | `skip` drops occurrences missed during downtime; `send` queues that occurrence once on resume |
+| `WA_SCHEDULER_MAX_ACTIVE`   | `100`                    | Maximum active, paused, and running schedules per instance |
 | `WA_BAILEYS_RATE_LIMIT`     | `20`                     | Messages/min per Baileys instance        |
 | `WA_CLOUD_RATE_LIMIT`       | `80`                     | Messages/min per Cloud API instance      |
 | `WA_MESSAGE_RETENTION_DAYS` | `30`                     | Auto-delete old messages                 |

@@ -15,17 +15,22 @@ import {
 import type { MessageScheduler } from "../services/scheduler.js";
 
 const GATE =
-  "Requires WA_SCHEDULER_ENABLED=true. While it is false, nothing is sent. " +
+  "Creating and resuming a schedule require WA_SCHEDULER_ENABLED=true. " +
+  "Pause and cancel work while it is false, so overdue rows can be stopped before the worker starts. " +
+  "Nothing is sent while the gate is false. Listing works either way. " +
   "Missed runs follow WA_SCHEDULER_MISSED_POLICY (skip by default, or send). " +
-  "Due messages are queued through the existing per-instance outbound rate limiter.";
+  "Due messages are queued through the existing per-instance outbound rate limiter, " +
+  "and a backlog is not enqueued faster than that limit.";
 
 export function registerScheduleTools(server: McpServer, scheduler: MessageScheduler): void {
   server.registerTool(
     "wa_schedule_message",
     {
       description: `Schedule a WhatsApp message once, or repeat it daily, weekly, or monthly.
-The default timezone is America/Bahia. The first run is scheduledAt; later runs use that
-wall-clock time in the schedule timezone. Weekdays are 0 (Sunday) through 6 (Saturday).
+The timezone is an IANA name. The default is America/Bahia. Numeric offsets and Etc/* zones are rejected.
+The first run is the first valid slot at or after scheduledAt, so a weekly or monthly schedule waits
+when that instant is not a selected weekday or day of the month. Later runs use that wall-clock time.
+Weekdays are 0 (Sunday) through 6 (Saturday). The recipient is a phone number or group JID.
 ${GATE}
 Returns the stored schedule. The WhatsApp send happens later and returns { status: "queued", jobId } from the outbound queue.`,
       inputSchema: ScheduleMessageSchema,
@@ -82,7 +87,7 @@ ${GATE}`,
   server.registerTool(
     "wa_pause_scheduled",
     {
-      description: `Pause an active schedule so later ticks do not send it. ${GATE}`,
+      description: `Pause an active schedule so later ticks do not send it. This works while WA_SCHEDULER_ENABLED is false. ${GATE}`,
       inputSchema: ScheduleIdSchema,
     },
     async (params) => {
@@ -118,7 +123,7 @@ ${GATE}`,
   server.registerTool(
     "wa_cancel_scheduled",
     {
-      description: `Cancel an active, paused, or failed schedule. Cancelled rows are never sent. ${GATE}`,
+      description: `Cancel an active, paused, or failed schedule. Cancelled rows are never sent. This works while WA_SCHEDULER_ENABLED is false. ${GATE}`,
       inputSchema: ScheduleIdSchema,
     },
     async (params) => {
