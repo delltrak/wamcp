@@ -412,6 +412,38 @@ describe("Baileys reconnect after unavailable service", () => {
     }
   });
 
+  it("keeps the outage start and append watermark across closes that never open", async () => {
+    vi.useFakeTimers();
+    const { id, adapter } = await createConnectedInstance();
+    const disconnected: ChannelEventPayload["instance.disconnected"][] = [];
+    adapter.on("instance.disconnected", (payload) => disconnected.push(payload));
+    const initial = instanceLifecycle(id);
+
+    await vi.advanceTimersByTimeAsync(60_000);
+    closeSocket(0, DisconnectReason.connectionClosed);
+    const outageStart = instanceLifecycle(id).lastDisconnected;
+    expect(outageStart).toBeGreaterThan(initial.lastConnected ?? 0);
+
+    for (let attempt = 0; attempt < 3; attempt++) {
+      await vi.advanceTimersByTimeAsync(reconnectDelay(attempt) + 5_000);
+      closeSocket(sockets.length - 1, DisconnectReason.connectionClosed);
+      expect(instanceLifecycle(id)).toEqual({
+        status: "disconnected",
+        lastConnected: initial.lastConnected,
+        lastDisconnected: outageStart,
+      });
+    }
+    expect(disconnected).toHaveLength(1);
+
+    await vi.advanceTimersByTimeAsync(reconnectDelay(3));
+    openSocket(sockets.length - 1);
+    expect(instanceLifecycle(id).lastDisconnected).toBe(outageStart);
+    // The append watermark is the outage start minus the 5-minute clock-skew allowance.
+    expect(
+      (adapter as unknown as { appendNotifyWatermarkMs: number | null }).appendNotifyWatermarkMs,
+    ).toBe((outageStart ?? 0) - 5 * 60_000);
+  });
+
   it("does not move persisted timestamps when a replaced socket closes", async () => {
     vi.useFakeTimers();
     const { manager, id } = await createConnectedInstance();
