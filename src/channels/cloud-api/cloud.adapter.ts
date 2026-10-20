@@ -8,7 +8,7 @@ import type { ChannelAdapter, ChannelEventHandler } from "../channel.interface.j
 import { and, eq, sql } from "drizzle-orm";
 import { db, sqlite } from "../../db/client.js";
 import { messages as messagesTable } from "../../db/schema.js";
-import { getWebPInfo, mediaResponseToBuffer } from "../../services/media.js";
+import { getWebPInfo, MediaService, mediaResponseToBuffer } from "../../services/media.js";
 import { MEDIA_LIMITS } from "../../constants.js";
 import type {
   ConnectionStatus,
@@ -117,6 +117,8 @@ interface CloudApiPhoneNumberResponse {
   id: string;
   quality_rating?: string;
 }
+
+const mediaService = new MediaService();
 
 export class CloudApiAdapter implements ChannelAdapter {
   private accessToken: string | null = null;
@@ -327,7 +329,8 @@ export class CloudApiAdapter implements ChannelAdapter {
       case "image": {
         const mediaFields: Record<string, unknown> = {};
         if (content.caption) mediaFields.caption = content.caption;
-        const media = this.resolveMediaPayload(content.image, "image", mediaFields);
+        const image = await this.outgoingCloudMedia(content.image, "image", content.compress);
+        const media = this.resolveMediaPayload(image, "image", mediaFields);
         const payload: Record<string, unknown> = {
           recipient_type: "individual",
           to: phone,
@@ -353,7 +356,8 @@ export class CloudApiAdapter implements ChannelAdapter {
         }
         const mediaFields: Record<string, unknown> = {};
         if (content.caption) mediaFields.caption = content.caption;
-        const media = this.resolveMediaPayload(content.video, "video", mediaFields);
+        const video = await this.outgoingCloudMedia(content.video, "video", content.compress);
+        const media = this.resolveMediaPayload(video, "video", mediaFields);
         const payload: Record<string, unknown> = {
           recipient_type: "individual",
           to: phone,
@@ -1127,6 +1131,21 @@ export class CloudApiAdapter implements ChannelAdapter {
   }
 
   // ---- Media helpers (public for external use) ----
+
+  private async outgoingCloudMedia(
+    input: string,
+    kind: "image" | "video",
+    compress?: boolean,
+  ): Promise<string> {
+    if (compress !== true) return input;
+    const prepared =
+      kind === "image"
+        ? await mediaService.prepareOutgoingImage(input)
+        : await mediaService.prepareOutgoingVideo(input);
+    if (!prepared.compressed) return prepared.input;
+    const fileName = kind === "image" ? "image.jpg" : "video.mp4";
+    return this.uploadMedia(prepared.data, prepared.mimeType, fileName);
+  }
 
   async uploadMedia(file: Buffer, mimeType: string, fileName?: string): Promise<string> {
     const { phoneNumberId, accessToken } = this.getCredentials();

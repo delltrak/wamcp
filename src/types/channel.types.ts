@@ -190,6 +190,7 @@ export interface ImageContent {
   caption?: string;
   quotedMessageId?: string;
   mentions?: string[];
+  compress?: boolean;
 }
 
 export interface VideoContent {
@@ -200,6 +201,7 @@ export interface VideoContent {
   ptv?: boolean;
   quotedMessageId?: string;
   mentions?: string[];
+  compress?: boolean;
 }
 
 export interface StickerContent {

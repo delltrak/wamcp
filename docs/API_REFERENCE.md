@@ -65,10 +65,15 @@ Tools marked **Baileys only** are not available on Cloud API instances.
 - **`to`** -- Recipient for send operations. Use a phone number (e.g. `"5511999999999"`) or a group JID (e.g. `"120363...@g.us"`).
 - **JID** -- Jabber ID, WhatsApp's internal identifier. Individual: `5511999999999@s.whatsapp.net`. Group: `120363...@g.us`.
 - **Media** -- Image/video/audio/document fields accept a URL (`https://...`) or base64-encoded data.
-  Stickers and GIFs are converted to WhatsApp-compatible formats with ffmpeg. Received media can
-  be saved under `WA_MEDIA_DOWNLOAD_DIR` (default `data/media-downloads`) or returned as base64.
+  Stickers and GIFs are converted to WhatsApp-compatible formats with ffmpeg. `wa_send_sticker`
+  accepts PNG, JPG, GIF, WebP, and short MP4 and produces 512x512 WebP. `wa_send_image` and
+  `wa_send_video` send the original media unless `compress` is true or `WA_MEDIA_COMPRESS=true`
+  (default `false`). `hd: true` sends the original. Received media can be saved under
+  `WA_MEDIA_DOWNLOAD_DIR` (default `data/media-downloads`) or returned as base64.
   `WA_MEDIA_DOWNLOAD_MAX_BYTES` defaults to 25 MB, and base64 mode is capped at 5 MB. Docker
-  includes ffmpeg; `WA_MEDIA_FFMPEG_PATH` and `WA_MEDIA_FFMPEG_TIMEOUT_MS` configure conversions.
+  installs Alpine `ffmpeg` (`libwebp`, `libwebp_anim`, `mjpeg`, `libx264`, `aac`). Sharp and the
+  libwebp CLI tools are not required. `WA_MEDIA_FFMPEG_PATH` and `WA_MEDIA_FFMPEG_TIMEOUT_MS`
+  configure conversions.
 - **Automatic read receipts** -- `WA_AUTO_READ=false` (default), `on_fetch` to mark incoming
   messages read when a tool or resource returns them, or `on_receive` to mark them read when they
   arrive. Invalid values disable the feature and log a warning.
@@ -387,8 +392,14 @@ Send an image to a WhatsApp contact or group.
 | `caption`         | string | No       | Image caption                       |
 | `quotedMessageId` | string | No       | Message ID to reply to              |
 | `mentions`        | string[] | No     | Participant phone numbers or JIDs to mention |
+| `compress`        | boolean | No      | Compress before sending. Omit to follow `WA_MEDIA_COMPRESS` (default `false`) |
+| `hd`              | boolean | No      | Send the original image. Overrides `compress` and `WA_MEDIA_COMPRESS` |
 
-**Channel support:** Both
+Compression re-encodes to JPEG, limits the longest edge to `WA_MEDIA_IMAGE_MAX_EDGE` (default 600),
+and uses `WA_MEDIA_IMAGE_QUALITY` (default 75). The original is sent when the result is not smaller.
+`hd: true` skips compression.
+
+**Channel support:** Both. A compressed Cloud API image is uploaded and sent by media id.
 
 **Response:**
 
@@ -413,8 +424,14 @@ Send a video to a WhatsApp contact or group.
 | `caption`         | string | No       | Video caption                       |
 | `quotedMessageId` | string | No       | Message ID to reply to              |
 | `mentions`        | string[] | No     | Participant phone numbers or JIDs to mention |
+| `compress`        | boolean | No      | Compress before sending. Omit to follow `WA_MEDIA_COMPRESS` (default `false`) |
+| `hd`              | boolean | No      | Send the original video. Overrides `compress` and `WA_MEDIA_COMPRESS` |
 
-**Channel support:** Both
+Compression re-encodes to H.264/AAC MP4, limits the longest edge to `WA_MEDIA_VIDEO_MAX_EDGE`
+(default 720), and uses `WA_MEDIA_VIDEO_CRF` (default 28). The original is sent when the result is
+not smaller. `hd: true` skips compression.
+
+**Channel support:** Both. A compressed Cloud API video is uploaded and sent by media id.
 
 **Response:**
 
@@ -445,18 +462,20 @@ Send a round video note through the normal queued video path. Baileys sends it w
 
 #### `wa_send_sticker`
 
-Send a native WhatsApp sticker. PNG/JPG images and GIFs are converted to 512x512 WebP with
-transparent padding. Static stickers are limited to 100 KB and animated stickers to 500 KB. Static
-WebP files that are not 512x512 are normalized with ffmpeg; animated WebP passes through only at
-512x512 because ffmpeg cannot safely resize animated WebP. Send a GIF to convert an animated sticker
-to 512x512. Correctly sized WebP files pass through unchanged when they are within their size limit.
+Send a native WhatsApp sticker. PNG, JPG, GIF, and short MP4 inputs are converted to 512x512 WebP
+with transparent padding. GIF and MP4 sources stay animated unless `animated` is false. MP4 input
+is trimmed to 10 seconds. Static stickers are limited to 100 KB and animated stickers to 500 KB.
+Static WebP files that are not 512x512 are normalized with ffmpeg; animated WebP passes through only
+at 512x512 because ffmpeg cannot safely resize animated WebP. Send a GIF or short MP4 to convert an
+animated sticker to 512x512. Correctly sized WebP files pass through unchanged when they are within
+their size limit.
 
 | Parameter         | Type    | Required | Description                                      |
 | ----------------- | ------- | -------- | ------------------------------------------------ |
 | `instanceId`      | string  | Yes      | The instance to send from                        |
 | `to`              | string  | Yes      | Recipient phone number or group JID              |
-| `sticker`         | string  | Yes      | PNG, JPG, GIF, or WebP URL or base64 data        |
-| `animated`        | boolean | No       | Hint to retain or flatten GIF animation          |
+| `sticker`         | string  | Yes      | PNG, JPG, GIF, WebP, or short MP4 URL or base64  |
+| `animated`        | boolean | No       | Keep or flatten GIF/MP4 animation                |
 | `quotedMessageId` | string  | No       | Message ID to reply to                           |
 
 **Channel support:** Both. Cloud API uploads the prepared WebP before sending it.

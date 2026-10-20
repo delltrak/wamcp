@@ -31,6 +31,10 @@ COPY --from=deps /app/node_modules ./node_modules
 COPY --from=builder /app/dist ./dist
 COPY package.json ./
 
+# System packages used at runtime:
+# - ffmpeg, including libwebp and libwebp_anim (sticker WebP), mjpeg (optional image
+#   compression), and libx264 plus aac (optional video compression).
+# Sharp and the libwebp CLI tools (cwebp, dwebp, webpmux) are not required.
 RUN apk add --no-cache ffmpeg \
     && mkdir -p /app/data/sessions /app/data/media /app/data/media-downloads
 

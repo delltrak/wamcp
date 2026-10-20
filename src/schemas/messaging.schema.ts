@@ -29,6 +29,18 @@ export const SendImageSchema = z
     caption: z.string().optional().describe("Optional image caption"),
     quotedMessageId: z.string().optional().describe("Message ID to reply to"),
     mentions: MentionsSchema,
+    compress: z
+      .boolean()
+      .optional()
+      .describe(
+        "Compress before sending. Omit to follow WA_MEDIA_COMPRESS (default false, send the original). hd true skips compression.",
+      ),
+    hd: z
+      .boolean()
+      .optional()
+      .describe(
+        "Send the original image without compression, even when compress or WA_MEDIA_COMPRESS is enabled.",
+      ),
   })
   .strict();
 
@@ -40,6 +52,18 @@ export const SendVideoSchema = z
     caption: z.string().optional().describe("Optional video caption"),
     quotedMessageId: z.string().optional().describe("Message ID to reply to"),
     mentions: MentionsSchema,
+    compress: z
+      .boolean()
+      .optional()
+      .describe(
+        "Compress before sending. Omit to follow WA_MEDIA_COMPRESS (default false, send the original). hd true skips compression.",
+      ),
+    hd: z
+      .boolean()
+      .optional()
+      .describe(
+        "Send the original video without compression, even when compress or WA_MEDIA_COMPRESS is enabled.",
+      ),
   })
   .strict();
 
@@ -57,11 +81,16 @@ export const SendStickerSchema = z
   .object({
     instanceId: z.string().min(1).describe("The instance ID to send from"),
     to: z.string().min(5).describe("Recipient phone number or group JID"),
-    sticker: z.string().min(1).describe("Sticker image URL or base64-encoded data"),
+    sticker: z
+      .string()
+      .min(1)
+      .describe("PNG, JPG, GIF, WebP, or short MP4 URL or base64-encoded data"),
     animated: z
       .boolean()
       .optional()
-      .describe("Optional hint that a GIF sticker input should retain its animation"),
+      .describe(
+        "Optional animation hint. A GIF keeps its animation unless this is false. An MP4 becomes an animated sticker unless this is false.",
+      ),
     quotedMessageId: z.string().optional().describe("Message ID to reply to"),
   })
   .strict();

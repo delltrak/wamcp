@@ -5,7 +5,7 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { InstanceManager } from "../services/instance-manager.js";
 import type { MessageQueue } from "../services/message-queue.js";
-import { MediaService } from "../services/media.js";
+import { MediaService, shouldCompressOutgoingMedia } from "../services/media.js";
 import { toolSuccess } from "../types/mcp.types.js";
 import { handleToolError } from "../utils/tool-handler.js";
 import { createRequestLogger } from "../utils/logger.js";
@@ -92,7 +92,7 @@ Returns: { status: "queued", jobId }`,
     "wa_send_image",
     {
       description:
-        "Send an image to a WhatsApp contact or group. Image can be provided as a URL or base64-encoded data. Optional caption.",
+        "Send an image to a WhatsApp contact or group. Image can be provided as a URL or base64-encoded data. Optional caption. Compression is off unless compress is true or WA_MEDIA_COMPRESS=true; hd true sends the original.",
       inputSchema: SendImageSchema,
     },
     async (params) => {
@@ -100,6 +100,10 @@ Returns: { status: "queued", jobId }`,
       const start = Date.now();
       try {
         const channel = instanceManager.getInstanceChannel(params.instanceId);
+        const compress = shouldCompressOutgoingMedia({
+          compress: params.compress,
+          hd: params.hd,
+        });
         const result = await messageQueue.enqueueMessage(
           params.instanceId,
           params.to,
@@ -109,10 +113,11 @@ Returns: { status: "queued", jobId }`,
             caption: params.caption,
             quotedMessageId: params.quotedMessageId,
             mentions: params.mentions,
+            ...(compress ? { compress: true } : {}),
           },
           channel,
         );
-        log.info({ duration: Date.now() - start, to: params.to }, "Image message queued");
+        log.info({ duration: Date.now() - start, to: params.to, compress }, "Image message queued");
         return toolSuccess(result);
       } catch (err) {
         return handleToolError("wa_send_image", err, params.instanceId);
@@ -124,7 +129,7 @@ Returns: { status: "queued", jobId }`,
     "wa_send_video",
     {
       description:
-        "Send a video to a WhatsApp contact or group. Video can be provided as a URL or base64-encoded data. Optional caption.",
+        "Send a video to a WhatsApp contact or group. Video can be provided as a URL or base64-encoded data. Optional caption. Compression is off unless compress is true or WA_MEDIA_COMPRESS=true; hd true sends the original.",
       inputSchema: SendVideoSchema,
     },
     async (params) => {
@@ -132,6 +137,10 @@ Returns: { status: "queued", jobId }`,
       const start = Date.now();
       try {
         const channel = instanceManager.getInstanceChannel(params.instanceId);
+        const compress = shouldCompressOutgoingMedia({
+          compress: params.compress,
+          hd: params.hd,
+        });
         const result = await messageQueue.enqueueMessage(
           params.instanceId,
           params.to,
@@ -141,10 +150,11 @@ Returns: { status: "queued", jobId }`,
             caption: params.caption,
             quotedMessageId: params.quotedMessageId,
             mentions: params.mentions,
+            ...(compress ? { compress: true } : {}),
           },
           channel,
         );
-        log.info({ duration: Date.now() - start, to: params.to }, "Video message queued");
+        log.info({ duration: Date.now() - start, to: params.to, compress }, "Video message queued");
         return toolSuccess(result);
       } catch (err) {
         return handleToolError("wa_send_video", err, params.instanceId);
@@ -193,7 +203,7 @@ Returns: { status: "queued", jobId }`,
     "wa_send_sticker",
     {
       description:
-        "Send a native WhatsApp sticker. Accepts PNG, JPG, GIF, or WebP URL/base64; non-WebP images are converted to 512x512 WebP with transparent padding. Animated GIFs use ffmpeg.",
+        "Send a native WhatsApp sticker. Accepts PNG, JPG, GIF, WebP, or short MP4 URL/base64 and converts it to 512x512 WebP. GIF and MP4 inputs stay animated unless animated is false. Static stickers are limited to 100 KB and animated stickers to 500 KB.",
       inputSchema: SendStickerSchema,
     },
     async (params) => {

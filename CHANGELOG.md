@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `wa_send_sticker` accepts PNG, JPG, GIF, WebP, and short MP4 input and converts it to 512x512 WebP.
+  GIF and MP4 sources stay animated, MP4 stickers are capped at 10 seconds, and WhatsApp's 100 KB
+  static and 500 KB animated limits still apply. `wa_send_image` and `wa_send_video` can compress
+  before sending when `compress` is true or `WA_MEDIA_COMPRESS=true` (default `false`). `hd: true`
+  sends the original media. Image edge and JPEG quality, and video edge and CRF, are configurable.
+
 - Added Baileys instance lifecycle webhooks for connection, disconnect, pairing-code, and QR events,
   plus the read-only `wa_get_instance_status` tool. Pairing and QR challenge data is omitted from
   webhook payloads and status output.
