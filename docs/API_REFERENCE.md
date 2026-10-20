@@ -11,7 +11,7 @@
    - [Instance Management](#21-instance-management-9-tools)
    - [Messaging](#22-messaging-31-tools)
    - [Chat Management](#23-chat-management-11-tools)
-   - [Group Management](#24-group-management-26-tools)
+   - [Group Management](#24-group-management-27-tools)
    - [Contact Management](#25-contact-management-8-tools)
    - [Profile Management](#26-profile-management-7-tools)
    - [Status / Stories](#27-status--stories-4-tools)
@@ -92,6 +92,11 @@ Tools marked **Baileys only** are not available on Cloud API instances.
   Setting `WA_APP_STATE_WRITES_ENABLED=true` continues to enable app-state and the existing
   group/server writes that share that gate; member-label tools specifically require
   `WA_GROUP_WRITES_ENABLED=true`.
+- **Group-history digests** -- `wa_send_group_history_to_member` is a Baileys workaround for the
+  unavailable native recent-history sharing feature. It reads local SQLite messages and queues a
+  text digest to the member's DM. `WA_GROUP_HISTORY_ON_JOIN=false` optionally enables the same
+  digest after a direct add by this account, and still requires `WA_GROUP_WRITES_ENABLED=true`.
+  `WA_GROUP_HISTORY_ON_JOIN_COUNT=50` is clamped to 25–100.
 - **Message keys for chat patches** -- Unread, archive, delete, and clear operations use up to three
   recent stored raw message keys with numeric Unix-second timestamps. The collection index uses the
   latest raw key's `remoteJid`, preserving the PN/LID address used by that message. Invalid rows are
@@ -110,7 +115,7 @@ Tools marked **Baileys only** are not available on Cloud API instances.
 
 ## 2. Tools Reference
 
-WA MCP exposes **137 tools** grouped by domain. All tools return MCP-standard responses.
+WA MCP exposes **138 tools** grouped by domain. All tools return MCP-standard responses.
 
 ### Success Response Format
 
@@ -1261,7 +1266,7 @@ is blocked unless `WA_APP_STATE_WRITES_ENABLED=true`.
 
 ---
 
-### 2.4 Group Management (26 tools)
+### 2.4 Group Management (27 tools)
 
 Tools for creating and managing WhatsApp groups.
 
@@ -1277,6 +1282,50 @@ the regular message-send path and remains available while both flags are disable
 Member labels use Baileys protocol messages and require `WA_GROUP_WRITES_ENABLED=true`. WhatsApp
 member labels are self-assigned: these tools can only set or remove the connected account's own
 label, not another participant's label. Updates are queued and rate limited per instance.
+
+`wa_send_group_history_to_member` sends a readable digest of recent locally stored group messages
+to a participant's direct chat. Baileys rc14 cannot use WhatsApp's native recent-history sharing,
+so this sends plain text as a workaround. It requires `WA_GROUP_WRITES_ENABLED=true`; the app-state
+write flag alone does not enable it. Digest chunks are queued through the per-instance outbound
+message limiter. Optional automatic sending is controlled by `WA_GROUP_HISTORY_ON_JOIN=false` and
+`WA_GROUP_HISTORY_ON_JOIN_COUNT=50` (clamped to 25–100).
+
+Baileys rc14's `group-participants.update` event provides `author` and may provide `authorPn`, but
+its normalized `action: "add"` combines direct adds, invite stubs, and join-request stubs. Automatic
+sends require a matching raw `messages.upsert` message with stub type `GROUP_PARTICIPANT_ADD`, an
+author matching this account's PN or LID, and a non-self participant. `GROUP_PARTICIPANT_INVITE`,
+`GROUP_PARTICIPANT_ADD_REQUEST_JOIN`, other-admin adds, and events without a matching raw stub or
+author are skipped. Errors are logged without interrupting event processing.
+
+#### `wa_send_group_history_to_member`
+
+Send the latest locally stored group messages as a readable, oldest-first digest in a participant's
+direct chat. The sender name uses a stored contact name or message push name, with the JID number as
+fallback. Media is represented by Portuguese placeholders such as `[imagem]`, `[áudio]`, and
+`[documento: nome]`, followed by any caption. Messages are split into queued chunks of at most 4,000
+characters. If no local messages are available, nothing is sent and the response includes a note.
+
+| Parameter     | Type   | Required | Description |
+| ------------- | ------ | -------- | ----------- |
+| `instanceId`  | string | Yes      | The instance ID to send from |
+| `groupJid`    | string | Yes      | WhatsApp group JID or bare group ID |
+| `participant` | string | Yes      | New member's individual JID or phone number; bare phone numbers are normalized to a JID |
+| `count`       | number | No       | Requested message count; defaults to 50 and is clamped to 25–100 |
+
+**Channel support:** Baileys only. Requires `WA_GROUP_WRITES_ENABLED=true`.
+
+**Response:** `messagesIncluded`, `chunksSent` (accepted by the outbound queue), `requestedCount`,
+`count` (after clamping), `clamped`, and an optional `note` for empty local history.
+
+```json
+{
+  "messagesIncluded": 42,
+  "chunksSent": 2,
+  "requestedCount": 50,
+  "count": 50,
+  "clamped": false
+}
+```
 
 #### `wa_list_groups`
 
@@ -3361,7 +3410,7 @@ Add to your Claude Desktop MCP configuration:
 }
 ```
 
-Once configured, the client will auto-discover all 137 WA MCP tools and can interact with WhatsApp directly.
+Once configured, the client will auto-discover all 138 WA MCP tools and can interact with WhatsApp directly.
 
 ### 6.3 LangChain (Python)
 
@@ -3374,7 +3423,7 @@ toolkit = MCPToolkit(
 )
 
 tools = toolkit.get_tools()
-# tools now contains all 137 WA MCP tools, ready for any LangChain agent
+# tools now contains all 138 WA MCP tools, ready for any LangChain agent
 ```
 
 ---
@@ -3391,14 +3440,14 @@ tools = toolkit.get_tools()
 | Message Search                    | 1     | Both                                 |
 | WhatsApp Business Labels          | 8     | Baileys                              |
 | WhatsApp Events                   | 2     | Baileys                              |
-| Group Management                  | 26    | Baileys                              |
+| Group Management                  | 27    | Baileys                              |
 | Contact Management                | 8     | Both                                 |
 | Profile Management                | 7     | Both                                 |
 | Status / Stories                  | 4     | Baileys only                         |
 | Newsletter / Channels             | 10    | Baileys only                         |
 | Business, Communities, and Catalog| 15    | Baileys only                         |
 | Call Management                   | 1     | Baileys only                         |
-| **Total**                         | **137** |                                    |
+| **Total**                         | **138** |                                    |
 
 | Resources     | 10  |
 | ------------- | --- |

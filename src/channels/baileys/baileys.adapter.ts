@@ -148,6 +148,7 @@ import { scheduleBaileysMessagesRead } from "../../services/auto-read.js";
 import { QuotedMessageResolutionError } from "../../utils/quoted-message.js";
 import { isValidStatusRecipient } from "../../utils/validation.js";
 import { normalizeGroupJid } from "../../utils/group-jid.js";
+import { isDirectGroupParticipantAdd } from "./group-history-event.js";
 import { MediaService } from "../../services/media.js";
 import {
   isOggContainer,
@@ -4382,6 +4383,7 @@ export class BaileysAdapter implements ChannelAdapter {
         isForwarded: r.isForwarded === 1,
         status: r.status as Message["status"],
         timestamp: r.timestamp,
+        ...(r.pushName ? { pushName: r.pushName } : {}),
         starred: r.starred === 1,
         ...(labels.length ? { labels } : {}),
       };
@@ -6605,9 +6607,14 @@ export class BaileysAdapter implements ChannelAdapter {
       }
 
       if (events["group-participants.update"]) {
+        const directAdd = isDirectGroupParticipantAdd(
+          events["group-participants.update"],
+          events["messages.upsert"]?.messages ?? [],
+        );
         const event = normalizeGroupParticipantsUpdate(
           this.instanceId,
           events["group-participants.update"],
+          directAdd,
         );
         this.emit("group.participants_changed", event);
       }

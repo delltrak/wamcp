@@ -408,6 +408,8 @@ export interface Message {
   mediaMimetype?: string | null;
   mediaFileName?: string | null;
   mediaSize?: number | null;
+  mediaCaption?: string | null;
+  caption?: string | null;
   mimeType?: string | null;
   fileName?: string | null;
   size?: number | null;
@@ -418,6 +420,7 @@ export interface Message {
   isForwarded: boolean;
   status: MessageDeliveryStatus;
   timestamp: number;
+  pushName?: string | null;
   starred?: boolean;
   labels?: BusinessLabel[];
 }
@@ -601,6 +604,11 @@ export interface NormalizedGroupParticipantsEvent {
   groupId: string;
   action: ParticipantAction;
   participants: string[];
+  participantAliases?: string[][];
+  author?: string | null;
+  authorPn?: string | null;
+  /** True only when the matching rc14 message stub identifies a direct participant add. */
+  directAdd?: boolean;
 }
 
 export interface NormalizedContactUpdateEvent {

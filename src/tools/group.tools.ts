@@ -33,9 +33,12 @@ import {
   HandleJoinRequestSchema,
   GroupJoinApprovalModeSchema,
   GroupMemberAddModeSchema,
+  SendGroupHistoryToMemberSchema,
   SetGroupMemberLabelSchema,
   RemoveGroupMemberLabelSchema,
 } from "../schemas/group.schema.js";
+import { sendGroupHistoryToMember } from "../services/group-history.js";
+import { assertGroupHistoryWritesEnabled } from "../utils/group-history-error.js";
 
 export function registerGroupTools(
   server: McpServer,
@@ -78,6 +81,46 @@ export function registerGroupTools(
         return toolSuccess(info);
       } catch (err) {
         return handleToolError("wa_get_group_info", err, params.instanceId);
+      }
+    },
+  );
+
+  server.registerTool(
+    "wa_send_group_history_to_member",
+    {
+      description:
+        "Send a readable digest of recent locally stored group messages to a member's WhatsApp DM. Baileys workaround for WhatsApp's native recent-history sharing, which is unavailable in Baileys rc14. Requires WA_GROUP_WRITES_ENABLED=true and uses the per-instance outbound message queue.",
+      inputSchema: SendGroupHistoryToMemberSchema,
+    },
+    async (params) => {
+      const log = createRequestLogger("wa_send_group_history_to_member", params.instanceId);
+      const start = Date.now();
+      try {
+        assertGroupHistoryWritesEnabled();
+        if (instanceManager.getInstanceChannel(params.instanceId) !== "baileys") {
+          throw new Error("Group history sharing is only supported on Baileys");
+        }
+        const adapter = instanceManager.getAdapter(params.instanceId);
+        const result = await sendGroupHistoryToMember({
+          instanceId: params.instanceId,
+          groupJid: params.groupJid,
+          participant: params.participant,
+          count: params.count,
+          adapter,
+          messageQueue,
+        });
+        log.info(
+          {
+            duration: Date.now() - start,
+            messagesIncluded: result.messagesIncluded,
+            chunksSent: result.chunksSent,
+            clamped: result.clamped,
+          },
+          "Group history digest queued",
+        );
+        return toolSuccess(result);
+      } catch (err) {
+        return handleToolError("wa_send_group_history_to_member", err, params.instanceId);
       }
     },
   );

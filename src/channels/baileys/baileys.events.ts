@@ -842,6 +842,7 @@ export function normalizeGroupsUpdate(
 export function normalizeGroupParticipantsUpdate(
   instanceId: string,
   data: BaileysEventMap["group-participants.update"],
+  directAdd = false,
 ): NormalizedGroupParticipantsEvent {
   const actionMap: Record<string, "add" | "remove" | "promote" | "demote"> = {
     add: "add",
@@ -850,13 +851,25 @@ export function normalizeGroupParticipantsUpdate(
     demote: "demote",
   };
 
+  const participants = data.participants.map((participant) =>
+    typeof participant === "string" ? participant : participant.id,
+  );
+
   return {
     instanceId,
     groupId: data.id,
     action: actionMap[data.action] ?? "add",
-    participants: data.participants.map((participant) =>
-      typeof participant === "string" ? participant : participant.id,
-    ),
+    participants,
+    participantAliases: data.participants.map((participant, index) => {
+      if (typeof participant === "string") return [participant];
+      const aliases = [participant.id, participant.phoneNumber, participant.lid].filter(
+        (identity): identity is string => typeof identity === "string" && identity.length > 0,
+      );
+      return aliases.length ? aliases : [participants[index]!];
+    }),
+    ...(typeof data.author === "string" ? { author: data.author } : {}),
+    ...(typeof data.authorPn === "string" ? { authorPn: data.authorPn } : {}),
+    ...(directAdd ? { directAdd: true } : {}),
   };
 }
 

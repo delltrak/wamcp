@@ -36,7 +36,7 @@
 
 **WA MCP** is a WhatsApp MCP server built with TypeScript that gives AI agents full access to WhatsApp through the [Model Context Protocol](https://modelcontextprotocol.io). It supports both **Baileys** (WhatsApp Web) and **Meta Cloud API** as dual-channel backends, deployable with **Docker** in a single command.
 
-Your agent connects once and auto-discovers **137 tools**, **10 resources**, and **15 real-time events** — zero configuration, zero REST wrappers, zero glue code.
+Your agent connects once and auto-discovers **138 tools**, **10 resources**, and **15 real-time events** — zero configuration, zero REST wrappers, zero glue code.
 
 ```
 Your AI Agent ←→ MCP Protocol ←→ WA MCP ←→ WhatsApp
@@ -82,7 +82,7 @@ from google.adk.tools.mcp_tool import McpToolset
 
 tools = McpToolset(url="http://localhost:3000/mcp")
 
-# Agent auto-discovers 137 WhatsApp tools
+# Agent auto-discovers 138 WhatsApp tools
 # wa_create_instance, wa_send_text, wa_send_image, ...
 ```
 
@@ -146,7 +146,7 @@ Add to your `claude_desktop_config.json`:
 
 ## 🛠️ Tools
 
-WA MCP exposes **137 tools** across 15 domains. All tools use the `wa_` prefix.
+WA MCP exposes **138 tools** across 15 domains. All tools use the `wa_` prefix.
 
 <details>
 <summary>📋 <strong>Instance Management</strong> (9 tools)</summary>
@@ -277,7 +277,7 @@ WA MCP exposes **137 tools** across 15 domains. All tools use the `wa_` prefix.
 </details>
 
 <details>
-<summary>👥 <strong>Groups</strong> (26 tools)</summary>
+<summary>👥 <strong>Groups</strong> (27 tools)</summary>
 
 | Tool                           | Description                   |
 | ------------------------------ | ----------------------------- |
@@ -289,6 +289,7 @@ WA MCP exposes **137 tools** across 15 domains. All tools use the `wa_` prefix.
 | `wa_create_group`              | Create group                  |
 | `wa_create_group_from_group`   | Create a group from another group's members |
 | `wa_group_add_participants`    | Add members                   |
+| `wa_send_group_history_to_member` | Send recent local group history to a member's DM (Baileys, gated, queued) |
 | `wa_group_remove_participants` | Remove members                |
 | `wa_group_promote`             | Promote to admin              |
 | `wa_group_demote`              | Demote from admin             |
@@ -722,6 +723,8 @@ Copy `.env.example` to `.env` and configure:
 | `WA_BAILEYS_EVENT_BUFFER_STALL_MS` | `60000` | Time a Baileys event buffer may remain active after connect before the watchdog flushes it |
 | `WA_APP_STATE_WRITES_ENABLED` | `false`                 | Enable protected Baileys app-state patches and remaining gated account/server changes |
 | `WA_GROUP_WRITES_ENABLED` | `false` | Enable Baileys group, community, and Channel server writes without enabling app-state patches |
+| `WA_GROUP_HISTORY_ON_JOIN` | `false` | Automatically DM a new member a local group-history digest after this account directly adds them; requires `WA_GROUP_WRITES_ENABLED=true` |
+| `WA_GROUP_HISTORY_ON_JOIN_COUNT` | `50` | Number of local messages in automatic digests, clamped to `25`–`100` |
 | `WA_APP_STATE_MIN_INTERVAL_MS` | `1500` | Minimum delay between app-state write attempts per instance; accepts `0` to disable spacing |
 | `WA_PRESENCE_MODE` | `on_activity` | Baileys presence policy: `on_activity` marks online around sends and typing/recording indicators; `always` preserves the legacy behavior |
 | `WA_PRESENCE_IDLE_SECONDS` | `30` | Seconds after activity before Baileys presence returns to unavailable; must be a positive integer no greater than `2147483` |
@@ -912,6 +915,15 @@ group/server operations that share that gate; member-label tools specifically re
 catalog reads, order reads, blocklist, and About calls remain available.
 Normal message sends, read receipts, and app-state reads/resyncs remain available as well.
 
+`wa_send_group_history_to_member` is a workaround for Baileys rc14's lack of WhatsApp's native
+recent-history sharing for new group members. It reads up to 100 latest messages from the local
+SQLite store, formats them oldest first, and queues a bounded digest to the member's direct chat.
+`WA_GROUP_HISTORY_ON_JOIN=true` enables the same digest after this account directly adds a member;
+it also requires `WA_GROUP_WRITES_ENABLED=true`. Baileys rc14's participant update includes an
+`author` JID and optional `authorPn`; the handler correlates the update with the raw
+`messages.upsert` stub and only accepts `GROUP_PARTICIPANT_ADD`. It skips invite-link and join-request
+stubs, other admins' adds, self-adds, and updates without a matching raw stub or author.
+
 For `wa_mark_chat_unread`, archive, delete, and clear ranges, the adapter uses up to three recent
 stored raw message keys, keeps their original PN/LID addressing, and converts their timestamps to
 Unix seconds. The patch index uses the newest raw key's `remoteJid` so it matches that address.
@@ -1000,7 +1012,7 @@ src/
 ├── index.ts                     # Entry point (HTTP/stdio)
 ├── constants.ts                 # Defaults and limits
 ├── server/mcp.ts                # MCP server setup
-├── tools/                       # 🔧 137 MCP tools (15 files)
+├── tools/                       # 🔧 138 MCP tools (15 files)
 ├── resources/                   # 📖 10 MCP resources (8 files)
 ├── notifications/events.ts      # 📡 15 documented event types
 ├── channels/

@@ -5,6 +5,7 @@
 import { z } from "zod";
 import { MAX_GROUP_PARTICIPANTS } from "../constants.js";
 import { isValidGroupId } from "../utils/group-jid.js";
+import { isValidStatusRecipient } from "../utils/validation.js";
 
 const GroupIdSchema = z
   .string()
@@ -20,6 +21,26 @@ export const GetGroupInfoSchema = z
   .object({
     instanceId: z.string().min(1).describe("The instance ID"),
     groupId: GroupIdSchema.describe("WhatsApp group JID or bare group ID"),
+  })
+  .strict();
+
+export const SendGroupHistoryToMemberSchema = z
+  .object({
+    instanceId: z.string().min(1).describe("The instance ID to send from"),
+    groupJid: GroupIdSchema.describe("WhatsApp group JID or bare group ID"),
+    participant: z
+      .string()
+      .trim()
+      .min(1)
+      .refine(isValidStatusRecipient, "Expected an individual WhatsApp phone number or JID")
+      .describe("New member's phone number or individual JID"),
+    count: z
+      .number()
+      .int()
+      .optional()
+      .describe(
+        "How many recent messages to include (defaults to 50; values are clamped to 25–100)",
+      ),
   })
   .strict();
 
