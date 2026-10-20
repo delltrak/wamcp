@@ -4,7 +4,6 @@ import { CHANNEL_EVENTS, type ChannelEvent } from "../types/channel.types.js";
 import { logger } from "../utils/logger.js";
 import { validateWebhookUrl } from "../utils/validation.js";
 import {
-  getInstanceWebhook,
   instanceWebhookStorageGeneration,
   listInstanceWebhooks,
   type InstanceWebhookRow,
@@ -658,6 +657,16 @@ export function assertInstanceWebhookHostAllowed(
   }
 }
 
+let warnedUnsignedInstanceWebhook = false;
+
+function warnUnsignedInstanceWebhook(): void {
+  if (warnedUnsignedInstanceWebhook) return;
+  warnedUnsignedInstanceWebhook = true;
+  logger.warn(
+    "Instance webhook is unsigned because global destinations use different HMAC secrets",
+  );
+}
+
 function inheritedWebhookSecret(url: string, config: EventWebhookConfig): string | undefined {
   const matched = config.destinations.find((destination) => webhookUrlsMatch(destination.url, url));
   if (matched?.secret) return matched.secret;
@@ -668,7 +677,9 @@ function inheritedWebhookSecret(url: string, config: EventWebhookConfig): string
         .filter((secret): secret is string => typeof secret === "string" && secret.length > 0),
     ),
   ];
-  return secrets.length === 1 ? secrets[0] : undefined;
+  if (secrets.length === 1) return secrets[0];
+  if (secrets.length > 1) warnUnsignedInstanceWebhook();
+  return undefined;
 }
 
 /**
@@ -756,19 +767,33 @@ function tryInstanceWebhookDestination(
   }
 }
 
+let cachedInstanceWebhookRows: {
+  generation: number;
+  byInstance: Map<string, InstanceWebhookRow>;
+} | null = null;
+
+/**
+ * #142: one read of every stored row until set or delete bumps the storage generation.
+ * The same generation key already invalidates the /health status cache.
+ */
+function instanceWebhookRows(): ReadonlyMap<string, InstanceWebhookRow> {
+  const generation = instanceWebhookStorageGeneration();
+  if (cachedInstanceWebhookRows?.generation === generation) {
+    return cachedInstanceWebhookRows.byInstance;
+  }
+  const byInstance = new Map<string, InstanceWebhookRow>();
+  for (const row of listInstanceWebhooks()) byInstance.set(row.instanceId, row);
+  cachedInstanceWebhookRows = { generation, byInstance };
+  return byInstance;
+}
+
 /** Global destinations, or the instance webhook in replace mode, or both when merge is on. */
 export function destinationsForInstance(
   config: EventWebhookConfig,
   instanceId: string,
   allowHttp = eventWebhookAllowsHttp(),
 ): EventWebhookDestination[] {
-  let row: InstanceWebhookRow | undefined;
-  try {
-    row = getInstanceWebhook(instanceId);
-  } catch {
-    skipInvalidInstanceWebhook(instanceId);
-    return config.destinations;
-  }
+  const row = instanceWebhookRows().get(instanceId);
   if (!row) return config.destinations;
   const instanceDestination = tryInstanceWebhookDestination(row, config, allowHttp);
   if (!instanceDestination) return config.destinations;
@@ -784,7 +809,7 @@ export function storedInstanceDestinations(
   allowHttp: boolean,
 ): EventWebhookDestination[] {
   const destinations: EventWebhookDestination[] = [];
-  for (const row of listInstanceWebhooks()) {
+  for (const row of instanceWebhookRows().values()) {
     const destination = tryInstanceWebhookDestination(row, config, allowHttp);
     if (destination) destinations.push(destination);
   }

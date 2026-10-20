@@ -581,7 +581,11 @@ The instance webhook also uses `WA_EVENT_WEBHOOK_PRESET` and
 `WA_EVENT_WEBHOOK_IGNORE_FROM_ME`. `auth_value` is stored in plaintext and is
 never returned by those tools, written to logs, or included in `GET /health`.
 The tools return the endpoint origin, not the full URL. Instance delivery uses
-`WA_EVENT_WEBHOOK_SECRET` when that global HMAC secret is set. A webhook stored
+`WA_EVENT_WEBHOOK_SECRET` when that global HMAC secret is set. If global
+destinations use different HMAC secrets and the instance URL matches none of
+them, that delivery is unsigned and one warning is logged. A stored row that
+fails validation makes `wa_get_instance_webhook` return `configured: false` and
+`invalid: true`. A webhook stored
 for any one instance satisfies `WA_REQUIRE_EVENT_WEBHOOK` for the process.
 `WA_EVENT_WEBHOOK_INSTANCE_MERGE_GLOBAL` defaults to false: that instance uses
 only its own webhook, and saving it logs a warning when a global destination

@@ -81,7 +81,10 @@ and set tools return the endpoint origin and the auth header name, plus
 `WA_EVENT_WEBHOOK_SECRET` is set, instance deliveries are signed with that same
 HMAC secret. If several global destinations use different secrets, the instance
 destination takes the secret of the global URL it replaces, and otherwise a
-secret only when every global destination shares one.
+secret only when every global destination shares one. When those secrets differ
+and the instance URL matches none of them, the instance webhook is sent unsigned.
+That condition logs one warning for the process. The warning does not include
+the URL or the secret.
 
 With `WA_EVENT_WEBHOOK_INSTANCE_MERGE_GLOBAL=false` (the default), events for
 that instance go only to its webhook. Saving that webhook logs a warning when a
@@ -92,9 +95,12 @@ trailing slash. If the instance URL is the same as a global URL, the event is
 sent once and the instance auth header, event list, and global HMAC secret are
 used. Deleting the row, or deleting the instance, restores global routing for
 that instance. A stored row that no longer passes validation is skipped with a
-warning. That skip does not fail `/health`, startup, or deliveries to the
-remaining destinations. The delivery worker reloads instance rows on `sync()`,
-not on every job. When the new options are unset and no instance webhook is
+warning. `wa_get_instance_webhook` returns `{ "configured": false, "invalid": true }`
+for that row and does not throw. That skip does not fail `/health`, startup, or
+deliveries to the remaining destinations. Event routing keeps the stored rows in
+memory until a webhook is saved or deleted, so a burst of events does not query
+once per event. The delivery worker reloads instance rows on `sync()`, not on
+every job. When the new options are unset and no instance webhook is
 stored, routing matches the global configuration.
 
 `WA_EVENT_WEBHOOK_IGNORE_JIDS` (#140) is copied onto the instance destination

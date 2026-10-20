@@ -15,6 +15,7 @@ import {
 import {
   deleteInstanceWebhook,
   getInstanceWebhook,
+  InvalidStoredInstanceWebhookError,
   upsertInstanceWebhook,
 } from "./instance-webhook-store.js";
 
@@ -29,7 +30,8 @@ export interface InstanceWebhookConfigured {
   updatedAt: number;
 }
 
-export type InstanceWebhookState = InstanceWebhookConfigured | { configured: false };
+export type InstanceWebhookState =
+  InstanceWebhookConfigured | { configured: false; invalid?: true };
 
 export interface InstanceWebhookInput {
   instanceId: string;
@@ -105,9 +107,16 @@ export function setInstanceWebhook(input: InstanceWebhookInput): InstanceWebhook
 /** Read the stored webhook. The auth value is never included. */
 export function readInstanceWebhook(instanceId: string): InstanceWebhookState {
   requireInstance(instanceId);
-  const row = getInstanceWebhook(instanceId);
-  if (!row) return { configured: false };
-  return viewFromStored(row.url, row.authHeader, row.authValue, row.events, row.updatedAt);
+  try {
+    const row = getInstanceWebhook(instanceId);
+    if (!row) return { configured: false };
+    return viewFromStored(row.url, row.authHeader, row.authValue, row.events, row.updatedAt);
+  } catch (err) {
+    if (err instanceof InvalidStoredInstanceWebhookError) {
+      return { configured: false, invalid: true };
+    }
+    throw err;
+  }
 }
 
 /** Remove the stored webhook. The instance then uses the global destinations. */

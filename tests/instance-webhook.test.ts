@@ -634,6 +634,7 @@ describe("per-instance event webhooks", () => {
       .prepare("UPDATE instance_webhooks SET url = ? WHERE instance_id = ?")
       .run("http://hooks.example.test/changed", INSTANCE_A);
     expect(internals.destinationMap().get(`instance:${INSTANCE_A}`)?.url).toBe(INSTANCE_URL);
+    touchInstanceWebhookStorage();
 
     internals.rebuildKnownDestinations();
     expect(internals.destinationMap().has(`instance:${INSTANCE_A}`)).toBe(false);
@@ -735,6 +736,114 @@ describe("per-instance event webhooks", () => {
     expect(third).not.toBe(first);
     expect(third.destinationCount).toBe(2);
     expect(getEventWebhookStatus(env)).toBe(third);
+  });
+
+  it("reads instance webhook rows once until storage changes", async () => {
+    const config = globalConfig();
+    const { manager, handler } = captureHandler();
+    const enqueue = vi.fn(() => Promise.resolve());
+    const unsubscribe = registerEventWebhookHandler(
+      manager,
+      config,
+      enqueue,
+      undefined,
+      (instanceId) => destinationsForInstance(config, instanceId),
+    );
+    const prepare = vi.spyOn(db.$client, "prepare");
+    const selects = (): number =>
+      prepare.mock.calls.filter((call) => {
+        const sql = String(call[0]);
+        return sql.includes("instance_webhooks") && /^\s*select/i.test(sql);
+      }).length;
+    const presence = {
+      instanceId: INSTANCE_A,
+      chatId: "5511888888888@s.whatsapp.net",
+      participant: "5511888888888@s.whatsapp.net",
+      status: "available" as const,
+    };
+
+    for (let index = 0; index < 100; index += 1) {
+      handler()?.("presence.updated", INSTANCE_A, presence);
+    }
+    expect(selects()).toBe(1);
+    expect(enqueue).not.toHaveBeenCalled();
+
+    setInstanceWebhook({ instanceId: INSTANCE_A, url: INSTANCE_URL });
+    const afterSave = selects();
+    for (let index = 0; index < 100; index += 1) {
+      handler()?.("presence.updated", INSTANCE_A, presence);
+    }
+    expect(selects()).toBe(afterSave + 1);
+
+    removeInstanceWebhook(INSTANCE_A);
+    const afterDelete = selects();
+    for (let index = 0; index < 100; index += 1) {
+      handler()?.("presence.updated", INSTANCE_A, presence);
+    }
+    expect(selects()).toBe(afterDelete + 1);
+
+    unsubscribe();
+    await unsubscribe.flush();
+  });
+
+  it("returns invalid instead of throwing when the stored webhook row is corrupt", async () => {
+    setInstanceWebhook({
+      instanceId: INSTANCE_A,
+      url: INSTANCE_URL,
+      authHeader: AUTH_HEADER,
+      authValue: AUTH_SECRET,
+    });
+    db.$client
+      .prepare("UPDATE instance_webhooks SET events = ? WHERE instance_id = ?")
+      .run("not-json", INSTANCE_A);
+    touchInstanceWebhookStorage();
+
+    expect(readInstanceWebhook(INSTANCE_A)).toEqual({ configured: false, invalid: true });
+    const tools = registerWebhookTools();
+    const result = await tools.get("wa_get_instance_webhook")?.({ instanceId: INSTANCE_A });
+    expect(result?.isError).toBeUndefined();
+    expect(JSON.parse(result?.content[0]?.text ?? "")).toEqual({
+      configured: false,
+      invalid: true,
+    });
+    expect(result?.content[0]?.text).not.toContain(INSTANCE_URL);
+    expect(result?.content[0]?.text).not.toContain(AUTH_SECRET);
+    expect(destinationsForInstance(globalConfig(), INSTANCE_A).map((item) => item.id)).toEqual([
+      "default",
+    ]);
+  });
+
+  it("warns once when different global secrets leave an instance webhook unsigned", () => {
+    setInstanceWebhook({ instanceId: INSTANCE_A, url: GLOBAL_URL });
+    const warn = vi.spyOn(logger, "warn").mockImplementation(() => undefined);
+    const config = loadEventWebhookConfig({
+      WA_EVENT_WEBHOOK_INSTANCE_MERGE_GLOBAL: "true",
+      WA_EVENT_WEBHOOKS: JSON.stringify([
+        { id: "one", url: GLOBAL_URL, secret: "hmac-secret-one-120" },
+        { id: "two", url: SECOND_URL, secret: "hmac-secret-two-120" },
+      ]),
+    });
+
+    const matched = destinationsForInstance(config, INSTANCE_A).find(
+      (destination) => destination.id === `instance:${INSTANCE_A}`,
+    );
+    expect(matched?.secret).toBe("hmac-secret-one-120");
+    expect(JSON.stringify(warn.mock.calls)).not.toContain("unsigned");
+
+    setInstanceWebhook({ instanceId: INSTANCE_A, url: INSTANCE_URL });
+    warn.mockClear();
+    const unsignedDestination = destinationsForInstance(config, INSTANCE_A).find(
+      (destination) => destination.id === `instance:${INSTANCE_A}`,
+    );
+    expect(unsignedDestination?.secret).toBeUndefined();
+    destinationsForInstance(config, INSTANCE_A);
+    const unsigned = warn.mock.calls.filter((call) => JSON.stringify(call).includes("unsigned"));
+    expect(unsigned).toHaveLength(1);
+    const text = JSON.stringify(unsigned);
+    expect(text).not.toContain("hmac-secret-one-120");
+    expect(text).not.toContain("hmac-secret-two-120");
+    expect(text).not.toContain(INSTANCE_URL);
+    expect(text).not.toContain(GLOBAL_URL);
   });
 
   it("copies ignoreJids onto the instance destination for the JID filter", () => {

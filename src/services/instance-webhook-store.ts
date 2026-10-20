@@ -96,10 +96,23 @@ export function listInstanceWebhooks(): InstanceWebhookRow[] {
   return rows;
 }
 
+export class InvalidStoredInstanceWebhookError extends Error {
+  constructor() {
+    super("Invalid stored instance webhook");
+    this.name = "InvalidStoredInstanceWebhookError";
+  }
+}
+
 export function getInstanceWebhook(instanceId: string): InstanceWebhookRow | undefined {
   const record = sqlite().prepare(INSTANCE_WEBHOOK_SQL.get).get(instanceId) as
     RawInstanceWebhook | undefined;
-  return record ? toRow(record) : undefined;
+  if (!record) return undefined;
+  try {
+    return toRow(record);
+  } catch {
+    logger.warn({ instanceId }, "Skipping invalid stored instance webhook");
+    throw new InvalidStoredInstanceWebhookError();
+  }
 }
 
 export function upsertInstanceWebhook(row: InstanceWebhookRow): void {

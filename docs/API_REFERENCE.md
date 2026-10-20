@@ -334,7 +334,7 @@ Configure Meta Cloud API credentials for a Cloud API instance. Required before c
 
 #### `wa_set_instance_webhook`
 
-Registered only when `WA_INSTANCE_WEBHOOK_TOOLS_ENABLED=true` (#142). Replace the outgoing event webhook stored for one instance. `auth_value` is saved in plaintext for delivery and is not returned. Omit `events` to inherit `WA_EVENT_WEBHOOK_EVENTS`. An empty event list is rejected. The instance webhook uses `WA_EVENT_WEBHOOK_PRESET`, `WA_EVENT_WEBHOOK_IGNORE_FROM_ME`, and `WA_EVENT_WEBHOOK_SECRET` when that global HMAC secret is set. The response `endpoint` is the URL origin, not the full URL.
+Registered only when `WA_INSTANCE_WEBHOOK_TOOLS_ENABLED=true` (#142). Replace the outgoing event webhook stored for one instance. `auth_value` is saved in plaintext for delivery and is not returned. Omit `events` to inherit `WA_EVENT_WEBHOOK_EVENTS`. An empty event list is rejected. The instance webhook uses `WA_EVENT_WEBHOOK_PRESET`, `WA_EVENT_WEBHOOK_IGNORE_FROM_ME`, and `WA_EVENT_WEBHOOK_SECRET` when that global HMAC secret is set. If global destinations use different HMAC secrets and this URL matches none of them, delivery is unsigned and one warning is logged. The response `endpoint` is the URL origin, not the full URL.
 
 `WA_EVENT_WEBHOOK_INSTANCE_MERGE_GLOBAL` defaults to `false`: this instance then uses only this webhook, and a warning is logged when a global destination exists. Set it to `true` to also deliver to the global destinations. A URL that matches a global destination, after lowercasing the host and removing a trailing slash, is delivered once, with this instance's auth header, events, and the global HMAC secret. `WA_INSTANCE_WEBHOOK_ALLOWED_HOSTS` optionally restricts the host. Instances without a stored webhook keep the global destinations. One stored instance webhook satisfies `WA_REQUIRE_EVENT_WEBHOOK` for the whole process. An invalid stored row is skipped so the other destinations keep working.
 
@@ -367,7 +367,7 @@ Registered only when `WA_INSTANCE_WEBHOOK_TOOLS_ENABLED=true` (#142). Replace th
 
 #### `wa_get_instance_webhook`
 
-Read the webhook stored for one instance. The auth value and full URL are never returned. `configured: false` means the instance uses the global destinations.
+Read the webhook stored for one instance. The auth value and full URL are never returned. `configured: false` means the instance uses the global destinations. A stored row that fails validation returns `configured: false` and `invalid: true` instead of an error.
 
 | Parameter    | Type   | Required | Description                                 |
 | ------------ | ------ | -------- | ------------------------------------------- |
