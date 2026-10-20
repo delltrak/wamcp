@@ -14,6 +14,7 @@ import {
   loadPresencePulseConfig,
   planPresencePulseStarts,
   parsePresencePulseWindow,
+  zonedWallTimeMs,
   type PresencePulseConfig,
   type PresencePulseDevice,
 } from "../src/services/presence-pulse.js";
@@ -24,6 +25,9 @@ const PULSE_ENV_KEYS = [
   "WA_PRESENCE_PULSE_TIMES_PER_DAY",
   "WA_PRESENCE_PULSE_MINUTES",
   "WA_PRESENCE_PULSE_WINDOW",
+  "WA_PRESENCE_PULSE_TZ",
+  "WA_PRESENCE_MODE",
+  "WA_MARK_ONLINE_ON_CONNECT",
 ] as const;
 
 function restorePulseEnv(previous: Map<string, string | undefined>): void {
@@ -57,6 +61,8 @@ describe("presence pulse configuration", () => {
         endMinutes: 22 * 60,
         label: PRESENCE_PULSE_DEFAULT_WINDOW,
       },
+      timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+      skipWhenAlwaysOnline: false,
     });
   });
 
@@ -66,12 +72,29 @@ describe("presence pulse configuration", () => {
     process.env.WA_PRESENCE_PULSE_MINUTES = String(PRESENCE_PULSE_MAX_MINUTES);
     process.env.WA_PRESENCE_PULSE_WINDOW = "09:30-18:00";
 
+    process.env.WA_PRESENCE_PULSE_TZ = "America/Bahia";
     expect(loadPresencePulseConfig()).toEqual({
       enabled: true,
       timesPerDay: 1,
       minutes: PRESENCE_PULSE_MAX_MINUTES,
       window: { startMinutes: 9 * 60 + 30, endMinutes: 18 * 60, label: "09:30-18:00" },
+      timeZone: "America/Bahia",
+      skipWhenAlwaysOnline: false,
     });
+
+    process.env.WA_PRESENCE_MODE = "always";
+    process.env.WA_MARK_ONLINE_ON_CONNECT = "true";
+    expect(loadPresencePulseConfig().skipWhenAlwaysOnline).toBe(true);
+    process.env.WA_PRESENCE_MODE = "on_activity";
+    expect(loadPresencePulseConfig().skipWhenAlwaysOnline).toBe(false);
+    delete process.env.WA_PRESENCE_MODE;
+    delete process.env.WA_MARK_ONLINE_ON_CONNECT;
+
+    process.env.WA_PRESENCE_PULSE_TZ = "Not/AZone";
+    expect(() => loadPresencePulseConfig()).toThrow(
+      "Invalid WA_PRESENCE_PULSE_TZ; expected an IANA time zone name",
+    );
+    delete process.env.WA_PRESENCE_PULSE_TZ;
 
     process.env.WA_PRESENCE_PULSE_ENABLED = "yes";
     expect(() => loadPresencePulseConfig()).toThrow(
@@ -120,38 +143,73 @@ describe("presence pulse configuration", () => {
 });
 
 describe("presence pulse schedule", () => {
-  const dayStart = new Date(2026, 9, 20).getTime();
+  const now = Date.UTC(2026, 9, 20, 12);
   const window = parsePresencePulseWindow("08:00-22:00");
 
   it("spreads pulses with jitter and keeps a minimum offline gap", () => {
     const early = planPresencePulseStarts({
-      dayStartMs: dayStart,
+      now,
+      timeZone: "UTC",
       window,
       timesPerDay: 2,
       minutes: 5,
       random: () => 0,
     });
     const late = planPresencePulseStarts({
-      dayStartMs: dayStart,
+      now,
+      timeZone: "UTC",
       window,
       timesPerDay: 2,
       minutes: 5,
       random: () => 0.999999999999,
     });
 
-    expect(early[0]).toBe(dayStart + 8 * 60 * 60 * 1000);
+    expect(early[0]).toBe(Date.UTC(2026, 9, 20, 8));
     expect(early[1]! - early[0]!).toBe((5 + PRESENCE_PULSE_MIN_OFFLINE_GAP_MINUTES) * 60_000);
     expect(late[0]).toBeGreaterThan(early[0]!);
-    expect(late[1]! + 5 * 60_000).toBeLessThanOrEqual(dayStart + 22 * 60 * 60 * 1000);
+    expect(late[1]! + 5 * 60_000).toBeLessThanOrEqual(Date.UTC(2026, 9, 20, 22));
     expect(late[1]! - late[0]!).toBeGreaterThanOrEqual(
       (5 + PRESENCE_PULSE_MIN_OFFLINE_GAP_MINUTES) * 60_000,
     );
+  });
+
+  it("keeps America/New_York wall-clock hours across the 2026 DST changes", () => {
+    const springNow = Date.parse("2026-03-08T15:00:00Z");
+    const fallNow = Date.parse("2026-11-01T15:00:00Z");
+    const zone = "America/New_York";
+
+    expect(zonedWallTimeMs(2026, 3, 8, 8 * 60, zone)).toBe(Date.parse("2026-03-08T12:00:00Z"));
+    expect(zonedWallTimeMs(2026, 3, 8, 22 * 60, zone)).toBe(Date.parse("2026-03-09T02:00:00Z"));
+    expect(zonedWallTimeMs(2026, 11, 1, 8 * 60, zone)).toBe(Date.parse("2026-11-01T13:00:00Z"));
+    expect(zonedWallTimeMs(2026, 11, 1, 22 * 60, zone)).toBe(Date.parse("2026-11-02T03:00:00Z"));
+
+    const spring = planPresencePulseStarts({
+      now: springNow,
+      timeZone: zone,
+      window,
+      timesPerDay: 1,
+      minutes: 5,
+      random: () => 0,
+    });
+    const fall = planPresencePulseStarts({
+      now: fallNow,
+      timeZone: zone,
+      window,
+      timesPerDay: 1,
+      minutes: 5,
+      random: () => 0,
+    });
+
+    expect(spring[0]).toBe(Date.parse("2026-03-08T12:00:00Z"));
+    expect(fall[0]).toBe(Date.parse("2026-11-01T13:00:00Z"));
+    expect(spring[0]).not.toBe(Date.parse("2026-03-08T05:00:00Z") + 8 * 60 * 60 * 1000);
+    expect(fall[0]).not.toBe(Date.parse("2026-11-01T04:00:00Z") + 8 * 60 * 60 * 1000);
   });
 });
 
 describe("presence pulse scheduler", () => {
   function at(hours: number, minutes = 0, seconds = 0, day = 20): number {
-    return new Date(2026, 9, day, hours, minutes, seconds).getTime();
+    return Date.UTC(2026, 9, day, hours, minutes, seconds);
   }
 
   function config(overrides: Partial<PresencePulseConfig> = {}): PresencePulseConfig {
@@ -159,6 +217,8 @@ describe("presence pulse scheduler", () => {
       enabled: true,
       timesPerDay: 2,
       minutes: 5,
+      timeZone: "UTC",
+      skipWhenAlwaysOnline: false,
       window: parsePresencePulseWindow("08:00-22:00"),
       ...overrides,
     };
@@ -303,6 +363,81 @@ describe("presence pulse scheduler", () => {
     scheduler.stop();
   });
 
+  it("drops a plan when the instance is no longer listed and replans if it returns", async () => {
+    const gone = device({ id: "gone" });
+    const stay = device({ id: "stay" });
+    let devices = [gone, stay];
+    let now = at(8, 1);
+    const scheduler = new PresencePulseScheduler({
+      config: config({ timesPerDay: 1 }),
+      listDevices: () => devices,
+      now: () => now,
+      random: () => 0,
+    });
+
+    scheduler.runDue(now);
+    await flush();
+    expect(gone.runPulse).toHaveBeenCalledTimes(1);
+
+    devices = [stay];
+    now = at(8, 2);
+    scheduler.runDue(now);
+    await flush();
+    expect(gone.runPulse).toHaveBeenCalledTimes(1);
+
+    devices = [gone];
+    scheduler.runDue(now);
+    await flush();
+    expect(gone.runPulse).toHaveBeenCalledTimes(2);
+    scheduler.stop();
+  });
+
+  it("plans the day again after a restart while a slot is still open", async () => {
+    const first = device();
+    const now = at(8, 1);
+    const scheduler = new PresencePulseScheduler({
+      config: config({ timesPerDay: 1 }),
+      listDevices: () => [first],
+      now: () => now,
+      random: () => 0,
+    });
+    scheduler.runDue(now);
+    await flush();
+    expect(first.runPulse).toHaveBeenCalledTimes(1);
+    scheduler.stop();
+
+    const restarted = device({ id: "restarted" });
+    const again = new PresencePulseScheduler({
+      config: config({ timesPerDay: 1 }),
+      listDevices: () => [restarted],
+      now: () => now,
+      random: () => 0,
+    });
+    again.runDue(now);
+    await flush();
+    expect(restarted.runPulse).toHaveBeenCalledTimes(1);
+    again.stop();
+  });
+
+  it("skips pulsing and logs once when the account is already online", () => {
+    const listDevices = vi.fn(() => [device()]);
+    const info = vi.fn();
+    const scheduler = new PresencePulseScheduler({
+      config: config({ skipWhenAlwaysOnline: true }),
+      listDevices,
+      log: { info, warn: vi.fn() },
+    });
+
+    scheduler.start();
+    scheduler.start();
+    scheduler.runDue(at(8));
+
+    expect(listDevices).not.toHaveBeenCalled();
+    expect(info).toHaveBeenCalledTimes(1);
+    expect(info.mock.calls[0]?.[1]).toContain("WA_MARK_ONLINE_ON_CONNECT=true");
+    scheduler.stop();
+  });
+
   it("does not pulse again after stop", async () => {
     const runPulse = vi.fn(async () => true);
     const scheduler = new PresencePulseScheduler({
@@ -393,9 +528,11 @@ describe("BaileysAdapter presence pulse", () => {
   it("sends global available and unavailable in always mode", async () => {
     vi.useFakeTimers();
     vi.stubEnv("WA_PRESENCE_MODE", "always");
-    vi.stubEnv("WA_MARK_ONLINE_ON_CONNECT", "true");
+    vi.stubEnv("WA_MARK_ONLINE_ON_CONNECT", "false");
     const { adapter, sendPresenceUpdate } = connectedAdapter("pulse-always");
-    expect((adapter as unknown as { markOnlineOnConnect: boolean }).markOnlineOnConnect).toBe(true);
+    expect((adapter as unknown as { markOnlineOnConnect: boolean }).markOnlineOnConnect).toBe(
+      false,
+    );
 
     const pulse = adapter.runPresencePulse(5_000);
     await vi.advanceTimersByTimeAsync(5_000);
@@ -405,6 +542,40 @@ describe("BaileysAdapter presence pulse", () => {
       "available",
       "unavailable",
     ]);
+  });
+
+  it("does not pulse when always mode already marks the account online on connect", async () => {
+    vi.useFakeTimers();
+    vi.stubEnv("WA_PRESENCE_MODE", "always");
+    vi.stubEnv("WA_MARK_ONLINE_ON_CONNECT", "true");
+    const { adapter, sendPresenceUpdate } = connectedAdapter("pulse-already-online");
+
+    await expect(adapter.runPresencePulse(5_000)).resolves.toBe(false);
+    expect(sendPresenceUpdate).not.toHaveBeenCalled();
+  });
+
+  it("leaves an explicit available presence in place when a pulse ends", async () => {
+    vi.useFakeTimers();
+    vi.stubEnv("WA_PRESENCE_MODE", "always");
+    vi.stubEnv("WA_MARK_ONLINE_ON_CONNECT", "false");
+    const { adapter, sendPresenceUpdate } = connectedAdapter("pulse-explicit");
+
+    await adapter.sendPresence(CHAT_JID, "available");
+    sendPresenceUpdate.mockClear();
+    const before = adapter.runPresencePulse(5_000);
+    await vi.advanceTimersByTimeAsync(5_000);
+    await expect(before).resolves.toBe(true);
+    expect(sendPresenceUpdate).not.toHaveBeenCalled();
+
+    await adapter.sendPresence(CHAT_JID, "unavailable");
+    sendPresenceUpdate.mockClear();
+    const during = adapter.runPresencePulse(5_000);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(sendPresenceUpdate).toHaveBeenCalledWith("available");
+    await adapter.sendPresence(CHAT_JID, "available");
+    await vi.advanceTimersByTimeAsync(5_000);
+    await expect(during).resolves.toBe(true);
+    expect(sendPresenceUpdate).not.toHaveBeenCalledWith("unavailable");
   });
 
   it("does not send unavailable when the socket closes during the pulse", async () => {

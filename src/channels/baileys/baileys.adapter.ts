@@ -947,6 +947,10 @@ export class BaileysAdapter implements ChannelAdapter {
   private presencePulseRunning = false;
   private presencePulseTimer: ReturnType<typeof setTimeout> | null = null;
   private presencePulseWaiter: ((completed: boolean) => void) | null = null;
+  /** Last available/unavailable requested outside a pulse, including mark-online-on-connect. */
+  private lastExplicitPresence: GlobalPresenceStatus | null = null;
+  /** True only while this pulse itself moved the account to available. */
+  private pulseMadeAvailable = false;
   private readonly activityInFlight = new Map<WASocket, number>();
   private readonly maxStatusRecipients: number;
   private readonly autoRejectCalls: boolean;
@@ -1387,6 +1391,13 @@ export class BaileysAdapter implements ChannelAdapter {
     this.presencePulseHoldUntilMs = 0;
     this.presencePulseToken += 1;
     this.clearPresencePulseWait(false);
+    this.lastExplicitPresence = null;
+    this.pulseMadeAvailable = false;
+  }
+
+  private noteExplicitPresence(status: GlobalPresenceStatus): void {
+    this.lastExplicitPresence = status;
+    this.pulseMadeAvailable = false;
   }
 
   private clearPresencePulseWait(completed: boolean): void {
@@ -1418,6 +1429,7 @@ export class BaileysAdapter implements ChannelAdapter {
    */
   async runPresencePulse(durationMs: number): Promise<boolean> {
     if (this.presencePulseRunning || this.status !== "connected" || !this.sock) return false;
+    if (this.presenceMode === "always" && this.markOnlineOnConnect) return false;
     if (!Number.isSafeInteger(durationMs) || durationMs < 1) {
       throw new Error("Presence pulse duration must be a positive integer number of milliseconds");
     }
@@ -1462,7 +1474,21 @@ export class BaileysAdapter implements ChannelAdapter {
       }
       return;
     }
-    await sock.sendPresenceUpdate(status);
+    if (status === "available") {
+      if (this.lastExplicitPresence === "available") {
+        this.pulseMadeAvailable = false;
+        return;
+      }
+      await sock.sendPresenceUpdate("available");
+      this.pulseMadeAvailable = true;
+      return;
+    }
+    if (!this.pulseMadeAvailable || this.lastExplicitPresence === "available") {
+      this.pulseMadeAvailable = false;
+      return;
+    }
+    this.pulseMadeAvailable = false;
+    await sock.sendPresenceUpdate("unavailable");
   }
 
   private logGlobalPresenceFailure(error: unknown): void {
@@ -2874,6 +2900,9 @@ export class BaileysAdapter implements ChannelAdapter {
     presenceStatus: "typing" | "composing" | "recording" | "paused" | "available" | "unavailable",
   ): Promise<void> {
     const sock = this.getSock();
+    if (presenceStatus === "available" || presenceStatus === "unavailable") {
+      this.noteExplicitPresence(presenceStatus);
+    }
     if (this.presenceMode === "on_activity" && presenceStatus === "unavailable") {
       this.presencePulseHoldUntilMs = 0;
       this.presencePulseToken += 1;
@@ -6111,6 +6140,8 @@ export class BaileysAdapter implements ChannelAdapter {
           void this.setGlobalPresence(sock, "unavailable").catch((error: unknown) => {
             this.logGlobalPresenceFailure(error);
           });
+        } else if (this.markOnlineOnConnect) {
+          this.noteExplicitPresence("available");
         }
         const user = sock.user as { lid?: string; name?: string } | undefined;
         this.emit("instance.connected", {

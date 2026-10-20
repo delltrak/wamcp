@@ -32,6 +32,15 @@ export interface PresencePulseConfig {
   timesPerDay: number;
   minutes: number;
   window: PresenceWindow;
+  /** IANA zone for the daily window. Defaults to the process zone, or the server zone. */
+  timeZone: string;
+  /** always mode with mark-online-on-connect already keeps the account online. */
+  skipWhenAlwaysOnline: boolean;
+}
+
+interface PresencePulseLog {
+  info(obj: Record<string, unknown>, message: string): void;
+  warn(obj: Record<string, unknown>, message: string): void;
 }
 
 export interface PresencePulseDevice {
@@ -47,6 +56,7 @@ export interface PresencePulseSchedulerOptions {
   checkIntervalMs?: number;
   now?: () => number;
   random?: () => number;
+  log?: PresencePulseLog;
 }
 
 interface DevicePlan {
@@ -83,7 +93,7 @@ function readBoundedInteger(
   return parsed;
 }
 
-/** Parse HH:MM-HH:MM. The window uses the server's local clock and must end after it starts. */
+/** Parse HH:MM-HH:MM. The window is wall-clock time in WA_PRESENCE_PULSE_TZ and must end after it starts. */
 export function parsePresencePulseWindow(value: string | undefined): PresenceWindow {
   const raw =
     value === undefined || value.trim() === "" ? PRESENCE_PULSE_DEFAULT_WINDOW : value.trim();
@@ -132,19 +142,111 @@ export function loadPresencePulseConfig(env: NodeJS.ProcessEnv = process.env): P
   );
   const window = parsePresencePulseWindow(env.WA_PRESENCE_PULSE_WINDOW);
   assertPulseFits(timesPerDay, minutes, window);
-  return { enabled, timesPerDay, minutes, window };
+  const timeZone = resolvePresencePulseTimeZone(env.WA_PRESENCE_PULSE_TZ);
+  const skipWhenAlwaysOnline =
+    env.WA_PRESENCE_MODE?.trim().toLowerCase() === "always" &&
+    env.WA_MARK_ONLINE_ON_CONNECT?.trim().toLowerCase() === "true";
+  return { enabled, timesPerDay, minutes, window, timeZone, skipWhenAlwaysOnline };
 }
 
-export function localDayStart(now: number): number {
-  const date = new Date(now);
-  return new Date(date.getFullYear(), date.getMonth(), date.getDate()).getTime();
+/** IANA zone for the pulse window. Blank uses the process TZ, which follows the server when unset. */
+export function resolvePresencePulseTimeZone(value: string | undefined): string {
+  const trimmed = value?.trim();
+  const timeZone = trimmed || Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
+  try {
+    Intl.DateTimeFormat("en-US", { timeZone }).format(0);
+  } catch {
+    throw new Error("Invalid WA_PRESENCE_PULSE_TZ; expected an IANA time zone name");
+  }
+  return timeZone;
 }
 
-export function localDayKey(now: number): string {
-  const date = new Date(now);
-  const month = String(date.getMonth() + 1).padStart(2, "0");
-  const day = String(date.getDate()).padStart(2, "0");
-  return `${date.getFullYear()}-${month}-${day}`;
+interface ZonedParts {
+  year: number;
+  month: number;
+  day: number;
+  hour: number;
+  minute: number;
+  second: number;
+}
+
+function zonedParts(instant: number, timeZone: string): ZonedParts {
+  const formatter = new Intl.DateTimeFormat("en-US", {
+    timeZone,
+    hourCycle: "h23",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+  });
+  const parts: Partial<ZonedParts> = {};
+  for (const part of formatter.formatToParts(new Date(instant))) {
+    if (part.type === "year" || part.type === "month" || part.type === "day") {
+      parts[part.type] = Number(part.value);
+    } else if (part.type === "hour" || part.type === "minute" || part.type === "second") {
+      parts[part.type] = Number(part.value);
+    }
+  }
+  return {
+    year: parts.year ?? 0,
+    month: parts.month ?? 1,
+    day: parts.day ?? 1,
+    hour: parts.hour ?? 0,
+    minute: parts.minute ?? 0,
+    second: parts.second ?? 0,
+  };
+}
+
+/** Intl can report midnight as hour 24 on the previous calendar day. */
+function zonedCalendarDate(parts: ZonedParts): { year: number; month: number; day: number } {
+  if (parts.hour !== 24) return { year: parts.year, month: parts.month, day: parts.day };
+  const rolled = new Date(Date.UTC(parts.year, parts.month - 1, parts.day + 1));
+  return {
+    year: rolled.getUTCFullYear(),
+    month: rolled.getUTCMonth() + 1,
+    day: rolled.getUTCDate(),
+  };
+}
+
+function zonedOffsetMs(instant: number, timeZone: string): number {
+  const parts = zonedParts(instant, timeZone);
+  const asUtc = Date.UTC(
+    parts.year,
+    parts.month - 1,
+    parts.day,
+    parts.hour,
+    parts.minute,
+    parts.second,
+  );
+  return asUtc - instant;
+}
+
+/** UTC instant of a wall-clock minute on a calendar day in an IANA zone. */
+export function zonedWallTimeMs(
+  year: number,
+  month: number,
+  day: number,
+  minuteOfDay: number,
+  timeZone: string,
+): number {
+  const hour = Math.floor(minuteOfDay / 60);
+  const minute = minuteOfDay % 60;
+  const utcGuess = Date.UTC(year, month - 1, day, hour, minute, 0);
+  const firstOffset = zonedOffsetMs(utcGuess, timeZone);
+  const first = utcGuess - firstOffset;
+  const secondOffset = zonedOffsetMs(first, timeZone);
+  const second = utcGuess - secondOffset;
+  if (zonedOffsetMs(second, timeZone) === secondOffset) return second;
+  return first;
+}
+
+export function zonedDayKey(instant: number, timeZone: string): string {
+  const date = zonedCalendarDate(zonedParts(instant, timeZone));
+  const month = String(date.month).padStart(2, "0");
+  const day = String(date.day).padStart(2, "0");
+  return `${date.year}-${month}-${day}`;
 }
 
 /**
@@ -152,7 +254,8 @@ export function localDayKey(now: number): string {
  * Starts stay at least the duration plus the offline gap apart, and each pulse ends by the window end.
  */
 export function planPresencePulseStarts(input: {
-  dayStartMs: number;
+  now: number;
+  timeZone: string;
   window: PresenceWindow;
   timesPerDay: number;
   minutes: number;
@@ -161,8 +264,22 @@ export function planPresencePulseStarts(input: {
   const random = input.random ?? Math.random;
   const durationMs = input.minutes * 60_000;
   const spacingMs = (input.minutes + PRESENCE_PULSE_MIN_OFFLINE_GAP_MINUTES) * 60_000;
-  const earliest = input.dayStartMs + input.window.startMinutes * 60_000;
-  const latestStart = input.dayStartMs + input.window.endMinutes * 60_000 - durationMs;
+  const date = zonedCalendarDate(zonedParts(input.now, input.timeZone));
+  const earliest = zonedWallTimeMs(
+    date.year,
+    date.month,
+    date.day,
+    input.window.startMinutes,
+    input.timeZone,
+  );
+  const windowEnd = zonedWallTimeMs(
+    date.year,
+    date.month,
+    date.day,
+    input.window.endMinutes,
+    input.timeZone,
+  );
+  const latestStart = windowEnd - durationMs;
   const slack = latestStart - earliest - (input.timesPerDay - 1) * spacingMs;
   if (slack < 0) {
     throw new Error(
@@ -189,6 +306,8 @@ export class PresencePulseScheduler {
   private readonly checkIntervalMs: number;
   private readonly now: () => number;
   private readonly random: () => number;
+  private readonly log: PresencePulseLog;
+  private skipLogged = false;
 
   constructor(options: PresencePulseSchedulerOptions) {
     this.config = options.config;
@@ -196,14 +315,28 @@ export class PresencePulseScheduler {
     this.checkIntervalMs = options.checkIntervalMs ?? PRESENCE_PULSE_CHECK_INTERVAL_MS;
     this.now = options.now ?? Date.now;
     this.random = options.random ?? Math.random;
+    this.log = options.log ?? logger;
   }
 
   start(): void {
     if (!this.config.enabled || this.timer) return;
+    if (this.config.skipWhenAlwaysOnline) {
+      this.logSkipOnce();
+      return;
+    }
     this.stopped = false;
     this.runDue();
     this.timer = setInterval(() => this.runDue(), this.checkIntervalMs);
     this.timer.unref?.();
+  }
+
+  private logSkipOnce(): void {
+    if (this.skipLogged) return;
+    this.skipLogged = true;
+    this.log.info(
+      {},
+      "Presence pulse skipped; WA_PRESENCE_MODE=always and WA_MARK_ONLINE_ON_CONNECT=true already keep the account online",
+    );
   }
 
   stop(): void {
@@ -214,8 +347,13 @@ export class PresencePulseScheduler {
 
   /** Start a pulse for every ready device that has a scheduled slot open. */
   runDue(now = this.now()): void {
-    if (!this.config.enabled || this.stopped) return;
-    for (const device of this.listDevices()) {
+    if (!this.config.enabled || this.stopped || this.config.skipWhenAlwaysOnline) return;
+    const devices = this.listDevices();
+    const live = new Set(devices.map((device) => device.id));
+    for (const id of this.plans.keys()) {
+      if (!live.has(id)) this.plans.delete(id);
+    }
+    for (const device of devices) {
       this.startIfDue(device, now);
     }
   }
@@ -229,7 +367,7 @@ export class PresencePulseScheduler {
     const { index, remaining } = slot;
     plan.done[index] = true;
     this.inFlight.add(device.id);
-    logger.info({ instanceId: device.id, minutes: this.config.minutes }, "Presence pulse");
+    this.log.info({ instanceId: device.id, minutes: this.config.minutes }, "Presence pulse");
     void device
       .runPulse(remaining)
       .then((pulsed) => {
@@ -237,7 +375,7 @@ export class PresencePulseScheduler {
       })
       .catch((error: unknown) => {
         plan.done[index] = false;
-        logger.warn(
+        this.log.warn(
           { err: error instanceof Error ? error.message : String(error), instanceId: device.id },
           "Presence pulse failed",
         );
@@ -248,11 +386,12 @@ export class PresencePulseScheduler {
   }
 
   private planFor(deviceId: string, now: number): DevicePlan {
-    const dayKey = localDayKey(now);
+    const dayKey = zonedDayKey(now, this.config.timeZone);
     const existing = this.plans.get(deviceId);
     if (existing?.dayKey === dayKey) return existing;
     const starts = planPresencePulseStarts({
-      dayStartMs: localDayStart(now),
+      now,
+      timeZone: this.config.timeZone,
       window: this.config.window,
       timesPerDay: this.config.timesPerDay,
       minutes: this.config.minutes,

@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- Added an optional Baileys presence pulse, off unless `WA_PRESENCE_PULSE_ENABLED=true`. It goes online a configured number of times inside a local time window, with random spacing, then returns to unavailable. It does not change `WA_MARK_ONLINE_ON_CONNECT`.
+- Added an optional Baileys presence pulse, off unless `WA_PRESENCE_PULSE_ENABLED=true`. It goes online a configured number of times inside `WA_PRESENCE_PULSE_WINDOW`, evaluated as wall-clock time in `WA_PRESENCE_PULSE_TZ` (or the process time zone). In `always` mode with `WA_MARK_ONLINE_ON_CONNECT=true` it does not pulse. Otherwise it returns to unavailable only when the pulse itself made the account available. Restarting plans the day again.
 - Added Baileys instance lifecycle webhooks for connection, disconnect, pairing-code, and QR events,
   plus the read-only `wa_get_instance_status` tool. Pairing and QR challenge data is omitted from
   webhook payloads and status output.

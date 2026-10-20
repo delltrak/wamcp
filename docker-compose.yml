@@ -5,6 +5,8 @@ services:
     restart: unless-stopped
     ports:
       - "3000:3000"
+    # The image does not set a time zone, so the container clock is UTC unless you set one.
+    # TZ=America/Bahia
     environment:
       - WA_TRANSPORT=http
       - WA_MCP_PORT=3000
@@ -24,6 +26,7 @@ services:
       - WA_PRESENCE_PULSE_TIMES_PER_DAY=${WA_PRESENCE_PULSE_TIMES_PER_DAY:-2}
       - WA_PRESENCE_PULSE_MINUTES=${WA_PRESENCE_PULSE_MINUTES:-5}
       - WA_PRESENCE_PULSE_WINDOW=${WA_PRESENCE_PULSE_WINDOW:-08:00-22:00}
+      - WA_PRESENCE_PULSE_TZ=${WA_PRESENCE_PULSE_TZ:-}
       - WA_TTS_ENABLED=${WA_TTS_ENABLED:-false}
       - WA_TTS_PROVIDER=${WA_TTS_PROVIDER:-elevenlabs}
       - WA_TTS_API_KEY=${WA_TTS_API_KEY:-}
