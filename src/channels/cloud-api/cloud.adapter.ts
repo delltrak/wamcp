@@ -651,7 +651,11 @@ export class CloudApiAdapter implements ChannelAdapter {
   }
 
   async markPlayed(_chatId: string, _messageIds: string[], _participant?: string): Promise<void> {
-    throw new Error("Marking audio messages as played is not supported on Cloud API");
+    throw new Error("Marking audio or video messages as played is not supported on Cloud API");
+  }
+
+  async markPlayedMessage(_messageId: string): Promise<void> {
+    throw new Error("Marking audio or video messages as played is not supported on Cloud API");
   }
 
   async markRead(chatId: string, messageIds: string[], _participant?: string): Promise<void> {

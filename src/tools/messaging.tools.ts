@@ -939,7 +939,7 @@ Returns: { status: "queued", jobId }`,
     "wa_mark_played",
     {
       description:
-        "Send a played receipt for stored incoming voice notes or audio messages. Nothing is marked played automatically. Baileys only; the message must already be stored for this instance and chat.",
+        "Send a played receipt for stored incoming audio, voice notes, or video. Always available. Group messages need participant when the sender is not stored. Baileys only. WA_AUTO_MARK_PLAYED=false controls a separate receipt after transcription.",
       inputSchema: MarkPlayedSchema,
     },
     async (params) => {
@@ -947,10 +947,10 @@ Returns: { status: "queued", jobId }`,
       const start = Date.now();
       try {
         const adapter = instanceManager.getAdapter(params.instanceId);
-        await adapter.markPlayed(params.chatId, params.messageIds, params.participant);
+        await adapter.markPlayed(params.chatJid, params.messageIds, params.participant);
         log.info(
           { duration: Date.now() - start, count: params.messageIds.length },
-          "Audio marked played",
+          "Media marked played",
         );
         return toolSuccess({ success: true, count: params.messageIds.length });
       } catch (err) {

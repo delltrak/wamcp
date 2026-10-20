@@ -241,6 +241,17 @@ interface StoredAppStateMessage {
   messageTimestamp: number;
 }
 
+function isPlayableMedia(type: string, rawMessage: WAMessage | undefined): boolean {
+  if (type === "audio" || type === "video") return true;
+  const content = unwrapMessageContent(rawMessage?.message);
+  if (!content) return false;
+  return (
+    content.audioMessage !== undefined ||
+    content.videoMessage !== undefined ||
+    content.ptvMessage !== undefined
+  );
+}
+
 function getStoredMessage(rawData: string | null, id: string): WAMessage | undefined {
   if (!rawData) return undefined;
   try {
@@ -3004,8 +3015,8 @@ export class BaileysAdapter implements ChannelAdapter {
 
       const rawMessage = getStoredMessage(storedMessage.rawData ?? null, id);
       const outgoing = storedMessage.isFromMe === 1 || rawMessage?.key.fromMe === true;
-      if (outgoing || storedMessage.type !== "audio") {
-        throw new Error(`Message ${id} is not an incoming audio or voice message`);
+      if (outgoing || !isPlayableMedia(storedMessage.type, rawMessage)) {
+        throw new Error(`Message ${id} is not an incoming audio, voice, or video message`);
       }
 
       const remoteJid = rawMessage?.key.remoteJid ?? storedMessage.chatId;
@@ -3018,7 +3029,7 @@ export class BaileysAdapter implements ChannelAdapter {
             : undefined);
         receiptParticipant = storedSender || participant;
         if (!receiptParticipant) {
-          throw new Error(`Sender is missing for group audio message ${id}`);
+          throw new Error(`Sender is missing for group audio or video message ${id}`);
         }
       }
 
@@ -3035,6 +3046,24 @@ export class BaileysAdapter implements ChannelAdapter {
     for (const batch of batches.values()) {
       await this.sendPlayedReceipt(sock, batch.jid, batch.participant, batch.messageIds);
     }
+  }
+
+  /** Mark one stored message played, using the chat and sender saved with it. */
+  async markPlayedMessage(messageId: string): Promise<void> {
+    const row = db
+      .select({
+        chatId: messagesTable.chatId,
+        senderId: messagesTable.senderId,
+      })
+      .from(messagesTable)
+      .where(and(eq(messagesTable.instanceId, this.instanceId), eq(messagesTable.id, messageId)))
+      .get();
+    if (!row) throw new Error(`Message ${messageId} is not stored in this chat`);
+    const participant =
+      row.chatId.endsWith("@g.us") && row.senderId && row.senderId !== "me"
+        ? row.senderId
+        : undefined;
+    await this.markPlayed(row.chatId, [messageId], participant);
   }
 
   /**

@@ -7,6 +7,10 @@ import type { InstanceManager } from "../services/instance-manager.js";
 import { MediaService } from "../services/media.js";
 import { TranscriptionService } from "../services/transcription.js";
 import { TranscribeAudioSchema } from "../schemas/transcription.schema.js";
+import {
+  isAutoMarkPlayedEnabled,
+  markTranscribedAudioPlayed,
+} from "../services/auto-mark-played.js";
 import { toolSuccess } from "../types/mcp.types.js";
 import { createRequestLogger } from "../utils/logger.js";
 import { handleToolError } from "../utils/tool-handler.js";
@@ -99,6 +103,11 @@ export function registerTranscriptionTools(
         }
 
         const result = await transcriptionService.transcribe(audio, mimeType ?? "audio/ogg");
+        const messageId = params.messageId;
+        const instanceId = params.instanceId;
+        if (messageId && instanceId && isAutoMarkPlayedEnabled()) {
+          await markTranscribedAudioPlayed(() => instanceManager.getAdapter(instanceId), messageId);
+        }
         log.info({ duration: Date.now() - start, bytes: audio.length }, "Audio transcribed");
         return toolSuccess({ text: result.text });
       } catch (err) {

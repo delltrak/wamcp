@@ -201,7 +201,7 @@ WA MCP exposes **138 tools** across 15 domains. All tools use the `wa_` prefix.
 | `wa_get_message_receipts` | List locally observed per-participant receipts (Baileys) |
 | `wa_get_message_reactions` | List locally observed reactions (Baileys) |
 | `wa_mark_read`         | Mark messages as read   |
-| `wa_mark_played`       | Mark a stored incoming voice note or audio message as played (Baileys; explicit only) |
+| `wa_mark_played`       | Mark stored incoming audio, voice, or video as played (Baileys; always available) |
 
 </details>
 
@@ -730,6 +730,7 @@ Copy `.env.example` to `.env` and configure:
 | `WA_AUTO_REJECT_CALLS`      | `false`                  | Automatically reject incoming one-to-one Baileys call offers |
 | `WA_STATUS_MAX_RECIPIENTS`  | `256`                    | Maximum recipients per Baileys status; excess recipients are truncated and reported |
 | `WA_AUTO_READ`              | `false`                  | `on_fetch` marks incoming messages read when fetched; `on_receive` marks them read on arrival |
+| `WA_AUTO_MARK_PLAYED`       | `false`                  | After a stored incoming audio message is transcribed, send a played receipt. `wa_mark_played` stays available either way |
 | `WA_MEDIA_CACHE_MAX_MB`     | `500`                    | Media cache size limit                   |
 | `WA_MEDIA_DOWNLOAD_DIR`     | `data/media-downloads`   | Dedicated directory for downloaded files; separate from Baileys session data |
 | `WA_MEDIA_DOWNLOAD_MAX_BYTES` | `26214400` (25 MB)     | Maximum size for received media downloads; base64 mode is capped at 5 MB |
@@ -874,8 +875,13 @@ directory.
 
 `WA_AUTO_READ` accepts `false`, `on_fetch`, or `on_receive`. Invalid values disable automatic
 read receipts and produce a warning. Automatic receipts never delay message delivery or tool
-responses; receipt failures are logged. Played receipts for voice notes and audio are separate:
-`wa_mark_played` sends one only when called, and there is no automatic played-receipt setting.
+responses; receipt failures are logged. Played receipts are separate. `wa_mark_played` is always
+available and sends a played receipt for stored incoming audio, voice notes (PTT), and video on
+Baileys, including in groups when `participant` or the stored sender is present. Nothing is marked
+played automatically unless `WA_AUTO_MARK_PLAYED=true`. That flag defaults to `false`. When it is
+`true`, a successful transcription of a stored incoming audio message also sends a played receipt.
+The transcription result is kept if that receipt fails. `WA_AUTO_MARK_PLAYED` must be `true` or
+`false`; any other value stops startup with an error that names the variable.
 
 `WA_PRESENCE_MODE` accepts `on_activity` or `always`. In `on_activity`, Baileys sends one global
 `unavailable` update after each connection opens, switches to global `available` before an outgoing

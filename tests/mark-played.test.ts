@@ -14,21 +14,21 @@ const GROUP_JID = "120363000000000000@g.us";
 const SENDER_JID = "5511888888888@s.whatsapp.net";
 
 describe("MarkPlayedSchema", () => {
-  it("accepts a stored audio id and rejects unknown fields", () => {
+  it("accepts chatJid and rejects the old chatId field", () => {
     expect(
       MarkPlayedSchema.parse({
         instanceId: "inst_test",
-        chatId: PN_JID,
+        chatJid: PN_JID,
         messageIds: ["voice-1"],
+        participant: SENDER_JID,
       }),
-    ).toMatchObject({ messageIds: ["voice-1"] });
+    ).toMatchObject({ chatJid: PN_JID, messageIds: ["voice-1"], participant: SENDER_JID });
 
     expect(() =>
       MarkPlayedSchema.parse({
         instanceId: "inst_test",
         chatId: PN_JID,
         messageIds: ["voice-1"],
-        extra: true,
       }),
     ).toThrow();
   });
@@ -37,7 +37,10 @@ describe("MarkPlayedSchema", () => {
 describe("CloudApiAdapter.markPlayed", () => {
   it("reports that played receipts are unsupported", async () => {
     await expect(new CloudApiAdapter("cloud_test").markPlayed(PN_JID, ["voice-1"])).rejects.toThrow(
-      "Marking audio messages as played is not supported on Cloud API",
+      "Marking audio or video messages as played is not supported on Cloud API",
+    );
+    await expect(new CloudApiAdapter("cloud_test").markPlayedMessage("voice-1")).rejects.toThrow(
+      "Marking audio or video messages as played is not supported on Cloud API",
     );
   });
 });
@@ -74,7 +77,7 @@ describe("BaileysAdapter.markPlayed", () => {
     chatId?: string;
     senderId?: string;
     isFromMe?: number;
-    type?: "audio" | "text" | "image";
+    type?: "audio" | "text" | "image" | "video";
     rawData?: string | null;
   }): void {
     db.insert(messages)
@@ -203,16 +206,54 @@ describe("BaileysAdapter.markPlayed", () => {
       "Message missing-audio is not stored in this chat",
     );
     await expect(adapter.markPlayed(PN_JID, ["outgoing-audio"])).rejects.toThrow(
-      "Message outgoing-audio is not an incoming audio or voice message",
+      "Message outgoing-audio is not an incoming audio, voice, or video message",
     );
     await expect(adapter.markPlayed(PN_JID, ["text-message"])).rejects.toThrow(
-      "Message text-message is not an incoming audio or voice message",
+      "Message text-message is not an incoming audio, voice, or video message",
     );
     await expect(adapter.markPlayed(GROUP_JID, ["group-without-sender"])).rejects.toThrow(
-      "Sender is missing for group audio message group-without-sender",
+      "Sender is missing for group audio or video message group-without-sender",
     );
     expect(sendNode).not.toHaveBeenCalled();
     expect(sendReceipt).not.toHaveBeenCalled();
+  });
+
+  it("sends a played receipt for video and for a video note stored as ptv", async () => {
+    insertAudio({ id: "video-1", type: "video" });
+    const ptvKey: WAMessageKey = { remoteJid: PN_JID, id: "ptv-1", fromMe: false };
+    insertAudio({
+      id: "ptv-1",
+      type: "text",
+      rawData: JSON.stringify({
+        key: ptvKey,
+        message: { ptvMessage: { mimetype: "video/mp4", seconds: 4 } },
+        messageTimestamp: 1_700_000_000,
+      }),
+    });
+    const { adapter, sendNode } = connectedAdapter();
+
+    await adapter.markPlayed(PN_JID, ["video-1", "ptv-1"]);
+
+    const node = sendNode.mock.calls[0]?.[0] as BinaryNode;
+    expect(node.attrs).toMatchObject({ id: "video-1", to: PN_JID, type: "played" });
+    expect(node.content).toEqual([
+      {
+        tag: "list",
+        attrs: {},
+        content: [{ tag: "item", attrs: { id: "ptv-1" } }],
+      },
+    ]);
+  });
+
+  it("marks a stored message from its saved chat without a separate chat argument", async () => {
+    insertAudio({ id: "voice-stored", chatId: PN_JID });
+    const { adapter, sendNode } = connectedAdapter();
+
+    await adapter.markPlayedMessage("voice-stored");
+
+    expect(sendNode.mock.calls[0]?.[0]).toMatchObject({
+      attrs: { id: "voice-stored", to: PN_JID, type: "played" },
+    });
   });
 
   it("rejects more than 100 message ids before sending", async () => {

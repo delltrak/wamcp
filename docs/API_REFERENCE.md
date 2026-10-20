@@ -1017,14 +1017,14 @@ Mark specific messages as read in a chat.
 
 #### `wa_mark_played`
 
-Send WhatsApp's played receipt for stored incoming voice notes or audio messages. The call is explicit: WA MCP never marks audio as played on its own. Each ID must already be stored for the instance and chat, must be an incoming audio or voice message, and group messages need a sender JID from storage or `participant`.
+Send WhatsApp's played receipt for stored incoming audio, voice notes (PTT), or video. The tool is always available. Each ID must already be stored for the instance and chat, must be incoming playable media, and group messages need a sender JID from storage or `participant`. Set `WA_AUTO_MARK_PLAYED=true` to also send this receipt after a stored incoming audio message is transcribed. That flag defaults to `false`.
 
 | Parameter     | Type     | Required | Description                                                      |
 | ------------- | -------- | -------- | ---------------------------------------------------------------- |
 | `instanceId`  | string   | Yes      | The instance ID                                                  |
-| `chatId`      | string   | Yes      | Chat JID containing the audio messages                           |
-| `messageIds`  | string[] | Yes      | Stored incoming audio or voice-note IDs (1-100)                  |
-| `participant` | string   | No       | Sender JID used only when a group message has no stored sender   |
+| `chatJid`     | string   | Yes      | Chat JID containing the audio, voice, or video messages          |
+| `messageIds`  | string[] | Yes      | Stored incoming audio, voice-note, or video IDs (1-100)          |
+| `participant` | string   | No       | Sender JID for a group message when storage has no sender        |
 
 **Channel support:** Baileys only. Cloud API does not support played receipts.
 
