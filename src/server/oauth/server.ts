@@ -35,8 +35,14 @@ export interface McpOAuthServerOptions {
   issuerUrl: string;
   resourceUrl: string;
   store: OAuthStore;
-  validateCredential: (username: string, password: string) => boolean | Promise<boolean>;
+  validateCredential: (
+    username: string,
+    password: string,
+    context?: { priority: boolean },
+  ) => boolean | Promise<boolean>;
   resolveCredentialVersion?: (username: string, macKey: Buffer) => string | undefined;
+  /** Configured Basic Auth accounts. Unknown names share one limiter bucket. */
+  knownUser?: (username: string) => boolean;
   limiter?: AuthAttemptLimiter;
   dynamicRegistration?: "open" | "disabled";
   redirectHostAllowlist?: readonly string[];
@@ -154,7 +160,9 @@ export class McpOAuthServer {
   private readonly validateCredential: (
     username: string,
     password: string,
+    context?: { priority: boolean },
   ) => boolean | Promise<boolean>;
+  private readonly knownUser: ((username: string) => boolean) | undefined;
   private readonly limiter: AuthAttemptLimiter | undefined;
   private readonly dynamicRegistration: "open" | "disabled";
   private readonly redirectHostAllowlist: readonly string[];
@@ -178,6 +186,7 @@ export class McpOAuthServer {
     this.resourceUrl = resource.href;
     this.store = options.store;
     this.validateCredential = options.validateCredential;
+    this.knownUser = options.knownUser;
     this.limiter = options.limiter;
     this.dynamicRegistration = options.dynamicRegistration ?? "open";
     this.redirectHostAllowlist = options.redirectHostAllowlist ?? [];
@@ -514,7 +523,9 @@ export class McpOAuthServer {
     const username = form.get("username") ?? "";
     const password = form.get("password") ?? "";
     const ip = clientAddress(req, this.trustProxy);
-    const reserved = this.limiter?.beginAttempt(ip, username) ?? 0;
+    const subject = this.attemptSubject(username);
+    const priority = this.limiter?.hasRecentSuccess(ip, subject) ?? false;
+    const reserved = this.limiter?.beginAttempt(ip, subject) ?? 0;
     if (reserved > 0) {
       this.sendRateLimited(res, reserved);
       return;
@@ -527,16 +538,16 @@ export class McpOAuthServer {
     let credentialsAccepted: boolean;
     try {
       credentialsAccepted =
-        credentialsWellFormed && (await this.validateCredential(username, password));
+        credentialsWellFormed && (await this.validateCredential(username, password, { priority }));
     } catch (error) {
       if (error instanceof ScryptBusyError) {
-        this.limiter?.cancelAttempt(ip, username);
         this.sendRateLimited(res, 1000);
         return;
       }
       throw error;
     }
     if (!credentialsAccepted) {
+      this.limiter?.recordFailure(ip, subject);
       this.log.warn(
         { event: "oauth_authorize_rejected" },
         "OAuth authorization credentials were rejected",
@@ -544,7 +555,7 @@ export class McpOAuthServer {
       this.renderAuthorize(res, 401, input, validated.client, "Invalid username or password.");
       return;
     }
-    this.limiter?.recordSuccess(ip, username);
+    this.limiter?.recordSuccess(ip, subject);
 
     let code: string;
     try {
@@ -918,22 +929,31 @@ ${error}
     const decoded = decodeBasicCredentials(parts[1]);
     if (!decoded || decoded.username !== username) return "no";
     const ip = clientAddress(req, this.trustProxy);
-    const reserved = this.limiter?.beginAttempt(ip, decoded.username) ?? 0;
+    const subject = this.attemptSubject(decoded.username);
+    const priority = this.limiter?.hasRecentSuccess(ip, subject) ?? false;
+    const reserved = this.limiter?.beginAttempt(ip, subject) ?? 0;
     if (reserved > 0) return "limited";
     try {
-      const accepted = await this.validateCredential(decoded.username, decoded.password);
+      const accepted = await this.validateCredential(decoded.username, decoded.password, {
+        priority,
+      });
       if (accepted) {
-        this.limiter?.recordSuccess(ip, decoded.username);
+        this.limiter?.recordSuccess(ip, subject);
         return "yes";
       }
+      this.limiter?.recordFailure(ip, subject);
     } catch (error) {
-      if (error instanceof ScryptBusyError) {
-        this.limiter?.cancelAttempt(ip, decoded.username);
-        return "limited";
-      }
+      if (error instanceof ScryptBusyError) return "limited";
       throw error;
     }
     return "no";
+  }
+
+  /** Unknown and malformed names share one bucket so they cannot evict a real user. */
+  private attemptSubject(username: string): string {
+    if (!username || username.length > 128) return "\0unknown";
+    if (this.knownUser && !this.knownUser(username)) return "\0unknown";
+    return username;
   }
 
   private redirect(res: ServerResponse, location: string): void {
@@ -1007,8 +1027,13 @@ export function createMcpOAuthServer(options: {
   issuerUrl: string;
   resourceUrl: string;
   dbPath: string;
-  validateCredential: (username: string, password: string) => boolean | Promise<boolean>;
+  validateCredential: (
+    username: string,
+    password: string,
+    context?: { priority: boolean },
+  ) => boolean | Promise<boolean>;
   resolveCredentialVersion?: (username: string, macKey: Buffer) => string | undefined;
+  knownUser?: (username: string) => boolean;
   limiter?: AuthAttemptLimiter;
   dynamicRegistration?: "open" | "disabled";
   redirectHostAllowlist?: readonly string[];

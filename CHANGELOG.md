@@ -48,14 +48,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `WA_BASIC_AUTH` does not prevent the stdio transport from starting.
 - Sign-in attempts are counted before the password check, so concurrent guesses cannot skip the
   backoff. `WA_TRUST_PROXY` optionally trusts `X-Forwarded-For` from a CIDR list and is unset by
-  default. A successful sign-in clears that address's failure count. A per-user lock does not apply
-  to an address that recently signed in as that user. IPv6 limits use a /64 prefix, and
-  `::ffff:127.0.0.1` is treated as `127.0.0.1`. Concurrent scrypt work is capped. Access tokens last
-  15 minutes, and refresh revokes the previous access token. Opening the OAuth database no longer
-  changes the mode of an existing directory. Credential versions are an HMAC with a per-install key.
-  Revoking a user invalidates unused authorization codes. `/oauth/revoke` sends the same CORS
-  headers as the token endpoint. Tokens stored with an empty credential version, including tokens
-  issued before this binding, are rejected once, so existing OAuth sessions must sign in again.
+  default. A forwarded hop that is not an IP is ignored. IPv6 limits use a /64 prefix, and
+  `::ffff:127.0.0.1` is treated as `127.0.0.1`. Access tokens last 15 minutes, and refresh revokes
+  the previous access token. Opening the OAuth database no longer changes the mode of an existing
+  directory. Credential versions are an HMAC with a per-install key. Revoking a user invalidates
+  unused authorization codes. `/oauth/revoke` sends the same CORS headers as the token endpoint.
+  Tokens stored with an empty credential version, including tokens issued before this binding, are
+  rejected once, so existing OAuth sessions must sign in again.
+- Sign-in backoff keeps its failure count when a lock expires and doubles on the next attempt, up
+  to 15 minutes. The count is forgotten only after 15 minutes without an attempt. A success clears
+  that username and leaves the shared address count in place. A recent success exempts only that
+  username at that address (the whole IPv6 /64 or NAT) for a few failures, and a wrong password
+  removes the exemption. Unknown usernames share one limiter bucket, and a live lock is not evicted
+  to make room. scrypt work uses a short queue, keeps one slot for a recent sign-in, and a rejected
+  attempt still counts. Back up `oauth.db.mac` with `oauth.db`; losing the key signs every session out.
 - App-state writes now run through a per-instance queue with configurable spacing and a resync
   preflight that requires a retrievable current key, a positive collection version, a 128-byte hash,
   and no Baileys-reported sync, decode, missing-key, or hash-verification failure. Successful writes

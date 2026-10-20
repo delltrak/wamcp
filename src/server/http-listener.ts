@@ -2,6 +2,8 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import type { HttpRoutes } from "./http-config.js";
 import type { McpOAuthServer } from "./oauth/server.js";
 
+export { clientAddress, normalizeClientIp } from "./ip-address.js";
+
 export interface HttpListenerDeps {
   routes: HttpRoutes;
   authorize: (req: IncomingMessage, res: ServerResponse) => boolean | Promise<boolean>;
@@ -9,6 +11,8 @@ export interface HttpListenerDeps {
   health: (req: IncomingMessage, res: ServerResponse) => void;
   mcp: (req: IncomingMessage, res: ServerResponse) => Promise<void>;
   webhook: (req: IncomingMessage, res: ServerResponse, url: URL) => Promise<void>;
+  /** Return true when the request was handled. Called only after the built-in routes miss. */
+  fallback?: (req: IncomingMessage, res: ServerResponse, url: URL) => boolean | Promise<boolean>;
 }
 
 export function createHttpRequestHandler(
@@ -41,6 +45,7 @@ export function createHttpRequestHandler(
       await deps.webhook(req, res, url);
       return;
     }
+    if (deps.fallback && (await deps.fallback(req, res, url))) return;
 
     res.writeHead(404, { "Content-Type": "application/json" });
     res.end(JSON.stringify({ error: "Not found" }));

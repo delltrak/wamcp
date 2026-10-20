@@ -66,13 +66,39 @@ export function clientAddress(req: IncomingMessage, trust?: TrustedProxy): strin
   if (typeof forwarded !== "string") return normalizeClientIp(peer);
   const hops = forwarded
     .split(",")
-    .map((hop) => stripIpDecorations(hop))
+    .map((hop) => hop.trim())
     .filter(Boolean);
+  let lastTrusted = peer;
   for (let index = hops.length - 1; index >= 0; index -= 1) {
-    const hop = hops[index]!;
-    if (!trust.matches(hop)) return normalizeClientIp(hop);
+    const hop = parseForwardedHop(hops[index]!);
+    if (!hop) return normalizeClientIp(lastTrusted);
+    if (trust.matches(hop)) {
+      lastTrusted = hop;
+      continue;
+    }
+    return normalizeClientIp(hop);
   }
-  return normalizeClientIp(peer);
+  return normalizeClientIp(lastTrusted);
+}
+
+/** IPv4 with a port, or `[ipv6]:port`. Anything else that is not an IP is rejected. */
+function parseForwardedHop(value: string): string | undefined {
+  let bare = value.trim();
+  if (bare.startsWith("[")) {
+    const end = bare.indexOf("]");
+    if (end <= 1) return undefined;
+    bare = bare.slice(1, end);
+  } else {
+    const colon = bare.lastIndexOf(":");
+    if (colon > 0 && /^\d{1,5}$/.test(bare.slice(colon + 1))) {
+      const host = bare.slice(0, colon);
+      if (isIP(host) === 4) bare = host;
+    }
+  }
+  const zone = bare.indexOf("%");
+  if (zone !== -1) bare = bare.slice(0, zone);
+  if (isIP(bare) === 0) return undefined;
+  return bare;
 }
 
 function socketAddress(req: IncomingMessage): string {

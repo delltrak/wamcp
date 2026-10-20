@@ -76,8 +76,11 @@ function openOAuth(
     redirectHostAllowlist: httpConfig.oauth.redirectHostAllowlist,
     ...(httpConfig.apiKey ? { apiKey: httpConfig.apiKey } : {}),
     limiter,
-    validateCredential: (username, password) =>
-      verifyBasicCredentials(httpConfig.basicUsers, username, password),
+    knownUser: (username) => findBasicUser(httpConfig.basicUsers, username) !== undefined,
+    validateCredential: (username, password, context) =>
+      verifyBasicCredentials(httpConfig.basicUsers, username, password, {
+        priority: context?.priority === true,
+      }),
     ...(httpConfig.trustProxy ? { trustProxy: httpConfig.trustProxy } : {}),
     resolveCredentialVersion: (username, macKey) => {
       const user = findBasicUser(httpConfig.basicUsers, username);

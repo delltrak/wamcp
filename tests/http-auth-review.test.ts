@@ -1,11 +1,20 @@
 import { createHash, randomBytes, scryptSync } from "node:crypto";
-import { chmodSync, mkdtempSync, mkdirSync, readFileSync, rmSync, statSync } from "node:fs";
+import {
+  chmodSync,
+  mkdtempSync,
+  mkdirSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { AuthAttemptLimiter, clientAddress } from "../src/server/auth-limiter.js";
 import {
+  BASIC_AUTH_SCRYPT_QUEUE_MAX,
   ScryptBusyError,
   basicAuthScryptOperations,
   clearBasicAuthSuccessCache,
@@ -18,9 +27,9 @@ import {
   loadHttpTransportConfig,
   loadHttpTransportConfigForTransport,
 } from "../src/server/http-config.js";
-import { createHttpRequestHandler } from "../src/server/http-listener.js";
+import { createHttpRequestHandler, normalizeClientIp } from "../src/server/http-listener.js";
 import { authorizeMcpHttpRequest } from "../src/server/mcp-auth.js";
-import { normalizeClientIp, parseTrustProxy } from "../src/server/ip-address.js";
+import { parseTrustProxy } from "../src/server/ip-address.js";
 import { credentialMacKeyPath, loadCredentialMacKey } from "../src/server/oauth/credential-key.js";
 import { redirectUriMatches, validRedirectUri } from "../src/server/oauth/redirect.js";
 import { McpOAuthServer } from "../src/server/oauth/server.js";
@@ -135,6 +144,26 @@ describe("concurrent sign-in attempts", () => {
     expect(results.slice(8).every((wait) => wait > 0)).toBe(true);
     expect(results[299]).toBe(results[8]);
     now += results[8] ?? 0;
+    expect(limiter.beginAttempt("203.0.113.5", "alice")).toBe(2000);
+  });
+
+  it("doubles the lock on each later cycle until the maximum, then forgets an idle bucket", () => {
+    let now = 0;
+    const base = 1000;
+    const max = 8_000;
+    const limiter = new AuthAttemptLimiter({
+      freeFailures: 1,
+      baseDelayMs: base,
+      maxDelayMs: max,
+      now: () => now,
+    });
+    expect(limiter.beginAttempt("203.0.113.5", "alice")).toBe(0);
+    for (let cycle = 0; cycle < 4; cycle += 1) {
+      const wait = limiter.beginAttempt("203.0.113.5", "alice");
+      expect(wait).toBe(Math.min(base * 2 ** cycle, max));
+      expect(limiter.beginAttempt("203.0.113.5", "alice")).toBe(wait);
+      now += wait;
+    }
     expect(limiter.beginAttempt("203.0.113.5", "alice")).toBe(0);
   });
 
@@ -255,6 +284,12 @@ describe("trusted proxies and address buckets", () => {
     expect(clientAddress(request("10.1.1.1", "1.2.3.4, 10.1.1.1"), trust)).toBe("1.2.3.4");
     expect(clientAddress(request("127.0.0.1", "203.0.113.9"))).toBe("127.0.0.1");
     expect(clientAddress(request("::ffff:127.0.0.1", "203.0.113.9"), trust)).toBe("203.0.113.9");
+    expect(clientAddress(request("127.0.0.1", "203.0.113.4:5555"), trust)).toBe("203.0.113.4");
+    expect(clientAddress(request("127.0.0.1", "[2001:db8::5]:443"), trust)).toBe(
+      normalizeClientIp("2001:db8::5"),
+    );
+    expect(clientAddress(request("10.1.1.1", "not-an-ip, 10.2.2.2"), trust)).toBe("10.2.2.2");
+    expect(clientAddress(request("10.1.1.1", "203.0.113.9, not-an-ip"), trust)).toBe("10.1.1.1");
   });
 
   it("groups IPv6 by /64 and folds IPv4-mapped addresses", () => {
@@ -302,46 +337,74 @@ describe("trusted proxies and address buckets", () => {
 });
 
 describe("per-user lock exemption", () => {
-  it("does not apply a user lock to an address with a recent success", () => {
+  it("gives a recent address a few tries, then drops the exemption on a failure", () => {
     let now = 10_000;
     const limiter = new AuthAttemptLimiter({
       freeFailures: 1,
       baseDelayMs: 60_000,
-      recentSuccessMs: 1_000,
+      recentSuccessMs: 60_000,
+      exemptFailures: 3,
       now: () => now,
     });
     limiter.recordSuccess("203.0.113.8", "alice");
     expect(limiter.beginAttempt("198.51.100.1", "alice")).toBe(0);
     expect(limiter.beginAttempt("198.51.100.1", "alice")).toBe(60_000);
-    expect(limiter.retryAfterMs("203.0.113.8", "alice")).toBe(0);
     expect(limiter.beginAttempt("203.0.113.8", "alice")).toBe(0);
-    expect(limiter.retryAfterMs("203.0.113.9", "alice")).toBeGreaterThan(0);
-    expect(limiter.beginAttempt("198.51.100.1", "bob")).toBe(60_000);
-    now += 1_000;
-    expect(limiter.retryAfterMs("203.0.113.8", "alice")).toBeGreaterThan(0);
+    expect(limiter.beginAttempt("203.0.113.8", "alice")).toBe(0);
+    expect(limiter.beginAttempt("203.0.113.8", "alice")).toBe(0);
+    expect(limiter.beginAttempt("203.0.113.8", "alice")).toBe(60_000);
+    limiter.recordSuccess("203.0.113.8", "alice");
+    expect(limiter.beginAttempt("203.0.113.8", "alice")).toBe(0);
+    limiter.recordFailure("203.0.113.8", "alice");
+    expect(limiter.beginAttempt("203.0.113.8", "alice")).toBe(60_000);
+    expect(limiter.beginAttempt("203.0.113.8", "bob")).toBe(60_000);
+    now += 60_000;
+    expect(limiter.retryAfterMs("198.51.100.1", "carol")).toBe(0);
   });
 });
 
 describe("scrypt concurrency cap", () => {
-  it("rejects extra scrypt work immediately and cancels the auth reservation", async () => {
-    setBasicAuthScryptLimit(1);
+  it("keeps a slot for a recent sign-in while four attackers occupy the rest", async () => {
+    setBasicAuthScryptLimit(4);
     clearBasicAuthSuccessCache();
     const users = parseBasicAuthUsers(scryptUser("alice", PASSWORD));
     const before = basicAuthScryptOperations();
-    const pending = verifyBasicCredentials(users, "alice", PASSWORD);
-    const settled = await Promise.allSettled(
-      Array.from({ length: 9 }, () => verifyBasicCredentials(users, "alice", PASSWORD)),
+    const attackers = Array.from({ length: 3 }, () =>
+      verifyBasicCredentials(users, "alice", `${PASSWORD}-no`, { priority: false }),
     );
-    expect(settled.every((result) => result.status === "rejected")).toBe(true);
-    for (const result of settled) {
-      if (result.status === "rejected") expect(result.reason).toBeInstanceOf(ScryptBusyError);
-    }
-    expect(basicAuthScryptOperations()).toBe(before + 1);
-    expect(await pending).toBe(true);
+    expect(basicAuthScryptOperations()).toBe(before + 3);
+    const queued = verifyBasicCredentials(users, "alice", `${PASSWORD}-queued`, { priority: false });
+    expect(basicAuthScryptOperations()).toBe(before + 3);
+    const legitimate = verifyBasicCredentials(users, "alice", PASSWORD, { priority: true });
+    expect(basicAuthScryptOperations()).toBe(before + 4);
+    expect(await legitimate).toBe(true);
+    expect(await queued).toBe(false);
+    expect((await Promise.all(attackers)).every((accepted) => accepted === false)).toBe(true);
+  });
 
+  it("rejects scrypt work that does not fit in the queue", async () => {
+    setBasicAuthScryptLimit(1);
     clearBasicAuthSuccessCache();
+    const users = parseBasicAuthUsers(scryptUser("queued", PASSWORD));
+    const started = [
+      verifyBasicCredentials(users, "queued", PASSWORD),
+      ...Array.from({ length: BASIC_AUTH_SCRYPT_QUEUE_MAX }, () =>
+        verifyBasicCredentials(users, "queued", PASSWORD),
+      ),
+    ];
+    const overflow = verifyBasicCredentials(users, "queued", PASSWORD).then(
+      () => undefined,
+      (error: unknown) => error,
+    );
+    expect(await overflow).toBeInstanceOf(ScryptBusyError);
+    await Promise.all(started);
+  });
+
+  it("counts a busy scrypt attempt instead of erasing the reservation", async () => {
     setBasicAuthScryptLimit(0);
-    const limiter = new AuthAttemptLimiter({ freeFailures: 1, now: () => 20 });
+    clearBasicAuthSuccessCache();
+    const users = parseBasicAuthUsers(scryptUser("alice", PASSWORD));
+    const limiter = new AuthAttemptLimiter({ freeFailures: 1, baseDelayMs: 1000, now: () => 20 });
     const response = mockResponse();
     const allowed = await authorizeMcpHttpRequest(
       {
@@ -356,7 +419,22 @@ describe("scrypt concurrency cap", () => {
     );
     expect(allowed).toBe(false);
     expect(response.statusCode).toBe(429);
-    expect(limiter.beginAttempt("203.0.113.8", "alice")).toBe(0);
+    expect(limiter.beginAttempt("203.0.113.8", "alice")).toBe(1000);
+  });
+
+  it("slides the successful scrypt cache forward on a hit", async () => {
+    clearBasicAuthSuccessCache();
+    const users = parseBasicAuthUsers(scryptUser("slide", PASSWORD));
+    const before = basicAuthScryptOperations();
+    const start = 1_700_000_000_000;
+    expect(await verifyBasicCredentials(users, "slide", PASSWORD, { now: start })).toBe(true);
+    expect(
+      await verifyBasicCredentials(users, "slide", PASSWORD, { now: start + 20_000 }),
+    ).toBe(true);
+    expect(
+      await verifyBasicCredentials(users, "slide", PASSWORD, { now: start + 40_000 }),
+    ).toBe(true);
+    expect(basicAuthScryptOperations()).toBe(before + 1);
   });
 });
 
@@ -514,6 +592,101 @@ describe("credential version HMAC", () => {
     expect(fingerprint).not.toBe(unsalted);
     expect(credentialFingerprint(user, randomBytes(32))).not.toBe(fingerprint);
     expect(credentialFingerprint(user, macKey)).toBe(fingerprint);
+  });
+
+  it("creates the key with an exclusive write and reads it back when the file exists", () => {
+    const root = mkdtempSync(join(tmpdir(), "wamcp-mac-"));
+    try {
+      const file = join(root, "oauth.db");
+      writeFileSync(file, "");
+      const first = loadCredentialMacKey(file);
+      const second = loadCredentialMacKey(file);
+      expect(second.equals(first)).toBe(true);
+      expect(statSync(credentialMacKeyPath(file)).mode & 0o777).toBe(0o600);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("unknown usernames and bucket eviction", () => {
+  it("keeps alice locked after 10001 unknown usernames", async () => {
+    const limiter = new AuthAttemptLimiter({ freeFailures: 1, baseDelayMs: 60_000 });
+    const users = parseBasicAuthUsers(`alice:${PASSWORD}`);
+    const call = (username: string, password: string, ip: string) => {
+      const response = mockResponse();
+      return authorizeMcpHttpRequest(
+        {
+          socket: { remoteAddress: ip },
+          headers: {
+            authorization: `Basic ${Buffer.from(`${username}:${password}`).toString("base64")}`,
+          },
+        } as unknown as IncomingMessage,
+        response,
+        { basicUsers: users, limiter },
+        null,
+      ).then(() => response.statusCode);
+    };
+    expect(await call("alice", `${PASSWORD}-wrong`, "203.0.113.40")).toBe(401);
+    expect(await call("alice", `${PASSWORD}-wrong`, "203.0.113.40")).toBe(429);
+    expect(await call("stranger-a", "x", "198.51.100.1")).toBe(401);
+    expect(await call("stranger-b", "x", "198.51.100.2")).toBe(429);
+    for (let index = 0; index < 10_001; index += 1) {
+      expect(await call(`stranger-${index}`, "x", `198.51.100.${(index % 200) + 1}`)).toBe(429);
+    }
+    expect(await call("alice", PASSWORD, "203.0.113.40")).toBe(429);
+  });
+
+  it("does not evict a locked bucket to store another username", () => {
+    let now = 5_000;
+    const limiter = new AuthAttemptLimiter({
+      freeFailures: 0,
+      baseDelayMs: 1000,
+      maxDelayMs: 60_000,
+      now: () => now,
+    });
+    const address = (index: number) => `10.1.${Math.floor(index / 256)}.${index % 256}`;
+    for (let index = 0; index < 10_000; index += 1) {
+      expect(limiter.beginAttempt(address(index), `user-${index}`)).toBe(1000);
+    }
+    expect(limiter.retryAfterMs(address(0), "user-0")).toBe(1000);
+    expect(limiter.beginAttempt("203.0.113.80", "overflow")).toBe(1000);
+    expect(limiter.retryAfterMs(address(0), "user-0")).toBe(1000);
+    now += 60_000;
+    expect(limiter.beginAttempt("203.0.113.80", "overflow")).toBe(1000);
+    expect(limiter.retryAfterMs(address(0), "user-0")).toBe(0);
+  });
+});
+
+describe("optional HTTP fallback", () => {
+  it("runs before the 404 and can leave the request unhandled", async () => {
+    const handler = createHttpRequestHandler({
+      routes: { health: "/health", mcp: "/mcp", webhook: "/cloud-webhook" },
+      oauth: null,
+      authorize: () => true,
+      health: (_req, res) => {
+        res.writeHead(200);
+        res.end();
+      },
+      mcp: async (_req, res) => {
+        res.writeHead(204);
+        res.end();
+      },
+      webhook: async (_req, res) => {
+        res.writeHead(204);
+        res.end();
+      },
+      fallback: (_req, res, url) => {
+        if (url.pathname !== "/dashboard") return false;
+        res.writeHead(204);
+        res.end();
+        return true;
+      },
+    });
+    const harness = await listen(handler);
+    expect((await fetch(`${harness.baseUrl}/dashboard`)).status).toBe(204);
+    expect((await fetch(`${harness.baseUrl}/missing`)).status).toBe(404);
+    expect(normalizeClientIp("127.0.0.1")).toBe("127.0.0.1");
   });
 });
 

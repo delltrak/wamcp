@@ -711,7 +711,7 @@ Copy `.env.example` to `.env` and configure. Leave the new HTTP auth settings un
 | `WA_MCP_OAUTH_ENABLED`      | `false`                  | Embed an OAuth 2.1 authorization server for the MCP endpoint |
 | `WA_MCP_OAUTH_ISSUER_URL`   | —                        | Public HTTPS issuer. Required when OAuth is enabled; its path must match `WA_BASE_PATH` |
 | `WA_MCP_OAUTH_RESOURCE_URL` | issuer origin + base path + `/mcp` | Canonical MCP resource URL checked on every token |
-| `WA_MCP_OAUTH_DB_PATH`      | `data/oauth.db`          | SQLite file for OAuth clients and token hashes. Separate from the WhatsApp database. Mode 0600. Existing parent directories are not chmodded |
+| `WA_MCP_OAUTH_DB_PATH`      | `data/oauth.db`          | SQLite file for OAuth clients and token hashes. Separate from the WhatsApp database. Mode 0600. Back up the sibling `oauth.db.mac` key with it; losing the key signs every session out. Existing parent directories are not chmodded |
 | `WA_MCP_OAUTH_DCR`          | `open`                   | `open` or `disabled`. `disabled` turns off dynamic client registration |
 | `WA_MCP_OAUTH_REDIRECT_HOST_ALLOWLIST` | —           | Comma-separated redirect hostnames or reverse-DNS native schemes. Unset allows every valid redirect |
 | `WA_TRUST_PROXY`            | —                        | CIDR list. `X-Forwarded-For` is honored only when the socket peer matches. Unset uses the socket address |
