@@ -417,7 +417,7 @@ describe("wa_send_group_history_to_member", () => {
       message({
         id: `line-${index}`,
         timestamp: index + 1,
-        content: `body-${index}-` + "x".repeat(80),
+        content: `m${index} ` + "x".repeat(80),
       }),
     );
     const prepared = prepareGroupHistoryChunks(
@@ -433,13 +433,51 @@ describe("wa_send_group_history_to_member", () => {
     expect(prepared.chunks.length).toBeLessThanOrEqual(5);
     expect(prepared.chunks.length).toBeGreaterThan(1);
     expect(prepared.omittedMessages).toBeGreaterThan(0);
-    expect(prepared.chunks.at(-1)).toContain(`…mais ${prepared.omittedMessages}`);
     expect(prepared.chunks[1]).toMatch(/^\(2\/\d+\)\n/);
     const body = prepared.chunks.join("\n");
+    expect(body).toContain(`…mais ${prepared.omittedMessages}`);
+    expect(body).toContain("m11 ");
+    expect(body).not.toContain("m0 ");
+    expect(body.indexOf(`…mais ${prepared.omittedMessages}`)).toBeLessThan(body.indexOf("m11 "));
     expect(body).not.toContain("x".repeat(80));
     for (const line of body.split("\n")) {
       if (line.startsWith("(")) continue;
       expect(line.length).toBeLessThanOrEqual(40);
+    }
+  });
+
+  it("drops the oldest messages when the cap is hit and still sends the rest in chronological order", () => {
+    const messages = Array.from({ length: 8 }, (_, index) =>
+      message({
+        id: `msg-${index}`,
+        timestamp: 1_000 + index,
+        content: `token-${index}`,
+      }),
+    );
+    const prepared = prepareGroupHistoryChunks(
+      {
+        groupJid: GROUP_JID,
+        groupName: "Equipe",
+        messages: [...messages].reverse(),
+        contacts: [],
+        timeZone: "UTC",
+      },
+      { maxChars: 120, maxChunks: 2, maxLineChars: 400 },
+    );
+
+    expect(prepared.omittedMessages).toBeGreaterThan(0);
+    expect(prepared.messagesIncluded).toBe(messages.length - prepared.omittedMessages);
+    const body = prepared.chunks.join("\n");
+    const firstKept = messages.length - prepared.messagesIncluded;
+    const noteAt = body.indexOf(`…mais ${prepared.omittedMessages}`);
+    const firstAt = body.indexOf(`token-${firstKept}`);
+    const lastAt = body.indexOf("token-7");
+    expect(noteAt).toBeGreaterThanOrEqual(0);
+    expect(firstAt).toBeGreaterThan(noteAt);
+    expect(lastAt).toBeGreaterThan(firstAt);
+    expect(body).not.toContain("token-0");
+    for (let index = 0; index < firstKept; index += 1) {
+      expect(body).not.toContain(`token-${index}`);
     }
   });
 

@@ -317,16 +317,18 @@ export function prepareGroupHistoryChunks(
   const pack = (included: Message[], omitted: number): string[] => {
     const digest = formatGroupHistoryDigest({ ...options, messages: included });
     const lines = digest.split("\n").map((line) => truncateLine(line, maxLineChars));
-    if (omitted > 0) lines.push(`…mais ${omitted}`);
+    if (omitted > 0) lines.splice(1, 0, `…mais ${omitted}`);
     return chunkGroupHistoryDigest(lines.join("\n"), maxChars);
   };
+
+  const newest = (count: number): Message[] => sorted.slice(sorted.length - count);
 
   let low = 0;
   let high = sorted.length;
   let best = 0;
   while (low <= high) {
     const mid = Math.floor((low + high) / 2);
-    const chunks = pack(sorted.slice(0, mid), sorted.length - mid);
+    const chunks = pack(newest(mid), sorted.length - mid);
     if (chunks.length <= maxChunks) {
       best = mid;
       low = mid + 1;
@@ -340,7 +342,7 @@ export function prepareGroupHistoryChunks(
   }
   const omittedMessages = sorted.length - best;
   return {
-    chunks: numberGroupHistoryChunks(pack(sorted.slice(0, best), omittedMessages)),
+    chunks: numberGroupHistoryChunks(pack(newest(best), omittedMessages)),
     messagesIncluded: best,
     omittedMessages,
   };

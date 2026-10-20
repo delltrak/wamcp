@@ -918,9 +918,9 @@ Normal message sends, read receipts, and app-state reads/resyncs remain availabl
 `wa_send_group_history_to_member` is a workaround for Baileys rc14's lack of WhatsApp's native
 recent-history sharing for new group members. It reads up to 100 latest local messages, skips
 revoked and view-once rows (widening the read until that many shareable messages remain or 1,000
-rows are scanned), formats them oldest first, truncates each line to 400 characters, and queues at
-most 5 chunks. When more than one chunk is queued they are numbered `(2/4)`. Messages that do not
-fit are left out with a `…mais N` note. The participant must be a current member, matched by phone
+rows are scanned), truncates each line to 400 characters, and queues at most 5 chunks. When
+more than one chunk is queued they are numbered `(2/4)`. If the cap is reached, the oldest
+messages are left out with a `…mais N` note and the newest are sent in chronological order. The participant must be a current member, matched by phone
 number (PN) or LID in group metadata; the direct message goes to the PN when one is known. A group
 whose `ephemeralDuration` is greater than 0 is refused so disappearing messages are not copied into
 a permanent chat. If a later chunk fails to enqueue, the response still reports the `chunksSent`

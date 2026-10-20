@@ -89,7 +89,7 @@ export function registerGroupTools(
     "wa_send_group_history_to_member",
     {
       description:
-        "Send a readable digest of recent locally stored group messages to a current member's WhatsApp DM. The participant must match group metadata by phone number (PN) or LID; otherwise the tool refuses. Groups with disappearing messages (ephemeralDuration greater than 0) are refused so temporary messages are not copied into a permanent chat. Revoked and view-once messages are skipped. Each line is truncated and the digest is capped at 5 queued chunks, numbered when split, with an ellipsis note when messages are left out. The DM uses the member's phone JID when metadata or the request has one. Baileys workaround for WhatsApp's native recent-history sharing, which is unavailable in Baileys rc14. Requires WA_GROUP_WRITES_ENABLED=true.",
+        "Send a readable digest of recent locally stored group messages to a current member's WhatsApp DM. The participant must match group metadata by phone number (PN) or LID; otherwise the tool refuses. Groups with disappearing messages (ephemeralDuration greater than 0) are refused so temporary messages are not copied into a permanent chat. Revoked and view-once messages are skipped. Each line is truncated and the digest is capped at 5 queued chunks, numbered when split. When messages do not fit, the oldest are left out with an ellipsis note and the newest are sent in chronological order. The DM uses the member's phone JID when metadata or the request has one. Baileys workaround for WhatsApp's native recent-history sharing, which is unavailable in Baileys rc14. Requires WA_GROUP_WRITES_ENABLED=true.",
       inputSchema: SendGroupHistoryToMemberSchema,
     },
     async (params) => {

@@ -1296,8 +1296,9 @@ metadata (or, for automatic sends, the stub) has one. Groups with `ephemeralDura
 0 are refused entirely, so disappearing messages are never copied into a permanent chat. Revoked
 messages and view-once messages are skipped; the read widens until the requested count of shareable
 messages is reached or 1,000 stored rows have been scanned. Each digest line is truncated to 400
-characters. At most 5 chunks are queued. Chunks are numbered `(2/4)` when there is more than one,
-and messages that do not fit are omitted with a `…mais N` line. If enqueue fails after at least one
+characters. At most 5 chunks are queued. Chunks are numbered `(2/4)` when there is more than one.
+If the cap is reached, the oldest messages are omitted with a `…mais N` line and the newest are
+sent in chronological order. If enqueue fails after at least one
 chunk was accepted, the tool still returns that `chunksSent` count. Digest chunks use the
 per-instance outbound message limiter.
 
@@ -1326,7 +1327,8 @@ member's direct chat. The sender name uses a stored contact name or message push
 number as fallback. Media is represented by Portuguese placeholders such as `[imagem]`, `[áudio]`,
 and `[documento: nome]`, followed by any caption. Revoked and view-once messages are omitted. Lines
 longer than 400 characters are truncated. The digest is split into at most 5 queued chunks of 4,000
-characters, numbered `(1/N)` when split, with `…mais N` when messages are left out. If no shareable
+characters, numbered `(1/N)` when split. When messages do not fit, the oldest are left out
+(`…mais N`) and the newest are sent in chronological order. If no shareable
 local messages are available, nothing is sent and the response includes a note. A group with
 disappearing messages enabled is refused before anything is queued.
 
