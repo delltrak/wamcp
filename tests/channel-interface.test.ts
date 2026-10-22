@@ -30,6 +30,8 @@ const CHANNEL_ADAPTER_METHODS: (keyof ChannelAdapter)[] = [
   // Presence
   "sendPresence",
   "markRead",
+  "markPlayed",
+  "markPlayedMessage",
   // Chats
   "modifyChat",
   "markChatUnread",

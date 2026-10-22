@@ -251,6 +251,37 @@ interface StoredAppStateMessage {
   messageTimestamp: number;
 }
 
+const PLAYED_RECEIPT_SERVERS = new Set(["s.whatsapp.net", "lid", "g.us", "hosted", "hosted.lid"]);
+
+function chatServer(jid: string): string {
+  const normalized = jid.trim().toLowerCase();
+  const at = normalized.lastIndexOf("@");
+  return at === -1 ? "" : normalized.slice(at + 1);
+}
+
+/** Played receipts go to user, hosted, and group chats. Status and newsletters are refused. */
+function assertPlayedReceiptChat(jid: string): void {
+  const normalized = jid.trim().toLowerCase();
+  const server = chatServer(normalized);
+  if (normalized === "status@broadcast" || server === "broadcast" || server === "newsletter") {
+    throw new Error(`Played receipts are not sent to status broadcasts or newsletters (${jid})`);
+  }
+  if (!PLAYED_RECEIPT_SERVERS.has(server)) {
+    throw new Error(`Played receipts only support @s.whatsapp.net, @lid, and @g.us chats (${jid})`);
+  }
+}
+
+function isPlayableMedia(type: string, rawMessage: WAMessage | undefined): boolean {
+  if (type === "audio" || type === "video") return true;
+  const content = unwrapMessageContent(rawMessage?.message);
+  if (!content) return false;
+  return (
+    content.audioMessage !== undefined ||
+    content.videoMessage !== undefined ||
+    content.ptvMessage !== undefined
+  );
+}
+
 interface StoredMessageKeyRow {
   id: string;
   chatId: string;
@@ -3101,6 +3132,158 @@ export class BaileysAdapter implements ChannelAdapter {
 
     if (keys.length === 0) return;
     await sock.readMessages(keys);
+  }
+
+  async markPlayed(chatId: string, messageIds: string[], participant?: string): Promise<void> {
+    if (messageIds.length > MAX_MARK_READ_MESSAGE_IDS) {
+      throw new Error(
+        `A mark-played request can contain at most ${MAX_MARK_READ_MESSAGE_IDS} message IDs`,
+      );
+    }
+    const sock = this.getSock();
+    const jid = this.normalizeJid(chatId);
+    assertPlayedReceiptChat(jid);
+    const chatAliases = await this.getChatJidAliases(jid);
+    const batches = new Map<string, { jid: string; participant?: string; messageIds: string[] }>();
+
+    for (const id of [...new Set(messageIds)]) {
+      const storedMessage = db
+        .select({
+          chatId: messagesTable.chatId,
+          senderId: messagesTable.senderId,
+          type: messagesTable.type,
+          isFromMe: messagesTable.isFromMe,
+          rawData: messagesTable.rawData,
+        })
+        .from(messagesTable)
+        .where(
+          and(
+            eq(messagesTable.instanceId, this.instanceId),
+            inArray(messagesTable.chatId, chatAliases),
+            eq(messagesTable.id, id),
+          ),
+        )
+        .get();
+
+      if (!storedMessage) {
+        throw new Error(`Message ${id} is not stored in this chat`);
+      }
+
+      const rawMessage = getStoredMessage(storedMessage.rawData ?? null, id);
+      const outgoing = storedMessage.isFromMe === 1 || rawMessage?.key.fromMe === true;
+      if (outgoing || !isPlayableMedia(storedMessage.type, rawMessage)) {
+        throw new Error(`Message ${id} is not an incoming audio, voice, or video message`);
+      }
+
+      const remoteJid = rawMessage?.key.remoteJid ?? storedMessage.chatId;
+      assertPlayedReceiptChat(remoteJid);
+      let receiptParticipant: string | undefined;
+      if (remoteJid.endsWith("@g.us")) {
+        const storedSender =
+          rawMessage?.key.participant ||
+          (storedMessage.senderId && storedMessage.senderId !== "me"
+            ? storedMessage.senderId
+            : undefined);
+        receiptParticipant = storedSender || participant;
+        if (!receiptParticipant) {
+          throw new Error(`Sender is missing for group audio or video message ${id}`);
+        }
+      }
+
+      const batchKey = `${remoteJid}\0${receiptParticipant ?? ""}`;
+      const batch = batches.get(batchKey) ?? {
+        jid: remoteJid,
+        ...(receiptParticipant ? { participant: receiptParticipant } : {}),
+        messageIds: [],
+      };
+      batch.messageIds.push(id);
+      batches.set(batchKey, batch);
+    }
+
+    for (const batch of batches.values()) {
+      await this.sendPlayedReceipt(sock, batch.jid, batch.participant, batch.messageIds);
+    }
+  }
+
+  /**
+   * Mark one stored incoming message played.
+   * chatId limits the lookup to that chat and its PN/LID aliases.
+   */
+  async markPlayedMessage(messageId: string, chatId?: string): Promise<void> {
+    const requested = chatId ? this.normalizeJid(chatId) : undefined;
+    if (requested) assertPlayedReceiptChat(requested);
+    const aliases = requested ? await this.getChatJidAliases(requested) : undefined;
+    const rows = db
+      .select({
+        chatId: messagesTable.chatId,
+        senderId: messagesTable.senderId,
+      })
+      .from(messagesTable)
+      .where(
+        and(
+          eq(messagesTable.instanceId, this.instanceId),
+          eq(messagesTable.id, messageId),
+          eq(messagesTable.isFromMe, 0),
+          aliases ? inArray(messagesTable.chatId, aliases) : undefined,
+        ),
+      )
+      .all();
+    const row = requested
+      ? (rows.find((candidate) => candidate.chatId === requested) ?? rows[0])
+      : rows[0];
+    if (!row) throw new Error(`Message ${messageId} is not stored in this chat`);
+    const participant =
+      row.chatId.endsWith("@g.us") && row.senderId && row.senderId !== "me"
+        ? row.senderId
+        : undefined;
+    await this.markPlayed(row.chatId, [messageId], participant);
+  }
+
+  /**
+   * rc14 sendReceipt omits the receipt timestamp for type "played".
+   * WhatsApp expects that timestamp, so send the receipt node directly when the socket exposes sendNode.
+   */
+  private async sendPlayedReceipt(
+    sock: WASocket,
+    jid: string,
+    participant: string | undefined,
+    messageIds: string[],
+  ): Promise<void> {
+    const receiptSocket = sock as WASocket & {
+      sendNode?: (node: BinaryNode) => Promise<unknown>;
+    };
+    if (typeof receiptSocket.sendNode === "function") {
+      const attrs: BinaryNode["attrs"] = {
+        id: messageIds[0] ?? "",
+        to: jid,
+        type: "played",
+        t: Math.floor(Date.now() / 1000).toString(),
+      };
+      if (participant) attrs.participant = participant;
+      const remainingIds = messageIds.slice(1);
+      const node: BinaryNode = {
+        tag: "receipt",
+        attrs,
+        ...(remainingIds.length > 0
+          ? {
+              content: [
+                {
+                  tag: "list",
+                  attrs: {},
+                  content: remainingIds.map((id) => ({
+                    tag: "item",
+                    attrs: { id },
+                  })),
+                },
+              ],
+            }
+          : {}),
+      };
+      await receiptSocket.sendNode(node);
+      return;
+    }
+
+    await sock.sendReceipt(jid, participant, messageIds, "played");
   }
 
   // ---- Chats ----

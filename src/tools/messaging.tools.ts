@@ -34,6 +34,7 @@ import {
   SendViewOnceSchema,
   SendPresenceSchema,
   MarkReadSchema,
+  MarkPlayedSchema,
   SubscribePresenceSchema,
   SendButtonsSchema,
   SendListSchema,
@@ -927,6 +928,30 @@ Returns: { status: "queued", jobId }`,
         return toolSuccess({ success: true });
       } catch (err) {
         return handleToolError("wa_mark_read", err, params.instanceId);
+      }
+    },
+  );
+
+  server.registerTool(
+    "wa_mark_played",
+    {
+      description:
+        "Send a played receipt for stored incoming audio, voice notes, or video. Always available. Group messages need participant when the sender is not stored. Baileys only. WA_AUTO_MARK_PLAYED=false controls a separate receipt after transcription.",
+      inputSchema: MarkPlayedSchema,
+    },
+    async (params) => {
+      const log = createRequestLogger("wa_mark_played", params.instanceId);
+      const start = Date.now();
+      try {
+        const adapter = instanceManager.getAdapter(params.instanceId);
+        await adapter.markPlayed(params.chatJid, params.messageIds, params.participant);
+        log.info(
+          { duration: Date.now() - start, count: params.messageIds.length },
+          "Media marked played",
+        );
+        return toolSuccess({ success: true, count: params.messageIds.length });
+      } catch (err) {
+        return handleToolError("wa_mark_played", err, params.instanceId);
       }
     },
   );

@@ -426,3 +426,25 @@ export const MarkReadSchema = z
       ),
   })
   .strict();
+
+export const MarkPlayedSchema = z
+  .object({
+    instanceId: z.string().min(1).describe("The instance ID"),
+    chatJid: z
+      .string()
+      .min(5)
+      .describe("Chat JID containing the audio, voice-note, or video messages"),
+    messageIds: z
+      .array(z.string().min(1))
+      .min(1)
+      .max(100)
+      .describe(
+        "Stored incoming audio, voice-note, or video message IDs to mark as played (1-100)",
+      ),
+    participant: z
+      .string()
+      .min(1)
+      .optional()
+      .describe("Sender JID for a group message when storage has no sender. Private chats omit it"),
+  })
+  .strict();
