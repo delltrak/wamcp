@@ -15,6 +15,10 @@ const CHANNEL_ADAPTER_METHODS: (keyof ChannelAdapter)[] = [
   "setCredentials",
   // Messaging
   "sendMessage",
+  "sendEvent",
+  "getEventResponses",
+  "getPollResults",
+  "starMessage",
   "editMessage",
   "deleteMessage",
   "forwardMessage",
@@ -27,20 +31,47 @@ const CHANNEL_ADAPTER_METHODS: (keyof ChannelAdapter)[] = [
   "markRead",
   // Chats
   "modifyChat",
+  "markChatUnread",
+  "listLabels",
+  "createLabel",
+  "editLabel",
+  "deleteLabel",
+  "setChatLabel",
+  "setMessageLabel",
+  "setDisappearingMessages",
+  "createQuickReply",
+  "editQuickReply",
+  "deleteQuickReply",
   // Groups
+  "listGroups",
   "createGroup",
   "modifyGroup",
   "modifyParticipants",
   "getGroupMetadata",
+  "updateGroupPicture",
+  "removeGroupPicture",
   "getGroupInviteCode",
+  "getGroupInviteInfo",
   "joinGroup",
+  "listGroupJoinRequests",
+  "sendGroupInviteMessage",
   "handleJoinRequest",
+  "setGroupJoinApprovalMode",
+  "setGroupMemberAddMode",
+  "createCommunity",
+  "listCommunities",
+  "getCommunityMetadata",
+  "linkGroupToCommunity",
+  "unlinkGroupFromCommunity",
+  "leaveCommunity",
   // Contacts
   "checkNumberExists",
   "blockContact",
   "unblockContact",
   "getBlocklist",
+  "getContactAbout",
   "getBusinessProfile",
+  "resyncContacts",
   // Profile
   "updateProfilePicture",
   "removeProfilePicture",
@@ -55,12 +86,29 @@ const CHANNEL_ADAPTER_METHODS: (keyof ChannelAdapter)[] = [
   "newsletterFollow",
   "newsletterUnfollow",
   "newsletterSend",
+  "createNewsletter",
+  "getNewsletterMetadata",
+  "updateNewsletterName",
+  "updateNewsletterDescription",
+  "updateNewsletterPicture",
+  "reactToNewsletterMessage",
+  "fetchNewsletterMessages",
+  "getCatalog",
+  "getCollections",
+  "createProduct",
+  "updateProduct",
+  "deleteProducts",
+  "getOrderDetails",
   // Calls
   "rejectCall",
   // Data access
   "getContacts",
   "getChats",
   "getMessages",
+  "searchMessages",
+  "fetchMessageHistory",
+  "downloadMessageAudio",
+  "downloadMessageMedia",
   "getProfileInfo",
   // Events
   "on",
@@ -85,4 +133,12 @@ describe("BaileysAdapter implements ChannelAdapter", () => {
       expect(typeof adapter[method]).toBe("function");
     });
   }
+});
+
+describe("Cloud API contact resync", () => {
+  it("returns a clear unsupported-operation error", async () => {
+    await expect(new CloudApiAdapter("test_instance").resyncContacts()).rejects.toThrow(
+      "Contact resync is not supported on Cloud API",
+    );
+  });
 });

@@ -7,6 +7,181 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- The Docker runtime stage now runs `ffmpeg -version` on every architecture the image build
+  targets, next to the existing `better-sqlite3` prebuild check. Published tags stay a single
+  `linux/amd64` + `linux/arm64` manifest list.
+
+### Added
+
+- Added Baileys instance lifecycle webhooks for connection, disconnect, pairing-code, and QR events,
+  plus the read-only `wa_get_instance_status` tool. Pairing and QR challenge data is omitted from
+  webhook payloads and status output.
+- Added per-chat presence subscriptions, send-time participant mentions and group `@all`, native
+  Cloud API buttons/lists with Baileys text fallbacks, custom link-preview metadata and generated
+  thumbnails, and status-story viewer lookup from observed read receipts.
+- Added local per-participant receipt and reaction history, multi-image albums, and private replies
+  to stored group-message authors. These replacements use normal messages or local read storage.
+- Added `WA_AUTO_REJECT_CALLS=false` for optional automatic rejection of one-to-one call offers.
+  Call offers and subsequent reject, timeout, accept, and terminate events now retain their status
+  and call details in MCP notifications and configured outgoing webhooks.
+
+- Added Baileys poll vote decryption and persisted poll results, live location sends, audio view-once
+  messages, and multi-contact vCards. Poll results use the stored poll message secret and decrypted
+  vote updates, so they remain available after reconnecting.
+- Added Baileys group invite metadata lookup, pending join-request listing, group invitation cards,
+  and contact/group profile-picture URL lookup. Group invite joining now accepts validated WhatsApp
+  invite links.
+- Startup warns when no outgoing event webhook destination is configured, when webhook authentication
+  is only half set, or when the webhook event set is empty. `GET /health` and `wa_get_instance_status`
+  report that redacted state. `WA_REQUIRE_EVENT_WEBHOOK=true` refuses to start when no destination is
+  configured or the event set is empty.
+
+### Fixed
+
+- App-state writes now run through a per-instance queue with configurable spacing and a resync
+  preflight that requires a retrievable current key, a positive collection version, a 128-byte hash,
+  and no Baileys-reported sync, decode, missing-key, or hash-verification failure. Successful writes
+  are resynced once and checked for version advancement; failed patches are not retried.
+- Chat unread/archive/delete/clear ranges now use at most three recent stored raw message keys,
+  numeric Unix-second timestamps, and the raw key's PN/LID `remoteJid` for the patch index. Star and
+  unstar refuse messages without a valid stored raw key.
+- Added `WA_GROUP_WRITES_ENABLED=false` for group, community, and Channel server operations that
+  use IQ/MEX/message queries. `WA_APP_STATE_WRITES_ENABLED=true` continues to enable those writes
+  along with app-state and other gated account/server operations.
+- Baileys presence now defaults to appearing online only around outgoing messages and typing or
+  recording activity, then returning to unavailable after the configured idle timeout.
+- Incoming offline messages delivered through Baileys `append` upserts now emit one `message.received`
+  event and webhook, with timestamp filtering, persistent deduplication, and a per-batch cap. Baileys
+  also logs every connection close and reconnect attempt. Its health watchdog uses `fetchStatus`
+  USync probes instead of counting raw websocket frames; two consecutive failed probes end the
+  socket so the existing reconnect flow can recover silent drops. A Baileys event buffer that stalls
+  past `WA_BAILEYS_EVENT_BUFFER_STALL_MS` is flushed once, and the socket ends if buffering persists
+  at the next check.
+- Baileys `on_receive` auto-read now marks only offline append messages that pass emission eligibility
+  and deduplication.
+- Poll votes on polls sent by this account now decrypt across LID/PN identity variants, including
+  wrapped updates. Unresolved votes retry after poll storage and when results are read.
+- Event messages sent by this account now retain their binary protobuf message secret in local
+  history, allowing encrypted RSVP responses to decrypt after the send and later message upserts.
+- Outgoing event webhook delivery failures now log the attempt, HTTP status, safe error details,
+  and an endpoint with query strings removed.
+- Media albums now store the album parent as `album` and each child under its extracted media type.
+- On-demand history sync now decrypts and persists poll votes, retrying votes that arrive before
+  their poll.
+- View-once audio now uses detected MP3, M4A, or OGG MIME types and only marks verified OGG/Opus
+  as PTT.
+- Cloud API now returns unsupported-operation errors for edits and view-once messages instead of
+  sending ordinary messages or media that appeared to meet those requests. Live locations, poll
+  result reads, and Baileys-only group helpers also return explicit Cloud API unsupported errors.
+- Group setting updates now apply both announcement and locked modes using their corresponding
+  Baileys enum values.
+- Channel follow/unfollow and the `defaultDisappearingMode` privacy update are now blocked unless
+  `WA_APP_STATE_WRITES_ENABLED=true`; other privacy setting updates remain available with writes
+  disabled.
+- Test databases and media directories now use temporary per-run paths.
+
+### Changed
+
+- Gate private disappearing-message timers and all Baileys group creation, settings, membership,
+  picture, invite, join, and join-request changes behind `WA_APP_STATE_WRITES_ENABLED`.
+- Added `WA_MARK_ONLINE_ON_CONNECT` to control whether Baileys marks the linked account online
+  when its socket connects. It defaults to `false`, preserving the current behavior.
+- Baileys status stories now report the recipient count and warn when the configured audience cap
+  truncates a recipient list.
+- Baileys status tools now return the status message ID needed to list observed viewers.
+
+### Added
+
+- Added private disappearing-message timers, blocked-contact and About reads, group join approval
+  and member-add modes, PTV video notes, community management, Channel management, and Business
+  catalog/product/order tools. Quick reply writes and community, Channel, catalog-product, and group
+  mode changes are gated by `WA_APP_STATE_WRITES_ENABLED`; list is unavailable because Baileys rc14
+  exposes no read method and quick reply sync actions are not stored locally. Read-only calls and
+  normal message sends remain available when writes are disabled.
+- Added local `wa_search_messages` with case-insensitive substring matching, escaped SQL `LIKE`
+  wildcards, date/sender/chat filters, and stable offset pagination.
+- Added Baileys WhatsApp Business label tools for listing, creation, edits, soft deletion, and
+  chat/message associations. Label edits and associations persist locally; chat listings, message
+  reads, MCP notifications, and optional outgoing webhooks include label details.
+- Added `wa_list_chats`, `wa_mark_chat_unread`, and `wa_star_message`. Mark-unread uses the stored
+  reverse-chronological message range required by Baileys, and starred state is retained locally.
+- Added `wa_send_event` and `wa_get_event_responses` with encrypted RSVP decryption, delayed
+  retries when an event message arrives, per-status counts, responder phone lookup, and additive
+  `event.response` notifications and webhooks.
+- Added `wa_fetch_message_history` for Baileys on-demand history sync, anchored at the oldest local
+  message, deduplicated through existing message persistence, and bounded by a response timeout.
+- Added additive SQLite tables for Business labels, their associations, and event responses, plus a
+  `starred` message column. Startup creates new tables and adds the column to existing databases.
+- Optional per-chat batching for incoming event webhook messages with a sliding debounce window,
+  maximum batch age, message-count cap, transcription-aware ordering, and shutdown flushing.
+- Added Baileys group listing and detailed participant roles, plus admin-only group picture updates
+  and removal. Picture inputs accept HTTPS URLs or base64 images and are converted to square JPEGs.
+- Added `wa_send_sticker`, `wa_send_gif`, and `wa_download_media`. Sticker conversion uses ffmpeg
+  when needed, GIFs are normalized to silent H.264 MP4 for Baileys playback, and received media can
+  be saved to a dedicated directory or returned as size-limited base64. Received media events now
+  include available MIME type, filename, caption, and size metadata.
+- Added `WA_MEDIA_DOWNLOAD_DIR`, `WA_MEDIA_DOWNLOAD_MAX_BYTES`, `WA_MEDIA_FFMPEG_PATH`, and
+  `WA_MEDIA_FFMPEG_TIMEOUT_MS` settings for media downloads and conversions.
+- Added `wa_resync_contacts` to refresh contacts on an existing Baileys session without pairing
+  again. It resyncs app-state collections individually, recovers contacts from local chats and
+  messages, and keeps recovered contacts in SQLite across restarts.
+- Optional `WA_STATUS_MAX_RECIPIENTS` cap for Baileys status audiences; it defaults to 256.
+- Added Baileys privacy read/update tools for last seen, online, profile photo, About/profile text
+  visibility, read receipts, group adds, calls, and default disappearing duration.
+- Optional ElevenLabs text-to-speech voice notes through a provider interface, with voice listing,
+  base64 previews, text chunk continuity, retry handling, and OGG/Opus output for Baileys.
+- Configurable TTS enablement, provider, voice, model, language, output format, text limit, API host,
+  timeout, and ffmpeg executable path.
+- Optional `WA_AUTO_READ=false|on_fetch|on_receive` behavior for incoming messages, with receipts
+  scheduled in the background so message handling and tool/resource responses continue promptly.
+- Optional `participant` input for `wa_mark_read`; Baileys group receipt keys now include the
+  participant and stored `fromMe` value while direct chat keys keep their existing shape.
+- Optional incoming audio transcription for Baileys and Cloud API messages through an
+  OpenAI-compatible transcription endpoint, with a `wa_transcribe_audio` MCP tool and
+  asynchronous transcription text on successful audio message notifications.
+- Configurable transcription enablement, API URL/model/language, size ceiling, and timeout.
+
+### Fixed
+
+- Baileys event response decryption now tries normalized LID and PN creator/responder candidates,
+  retries stored encrypted responses when `wa_get_event_responses` is called, and reports the number
+  of attempted JID combinations when decryption still fails.
+- Baileys event responses now map numeric, named, Long-like, and encoded WAProto RSVP values to
+  `GOING`, `NOT_GOING`, or `MAYBE`; stored encrypted responses with an earlier `UNKNOWN` status are
+  re-decoded on read when possible.
+- Baileys event responses that fail decryption with every available creator and responder JID
+  combination are now reported as unrecoverable; this commonly means the stored event `messageSecret`
+  does not match after re-pairing, so the participant must answer again.
+- Previously stored Baileys `messages.update` RSVP payloads are now re-decoded on read as well.
+  `wa_get_event_responses` explains remaining `UNKNOWN` statuses with a reason and recoverability;
+  responses whose payload was never stored cannot be recovered, and the responder can answer again.
+- Event RSVP responses now decrypt with the original event's `messageSecret`, including LID/PN
+  author resolution; encrypted responses are retained until the event is available, and the last
+  response per participant is stored with its timestamp and extra guest count.
+- Baileys message forwarding now uses the stored original message content, including outgoing media
+  protos and Buffer fields. Messages without available content return an error instead of sending an
+  empty forwarded bubble.
+- Baileys status deletions now include the original audience (or a validated explicit audience),
+  and successful message deletions are marked as revoked in local message history.
+- Baileys status stories now pass a normalized, deduplicated recipient list (the account's own JID
+  plus stored contacts by default) to `sendMessage`, so status updates are distributed. Status tools
+  also accept an explicit individual-recipient list and validate text-story RGB/ARGB colors.
+- Baileys business templates, interactive messages, button/list messages, and their selection
+  responses now retain readable content, button metadata, and header media details across storage,
+  `wa_get_messages`, MCP notifications, and event webhooks. Unknown Baileys content types retain
+  their raw type name. Structured message metadata is recovered from the existing `raw_data`
+  column, so no database migration is needed.
+- Baileys PTT voice notes now include a 64-byte waveform and duration when ffmpeg can decode the
+  audio; non-Opus input is converted to OGG/Opus, with sends falling back gracefully on failure.
+- Baileys quoted text, image, and video sends now resolve the referenced message from the same
+  chat and instance and pass a complete WAMessage to the socket. Missing quotes return a clear
+  tool error before enqueueing; quotes removed before delivery fail without BullMQ retries.
+- Outgoing event webhooks retry only network errors, timeouts, HTTP 429, and 5xx responses;
+  other 4xx responses fail permanently. Retries use capped exponential backoff with jitter and
+  honor a capped `Retry-After` minimum when provided.
+
 ## [2.0.0] - 2026-09-18
 
 Dependency modernization after ~6.5 months of drift. Closes 4 critical and 17 high
@@ -89,7 +264,7 @@ advisories; `npm audit` goes from **33 vulnerabilities to 4** (all moderate, all
 - Declared `@vitest/coverage-v8`, which `vitest.config.ts` has always referenced but was never in
   `devDependencies`.
 - **Eight of the ten resources were unreachable.** They were registered by passing a plain string
-  containing `{id}` to the deprecated `server.resource()`, which the SDK treats as a *literal*
+  containing `{id}` to the deprecated `server.resource()`, which the SDK treats as a _literal_
   static URI rather than a template. `resources/templates/list` returned nothing, and reading
   either the placeholder URI or a substituted one returned "Resource not found". The URI parsing
   behind them was dead too: `instances` is the **host** of a `whatsapp://` URI, not a path

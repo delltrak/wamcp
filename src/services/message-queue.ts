@@ -2,11 +2,10 @@
 // WA MCP — Message Queue (BullMQ)
 // ============================================================
 
-import { Queue, Worker, type Job } from "bullmq";
+import { Queue, UnrecoverableError, Worker, type Job } from "bullmq";
 import type { ChannelAdapter } from "../channels/channel.interface.js";
-import type { MessageContent } from "../types/channel.types.js";
+import type { ChannelType, MessageContent } from "../types/channel.types.js";
 import {
-  DEFAULT_REDIS_URL,
   DEFAULT_BAILEYS_RATE_LIMIT,
   DEFAULT_CLOUD_RATE_LIMIT,
   QUEUE_RETRY_ATTEMPTS,
@@ -15,14 +14,30 @@ import {
   QUEUE_FAILED_AGE_S,
 } from "../constants.js";
 import { createChildLogger } from "../utils/logger.js";
+import { QuotedMessageResolutionError } from "../utils/quoted-message.js";
+import { getRedisConnectionOptions } from "./redis.js";
 
 const logger = createChildLogger({ service: "message-queue" });
 
-export interface OutboundJob {
-  instanceId: string;
-  to: string;
-  content: MessageContent;
-}
+export type OutboundJob =
+  | {
+      instanceId: string;
+      to: string;
+      content: MessageContent;
+      kind?: "message";
+    }
+  | {
+      kind: "album";
+      instanceId: string;
+      to: string;
+      images: Array<{ image: string; caption?: string }>;
+    }
+  | {
+      kind: "group-member-label";
+      instanceId: string;
+      groupId: string;
+      memberLabel: string | null;
+    };
 
 export interface EnqueueResult {
   status: "queued";
@@ -36,18 +51,8 @@ export interface QueueStats {
   failed: number;
 }
 
-function getRedisOpts(): { host: string; port: number; maxRetriesPerRequest: null } {
-  const url = process.env.WA_REDIS_URL ?? DEFAULT_REDIS_URL;
-  const parsed = new URL(url);
-  return {
-    host: parsed.hostname || "localhost",
-    port: parseInt(parsed.port || "6379", 10),
-    maxRetriesPerRequest: null,
-  };
-}
-
 export class MessageQueue {
-  private readonly redisOpts = getRedisOpts();
+  private readonly redisOpts = getRedisConnectionOptions();
   private readonly queues = new Map<string, Queue>();
   private readonly workers = new Map<string, Worker>();
   private getAdapter: ((instanceId: string) => ChannelAdapter) | null = null;
@@ -65,10 +70,21 @@ export class MessageQueue {
 
     const queueName = `outbound-${instanceId}`;
 
+    const defaultRateLimit =
+      channel === "baileys" ? DEFAULT_BAILEYS_RATE_LIMIT : DEFAULT_CLOUD_RATE_LIMIT;
+    const rateLimitVariable =
+      channel === "baileys" ? "WA_BAILEYS_RATE_LIMIT" : "WA_CLOUD_RATE_LIMIT";
+    const parsedRateLimit = Number(process.env[rateLimitVariable] ?? defaultRateLimit);
     const rateLimit =
-      channel === "baileys"
-        ? parseInt(process.env.WA_BAILEYS_RATE_LIMIT ?? String(DEFAULT_BAILEYS_RATE_LIMIT), 10)
-        : parseInt(process.env.WA_CLOUD_RATE_LIMIT ?? String(DEFAULT_CLOUD_RATE_LIMIT), 10);
+      Number.isSafeInteger(parsedRateLimit) && parsedRateLimit > 0
+        ? parsedRateLimit
+        : defaultRateLimit;
+    if (rateLimit !== parsedRateLimit) {
+      logger.warn(
+        { instanceId, variable: rateLimitVariable, value: process.env[rateLimitVariable] },
+        `Invalid ${rateLimitVariable}; using default rate limit ${defaultRateLimit}`,
+      );
+    }
 
     const queue = new Queue(queueName, {
       connection: this.redisOpts,
@@ -91,7 +107,20 @@ export class MessageQueue {
         }
         const data = job.data as OutboundJob;
         const adapter = this.getAdapter(data.instanceId);
-        await adapter.sendMessage(data.to, data.content);
+        try {
+          if (data.kind === "group-member-label") {
+            await adapter.updateGroupMemberLabel(data.groupId, data.memberLabel);
+          } else if (data.kind === "album") {
+            await adapter.sendMediaAlbum(data.to, data.images);
+          } else {
+            await adapter.sendMessage(data.to, data.content);
+          }
+        } catch (err) {
+          if (err instanceof QuotedMessageResolutionError) {
+            throw new UnrecoverableError(err.message);
+          }
+          throw err;
+        }
       },
       {
         connection: this.redisOpts,
@@ -122,9 +151,48 @@ export class MessageQueue {
     content: MessageContent,
     channel: "baileys" | "cloud" = "baileys",
   ): Promise<EnqueueResult> {
+    if ("quotedMessageId" in content && content.quotedMessageId && this.getAdapter) {
+      this.getAdapter(instanceId).validateQuotedMessage?.(to, content.quotedMessageId);
+    }
+
     const queue = this.getOrCreateQueue(instanceId, channel);
     const jobData: OutboundJob = { instanceId, to, content };
     const job = await queue.add("send", jobData);
+    return { status: "queued", jobId: job.id ?? "" };
+  }
+
+  /** Enqueue a bounded Baileys album through the same per-instance rate limiter as messages. */
+  async enqueueMediaAlbum(
+    instanceId: string,
+    to: string,
+    images: Array<{ image: string; caption?: string }>,
+  ): Promise<EnqueueResult> {
+    if (images.length < 2 || images.length > 10) {
+      throw new Error("A WhatsApp media album must contain between 2 and 10 images");
+    }
+    const queue = this.getOrCreateQueue(instanceId, "baileys");
+    const jobData: OutboundJob = { kind: "album", instanceId, to, images };
+    // A partial album cannot be safely retried without duplicating already-sent images.
+    const job = await queue.add("album", jobData, { attempts: 1 });
+    return { status: "queued", jobId: job.id ?? "" };
+  }
+
+  /** Queue a group member label update on the instance's rate-limited worker. */
+  async enqueueGroupMemberLabel(
+    instanceId: string,
+    groupId: string,
+    memberLabel: string | null,
+    channel: ChannelType = "baileys",
+  ): Promise<EnqueueResult> {
+    if (channel !== "baileys") {
+      throw new Error("Group member labels are not supported on Cloud API");
+    }
+    if (!this.getAdapter) throw new Error("Adapter resolver not set");
+    this.getAdapter(instanceId).assertGroupMemberLabelWritesEnabled();
+
+    const queue = this.getOrCreateQueue(instanceId, channel);
+    const jobData: OutboundJob = { kind: "group-member-label", instanceId, groupId, memberLabel };
+    const job = await queue.add("group-member-label", jobData);
     return { status: "queued", jobId: job.id ?? "" };
   }
 

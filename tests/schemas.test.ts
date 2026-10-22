@@ -10,6 +10,8 @@ import {
   SendLocationSchema,
   SendContactSchema,
   SendPollSchema,
+  GetPollResultsSchema,
+  SendLiveLocationSchema,
   SendReactionSchema,
   SendLinkPreviewSchema,
   ForwardMessageSchema,
@@ -62,6 +64,9 @@ import {
   UpdateSettingsSchema,
   LeaveGroupSchema,
   GetInviteCodeSchema,
+  GetGroupInviteInfoSchema,
+  ListGroupJoinRequestsSchema,
+  SendGroupInviteMessageSchema,
   RevokeInviteSchema,
   JoinGroupSchema,
   ToggleEphemeralSchema,
@@ -72,6 +77,7 @@ import {
 import {
   UpdateProfilePictureSchema,
   RemoveProfilePictureSchema,
+  GetProfilePictureSchema,
   UpdateProfileNameSchema,
   UpdateProfileStatusSchema,
   UpdatePrivacySchema,
@@ -335,6 +341,42 @@ describe("SendContactSchema", () => {
     });
     expect(result.success).toBe(false);
   });
+
+  it("accepts multiple vCards and rejects mixing both input forms", () => {
+    expect(
+      SendContactSchema.safeParse({
+        instanceId: "inst_abc123",
+        to: "5511999999999",
+        contacts: [
+          { name: "A Person", phone: "5511888888888" },
+          { name: "B Person", phone: "5511777777777" },
+        ],
+      }).success,
+    ).toBe(true);
+    expect(
+      SendContactSchema.safeParse({
+        instanceId: "inst_abc123",
+        to: "5511999999999",
+        contactName: "A Person",
+        contactPhone: "5511888888888",
+        contacts: [{ name: "B Person", phone: "5511777777777" }],
+      }).success,
+    ).toBe(false);
+  });
+});
+
+describe("SendLiveLocationSchema", () => {
+  it("accepts bounded coordinates and optional accuracy", () => {
+    expect(
+      SendLiveLocationSchema.safeParse({
+        instanceId: "inst_abc123",
+        to: "5511999999999",
+        latitude: -23.5,
+        longitude: -46.6,
+        accuracyInMeters: 20,
+      }).success,
+    ).toBe(true);
+  });
 });
 
 describe("SendPollSchema", () => {
@@ -379,6 +421,18 @@ describe("SendPollSchema", () => {
     if (result.success) {
       expect(result.data.multiSelect).toBe(false);
     }
+  });
+});
+
+describe("GetPollResultsSchema", () => {
+  it("requires the chat and poll message ID", () => {
+    expect(
+      GetPollResultsSchema.safeParse({
+        instanceId: "inst_abc123",
+        chatId: "120363000000000000@g.us",
+        messageId: "poll-123",
+      }).success,
+    ).toBe(true);
   });
 });
 
@@ -459,6 +513,38 @@ describe("DeleteMessageSchema", () => {
     });
     expect(result.success).toBe(true);
   });
+
+  it("accepts an optional status audience only for status@broadcast", () => {
+    expect(
+      DeleteMessageSchema.safeParse({
+        instanceId: "inst_abc123",
+        chatId: "status@broadcast",
+        messageId: "msg_123",
+        statusJidList: ["5511999999999", "5511888888888@s.whatsapp.net"],
+      }).success,
+    ).toBe(true);
+    expect(
+      DeleteMessageSchema.safeParse({
+        instanceId: "inst_abc123",
+        chatId: "5511999999999@s.whatsapp.net",
+        messageId: "msg_123",
+        statusJidList: ["5511888888888"],
+      }).success,
+    ).toBe(false);
+  });
+
+  it("rejects invalid status recipients and unknown fields", () => {
+    const base = {
+      instanceId: "inst_abc123",
+      chatId: "status@broadcast",
+      messageId: "msg_123",
+    };
+    expect(
+      DeleteMessageSchema.safeParse({ ...base, statusJidList: ["120363000000000000-5@g.us"] })
+        .success,
+    ).toBe(false);
+    expect(DeleteMessageSchema.safeParse({ ...base, unexpected: true }).success).toBe(false);
+  });
 });
 
 describe("PinMessageSchema", () => {
@@ -502,6 +588,17 @@ describe("SendViewOnceSchema", () => {
     });
     expect(result.success).toBe(false);
   });
+
+  it("accepts audio media", () => {
+    expect(
+      SendViewOnceSchema.safeParse({
+        instanceId: "inst_abc123",
+        to: "5511999999999",
+        media: "YXVkaW8=",
+        type: "audio",
+      }).success,
+    ).toBe(true);
+  });
 });
 
 describe("SendPresenceSchema", () => {
@@ -541,6 +638,15 @@ describe("MarkReadSchema", () => {
       instanceId: "inst_abc123",
       chatId: "5511999999999@s.whatsapp.net",
       messageIds: [],
+    });
+    expect(result.success).toBe(false);
+  });
+
+  it("rejects more than 100 message IDs", () => {
+    const result = MarkReadSchema.safeParse({
+      instanceId: "inst_abc123",
+      chatId: "5511999999999@s.whatsapp.net",
+      messageIds: Array.from({ length: 101 }, (_, index) => `msg_${index}`),
     });
     expect(result.success).toBe(false);
   });
@@ -882,6 +988,30 @@ describe("GetInviteCodeSchema", () => {
   });
 });
 
+describe("group invite helper schemas", () => {
+  it("accepts invite-code links and group request lookups", () => {
+    expect(
+      GetGroupInviteInfoSchema.safeParse({
+        instanceId: "inst_abc123",
+        inviteCode: "https://chat.whatsapp.com/AbCdEfGh",
+      }).success,
+    ).toBe(true);
+    expect(
+      ListGroupJoinRequestsSchema.safeParse({
+        instanceId: "inst_abc123",
+        groupId: "120363000000000000@g.us",
+      }).success,
+    ).toBe(true);
+    expect(
+      SendGroupInviteMessageSchema.safeParse({
+        instanceId: "inst_abc123",
+        to: "5511999999999",
+        groupId: "120363000000000000@g.us",
+      }).success,
+    ).toBe(true);
+  });
+});
+
 describe("RevokeInviteSchema", () => {
   it("accepts valid input", () => {
     const result = RevokeInviteSchema.safeParse({
@@ -983,6 +1113,17 @@ describe("RemoveProfilePictureSchema", () => {
       instanceId: "inst_abc123",
     });
     expect(result.success).toBe(true);
+  });
+});
+
+describe("GetProfilePictureSchema", () => {
+  it("accepts a contact or group JID", () => {
+    expect(
+      GetProfilePictureSchema.safeParse({
+        instanceId: "inst_abc123",
+        jid: "120363000000000000@g.us",
+      }).success,
+    ).toBe(true);
   });
 });
 

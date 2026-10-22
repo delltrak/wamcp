@@ -62,7 +62,15 @@ export type McpNotificationMethod =
   | "whatsapp/group.participants_changed"
   | "whatsapp/contact.updated"
   | "whatsapp/connection.changed"
-  | "whatsapp/call.received";
+  | "whatsapp/instance.connected"
+  | "whatsapp/instance.disconnected"
+  | "whatsapp/instance.pairing_code_generated"
+  | "whatsapp/instance.qr_generated"
+  | "whatsapp/instance.pairing_expired"
+  | "whatsapp/instance.qr_expired"
+  | "whatsapp/call.received"
+  | "whatsapp/label.updated"
+  | "whatsapp/event.response";
 
 // MCP resource URI patterns
 export type McpResourceUri =

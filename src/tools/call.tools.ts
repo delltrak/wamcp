@@ -27,7 +27,7 @@ export function registerCallTools(
       const start = Date.now();
       try {
         const adapter = instanceManager.getAdapter(params.instanceId);
-        await adapter.rejectCall(params.callId);
+        await adapter.rejectCall(params.callId, params.callFrom);
         log.info({ duration: Date.now() - start }, "Call rejected");
         return toolSuccess({ success: true, callId: params.callId });
       } catch (err) {

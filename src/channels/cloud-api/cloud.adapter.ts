@@ -5,17 +5,23 @@
 // ============================================================
 
 import type { ChannelAdapter, ChannelEventHandler } from "../channel.interface.js";
+import { and, eq, sql } from "drizzle-orm";
+import { db, sqlite } from "../../db/client.js";
+import { messages as messagesTable } from "../../db/schema.js";
+import { getWebPInfo, mediaResponseToBuffer } from "../../services/media.js";
+import { MEDIA_LIMITS } from "../../constants.js";
 import type {
   ConnectionStatus,
   MessageContent,
   MessageResponse,
   GroupResponse,
+  CreateGroupFromGroupResponse,
+  GroupSummary,
   NumberExistsResponse,
   BusinessProfile,
   ProfileInfo,
   PrivacySettings,
-  PrivacySetting,
-  PrivacyValue,
+  PrivacyUpdate,
   Contact,
   Chat,
   Message,
@@ -24,15 +30,42 @@ import type {
   GroupModification,
   ParticipantAction,
   StatusContent,
+  StatusSendResult,
   CloudCredentials,
   ChannelEvent,
   ChannelEventPayload,
+  NormalizedMessageEvent,
+  BusinessLabel,
+  EventResponse,
+  PollResults,
+  GroupJoinRequest,
+  MessageReceipt,
+  MessageReaction,
+  LinkPreviewOptions,
+  MessageSearchOptions,
+  SendEventOptions,
+  CatalogProductCreateInput,
+  CatalogProductUpdateInput,
+  InstanceRuntimeStatus,
 } from "../../types/channel.types.js";
+import type {
+  CatalogCollection,
+  GetCatalogOptions,
+  NewsletterMetadata,
+  OrderDetails,
+  Product,
+} from "@whiskeysockets/baileys";
+import { searchStoredMessages } from "../../services/message-search.js";
 import { createChildLogger } from "../../utils/logger.js";
+import { getAutoReadMode, scheduleIncomingMessageRead } from "../../services/auto-read.js";
 
 const logger = createChildLogger({ service: "cloud-api-adapter" });
 
 const GRAPH_API_BASE = "https://graph.facebook.com/v21.0";
+
+function sizeLimitLabel(maxBytes: number): string {
+  return maxBytes < 1024 * 1024 ? `${maxBytes} bytes` : `${Math.round(maxBytes / 1024 / 1024)} MB`;
+}
 
 // ---- Cloud API response/error types ----
 
@@ -60,7 +93,7 @@ interface CloudApiMediaUrlResponse {
   url: string;
   mime_type: string;
   sha256: string;
-  file_size: number;
+  file_size?: number;
   id: string;
   messaging_product: string;
 }
@@ -90,6 +123,8 @@ export class CloudApiAdapter implements ChannelAdapter {
   private phoneNumberId: string | null = null;
   private businessId: string | null = null;
   private status: ConnectionStatus = "disconnected";
+  private displayPhoneNumber: string | null = null;
+  private lastDisconnectAt: number | null = null;
 
   private readonly listeners = new Map<ChannelEvent, Set<ChannelEventHandler<ChannelEvent>>>();
 
@@ -185,13 +220,22 @@ export class CloudApiAdapter implements ChannelAdapter {
     try {
       // Verify credentials by fetching phone number info
       const url = `${GRAPH_API_BASE}/${this.phoneNumberId}`;
-      await this.request<CloudApiPhoneNumberResponse>(url);
+      const phoneInfo = await this.request<CloudApiPhoneNumberResponse>(url);
       this.status = "connected";
+      this.displayPhoneNumber = phoneInfo.display_phone_number;
       logger.info({ instanceId: this.instanceId }, "Cloud API connected");
 
       this.emit("connection.changed", {
         instanceId: this.instanceId,
         status: "open",
+      });
+      this.emit("instance.connected", {
+        instanceId: this.instanceId,
+        phone: this.displayPhoneNumber,
+        lid: null,
+        pushName: null,
+        connectedAt: Date.now(),
+        wasPairing: false,
       });
     } catch (err) {
       this.status = "disconnected";
@@ -202,7 +246,17 @@ export class CloudApiAdapter implements ChannelAdapter {
 
   async disconnect(): Promise<void> {
     this.status = "disconnected";
+    this.lastDisconnectAt = Date.now();
     logger.info({ instanceId: this.instanceId }, "Cloud API disconnected");
+
+    this.emit("instance.disconnected", {
+      instanceId: this.instanceId,
+      reason: "Disconnected",
+      statusCode: null,
+      loggedOut: false,
+      willReconnect: false,
+      disconnectedAt: this.lastDisconnectAt,
+    });
 
     this.emit("connection.changed", {
       instanceId: this.instanceId,
@@ -212,6 +266,18 @@ export class CloudApiAdapter implements ChannelAdapter {
 
   getStatus(): ConnectionStatus {
     return this.status;
+  }
+
+  getLifecycleStatus(): InstanceRuntimeStatus {
+    return {
+      phone: this.status === "connected" ? this.displayPhoneNumber : null,
+      lid: null,
+      pushName: null,
+      disconnectReason: this.lastDisconnectAt === null ? null : "Disconnected",
+      disconnectStatusCode: null,
+      pendingChallenge: null,
+      presenceMode: null,
+    };
   }
 
   // ---- Authentication ----
@@ -235,6 +301,13 @@ export class CloudApiAdapter implements ChannelAdapter {
 
   async sendMessage(to: string, content: MessageContent): Promise<MessageResponse> {
     const phone = this.normalizePhone(to);
+
+    if (
+      "mentions" in content &&
+      ((content.mentions?.length ?? 0) > 0 || ("mentionAll" in content && content.mentionAll))
+    ) {
+      throw new Error("Participant mentions are not supported by this Cloud API adapter");
+    }
 
     switch (content.type) {
       case "text": {
@@ -268,6 +341,16 @@ export class CloudApiAdapter implements ChannelAdapter {
       }
 
       case "video": {
+        if (content.ptv) {
+          throw new Error(
+            "Video notes (PTV) are not supported on Cloud API; use a Baileys instance",
+          );
+        }
+        if (content.gifPlayback) {
+          throw new Error(
+            "GIF playback sending is not supported on Cloud API; use a Baileys instance",
+          );
+        }
         const mediaFields: Record<string, unknown> = {};
         if (content.caption) mediaFields.caption = content.caption;
         const media = this.resolveMediaPayload(content.video, "video", mediaFields);
@@ -283,13 +366,51 @@ export class CloudApiAdapter implements ChannelAdapter {
         return this.toMessageResponse(res);
       }
 
+      case "sticker": {
+        const sticker = Buffer.from(content.sticker, "base64");
+        if (sticker.length > MEDIA_LIMITS.stickerAnimated) {
+          throw new Error(
+            `Sticker exceeds the ${MEDIA_LIMITS.stickerAnimated} byte WhatsApp sticker limit`,
+          );
+        }
+        const stickerInfo = getWebPInfo(sticker);
+        if (!stickerInfo) {
+          throw new Error("Cloud API sticker messages require a valid WebP sticker");
+        }
+        const stickerLimit = stickerInfo.animated
+          ? MEDIA_LIMITS.stickerAnimated
+          : MEDIA_LIMITS.stickerStatic;
+        if (sticker.length > stickerLimit) {
+          const type = stickerInfo.animated ? "animated" : "static";
+          throw new Error(
+            `${type[0]!.toUpperCase()}${type.slice(1)} sticker exceeds the ${sizeLimitLabel(stickerLimit)} WhatsApp sticker limit`,
+          );
+        }
+        const mediaId = await this.uploadMedia(sticker, "image/webp", "sticker.webp");
+        const payload: Record<string, unknown> = {
+          recipient_type: "individual",
+          to: phone,
+          type: "sticker",
+          sticker: { id: mediaId },
+        };
+        if (content.quotedMessageId) {
+          payload.context = { message_id: content.quotedMessageId };
+        }
+        const res = await this.sendRaw(payload);
+        return this.toMessageResponse(res);
+      }
+
       case "audio": {
         const media = this.resolveMediaPayload(content.audio, "audio");
-        const res = await this.sendRaw({
+        const payload: Record<string, unknown> = {
           recipient_type: "individual",
           to: phone,
           ...media,
-        });
+        };
+        if (content.quotedMessageId) {
+          payload.context = { message_id: content.quotedMessageId };
+        }
+        const res = await this.sendRaw(payload);
         return this.toMessageResponse(res);
       }
 
@@ -308,6 +429,11 @@ export class CloudApiAdapter implements ChannelAdapter {
       }
 
       case "location": {
+        if (content.isLive) {
+          throw new Error(
+            "Live location messages are not supported on Cloud API; use a Baileys instance",
+          );
+        }
         const res = await this.sendRaw({
           recipient_type: "individual",
           to: phone,
@@ -323,16 +449,18 @@ export class CloudApiAdapter implements ChannelAdapter {
       }
 
       case "contact": {
+        const contacts =
+          "contacts" in content
+            ? content.contacts
+            : [{ name: content.contactName, phone: content.contactPhone }];
         const res = await this.sendRaw({
           recipient_type: "individual",
           to: phone,
           type: "contacts",
-          contacts: [
-            {
-              name: { formatted_name: content.contactName },
-              phones: [{ phone: content.contactPhone, type: "CELL" }],
-            },
-          ],
+          contacts: contacts.map(({ name, phone: contactPhone }) => ({
+            name: { formatted_name: name },
+            phones: [{ phone: contactPhone, type: "CELL" }],
+          })),
         });
         return this.toMessageResponse(res);
       }
@@ -346,6 +474,51 @@ export class CloudApiAdapter implements ChannelAdapter {
         );
       }
 
+      case "buttons": {
+        const res = await this.sendRaw({
+          recipient_type: "individual",
+          to: phone,
+          type: "interactive",
+          interactive: {
+            type: "button",
+            body: { text: content.text },
+            ...(content.footer ? { footer: { text: content.footer } } : {}),
+            action: {
+              buttons: content.buttons.map((button) => ({
+                type: "reply",
+                reply: { id: button.id, title: button.text },
+              })),
+            },
+          },
+        });
+        return this.toMessageResponse(res);
+      }
+
+      case "list": {
+        const res = await this.sendRaw({
+          recipient_type: "individual",
+          to: phone,
+          type: "interactive",
+          interactive: {
+            type: "list",
+            body: { text: content.text },
+            ...(content.footer ? { footer: { text: content.footer } } : {}),
+            action: {
+              button: content.buttonText,
+              sections: content.sections.map((section) => ({
+                title: section.title,
+                rows: section.rows.map((row) => ({
+                  id: row.id,
+                  title: row.title,
+                  ...(row.description ? { description: row.description } : {}),
+                })),
+              })),
+            },
+          },
+        });
+        return this.toMessageResponse(res);
+      }
+
       case "reaction": {
         throw new Error("Use sendReaction() for reactions");
       }
@@ -355,16 +528,26 @@ export class CloudApiAdapter implements ChannelAdapter {
     }
   }
 
-  async editMessage(_chatId: string, msgId: string, newText: string): Promise<void> {
-    const phone = this.normalizePhone(_chatId);
-    await this.sendRaw({
-      recipient_type: "individual",
-      to: phone,
-      type: "text",
-      text: { body: newText },
-      biz_opaque_callback_data: `edit_${msgId}`,
-      context: { message_id: msgId },
-    });
+  async sendEvent(_options: SendEventOptions): Promise<MessageResponse> {
+    throw new Error(
+      "WhatsApp event messages are not supported on Cloud API; use a Baileys instance",
+    );
+  }
+
+  async getEventResponses(_chatId: string, _eventMessageId: string): Promise<EventResponse[]> {
+    throw new Error("WhatsApp event responses are only available on Baileys instances");
+  }
+
+  async getPollResults(_chatId: string, _pollMessageId: string): Promise<PollResults> {
+    throw new Error("Poll results are only available on Baileys instances");
+  }
+
+  async starMessage(_chatId: string, _messageId: string, _star: boolean): Promise<void> {
+    throw new Error("Starring messages is not supported on Cloud API; use a Baileys instance");
+  }
+
+  async editMessage(_chatId: string, _msgId: string, _newText: string): Promise<void> {
+    throw new Error("Editing sent messages is not supported on Cloud API; use a Baileys instance");
   }
 
   async deleteMessage(_chatId: string, _msgId: string): Promise<void> {
@@ -396,26 +579,32 @@ export class CloudApiAdapter implements ChannelAdapter {
     throw new Error("Pinning messages is not supported on Cloud API");
   }
 
-  async sendViewOnce(to: string, media: string, type: "image" | "video"): Promise<MessageResponse> {
-    // Cloud API doesn't have a direct viewOnce parameter the same way.
-    // We send as a normal media message (viewOnce is controlled client-side on Cloud API).
-    const phone = this.normalizePhone(to);
-    const mediaPayload = this.resolveMediaPayload(media, type);
-    const res = await this.sendRaw({
-      recipient_type: "individual",
-      to: phone,
-      ...mediaPayload,
-    });
-    return this.toMessageResponse(res);
+  async sendViewOnce(
+    _to: string,
+    _media: string,
+    _type: "image" | "video" | "audio",
+  ): Promise<MessageResponse> {
+    throw new Error("View-once media is not supported on Cloud API; use a Baileys instance");
   }
 
-  async sendLinkPreview(to: string, text: string, _url: string): Promise<MessageResponse> {
+  async sendLinkPreview(
+    to: string,
+    text: string,
+    url: string,
+    options?: LinkPreviewOptions,
+  ): Promise<MessageResponse> {
+    if (options?.title || options?.description || options?.thumbnail) {
+      throw new Error(
+        "Custom link preview metadata and thumbnails are not supported on Cloud API; the URL preview is generated by Meta",
+      );
+    }
     const phone = this.normalizePhone(to);
+    const body = text.includes(url) ? text : `${text}\n${url}`;
     const res = await this.sendRaw({
       recipient_type: "individual",
       to: phone,
       type: "text",
-      text: { preview_url: true, body: text },
+      text: { preview_url: true, body },
     });
     return this.toMessageResponse(res);
   }
@@ -424,13 +613,44 @@ export class CloudApiAdapter implements ChannelAdapter {
 
   async sendPresence(
     _chatId: string,
-    _status: "composing" | "recording" | "paused" | "available" | "unavailable",
+    _status: "typing" | "composing" | "recording" | "paused" | "available" | "unavailable",
   ): Promise<void> {
     // Cloud API does not support sending presence/typing indicators programmatically
     throw new Error("Sending presence is not supported on Cloud API");
   }
 
-  async markRead(chatId: string, messageIds: string[]): Promise<void> {
+  async subscribePresence(_chatId: string): Promise<void> {
+    throw new Error("Subscribing to contact presence is not supported on Cloud API");
+  }
+
+  async getMessageReceipts(_chatId: string, _messageId: string): Promise<MessageReceipt[]> {
+    throw new Error("Participant-level message receipts are not available on Cloud API");
+  }
+
+  async getStatusViewers(_messageId: string): Promise<string[]> {
+    throw new Error("Status story viewers are not available on Cloud API");
+  }
+
+  async getMessageReactions(_chatId: string, _messageId: string): Promise<MessageReaction[]> {
+    throw new Error("Message reaction history is not available on Cloud API");
+  }
+
+  async replyPrivatelyToGroupMessage(
+    _groupId: string,
+    _messageId: string,
+    _text: string,
+  ): Promise<MessageResponse> {
+    throw new Error("Private replies to group messages are not supported on Cloud API");
+  }
+
+  async sendMediaAlbum(
+    _to: string,
+    _images: Array<{ image: string; caption?: string }>,
+  ): Promise<MessageResponse> {
+    throw new Error("Grouped media albums are not supported on Cloud API; use a Baileys instance");
+  }
+
+  async markRead(chatId: string, messageIds: string[], _participant?: string): Promise<void> {
     // Cloud API marks one message at a time
     const _phone = this.normalizePhone(chatId);
     const { phoneNumberId } = this.getCredentials();
@@ -454,10 +674,79 @@ export class CloudApiAdapter implements ChannelAdapter {
     throw new Error("Chat modifications (archive, pin, mute) are not supported on Cloud API");
   }
 
+  async markChatUnread(_chatId: string): Promise<void> {
+    throw new Error("Marking a chat unread is not supported on Cloud API; use a Baileys instance");
+  }
+
+  async listLabels(_includeDeleted = false): Promise<BusinessLabel[]> {
+    throw new Error("WhatsApp Business labels are not supported on Cloud API by this server");
+  }
+
+  async createLabel(_name: string, _color: number): Promise<BusinessLabel> {
+    throw new Error("WhatsApp Business labels are not supported on Cloud API by this server");
+  }
+
+  async editLabel(_id: string, _update: { name?: string; color?: number }): Promise<void> {
+    throw new Error("WhatsApp Business labels are not supported on Cloud API by this server");
+  }
+
+  async deleteLabel(_id: string): Promise<void> {
+    throw new Error("WhatsApp Business labels are not supported on Cloud API by this server");
+  }
+
+  async setChatLabel(_chatId: string, _labelId: string, _add: boolean): Promise<void> {
+    throw new Error("WhatsApp Business labels are not supported on Cloud API by this server");
+  }
+
+  async setMessageLabel(
+    _chatId: string,
+    _messageId: string,
+    _labelId: string,
+    _add: boolean,
+  ): Promise<void> {
+    throw new Error("WhatsApp Business labels are not supported on Cloud API by this server");
+  }
+
+  async setDisappearingMessages(
+    _chatId: string,
+    _duration: 0 | 86400 | 604800 | 7776000,
+  ): Promise<void> {
+    throw new Error("Disappearing-message settings are not supported on Cloud API");
+  }
+
+  async createQuickReply(_input: { shortcut: string; message: string }): Promise<void> {
+    throw new Error("Business quick replies are only available on Baileys instances");
+  }
+
+  async editQuickReply(_input: {
+    shortcut: string;
+    message: string;
+    timestamp: string;
+  }): Promise<void> {
+    throw new Error("Business quick replies are only available on Baileys instances");
+  }
+
+  async deleteQuickReply(_timestamp: string): Promise<void> {
+    throw new Error("Business quick replies are only available on Baileys instances");
+  }
+
   // ---- Groups ----
+
+  async listGroups(): Promise<GroupSummary[]> {
+    throw new Error("Listing groups is not supported on Cloud API");
+  }
 
   async createGroup(_name: string, _participants: string[]): Promise<GroupResponse> {
     throw new Error("Group management is not supported on Cloud API");
+  }
+
+  async createGroupFromGroup(
+    _sourceGroupId: string,
+    _name: string,
+    _includeParticipants?: string[],
+    _excludeParticipants?: string[],
+  ): Promise<CreateGroupFromGroupResponse> {
+    throw new Error("Creating a group from another group is not supported on Cloud API");
   }
 
   async modifyGroup(_groupId: string, _modification: GroupModification): Promise<void> {
@@ -473,15 +762,49 @@ export class CloudApiAdapter implements ChannelAdapter {
   }
 
   async getGroupMetadata(_groupId: string): Promise<GroupMetadata> {
-    throw new Error("Group management is not supported on Cloud API");
+    throw new Error("Group metadata is not supported on Cloud API");
+  }
+
+  assertGroupMemberLabelWritesEnabled(): void {
+    throw new Error("Group member labels are not supported on Cloud API");
+  }
+
+  async updateGroupMemberLabel(_groupId: string, _memberLabel: string | null): Promise<void> {
+    throw new Error("Group member labels are not supported on Cloud API");
+  }
+
+  async updateGroupPicture(_groupId: string, _image: string): Promise<void> {
+    throw new Error("Updating a group picture is not supported on Cloud API");
+  }
+
+  async removeGroupPicture(_groupId: string): Promise<void> {
+    throw new Error("Removing a group picture is not supported on Cloud API");
   }
 
   async getGroupInviteCode(_groupId: string): Promise<string> {
     throw new Error("Group management is not supported on Cloud API");
   }
 
+  async getGroupInviteInfo(_inviteCode: string): Promise<GroupMetadata> {
+    throw new Error("Group invite lookup is not supported on Cloud API; use a Baileys instance");
+  }
+
   async joinGroup(_inviteCode: string): Promise<string> {
     throw new Error("Group management is not supported on Cloud API");
+  }
+
+  async listGroupJoinRequests(_groupId: string): Promise<GroupJoinRequest[]> {
+    throw new Error(
+      "Group join-request lists are not supported on Cloud API; use a Baileys instance",
+    );
+  }
+
+  async sendGroupInviteMessage(
+    _to: string,
+    _groupId: string,
+    _text?: string,
+  ): Promise<MessageResponse> {
+    throw new Error("Group invite messages are not supported on Cloud API; use a Baileys instance");
   }
 
   async handleJoinRequest(
@@ -490,6 +813,43 @@ export class CloudApiAdapter implements ChannelAdapter {
     _action: "approve" | "reject",
   ): Promise<void> {
     throw new Error("Group management is not supported on Cloud API");
+  }
+
+  async setGroupJoinApprovalMode(_groupId: string, _mode: "on" | "off"): Promise<void> {
+    throw new Error("Group join approval mode is only available on Baileys instances");
+  }
+
+  async setGroupMemberAddMode(
+    _groupId: string,
+    _mode: "admin_add" | "all_member_add",
+  ): Promise<void> {
+    throw new Error("Group member-add mode is only available on Baileys instances");
+  }
+
+  // ---- Communities ----
+
+  async createCommunity(_subject: string, _description?: string): Promise<GroupMetadata | null> {
+    throw new Error("Community management is only available on Baileys instances");
+  }
+
+  async listCommunities(): Promise<Record<string, GroupMetadata>> {
+    throw new Error("Community management is only available on Baileys instances");
+  }
+
+  async getCommunityMetadata(_communityId: string): Promise<GroupMetadata> {
+    throw new Error("Community management is only available on Baileys instances");
+  }
+
+  async linkGroupToCommunity(_groupId: string, _communityId: string): Promise<void> {
+    throw new Error("Community management is only available on Baileys instances");
+  }
+
+  async unlinkGroupFromCommunity(_groupId: string, _communityId: string): Promise<void> {
+    throw new Error("Community management is only available on Baileys instances");
+  }
+
+  async leaveCommunity(_communityId: string): Promise<void> {
+    throw new Error("Community management is only available on Baileys instances");
   }
 
   // ---- Contacts ----
@@ -520,6 +880,10 @@ export class CloudApiAdapter implements ChannelAdapter {
     throw new Error("Blocklist is not available on Cloud API");
   }
 
+  async getContactAbout(_jid: string): Promise<string | null> {
+    throw new Error("Contact About lookup is only available on Baileys instances");
+  }
+
   async getBusinessProfile(_jid: string): Promise<BusinessProfile | null> {
     const { phoneNumberId } = this.getCredentials();
     const url = `${GRAPH_API_BASE}/${phoneNumberId}/whatsapp_business_profile?fields=about,address,description,email,vertical,websites,profile_picture_url`;
@@ -540,6 +904,10 @@ export class CloudApiAdapter implements ChannelAdapter {
     } catch {
       return null;
     }
+  }
+
+  async resyncContacts(): Promise<never> {
+    throw new Error("Contact resync is not supported on Cloud API");
   }
 
   // ---- Profile ----
@@ -581,12 +949,12 @@ export class CloudApiAdapter implements ChannelAdapter {
     });
   }
 
-  async updatePrivacy(_setting: PrivacySetting, _value: PrivacyValue): Promise<void> {
-    throw new Error("Privacy settings are not configurable via Cloud API");
+  async updatePrivacy(_update: PrivacyUpdate): Promise<void> {
+    throw new Error("Privacy settings are not supported on the Cloud API");
   }
 
-  async getPrivacySettings(): Promise<PrivacySettings> {
-    throw new Error("Privacy settings are not available via Cloud API");
+  async getPrivacySettings(_forceRefresh = true): Promise<PrivacySettings> {
+    throw new Error("Privacy settings are not supported on the Cloud API");
   }
 
   async getProfilePicture(_jid: string): Promise<string | null> {
@@ -603,7 +971,7 @@ export class CloudApiAdapter implements ChannelAdapter {
 
   // ---- Status / Stories ----
 
-  async sendStatus(_content: StatusContent): Promise<void> {
+  async sendStatus(_content: StatusContent): Promise<StatusSendResult> {
     throw new Error("Status/Stories are not supported on Cloud API");
   }
 
@@ -621,10 +989,81 @@ export class CloudApiAdapter implements ChannelAdapter {
     throw new Error("Newsletters are only available for Baileys instances");
   }
 
+  async createNewsletter(_name: string, _description?: string): Promise<NewsletterMetadata> {
+    throw new Error("Channel management is only available on Baileys instances");
+  }
+
+  async getNewsletterMetadata(
+    _type: "invite" | "jid",
+    _key: string,
+  ): Promise<NewsletterMetadata | null> {
+    throw new Error("Channel metadata is only available on Baileys instances");
+  }
+
+  async updateNewsletterName(_jid: string, _name: string): Promise<void> {
+    throw new Error("Channel updates are only available on Baileys instances");
+  }
+
+  async updateNewsletterDescription(_jid: string, _description: string): Promise<void> {
+    throw new Error("Channel updates are only available on Baileys instances");
+  }
+
+  async updateNewsletterPicture(_jid: string, _image: string): Promise<void> {
+    throw new Error("Channel picture updates are only available on Baileys instances");
+  }
+
+  async reactToNewsletterMessage(
+    _jid: string,
+    _serverId: string,
+    _reaction?: string,
+  ): Promise<void> {
+    throw new Error("Channel post reactions are only available on Baileys instances");
+  }
+
+  async fetchNewsletterMessages(
+    _jid: string,
+    _count: number,
+    _since: number,
+    _after: number,
+  ): Promise<never> {
+    throw new Error("Channel post history is only available on Baileys instances");
+  }
+
+  // ---- Business catalog ----
+
+  async getCatalog(
+    _options: GetCatalogOptions,
+  ): Promise<{ products: Product[]; nextPageCursor: string | undefined }> {
+    throw new Error("Business catalog tools are only available on Baileys instances");
+  }
+
+  async getCollections(
+    _jid?: string,
+    _limit?: number,
+  ): Promise<{ collections: CatalogCollection[] }> {
+    throw new Error("Business catalog tools are only available on Baileys instances");
+  }
+
+  async createProduct(_input: CatalogProductCreateInput): Promise<Product> {
+    throw new Error("Business catalog tools are only available on Baileys instances");
+  }
+
+  async updateProduct(_productId: string, _input: CatalogProductUpdateInput): Promise<Product> {
+    throw new Error("Business catalog tools are only available on Baileys instances");
+  }
+
+  async deleteProducts(_productIds: string[]): Promise<{ deleted: number }> {
+    throw new Error("Business catalog tools are only available on Baileys instances");
+  }
+
+  async getOrderDetails(_orderId: string, _tokenBase64: string): Promise<OrderDetails> {
+    throw new Error("Order details are only available on Baileys instances");
+  }
+
   // ---- Calls ----
 
   async rejectCall(_callId: string): Promise<void> {
-    throw new Error("Call management is not supported on Cloud API");
+    throw new Error("Call rejection is not supported on Cloud API");
   }
 
   // ---- Data access ----
@@ -643,6 +1082,26 @@ export class CloudApiAdapter implements ChannelAdapter {
     throw new Error(
       "Message history is not available on Cloud API. Use webhooks to receive messages.",
     );
+  }
+
+  async searchMessages(
+    options: MessageSearchOptions,
+  ): Promise<{ messages: Message[]; hasMore: boolean; nextOffset: number | null }> {
+    return searchStoredMessages(sqlite, this.instanceId, options);
+  }
+
+  async fetchMessageHistory(
+    _chatId: string,
+    _count: number,
+    _timeoutMs?: number,
+  ): Promise<{
+    requested: number;
+    limit: number;
+    capped: boolean;
+    stored: number;
+    timedOut: boolean;
+  }> {
+    throw new Error("On-demand message history is only available on Baileys instances");
   }
 
   async getProfileInfo(): Promise<ProfileInfo> {
@@ -695,29 +1154,108 @@ export class CloudApiAdapter implements ChannelAdapter {
     return (body as CloudApiMediaUploadResponse).id;
   }
 
-  async getMediaUrl(mediaId: string): Promise<{ url: string; mimeType: string }> {
+  async getMediaUrl(
+    mediaId: string,
+    signal?: AbortSignal,
+  ): Promise<{ url: string; mimeType: string; fileSize?: number }> {
     const url = `${GRAPH_API_BASE}/${mediaId}`;
-    const res = await this.request<CloudApiMediaUrlResponse>(url);
-    return { url: res.url, mimeType: res.mime_type };
+    const res = await this.request<CloudApiMediaUrlResponse>(url, signal ? { signal } : {});
+    return { url: res.url, mimeType: res.mime_type, fileSize: res.file_size };
   }
 
-  async downloadMedia(mediaId: string): Promise<{ data: Buffer; mimeType: string }> {
+  async downloadMedia(
+    mediaId: string,
+    maxBytes?: number,
+    timeoutMs?: number,
+  ): Promise<{ data: Buffer; mimeType: string }> {
     const { accessToken } = this.getCredentials();
+    const signal = timeoutMs ? AbortSignal.timeout(timeoutMs) : undefined;
 
     // Step 1: Get the media URL
-    const { url, mimeType } = await this.getMediaUrl(mediaId);
+    const { url, mimeType, fileSize } = await this.getMediaUrl(mediaId, signal);
+    if (maxBytes !== undefined && fileSize !== undefined && fileSize > maxBytes) {
+      throw new Error(`Media exceeds maximum download size of ${sizeLimitLabel(maxBytes)}`);
+    }
 
     // Step 2: Download the actual file (URL expires in 5 minutes)
-    const response = await fetch(url, {
-      headers: { Authorization: `Bearer ${accessToken}` },
-    });
+    const options: RequestInit = { headers: { Authorization: `Bearer ${accessToken}` } };
+    if (signal) options.signal = signal;
+    const response = await fetch(url, options);
 
     if (!response.ok) {
       throw new Error(`Media download failed: HTTP ${response.status}`);
     }
 
-    const arrayBuffer = await response.arrayBuffer();
-    return { data: Buffer.from(arrayBuffer), mimeType };
+    const data = await mediaResponseToBuffer(response, maxBytes);
+    return { data, mimeType };
+  }
+
+  async downloadMessageAudio(
+    messageId: string,
+    maxBytes?: number,
+    timeoutMs?: number,
+  ): Promise<{ data: Buffer; mimeType: string }> {
+    const row = db
+      .select({
+        type: messagesTable.type,
+        mediaUrl: messagesTable.mediaUrl,
+      })
+      .from(messagesTable)
+      .where(and(eq(messagesTable.instanceId, this.instanceId), eq(messagesTable.id, messageId)))
+      .get();
+
+    if (!row) throw new Error(`Message '${messageId}' not found`);
+    if (row.type !== "audio") throw new Error(`Message '${messageId}' is not audio`);
+    if (!row.mediaUrl) throw new Error(`Audio media for message '${messageId}' is unavailable`);
+
+    return this.downloadMedia(row.mediaUrl, maxBytes, timeoutMs);
+  }
+
+  async downloadMessageMedia(
+    messageId: string,
+    chatId?: string,
+    maxBytes?: number,
+    timeoutMs?: number,
+  ): Promise<{ data: Buffer; mimeType: string; fileName?: string }> {
+    const where = chatId
+      ? and(
+          eq(messagesTable.instanceId, this.instanceId),
+          eq(messagesTable.id, messageId),
+          eq(messagesTable.chatId, chatId),
+        )
+      : and(eq(messagesTable.instanceId, this.instanceId), eq(messagesTable.id, messageId));
+    const row = db
+      .select({
+        type: messagesTable.type,
+        mediaUrl: messagesTable.mediaUrl,
+        mimetype: messagesTable.mediaMimetype,
+        rawData: messagesTable.rawData,
+      })
+      .from(messagesTable)
+      .where(where)
+      .get();
+
+    if (!row) throw new Error(`Message '${messageId}' not found`);
+    if (!["image", "video", "audio", "document", "sticker"].includes(row.type)) {
+      throw new Error(`Message '${messageId}' does not contain downloadable media`);
+    }
+    if (!row.mediaUrl) throw new Error(`Media for message '${messageId}' is unavailable`);
+
+    const downloaded = await this.downloadMedia(row.mediaUrl, maxBytes, timeoutMs);
+    let metadata: { fileName?: unknown } = {};
+    if (row.rawData) {
+      try {
+        metadata = JSON.parse(row.rawData) as { fileName?: unknown };
+      } catch {
+        // Stored media IDs remain usable when optional metadata is malformed.
+      }
+    }
+    const fileName = typeof metadata.fileName === "string" ? metadata.fileName : undefined;
+    return {
+      ...downloaded,
+      mimeType: row.mimetype ?? downloaded.mimeType,
+      ...(fileName ? { fileName } : {}),
+    };
   }
 
   async deleteMedia(mediaId: string): Promise<void> {
@@ -745,6 +1283,20 @@ export class CloudApiAdapter implements ChannelAdapter {
 
   /** Emit an event to registered listeners. Public so the webhook handler can use it. */
   emit<E extends ChannelEvent>(event: E, payload: ChannelEventPayload[E]): void {
+    if (event === "message.received") {
+      const messageEvent = payload as ChannelEventPayload["message.received"];
+      this.persistMediaMessage(messageEvent);
+      if (getAutoReadMode() === "on_receive") {
+        scheduleIncomingMessageRead(
+          this,
+          messageEvent.chatId,
+          messageEvent.message.id,
+          messageEvent.message.isFromMe,
+          this.instanceId,
+        );
+      }
+    }
+
     const handlers = this.listeners.get(event);
     if (handlers) {
       for (const handler of handlers) {
@@ -754,6 +1306,50 @@ export class CloudApiAdapter implements ChannelAdapter {
           logger.error({ err, event }, "Error in event handler");
         }
       }
+    }
+  }
+
+  private persistMediaMessage(event: NormalizedMessageEvent): void {
+    if (!["image", "video", "audio", "document", "sticker"].includes(event.message.type)) return;
+
+    try {
+      const rawData = JSON.stringify({
+        fileName: event.message.fileName ?? event.message.mediaFileName ?? null,
+        size: event.message.size ?? event.message.mediaSize ?? null,
+      });
+      db.insert(messagesTable)
+        .values({
+          id: event.message.id,
+          instanceId: this.instanceId,
+          chatId: event.chatId,
+          senderId: event.message.sender,
+          type: event.message.type,
+          content: event.message.content,
+          mediaUrl: event.message.mediaUrl,
+          mediaMimetype: event.message.mimeType ?? event.message.mediaMimetype ?? null,
+          quotedId: event.message.quotedMessageId,
+          isFromMe: event.message.isFromMe ? 1 : 0,
+          isForwarded: event.message.isForwarded === true ? 1 : 0,
+          status: "received",
+          timestamp: event.message.timestamp,
+          rawData,
+        })
+        .onConflictDoUpdate({
+          target: [messagesTable.instanceId, messagesTable.id],
+          set: {
+            mediaUrl: event.message.mediaUrl,
+            mediaMimetype: event.message.mimeType ?? event.message.mediaMimetype ?? null,
+            content: event.message.content,
+            rawData,
+            isForwarded: sql`CASE WHEN excluded.is_forwarded = 1 THEN 1 ELSE ${messagesTable.isForwarded} END`,
+          },
+        })
+        .run();
+    } catch (err) {
+      logger.error(
+        { err, messageId: event.message.id },
+        "Failed to persist Cloud API media message",
+      );
     }
   }
 }

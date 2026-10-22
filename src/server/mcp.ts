@@ -19,6 +19,12 @@ import { registerProfileTools } from "../tools/profile.tools.js";
 import { registerStatusTools } from "../tools/status.tools.js";
 import { registerCallTools } from "../tools/call.tools.js";
 import { registerNewsletterTools } from "../tools/newsletter.tools.js";
+import { registerBusinessTools } from "../tools/business.tools.js";
+import { registerTranscriptionTools } from "../tools/transcription.tools.js";
+import { registerTtsTools } from "../tools/tts.tools.js";
+import { registerSearchTools } from "../tools/search.tools.js";
+import { registerLabelTools } from "../tools/label.tools.js";
+import { registerEventTools } from "../tools/event.tools.js";
 
 // Resources
 import { registerInstancesResource } from "../resources/instances.resource.js";
@@ -36,7 +42,7 @@ import { registerEventNotifications } from "../notifications/events.js";
 export function createMcpServer(
   instanceManager: InstanceManager,
   messageQueue: MessageQueue,
-): McpServer {
+): { server: McpServer; dispose: () => void; close: () => Promise<void> } {
   const server = new McpServer(
     {
       name: SERVER_NAME,
@@ -59,6 +65,12 @@ export function createMcpServer(
   registerStatusTools(server, instanceManager, messageQueue);
   registerCallTools(server, instanceManager, messageQueue);
   registerNewsletterTools(server, instanceManager, messageQueue);
+  registerBusinessTools(server, instanceManager);
+  registerTranscriptionTools(server, instanceManager);
+  registerTtsTools(server, instanceManager, messageQueue);
+  registerSearchTools(server, instanceManager);
+  registerLabelTools(server, instanceManager);
+  registerEventTools(server, instanceManager);
 
   // Register resources
   registerInstancesResource(server, instanceManager, messageQueue);
@@ -71,7 +83,22 @@ export function createMcpServer(
   registerBlocklistResource(server, instanceManager);
 
   // Register event notifications
-  registerEventNotifications(server, instanceManager);
+  const removeEventNotifications = registerEventNotifications(server, instanceManager);
+  let disposed = false;
+  const dispose = () => {
+    if (disposed) return;
+    disposed = true;
+    removeEventNotifications();
+  };
 
-  return server;
+  server.server.onclose = dispose;
+
+  return {
+    server,
+    dispose,
+    async close() {
+      dispose();
+      await server.close();
+    },
+  };
 }

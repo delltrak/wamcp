@@ -25,6 +25,8 @@ interface WebhookContact {
 interface WebhookMessageContext {
   from?: string;
   id?: string;
+  forwarded?: boolean;
+  frequently_forwarded?: boolean;
 }
 
 interface WebhookMessage {
@@ -33,17 +35,18 @@ interface WebhookMessage {
   timestamp: string;
   type: string;
   text?: { body: string };
-  image?: { id: string; mime_type?: string; sha256?: string; caption?: string };
-  video?: { id: string; mime_type?: string; sha256?: string; caption?: string };
-  audio?: { id: string; mime_type?: string; sha256?: string };
+  image?: { id: string; mime_type?: string; sha256?: string; caption?: string; file_size?: number };
+  video?: { id: string; mime_type?: string; sha256?: string; caption?: string; file_size?: number };
+  audio?: { id: string; mime_type?: string; sha256?: string; file_size?: number };
   document?: {
     id: string;
     mime_type?: string;
     sha256?: string;
     caption?: string;
     filename?: string;
+    file_size?: number;
   };
-  sticker?: { id: string; mime_type?: string; sha256?: string };
+  sticker?: { id: string; mime_type?: string; sha256?: string; file_size?: number };
   location?: { latitude: number; longitude: number; name?: string; address?: string };
   contacts?: Array<{ name: { formatted_name?: string }; phones?: Array<{ phone?: string }> }>;
   reaction?: { message_id: string; emoji: string };
@@ -184,6 +187,49 @@ function extractMediaId(msg: WebhookMessage): string | null {
   );
 }
 
+function extractMediaInfo(
+  msg: WebhookMessage,
+): Pick<
+  ChannelEventPayload["message.received"]["message"],
+  | "mediaMimetype"
+  | "mediaFileName"
+  | "mediaSize"
+  | "mediaCaption"
+  | "mimeType"
+  | "fileName"
+  | "size"
+  | "caption"
+> {
+  const media =
+    msg.type === "image"
+      ? msg.image
+      : msg.type === "video"
+        ? msg.video
+        : msg.type === "audio"
+          ? msg.audio
+          : msg.type === "document"
+            ? msg.document
+            : msg.type === "sticker"
+              ? msg.sticker
+              : undefined;
+  if (!media) return {};
+
+  const fileName =
+    "filename" in media && typeof media.filename === "string" ? media.filename : undefined;
+  const caption =
+    "caption" in media && typeof media.caption === "string" ? media.caption : undefined;
+  const size = media.file_size;
+  const mimeType = media.mime_type;
+  return {
+    ...(mimeType ? { mediaMimetype: mimeType, mimeType } : {}),
+    ...(fileName ? { mediaFileName: fileName, fileName } : {}),
+    ...(typeof size === "number" && Number.isSafeInteger(size) && size > 0
+      ? { mediaSize: size, size }
+      : {}),
+    ...(caption ? { mediaCaption: caption, caption } : {}),
+  };
+}
+
 // ---- Main normalizer ----
 
 /**
@@ -232,9 +278,13 @@ export function normalizeWebhookPayload(payload: MetaWebhookPayload): Normalized
             continue;
           }
 
+          const mediaInfo = extractMediaInfo(msg);
           const messageEvent: NormalizedMessageEvent = {
             instanceId: "", // filled by caller
             chatId: `${msg.from}@s.whatsapp.net`,
+            chatName: contactNames.get(msg.from) ?? null,
+            senderName: contactNames.get(msg.from) ?? null,
+            isGroup: false,
             message: {
               id: msg.id,
               sender: `${msg.from}@s.whatsapp.net`,
@@ -242,8 +292,11 @@ export function normalizeWebhookPayload(payload: MetaWebhookPayload): Normalized
               type: mapMessageType(msg.type),
               content: extractTextContent(msg),
               mediaUrl: extractMediaId(msg), // media ID, can be resolved later
+              ...mediaInfo,
               quotedMessageId: msg.context?.id ?? null,
               isFromMe: false,
+              isForwarded:
+                msg.context?.forwarded === true || msg.context?.frequently_forwarded === true,
             },
           };
 

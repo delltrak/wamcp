@@ -22,7 +22,8 @@ export function registerNewsletterTools(
   server.registerTool(
     "wa_newsletter_follow",
     {
-      description: "Follow a WhatsApp Channel/Newsletter. Baileys only.",
+      description:
+        "Follow a WhatsApp Channel/Newsletter. This server operation is blocked unless WA_GROUP_WRITES_ENABLED=true or WA_APP_STATE_WRITES_ENABLED=true. Baileys only.",
       inputSchema: NewsletterFollowSchema,
     },
     async (params) => {
@@ -42,7 +43,8 @@ export function registerNewsletterTools(
   server.registerTool(
     "wa_newsletter_unfollow",
     {
-      description: "Unfollow a WhatsApp Channel/Newsletter. Baileys only.",
+      description:
+        "Unfollow a WhatsApp Channel/Newsletter. This server operation is blocked unless WA_GROUP_WRITES_ENABLED=true or WA_APP_STATE_WRITES_ENABLED=true. Baileys only.",
       inputSchema: NewsletterUnfollowSchema,
     },
     async (params) => {

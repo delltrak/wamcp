@@ -2,10 +2,10 @@
 // WA MCP — Scheduled Maintenance Jobs
 // ============================================================
 
-import { lt } from "drizzle-orm";
+import { and, gt, lt, or } from "drizzle-orm";
 import { Queue, Worker, type Job } from "bullmq";
 import { db } from "../db/client.js";
-import { messages, processedMessages } from "../db/schema.js";
+import { messages, processedMessages, statusAudiences } from "../db/schema.js";
 import { refreshWaVersion } from "../channels/baileys/baileys.version.js";
 import type { InstanceManager } from "./instance-manager.js";
 import { createChildLogger } from "../utils/logger.js";
@@ -138,11 +138,27 @@ export class MaintenanceService {
       process.env.WA_MESSAGE_RETENTION_DAYS ?? String(DEFAULT_MESSAGE_RETENTION_DAYS),
       10,
     );
-    const cutoff = Date.now() - retentionDays * 24 * 60 * 60 * 1000;
+    const cutoffMs = Date.now() - retentionDays * 24 * 60 * 60 * 1000;
+    const cutoffSeconds = Math.floor(cutoffMs / 1000);
 
-    const result = db.delete(messages).where(lt(messages.timestamp, cutoff)).run();
+    const result = db
+      .delete(messages)
+      .where(
+        or(
+          lt(messages.timestamp, cutoffSeconds),
+          and(gt(messages.timestamp, 1_000_000_000_000), lt(messages.timestamp, cutoffMs)),
+        ),
+      )
+      .run();
+    const audiencesResult = db
+      .delete(statusAudiences)
+      .where(lt(statusAudiences.createdAt, cutoffMs))
+      .run();
 
-    logger.info({ deleted: result.changes, retentionDays }, "Pruned old messages");
+    logger.info(
+      { deleted: result.changes, deletedStatusAudiences: audiencesResult.changes, retentionDays },
+      "Pruned old messages and status audiences",
+    );
   }
 
   private async pruneDedup(): Promise<void> {

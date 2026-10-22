@@ -11,5 +11,10 @@ export const RejectCallSchema = z
       .string()
       .min(1)
       .describe("The call ID to reject (received via whatsapp/call.received notification)"),
+    callFrom: z
+      .string()
+      .min(5)
+      .optional()
+      .describe("Caller JID from the call notification, if supplied"),
   })
   .strict();

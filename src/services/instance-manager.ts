@@ -9,7 +9,13 @@ import { instances, authKeys, queueStats } from "../db/schema.js";
 import { BaileysAdapter } from "../channels/baileys/baileys.adapter.js";
 import { CloudApiAdapter } from "../channels/cloud-api/cloud.adapter.js";
 import type { ChannelAdapter } from "../channels/channel.interface.js";
-import type { ChannelType, ChannelEvent, ChannelEventPayload } from "../types/channel.types.js";
+import {
+  CHANNEL_EVENTS,
+  type ChannelType,
+  type ChannelEvent,
+  type ChannelEventPayload,
+  type InstanceRuntimeStatus,
+} from "../types/channel.types.js";
 import type { InstanceEntity } from "../types/db.types.js";
 import { INSTANCE_ID_PREFIX } from "../constants.js";
 import { createChildLogger } from "../utils/logger.js";
@@ -28,6 +34,22 @@ type InstanceEventHandler = <E extends ChannelEvent>(
   payload: ChannelEventPayload[E],
 ) => void;
 
+export interface InstanceLifecycleStatusSnapshot {
+  instanceId: string;
+  name: string;
+  channel: ChannelType;
+  state: string;
+  phone: string | null;
+  lid: string | null;
+  pushName: string | null;
+  lastConnectedAt: number | null;
+  lastDisconnectedAt: number | null;
+  disconnectReason: string | null;
+  disconnectStatusCode: number | null;
+  pendingChallenge: InstanceRuntimeStatus["pendingChallenge"];
+  presenceMode: string | null;
+}
+
 export class InstanceManager {
   private readonly adapters = new Map<string, ManagedInstance>();
   private readonly globalHandlers = new Set<InstanceEventHandler>();
@@ -40,8 +62,9 @@ export class InstanceManager {
   }
 
   /** Register a global event handler that receives all instance events */
-  onAnyEvent(handler: InstanceEventHandler): void {
+  onAnyEvent(handler: InstanceEventHandler): () => void {
     this.globalHandlers.add(handler);
+    return () => this.globalHandlers.delete(handler);
   }
 
   /** Initialize: load existing instances from DB and reconnect those with status "open"/connected */
@@ -188,6 +211,48 @@ export class InstanceManager {
     return this.getInstanceFromDb(id);
   }
 
+  /** Return lifecycle metadata without selecting credential or session columns. */
+  getInstanceLifecycleStatuses(id?: string): InstanceLifecycleStatusSnapshot[] {
+    const select = db
+      .select({
+        id: instances.id,
+        name: instances.name,
+        channel: instances.channel,
+        status: instances.status,
+        phoneNumber: instances.phoneNumber,
+        lastConnected: instances.lastConnected,
+        lastDisconnected: instances.lastDisconnected,
+        lastDisconnectReason: instances.lastDisconnectReason,
+        lastDisconnectStatusCode: instances.lastDisconnectStatusCode,
+      })
+      .from(instances);
+    const rows = id ? select.where(eq(instances.id, id)).all() : select.all();
+    if (id && rows.length === 0) throw new Error(`Instance ${id} not found`);
+
+    return rows.map((row) => {
+      const managed = this.adapters.get(row.id);
+      const adapter = managed?.adapter;
+      const runtime = adapter?.getLifecycleStatus?.();
+      const state = adapter?.getStatus() ?? row.status;
+      const connected = state === "connected";
+      return {
+        instanceId: row.id,
+        name: row.name,
+        channel: row.channel as ChannelType,
+        state,
+        phone: connected ? (runtime?.phone ?? row.phoneNumber) : null,
+        lid: connected ? (runtime?.lid ?? null) : null,
+        pushName: connected ? (runtime?.pushName ?? null) : null,
+        lastConnectedAt: row.lastConnected,
+        lastDisconnectedAt: row.lastDisconnected,
+        disconnectReason: runtime?.disconnectReason ?? row.lastDisconnectReason,
+        disconnectStatusCode: runtime?.disconnectStatusCode ?? row.lastDisconnectStatusCode,
+        pendingChallenge: runtime?.pendingChallenge ?? null,
+        presenceMode: runtime?.presenceMode ?? null,
+      };
+    });
+  }
+
   private getInstanceFromDb(id: string): InstanceEntity {
     const row = db.select().from(instances).where(eq(instances.id, id)).get();
     if (!row) {
@@ -225,23 +290,30 @@ export class InstanceManager {
   }
 
   private bindAdapterEvents(instanceId: string, adapter: ChannelAdapter): void {
-    const events: ChannelEvent[] = [
-      "message.received",
-      "message.updated",
-      "message.deleted",
-      "message.reaction",
-      "message.edited",
-      "presence.updated",
-      "chat.updated",
-      "group.updated",
-      "group.participants_changed",
-      "contact.updated",
-      "connection.changed",
-      "call.received",
-    ];
-
-    for (const event of events) {
+    for (const event of CHANNEL_EVENTS) {
       adapter.on(event, (payload: ChannelEventPayload[typeof event]) => {
+        if (event === "instance.connected") {
+          const connectedPayload = payload as ChannelEventPayload["instance.connected"];
+          db.update(instances)
+            .set({
+              ...(connectedPayload.phone ? { phoneNumber: connectedPayload.phone } : {}),
+              updatedAt: connectedPayload.connectedAt,
+            })
+            .where(eq(instances.id, instanceId))
+            .run();
+        }
+
+        if (event === "instance.disconnected") {
+          const disconnectedPayload = payload as ChannelEventPayload["instance.disconnected"];
+          db.update(instances)
+            .set({
+              lastDisconnectReason: disconnectedPayload.reason,
+              lastDisconnectStatusCode: disconnectedPayload.statusCode,
+            })
+            .where(eq(instances.id, instanceId))
+            .run();
+        }
+
         // Update instance status on connection changes
         if (event === "connection.changed") {
           const connPayload = payload as ChannelEventPayload["connection.changed"];
@@ -259,7 +331,20 @@ export class InstanceManager {
             updateFields.lastConnected = Date.now();
           }
           if (connPayload.status === "close") {
-            updateFields.lastDisconnected = Date.now();
+            const instance = db
+              .select({
+                lastConnected: instances.lastConnected,
+                lastDisconnected: instances.lastDisconnected,
+              })
+              .from(instances)
+              .where(eq(instances.id, instanceId))
+              .get();
+            const outageAlreadyRecorded =
+              instance?.lastDisconnected != null &&
+              (instance.lastConnected == null ||
+                instance.lastDisconnected >= instance.lastConnected);
+            // Keep the first close time until a successful connection starts a new outage.
+            if (!outageAlreadyRecorded) updateFields.lastDisconnected = Date.now();
           }
           db.update(instances).set(updateFields).where(eq(instances.id, instanceId)).run();
         }

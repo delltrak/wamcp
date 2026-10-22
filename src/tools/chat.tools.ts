@@ -8,6 +8,7 @@ import type { MessageQueue } from "../services/message-queue.js";
 import { toolSuccess } from "../types/mcp.types.js";
 import { handleToolError } from "../utils/tool-handler.js";
 import { createRequestLogger } from "../utils/logger.js";
+import { scheduleFetchedMessagesRead } from "../services/auto-read.js";
 import {
   ArchiveChatSchema,
   PinChatSchema,
@@ -15,6 +16,11 @@ import {
   DeleteChatSchema,
   ClearChatSchema,
   GetMessagesSchema,
+  ListChatsSchema,
+  MarkChatUnreadSchema,
+  StarMessageSchema,
+  FetchMessageHistorySchema,
+  SetDisappearingMessagesSchema,
 } from "../schemas/chat.schema.js";
 
 export function registerChatTools(
@@ -144,6 +150,7 @@ export function registerChatTools(
       try {
         const adapter = instanceManager.getAdapter(params.instanceId);
         const messages = await adapter.getMessages(params.chatId, params.limit);
+        scheduleFetchedMessagesRead(adapter, params.chatId, messages, params.instanceId);
         log.info(
           { duration: Date.now() - start, chatId: params.chatId, count: messages.length },
           "Messages retrieved",
@@ -151,6 +158,100 @@ export function registerChatTools(
         return toolSuccess({ chatId: params.chatId, count: messages.length, messages });
       } catch (err) {
         return handleToolError("wa_get_messages", err, params.instanceId);
+      }
+    },
+  );
+
+  server.registerTool(
+    "wa_list_chats",
+    {
+      description:
+        "List chats stored for an instance, including each chat's current WhatsApp Business labels.",
+      inputSchema: ListChatsSchema,
+    },
+    async (params) => {
+      try {
+        const chats = await instanceManager.getAdapter(params.instanceId).getChats();
+        return toolSuccess({ count: chats.length, chats });
+      } catch (err) {
+        return handleToolError("wa_list_chats", err, params.instanceId);
+      }
+    },
+  );
+
+  server.registerTool(
+    "wa_mark_chat_unread",
+    {
+      description:
+        "Mark a chat unread on Baileys. The stored recent messages are supplied as the required chat-modification range.",
+      inputSchema: MarkChatUnreadSchema,
+    },
+    async (params) => {
+      try {
+        await instanceManager.getAdapter(params.instanceId).markChatUnread(params.chatId);
+        return toolSuccess({ success: true, chatId: params.chatId, unread: true });
+      } catch (err) {
+        return handleToolError("wa_mark_chat_unread", err, params.instanceId);
+      }
+    },
+  );
+
+  server.registerTool(
+    "wa_star_message",
+    {
+      description: "Star or unstar a stored message on a Baileys account.",
+      inputSchema: StarMessageSchema,
+    },
+    async (params) => {
+      try {
+        await instanceManager
+          .getAdapter(params.instanceId)
+          .starMessage(params.chatId, params.messageId, params.star);
+        return toolSuccess({ success: true, messageId: params.messageId, starred: params.star });
+      } catch (err) {
+        return handleToolError("wa_star_message", err, params.instanceId);
+      }
+    },
+  );
+
+  server.registerTool(
+    "wa_fetch_message_history",
+    {
+      description:
+        "Request older messages for a chat from Baileys using the oldest stored message as the anchor. Waits for ON_DEMAND history results up to timeoutMs. The response includes limit and capped when the requested count exceeds the configured maximum.",
+      inputSchema: FetchMessageHistorySchema,
+    },
+    async (params) => {
+      try {
+        const result = await instanceManager
+          .getAdapter(params.instanceId)
+          .fetchMessageHistory(params.chatId, params.count, params.timeoutMs);
+        return toolSuccess({ chatId: params.chatId, ...result });
+      } catch (err) {
+        return handleToolError("wa_fetch_message_history", err, params.instanceId);
+      }
+    },
+  );
+
+  server.registerTool(
+    "wa_set_disappearing_messages",
+    {
+      description:
+        "Set disappearing messages for a private chat: off, 24 hours, 7 days, or 90 days. This account/server change is blocked unless WA_APP_STATE_WRITES_ENABLED=true. Baileys sends the protocol control message; Cloud API does not support this operation.",
+      inputSchema: SetDisappearingMessagesSchema,
+    },
+    async (params) => {
+      try {
+        await instanceManager
+          .getAdapter(params.instanceId)
+          .setDisappearingMessages(params.chatId, params.duration);
+        return toolSuccess({
+          success: true,
+          chatId: params.chatId,
+          duration: params.duration,
+        });
+      } catch (err) {
+        return handleToolError("wa_set_disappearing_messages", err, params.instanceId);
       }
     },
   );

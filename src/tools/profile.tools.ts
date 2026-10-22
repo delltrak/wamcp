@@ -9,15 +9,56 @@ import { toolSuccess } from "../types/mcp.types.js";
 import { handleToolError } from "../utils/tool-handler.js";
 import { createRequestLogger } from "../utils/logger.js";
 import { MediaService } from "../services/media.js";
+import type { PrivacyUpdate } from "../types/channel.types.js";
 import {
   UpdateProfilePictureSchema,
   RemoveProfilePictureSchema,
+  GetProfilePictureSchema,
   UpdateProfileNameSchema,
   UpdateProfileStatusSchema,
   UpdatePrivacySchema,
+  GetPrivacySettingsSchema,
 } from "../schemas/profile.schema.js";
 
 const mediaService = new MediaService();
+
+const PRIVACY_VALUES = ["all", "contacts", "contact_blacklist", "none"] as const;
+const ONLINE_VALUES = ["all", "match_last_seen"] as const;
+const READ_RECEIPTS_VALUES = ["all", "none"] as const;
+const GROUP_ADD_VALUES = ["all", "contacts", "contact_blacklist"] as const;
+const CALL_VALUES = ["all", "known"] as const;
+const DEFAULT_DISAPPEARING_DURATIONS = [0, 86400, 604800, 7776000] as const;
+
+function isOneOf<T extends string | number>(value: unknown, allowed: readonly T[]): value is T {
+  return allowed.some((candidate) => candidate === value);
+}
+
+function toPrivacyUpdate(setting: PrivacyUpdate["setting"], value: string | number): PrivacyUpdate {
+  switch (setting) {
+    case "lastSeen":
+    case "profilePic":
+    case "status":
+      if (isOneOf(value, PRIVACY_VALUES)) return { setting, value };
+      break;
+    case "online":
+      if (isOneOf(value, ONLINE_VALUES)) return { setting, value };
+      break;
+    case "readReceipts":
+      if (isOneOf(value, READ_RECEIPTS_VALUES)) return { setting, value };
+      break;
+    case "groupAdd":
+      if (isOneOf(value, GROUP_ADD_VALUES)) return { setting, value };
+      break;
+    case "calls":
+      if (isOneOf(value, CALL_VALUES)) return { setting, value };
+      break;
+    case "defaultDisappearingMode":
+      if (isOneOf(value, DEFAULT_DISAPPEARING_DURATIONS)) return { setting, value };
+      break;
+  }
+
+  throw new Error(`Invalid value for privacy setting ${setting}`);
+}
 
 export function registerProfileTools(
   server: McpServer,
@@ -67,6 +108,33 @@ export function registerProfileTools(
   );
 
   server.registerTool(
+    "wa_get_profile_picture",
+    {
+      description:
+        "Fetch the current profile-picture URL for a contact or group. This uses a Baileys read query and is unavailable on Cloud API.",
+      inputSchema: GetProfilePictureSchema,
+    },
+    async (params) => {
+      const log = createRequestLogger("wa_get_profile_picture", params.instanceId);
+      const start = Date.now();
+      try {
+        if (instanceManager.getInstanceChannel(params.instanceId) === "cloud") {
+          throw new Error(
+            "Contact and group profile-picture lookup is not supported on Cloud API; use a Baileys instance",
+          );
+        }
+        const url = await instanceManager
+          .getAdapter(params.instanceId)
+          .getProfilePicture(params.jid);
+        log.info({ duration: Date.now() - start, found: url !== null }, "Profile picture URL read");
+        return toolSuccess({ jid: params.jid, url });
+      } catch (err) {
+        return handleToolError("wa_get_profile_picture", err, params.instanceId);
+      }
+    },
+  );
+
+  server.registerTool(
     "wa_update_profile_name",
     {
       description: "Change the display name for a WhatsApp instance (max 25 characters).",
@@ -107,10 +175,31 @@ export function registerProfileTools(
   );
 
   server.registerTool(
+    "wa_get_privacy_settings",
+    {
+      description:
+        "Read normalized account privacy settings for a Baileys instance. Reads refresh from WhatsApp by default; pass forceRefresh=false to use cached settings. The status setting is About/profile text visibility.",
+      inputSchema: GetPrivacySettingsSchema,
+    },
+    async (params) => {
+      const log = createRequestLogger("wa_get_privacy_settings", params.instanceId);
+      const start = Date.now();
+      try {
+        const adapter = instanceManager.getAdapter(params.instanceId);
+        const settings = await adapter.getPrivacySettings(params.forceRefresh ?? true);
+        log.info({ duration: Date.now() - start }, "Privacy settings read");
+        return toolSuccess(settings);
+      } catch (err) {
+        return handleToolError("wa_get_privacy_settings", err, params.instanceId);
+      }
+    },
+  );
+
+  server.registerTool(
     "wa_update_privacy",
     {
       description:
-        "Update privacy settings (lastSeen, online, profilePic, status, readReceipts, groupAdd).",
+        "Update Baileys account privacy settings: lastSeen, online, profilePic, status (About/profile text visibility), readReceipts, groupAdd, calls, or defaultDisappearingMode. Updating defaultDisappearingMode is blocked unless WA_APP_STATE_WRITES_ENABLED=true; other privacy settings remain available when writes are disabled.",
       inputSchema: UpdatePrivacySchema,
     },
     async (params) => {
@@ -118,7 +207,8 @@ export function registerProfileTools(
       const start = Date.now();
       try {
         const adapter = instanceManager.getAdapter(params.instanceId);
-        await adapter.updatePrivacy(params.setting, params.value);
+        const update = toPrivacyUpdate(params.setting, params.value);
+        await adapter.updatePrivacy(update);
         log.info({ duration: Date.now() - start }, "Privacy setting updated");
         return toolSuccess({ success: true, setting: params.setting, value: params.value });
       } catch (err) {

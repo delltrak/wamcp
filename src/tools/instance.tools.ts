@@ -5,6 +5,7 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { InstanceManager } from "../services/instance-manager.js";
 import type { MessageQueue } from "../services/message-queue.js";
+import { eventWebhookToolStatus, getEventWebhookStatus } from "../services/event-webhook-config.js";
 import { toolSuccess } from "../types/mcp.types.js";
 import { handleToolError } from "../utils/tool-handler.js";
 import { createRequestLogger } from "../utils/logger.js";
@@ -14,6 +15,7 @@ import {
   DisconnectInstanceSchema,
   DeleteInstanceSchema,
   RestartInstanceSchema,
+  GetInstanceStatusSchema,
   GetQrCodeSchema,
   GetPairingCodeSchema,
   SetCloudCredentialsSchema,
@@ -24,6 +26,57 @@ export function registerInstanceTools(
   instanceManager: InstanceManager,
   _messageQueue: MessageQueue,
 ): void {
+  server.registerTool(
+    "wa_get_instance_status",
+    {
+      description:
+        "Read connection state and lifecycle metadata for one instance or all instances. Also returns redacted event-webhook status: configured, destinationCount, eventCount, authConfigured, warnings (string codes), and droppedEvents. droppedEvents lists configured event names excluded by the Grok Bot preset; public GET /health omits this field and all event names. URLs, header names, header values, and tokens are omitted.",
+      inputSchema: GetInstanceStatusSchema,
+    },
+    async (params) => {
+      const log = createRequestLogger("wa_get_instance_status", params.instanceId);
+      const start = Date.now();
+      try {
+        const instances = instanceManager
+          .getInstanceLifecycleStatuses(params.instanceId)
+          .map((item) => ({
+            instanceId: item.instanceId,
+            name: item.name,
+            channel: item.channel,
+            connectionState: item.state,
+            phone: item.phone,
+            lid: item.lid,
+            pushName: item.pushName,
+            lastConnected:
+              item.lastConnectedAt === null ? null : new Date(item.lastConnectedAt).toISOString(),
+            lastDisconnected:
+              item.lastDisconnectedAt === null
+                ? null
+                : new Date(item.lastDisconnectedAt).toISOString(),
+            lastDisconnectReason: item.disconnectReason,
+            lastDisconnectStatusCode: item.disconnectStatusCode,
+            pendingPairing: {
+              status: item.pendingChallenge?.method ?? "none",
+              generatedAt: item.pendingChallenge
+                ? new Date(item.pendingChallenge.generatedAt).toISOString()
+                : null,
+              expiresAt: item.pendingChallenge
+                ? new Date(item.pendingChallenge.expiresAt).toISOString()
+                : null,
+            },
+            presenceMode: item.presenceMode,
+          }));
+        log.info({ duration: Date.now() - start, count: instances.length }, "Instance status read");
+        return toolSuccess({
+          instances,
+          webhook: eventWebhookToolStatus(getEventWebhookStatus()),
+        });
+      } catch (err) {
+        return handleToolError("wa_get_instance_status", err, params.instanceId);
+      }
+    },
+  );
+
   server.registerTool(
     "wa_create_instance",
     {

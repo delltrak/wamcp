@@ -15,7 +15,7 @@ export function registerPrivacyResource(server: McpServer, instanceManager: Inst
       (name) => `Privacy — ${name}`,
     ),
     {
-      description: "Privacy settings for an instance",
+      description: "Privacy settings for an instance, including About/profile text visibility",
       mimeType: "application/json",
     },
     async (uri, variables) => {

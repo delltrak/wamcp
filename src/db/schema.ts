@@ -32,6 +32,8 @@ export const instances = sqliteTable("instances", {
   updatedAt: integer("updated_at").notNull(),
   lastConnected: integer("last_connected"),
   lastDisconnected: integer("last_disconnected"),
+  lastDisconnectReason: text("last_disconnect_reason"),
+  lastDisconnectStatusCode: integer("last_disconnect_status_code"),
 });
 
 // ============================================================
@@ -78,6 +80,8 @@ export const messages = sqliteTable(
         "poll",
         "reaction",
         "sticker",
+        "event",
+        "album",
       ],
     }).notNull(),
     content: text("content"),
@@ -88,17 +92,73 @@ export const messages = sqliteTable(
     isFromMe: integer("is_from_me").notNull().default(0),
     isForwarded: integer("is_forwarded").notNull().default(0),
     status: text("status", {
-      enum: ["received", "sent", "delivered", "read", "played"],
+      enum: ["received", "sent", "delivered", "read", "played", "revoked"],
     })
       .notNull()
       .default("received"),
     timestamp: integer("timestamp").notNull(),
+    pushName: text("push_name"),
     rawData: text("raw_data"),
+    starred: integer("starred").notNull().default(0),
   },
   (table) => [
     primaryKey({ columns: [table.instanceId, table.id] }),
     index("idx_messages_chat").on(table.instanceId, table.chatId, table.timestamp),
     index("idx_messages_timestamp").on(table.instanceId, table.timestamp),
+  ],
+);
+
+// ============================================================
+// STATUS AUDIENCES
+// Recipients for sent status stories, used to distribute revocations
+// ============================================================
+export const statusAudiences = sqliteTable(
+  "status_audiences",
+  {
+    instanceId: text("instance_id")
+      .notNull()
+      .references(() => instances.id, { onDelete: "cascade" }),
+    messageId: text("message_id").notNull(),
+    recipientJids: text("recipient_jids").notNull(),
+    createdAt: integer("created_at").notNull(),
+  },
+  (table) => [primaryKey({ columns: [table.instanceId, table.messageId] })],
+);
+
+// Participant-level delivery information, including viewers of status stories.
+export const messageReceipts = sqliteTable(
+  "message_receipts",
+  {
+    instanceId: text("instance_id")
+      .notNull()
+      .references(() => instances.id, { onDelete: "cascade" }),
+    chatId: text("chat_id").notNull(),
+    messageId: text("message_id").notNull(),
+    participant: text("participant").notNull(),
+    status: text("status", { enum: ["delivered", "read", "played"] }).notNull(),
+    timestamp: integer("timestamp").notNull(),
+  },
+  (table) => [
+    primaryKey({ columns: [table.instanceId, table.chatId, table.messageId, table.participant] }),
+    index("idx_message_receipts_message").on(table.instanceId, table.chatId, table.messageId),
+  ],
+);
+
+export const messageReactions = sqliteTable(
+  "message_reactions",
+  {
+    instanceId: text("instance_id")
+      .notNull()
+      .references(() => instances.id, { onDelete: "cascade" }),
+    chatId: text("chat_id").notNull(),
+    messageId: text("message_id").notNull(),
+    participant: text("participant").notNull(),
+    emoji: text("emoji").notNull(),
+    timestamp: integer("timestamp").notNull(),
+  },
+  (table) => [
+    primaryKey({ columns: [table.instanceId, table.chatId, table.messageId, table.participant] }),
+    index("idx_message_reactions_message").on(table.instanceId, table.chatId, table.messageId),
   ],
 );
 
@@ -130,6 +190,7 @@ export const contacts = sqliteTable(
       .references(() => instances.id, { onDelete: "cascade" }),
     jid: text("jid").notNull(),
     name: text("name"),
+    nameSource: text("name_source"),
     notifyName: text("notify_name"),
     phone: text("phone"),
     lid: text("lid"),
@@ -172,6 +233,25 @@ export const groupsCache = sqliteTable(
 );
 
 // ============================================================
+// GROUP MEMBER LABELS
+// Latest labels observed from WhatsApp group protocol messages
+// ============================================================
+export const groupMemberLabels = sqliteTable(
+  "group_member_labels",
+  {
+    instanceId: text("instance_id")
+      .notNull()
+      .references(() => instances.id, { onDelete: "cascade" }),
+    groupJid: text("group_jid").notNull(),
+    participantJid: text("participant_jid").notNull(),
+    memberLabel: text("member_label"),
+    labelTimestamp: integer("label_timestamp").notNull(),
+    updatedAt: integer("updated_at").notNull(),
+  },
+  (table) => [primaryKey({ columns: [table.instanceId, table.groupJid, table.participantJid] })],
+);
+
+// ============================================================
 // CHATS
 // Cached chat list with metadata
 // ============================================================
@@ -196,6 +276,88 @@ export const chats = sqliteTable(
   (table) => [
     primaryKey({ columns: [table.instanceId, table.jid] }),
     index("idx_chats_recent").on(table.instanceId, table.lastMessageAt),
+  ],
+);
+
+// ============================================================
+// BUSINESS LABELS
+// ============================================================
+export const labels = sqliteTable(
+  "labels",
+  {
+    instanceId: text("instance_id")
+      .notNull()
+      .references(() => instances.id, { onDelete: "cascade" }),
+    id: text("label_id").notNull(),
+    name: text("name").notNull(),
+    color: integer("color").notNull(),
+    deleted: integer("deleted").notNull().default(0),
+    predefinedId: text("predefined_id"),
+    updatedAt: integer("updated_at").notNull(),
+  },
+  (table) => [primaryKey({ columns: [table.instanceId, table.id] })],
+);
+
+export const labelAssociations = sqliteTable(
+  "label_associations",
+  {
+    instanceId: text("instance_id")
+      .notNull()
+      .references(() => instances.id, { onDelete: "cascade" }),
+    labelId: text("label_id").notNull(),
+    type: text("association_type", { enum: ["chat", "message"] }).notNull(),
+    chatId: text("chat_id").notNull(),
+    messageId: text("message_id").notNull().default(""),
+    updatedAt: integer("updated_at").notNull(),
+  },
+  (table) => [
+    primaryKey({
+      columns: [table.instanceId, table.labelId, table.type, table.chatId, table.messageId],
+    }),
+    index("idx_label_associations_chat").on(table.instanceId, table.chatId, table.type),
+    index("idx_label_associations_message").on(
+      table.instanceId,
+      table.chatId,
+      table.messageId,
+      table.type,
+    ),
+  ],
+);
+
+export const eventResponses = sqliteTable(
+  "event_responses",
+  {
+    instanceId: text("instance_id")
+      .notNull()
+      .references(() => instances.id, { onDelete: "cascade" }),
+    eventMessageId: text("event_message_id").notNull(),
+    chatId: text("chat_id").notNull(),
+    responder: text("responder").notNull(),
+    response: text("response").notNull(),
+    timestamp: integer("timestamp"),
+    extraGuestCount: integer("extra_guest_count"),
+    responseMessageId: text("response_message_id"),
+    rawData: text("raw_data"),
+  },
+  (table) => [
+    primaryKey({ columns: [table.instanceId, table.eventMessageId, table.responder] }),
+    index("idx_event_responses_chat").on(table.instanceId, table.chatId, table.eventMessageId),
+  ],
+);
+
+export const pendingPollVotes = sqliteTable(
+  "pending_poll_votes",
+  {
+    instanceId: text("instance_id")
+      .notNull()
+      .references(() => instances.id, { onDelete: "cascade" }),
+    pollMessageId: text("poll_message_id").notNull(),
+    voteMessageId: text("vote_message_id").notNull(),
+    rawData: text("raw_data").notNull(),
+  },
+  (table) => [
+    primaryKey({ columns: [table.instanceId, table.pollMessageId, table.voteMessageId] }),
+    index("idx_pending_poll_votes_poll").on(table.instanceId, table.pollMessageId),
   ],
 );
 

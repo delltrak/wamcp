@@ -1,8 +1,8 @@
 import "dotenv/config";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { timingSafeEqual } from "node:crypto";
-import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import { McpHttpSessionManager } from "./server/http-session.js";
 import {
   VERSION,
   SERVER_NAME,
@@ -14,12 +14,17 @@ import {
 } from "./constants.js";
 import { InstanceManager } from "./services/instance-manager.js";
 import { MessageQueue } from "./services/message-queue.js";
+import { EventWebhookService } from "./services/event-webhook.js";
 import { MaintenanceService } from "./services/maintenance.js";
 import { createMcpServer } from "./server/mcp.js";
 import { verifyWebhookSignature } from "./channels/cloud-api/cloud.auth.js";
 import { normalizeWebhookPayload } from "./channels/cloud-api/cloud.events.js";
 import type { MetaWebhookPayload } from "./channels/cloud-api/cloud.events.js";
+import { installShutdownHandlers, SHUTDOWN_TIMEOUT_MS } from "./utils/shutdown.js";
 import { logger } from "./utils/logger.js";
+import { getAutoReadMode } from "./services/auto-read.js";
+import { bootEventWebhook, type EventWebhookStatus } from "./services/event-webhook-config.js";
+import { buildHealthBody } from "./server/health.js";
 
 const CLOUD_WEBHOOK_PATH = "/cloud-webhook";
 
@@ -63,12 +68,16 @@ function checkApiKey(req: IncomingMessage, res: ServerResponse): boolean {
 }
 
 async function initServices() {
+  getAutoReadMode();
+
   // Initialize services
   const instanceManager = new InstanceManager();
   const messageQueue = new MessageQueue();
+  const eventWebhook = new EventWebhookService();
 
   // Wire them together
   instanceManager.setMessageQueue(messageQueue);
+  eventWebhook.start(instanceManager);
 
   // Load existing instances from DB and reconnect
   await instanceManager.init();
@@ -79,16 +88,13 @@ async function initServices() {
 
   logger.info("Services initialized");
 
-  return { instanceManager, messageQueue };
+  return { instanceManager, messageQueue, eventWebhook, maintenance };
 }
 
-async function startHttp(): Promise<void> {
-  const { instanceManager, messageQueue } = await initServices();
-  const mcpServer = createMcpServer(instanceManager, messageQueue);
+async function startHttp(webhookStatus: EventWebhookStatus): Promise<void> {
+  const { instanceManager, messageQueue, eventWebhook, maintenance } = await initServices();
+  const mcpSessions = new McpHttpSessionManager(instanceManager, messageQueue);
   const startTime = Date.now();
-
-  // Map to track transports by session ID
-  const transports = new Map<string, StreamableHTTPServerTransport>();
 
   const httpServer = createServer(async (req: IncomingMessage, res: ServerResponse) => {
     const url = new URL(req.url ?? "/", `http://localhost:${port}`);
@@ -97,16 +103,16 @@ async function startHttp(): Promise<void> {
     if (url.pathname === HEALTH_ENDPOINT && req.method === "GET") {
       const allInstances = instanceManager.getAllInstances();
       const connected = allInstances.filter((i) => i.status === "connected").length;
-      const health = {
-        status: "ok",
-        uptime: Math.floor((Date.now() - startTime) / 1000),
+      const health = buildHealthBody({
+        uptimeSeconds: Math.floor((Date.now() - startTime) / 1000),
         instances: {
           total: allInstances.length,
           connected,
           disconnected: allInstances.length - connected,
         },
         version: VERSION,
-      };
+        webhook: webhookStatus,
+      });
       res.writeHead(200, { "Content-Type": "application/json" });
       res.end(JSON.stringify(health));
       return;
@@ -116,66 +122,7 @@ async function startHttp(): Promise<void> {
     if (url.pathname === MCP_ENDPOINT) {
       // Authenticate before processing MCP requests
       if (!checkApiKey(req, res)) return;
-
-      // Extract session ID from header
-      const sessionId = req.headers["mcp-session-id"] as string | undefined;
-
-      if (req.method === "POST") {
-        // For new sessions or existing sessions
-        let mcpTransport: StreamableHTTPServerTransport;
-
-        if (sessionId && transports.has(sessionId)) {
-          mcpTransport = transports.get(sessionId)!;
-        } else {
-          // Create new transport for new session
-          mcpTransport = new StreamableHTTPServerTransport({
-            sessionIdGenerator: () => crypto.randomUUID(),
-            onsessioninitialized: (newSessionId) => {
-              transports.set(newSessionId, mcpTransport);
-              logger.info({ sessionId: newSessionId }, "MCP session initialized");
-            },
-          });
-
-          mcpTransport.onclose = () => {
-            const sid = Array.from(transports.entries()).find(([, t]) => t === mcpTransport)?.[0];
-            if (sid) {
-              transports.delete(sid);
-              logger.info({ sessionId: sid }, "MCP session closed");
-            }
-          };
-
-          await mcpServer.connect(mcpTransport);
-        }
-
-        await mcpTransport.handleRequest(req, res);
-        return;
-      }
-
-      if (req.method === "GET") {
-        // SSE stream for notifications
-        if (sessionId && transports.has(sessionId)) {
-          const mcpTransport = transports.get(sessionId)!;
-          await mcpTransport.handleRequest(req, res);
-          return;
-        }
-        res.writeHead(400, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ error: "Missing or invalid session ID" }));
-        return;
-      }
-
-      if (req.method === "DELETE") {
-        if (sessionId && transports.has(sessionId)) {
-          const mcpTransport = transports.get(sessionId)!;
-          await mcpTransport.handleRequest(req, res);
-          return;
-        }
-        res.writeHead(400, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ error: "Missing or invalid session ID" }));
-        return;
-      }
-
-      res.writeHead(405, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ error: "Method not allowed" }));
+      await mcpSessions.handleRequest(req, res);
       return;
     }
 
@@ -260,6 +207,39 @@ async function startHttp(): Promise<void> {
     res.end(JSON.stringify({ error: "Not found" }));
   });
 
+  let servicesClosePromise: Promise<void> | null = null;
+  const closeServices = (): Promise<void> => {
+    servicesClosePromise ??= Promise.all([
+      messageQueue.close(),
+      eventWebhook.close(),
+      maintenance.stop(),
+    ]).then(() => undefined);
+    return servicesClosePromise;
+  };
+  httpServer.on("close", () => {
+    void closeServices().catch((err: unknown) => {
+      logger.error({ err }, "Failed to close server services");
+    });
+  });
+
+  installShutdownHandlers(
+    async (signal) => {
+      logger.info({ signal }, "Stopping HTTP server");
+      try {
+        const serverClosed = new Promise<void>((resolve, reject) => {
+          httpServer.close((error) => (error ? reject(error) : resolve()));
+        });
+        await Promise.all([serverClosed, mcpSessions.closeAll()]);
+      } finally {
+        await closeServices();
+      }
+    },
+    {
+      timeoutMs: SHUTDOWN_TIMEOUT_MS,
+      onError: (err) => logger.error({ err }, "Failed to shut down HTTP server"),
+    },
+  );
+
   httpServer.listen(port, () => {
     logger.info(
       { port, transport: "http", version: VERSION },
@@ -269,8 +249,35 @@ async function startHttp(): Promise<void> {
 }
 
 async function startStdio(): Promise<void> {
-  const { instanceManager, messageQueue } = await initServices();
-  const mcpServer = createMcpServer(instanceManager, messageQueue);
+  const { instanceManager, messageQueue, eventWebhook, maintenance } = await initServices();
+  const { server: mcpServer } = createMcpServer(instanceManager, messageQueue);
+  const onServerClose = mcpServer.server.onclose;
+  let servicesClosePromise: Promise<void> | null = null;
+  const closeServices = (): Promise<void> => {
+    servicesClosePromise ??= Promise.all([
+      messageQueue.close(),
+      eventWebhook.close(),
+      maintenance.stop(),
+    ]).then(() => undefined);
+    return servicesClosePromise;
+  };
+  mcpServer.server.onclose = () => {
+    onServerClose?.();
+    void closeServices().catch((err: unknown) => {
+      logger.error({ err }, "Failed to close server services");
+    });
+  };
+  installShutdownHandlers(
+    async (signal) => {
+      logger.info({ signal }, "Stopping stdio server");
+      await mcpServer.close();
+      await closeServices();
+    },
+    {
+      timeoutMs: SHUTDOWN_TIMEOUT_MS,
+      onError: (err) => logger.error({ err }, "Failed to shut down stdio server"),
+    },
+  );
   const stdioTransport = new StdioServerTransport(process.stdin, process.stdout, {
     maxBufferSize: STDIO_MAX_BUFFER_BYTES,
   });
@@ -280,11 +287,12 @@ async function startStdio(): Promise<void> {
 
 async function main(): Promise<void> {
   logger.info({ transport, version: VERSION }, "Starting WA MCP server");
+  const webhookStatus = bootEventWebhook();
 
   if (transport === "stdio") {
     await startStdio();
   } else {
-    await startHttp();
+    await startHttp(webhookStatus);
   }
 }
 

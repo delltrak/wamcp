@@ -14,6 +14,9 @@ import {
   UnblockContactSchema,
   GetBusinessProfileSchema,
   SearchContactSchema,
+  ResyncContactsSchema,
+  ListBlockedContactsSchema,
+  GetContactAboutSchema,
 } from "../schemas/contact.schema.js";
 
 export function registerContactTools(
@@ -122,6 +125,75 @@ export function registerContactTools(
         return toolSuccess({ query: params.query, count: contacts.length, contacts });
       } catch (err) {
         return handleToolError("wa_search_contact", err, params.instanceId);
+      }
+    },
+  );
+
+  server.registerTool(
+    "wa_resync_contacts",
+    {
+      description:
+        "Refresh contacts for an already connected Baileys session without pairing again. Resyncs app-state collections and recovers individual contacts from locally stored chats and messages.",
+      inputSchema: ResyncContactsSchema,
+    },
+    async (params) => {
+      const log = createRequestLogger("wa_resync_contacts", params.instanceId);
+      const start = Date.now();
+      try {
+        const adapter = instanceManager.getAdapter(params.instanceId);
+        const result = await adapter.resyncContacts();
+        const failedCollections = result.sources.appState.collections.filter(
+          (collection) => !collection.success,
+        ).length;
+        log.info(
+          {
+            duration: Date.now() - start,
+            contactsBefore: result.contactsBefore,
+            contactsAfter: result.contactsAfter,
+            added: result.added,
+            failedCollections,
+          },
+          "Contact resync completed",
+        );
+        return toolSuccess(result);
+      } catch (err) {
+        return handleToolError("wa_resync_contacts", err, params.instanceId);
+      }
+    },
+  );
+
+  server.registerTool(
+    "wa_list_blocked_contacts",
+    {
+      description:
+        "List contact JIDs in the WhatsApp blocklist. Baileys reads the blocklist through an IQ query; Cloud API does not expose it.",
+      inputSchema: ListBlockedContactsSchema,
+    },
+    async (params) => {
+      try {
+        const blocked = await instanceManager.getAdapter(params.instanceId).getBlocklist();
+        return toolSuccess({ count: blocked.length, blocked });
+      } catch (err) {
+        return handleToolError("wa_list_blocked_contacts", err, params.instanceId);
+      }
+    },
+  );
+
+  server.registerTool(
+    "wa_get_contact_about",
+    {
+      description:
+        "Read a contact's About text with Baileys fetchStatus. This is a USync read; Cloud API does not support it.",
+      inputSchema: GetContactAboutSchema,
+    },
+    async (params) => {
+      try {
+        const about = await instanceManager
+          .getAdapter(params.instanceId)
+          .getContactAbout(params.jid);
+        return toolSuccess({ jid: params.jid, about });
+      } catch (err) {
+        return handleToolError("wa_get_contact_about", err, params.instanceId);
       }
     },
   );
