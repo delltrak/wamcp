@@ -1,0 +1,985 @@
+import { randomUUID } from "node:crypto";
+import { readFileSync } from "node:fs";
+import { createServer, type Socket } from "node:net";
+import { get as httpsGet } from "node:https";
+import { Readable } from "node:stream";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { WAMessage } from "@whiskeysockets/baileys";
+import { HttpsProxyAgent } from "https-proxy-agent";
+import pino from "pino";
+import { SocksProxyAgent } from "socks-proxy-agent";
+import { fetch as undiciFetch, Dispatcher1Wrapper, ProxyAgent, type Dispatcher } from "undici";
+import { sqlite } from "../src/db/client.js";
+import { buildHealthBody, renderHealthBody } from "../src/server/health.js";
+import {
+  closeBaileysProxyAgents,
+  createBaileysProxyAgents,
+  mediaDownloadOptions,
+  parseBaileysProxyUrl,
+  proxyDispatcherUrl,
+} from "../src/channels/baileys/proxy.js";
+import { logger } from "../src/utils/logger.js";
+import { redactError, redactProxyCredentials, redactProxyUrl } from "../src/utils/proxy-redact.js";
+import { toolError } from "../src/types/mcp.types.js";
+
+const SECRET = "supersecret";
+const CHAT = "5500000000000@s.whatsapp.net";
+
+const mocks = vi.hoisted(() => ({
+  makeWASocket: vi.fn(),
+  downloadMediaMessage: vi.fn(),
+  makeCacheableSignalKeyStore: vi.fn((keys: unknown) => keys),
+  useSqliteAuthState: vi.fn(async () => ({
+    state: { creds: {}, keys: {} },
+    saveCreds: vi.fn(async () => {}),
+  })),
+  getWaVersion: vi.fn(async () => ({ version: [2, 3000, 0] as [number, number, number] })),
+}));
+
+vi.mock("@whiskeysockets/baileys", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@whiskeysockets/baileys")>();
+  return {
+    ...actual,
+    default: mocks.makeWASocket,
+    makeCacheableSignalKeyStore: mocks.makeCacheableSignalKeyStore,
+    downloadMediaMessage: mocks.downloadMediaMessage,
+  };
+});
+
+vi.mock("../src/channels/baileys/baileys.auth.js", () => ({
+  useSqliteAuthState: mocks.useSqliteAuthState,
+  clearAuthState: vi.fn(),
+}));
+
+vi.mock("../src/channels/baileys/baileys.version.js", () => ({
+  getWaVersion: mocks.getWaVersion,
+}));
+
+import { BaileysAdapter } from "../src/channels/baileys/baileys.adapter.js";
+
+function proxyUrl(scheme: string, port: number): string {
+  return `${scheme}://user:${SECRET}@127.0.0.1:${port}`;
+}
+
+function listen<T>(
+  attach: (socket: Socket, done: (value: T) => void) => void,
+): Promise<{ port: number; done: Promise<T>; close: () => Promise<void> }> {
+  return new Promise((resolve, reject) => {
+    let finish: (value: T) => void = () => undefined;
+    const done = new Promise<T>((resolveDone) => {
+      finish = resolveDone;
+    });
+    const server = createServer((socket) => attach(socket, finish));
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", () => {
+      const address = server.address();
+      if (!address || typeof address === "string") {
+        reject(new Error("proxy test server is missing a port"));
+        return;
+      }
+      resolve({
+        port: address.port,
+        done,
+        close: () =>
+          new Promise<void>((resolveClose, rejectClose) => {
+            server.close((error) => (error ? rejectClose(error) : resolveClose()));
+          }),
+      });
+    });
+  });
+}
+
+function collectSocksAuth(
+  socket: Socket,
+  done: (value: { username: string; password: string }) => void,
+): void {
+  const chunks: Buffer[] = [];
+  let stage: "greeting" | "auth" | "done" = "greeting";
+  socket.on("data", (data: Buffer) => {
+    chunks.push(data);
+    let pending = Buffer.concat(chunks);
+    chunks.length = 0;
+    if (stage === "greeting") {
+      if (pending.length < 2 || pending.length < 2 + (pending[1] ?? 0)) {
+        chunks.push(pending);
+        return;
+      }
+      socket.write(Buffer.from([0x05, 0x02]));
+      pending = pending.subarray(2 + (pending[1] ?? 0));
+      stage = "auth";
+    }
+    if (stage !== "auth") return;
+    if (pending.length < 2) {
+      chunks.push(pending);
+      return;
+    }
+    const usernameLength = pending[1] ?? 0;
+    if (pending.length < 2 + usernameLength + 1) {
+      chunks.push(pending);
+      return;
+    }
+    const passwordLength = pending[2 + usernameLength] ?? 0;
+    if (pending.length < 3 + usernameLength + passwordLength) {
+      chunks.push(pending);
+      return;
+    }
+    stage = "done";
+    done({
+      username: pending.subarray(2, 2 + usernameLength).toString("utf8"),
+      password: pending
+        .subarray(3 + usernameLength, 3 + usernameLength + passwordLength)
+        .toString("utf8"),
+    });
+    socket.destroy();
+  });
+}
+
+function collectHttpProxyHeader(socket: Socket, done: (value: string) => void): void {
+  let received = "";
+  socket.on("data", (data: Buffer) => {
+    received += data.toString("utf8");
+    if (!received.includes("\r\n\r\n")) return;
+    done(received);
+    socket.destroy();
+  });
+}
+
+async function driveProxy(dispatcher: Dispatcher, done: Promise<unknown>): Promise<void> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 3_000);
+  const request = undiciFetch("http://127.0.0.1:59999/", {
+    dispatcher,
+    signal: controller.signal,
+  }).then(
+    () => undefined,
+    () => undefined,
+  );
+  try {
+    await done;
+  } finally {
+    clearTimeout(timer);
+    controller.abort();
+    await request;
+  }
+}
+
+function silentProxy(): Promise<{
+  port: number;
+  connections: () => number;
+  closed: () => number;
+  close: () => Promise<void>;
+}> {
+  return new Promise((resolve, reject) => {
+    const sockets = new Set<Socket>();
+    let closed = 0;
+    const server = createServer((socket) => {
+      sockets.add(socket);
+      socket.on("error", () => undefined);
+      socket.on("close", () => {
+        sockets.delete(socket);
+        closed += 1;
+      });
+      // A paused socket hides the peer close until the received bytes are consumed.
+      socket.resume();
+    });
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", () => {
+      const address = server.address();
+      if (!address || typeof address === "string") {
+        reject(new Error("silent proxy server is missing a port"));
+        return;
+      }
+      resolve({
+        port: address.port,
+        connections: () => sockets.size,
+        closed: () => closed,
+        close: () =>
+          new Promise<void>((resolveClose, rejectClose) => {
+            for (const socket of sockets) socket.destroy();
+            server.close((error) => (error ? rejectClose(error) : resolveClose()));
+          }),
+      });
+    });
+  });
+}
+
+async function waitForProxyConnection(connections: () => number, before: number): Promise<void> {
+  await vi.waitFor(
+    () => {
+      expect(connections()).toBeGreaterThan(before);
+    },
+    { timeout: 2_000 },
+  );
+}
+
+function expectNoSecret(value: string): void {
+  expect(value).not.toContain(SECRET);
+  expect(value).not.toContain(`user:${SECRET}`);
+}
+
+describe("Baileys proxy URL validation", () => {
+  it("treats unset, empty, and whitespace-only values as a direct connection", () => {
+    expect(parseBaileysProxyUrl(undefined)).toBeUndefined();
+    expect(parseBaileysProxyUrl("")).toBeUndefined();
+    expect(parseBaileysProxyUrl("   ")).toBeUndefined();
+  });
+
+  it.each([
+    ["socks5://127.0.0.1:1080", "socks5://127.0.0.1:1080"],
+    ["socks5h://user:p%40ss@proxy.example:1080", "socks5h://user:p%40ss@proxy.example:1080"],
+    ["http://user@proxy.example:8080", "http://user@proxy.example:8080"],
+    ["https://proxy.example:8443", "https://proxy.example:8443"],
+    ["http://proxy.example:80", "http://proxy.example:80"],
+    ["https://proxy.example:443", "https://proxy.example:443"],
+    ["http://user:p%40ss@[::1]:80/", "http://user:p%40ss@[::1]:80"],
+    ["HTTPS://Proxy.Example:443/", "https://proxy.example:443"],
+    ["http://proxy.example:00080", "http://proxy.example:80"],
+    ["socks5://[::1]:1080", "socks5://[::1]:1080"],
+    ["HTTP://Proxy.Example:8080/", "http://proxy.example:8080"],
+    ["socks5://user:@proxy.example:1080", "socks5://user:@proxy.example:1080"],
+  ])("accepts %s", (input, expected) => {
+    expect(parseBaileysProxyUrl(input)).toBe(expected);
+  });
+
+  it.each([
+    ["socks4://127.0.0.1:1080", /absolute/],
+    ["socks://127.0.0.1:1080", /absolute/],
+    ["ftp://127.0.0.1:1080", /absolute/],
+    ["file:///tmp/proxy", /absolute/],
+    ["http://proxy.example", /port/],
+    ["https://proxy.example:8443/proxy", /path/],
+    ["http://proxy.example:8080?mode=1", /query/],
+    ["http://proxy.example:8080#frag", /fragment/],
+    [" http://proxy.example:8080", /whitespace/],
+    ["http://proxy.example:8080 ", /whitespace/],
+    ["http://:secret@proxy.example:8080", /username is required/],
+    ["http://user:pass@evil@proxy.example:8080", /absolute/],
+    ["http://proxy.example:8080\\path", /backslash/],
+    ["http://proxy.example:0", /port/],
+    ["http://proxy.example:65536", /port/],
+    ["http://user:p%zz@proxy.example:8080", /percent-encoding/],
+  ])("rejects %s", (input, pattern) => {
+    expect(() => parseBaileysProxyUrl(input)).toThrow(pattern);
+  });
+
+  it("rejects control characters without echoing the value", () => {
+    expect(() => parseBaileysProxyUrl("http://proxy.example:8080/\nnext")).toThrow(
+      /control characters/,
+    );
+  });
+
+  it("does not echo credentials when validation fails", () => {
+    const input = `http://user:${SECRET}@proxy.example:8080/hidden`;
+    expect(() => parseBaileysProxyUrl(input)).toThrow(Error);
+    try {
+      parseBaileysProxyUrl(input);
+    } catch (error) {
+      const err = error as Error;
+      expectNoSecret(`${err.name} ${err.message} ${err.stack ?? ""}`);
+      expect(err.message).toMatch(/path is not allowed/);
+    }
+  });
+});
+
+describe("proxy credential redaction", () => {
+  const configured = proxyUrl("socks5", 1080);
+
+  it("keeps the proxy host and removes userinfo", () => {
+    expect(redactProxyUrl(configured)).toBe("socks5://***:***@127.0.0.1:1080");
+    expect(redactProxyUrl("not a url")).toBe("<unparseable-proxy-url>");
+    expect(redactProxyUrl("http://proxy.example:8080")).toBe("http://proxy.example:8080");
+    expectNoSecret(redactProxyUrl(configured));
+  });
+
+  it("redacts proxy URLs in text without damaging a host that contains the same word", () => {
+    const text = `via socks5://user:${SECRET}@${SECRET}.example:1080`;
+    expect(redactProxyCredentials(text)).toBe(`via socks5://***:***@${SECRET}.example:1080`);
+  });
+
+  it("redacts a bare username and password when each is at least 4 characters", () => {
+    const encoded = "socks5://alice:p%40ssw0rd@127.0.0.1:1080";
+    expect(redactProxyCredentials("alice used p@ssw0rd and p%40ssw0rd", encoded)).toBe(
+      "*** used *** and ***",
+    );
+    expect(redactProxyCredentials("abc xyz", "http://abc:xyz@127.0.0.1:8080")).toBe("abc xyz");
+    expect(redactProxyCredentials("abcd wxyz", "http://abcd:wxyz@127.0.0.1:8080")).toBe("*** ***");
+  });
+
+  it("redacts bare credentials only as whole tokens", () => {
+    const url = "http://proxy:admin@127.0.0.1:8080";
+    expect(redactProxyCredentials("administrator proxying", url)).toBe("administrator proxying");
+    expect(redactProxyCredentials("the proxy admin account", url)).toBe("the *** *** account");
+    expect(redactProxyCredentials("short ab stayed", "http://u:ab@127.0.0.1:8080")).toBe(
+      "short ab stayed",
+    );
+    expect(redactProxyCredentials("http://u:ab@127.0.0.1:8080", "http://u:ab@127.0.0.1:8080")).toBe(
+      "http://***:***@127.0.0.1:8080",
+    );
+  });
+
+  it("redacts secrets of 8 or more characters inside a longer token", () => {
+    const url = "http://username:p%40ss%3Aw0rd@127.0.0.1:8080";
+    expect(redactProxyCredentials("xp@ss:w0rd/xy", url)).toBe("x***/xy");
+    expect(redactProxyCredentials("xp%40ss%3Aw0rd/xy", url)).toBe("x***/xy");
+    expect(redactProxyCredentials("xusernamey", url)).toBe("x***y");
+    expect(redactProxyCredentials("xsecretx", "http://user:secret1@127.0.0.1:8080")).toBe(
+      "xsecretx",
+    );
+    expect(redactProxyCredentials("the secret1 value", "http://user:secret1@127.0.0.1:8080")).toBe(
+      "the *** value",
+    );
+  });
+
+  it("redacts a credential pair that leaked outside a URL", () => {
+    const text = `authentication failed for user:${SECRET}`;
+    expectNoSecret(redactProxyCredentials(text, configured));
+    expect(redactProxyCredentials("https://mmg.whatsapp.net/file", configured)).toBe(
+      "https://mmg.whatsapp.net/file",
+    );
+  });
+
+  it("redacts the trailing-slash form stored by an HTTP proxy agent", () => {
+    const line = JSON.stringify({
+      proxy: `http://user:${SECRET}@127.0.0.1:8080/`,
+    });
+    expectNoSecret(redactProxyCredentials(line));
+    expect(redactProxyCredentials(line)).toContain("127.0.0.1:8080");
+  });
+
+  it("redacts credentials in error stacks", () => {
+    const error = new Error(`connect failed via ${configured}`);
+    const redacted = redactError(error, configured);
+    expectNoSecret(`${redacted.message}\n${redacted.stack ?? ""}`);
+    expect(redacted.name).toBe("Error");
+  });
+
+  it("keeps a redacted cause", () => {
+    const cause = new Error(`connect failed via ${configured}`);
+    const error = new Error("wrapper");
+    error.cause = cause;
+    const redacted = redactError(error, configured);
+    expect(redacted.cause).toBeInstanceOf(Error);
+    expectNoSecret(
+      `${(redacted.cause as Error).message}\n${(redacted.cause as Error).stack ?? ""}`,
+    );
+    expect((redacted.cause as Error).message).toContain("127.0.0.1:1080");
+
+    const stringCause = new Error("outer");
+    stringCause.cause = `pair user:${SECRET}`;
+    const redactedString = redactError(stringCause, configured);
+    expect(typeof redactedString.cause).toBe("string");
+    expectNoSecret(String(redactedString.cause));
+  });
+
+  it("redacts credentials in the application log hook and tool errors", () => {
+    const hooks = logger[pino.symbols.hooksSym] as { streamWrite?: (line: string) => string };
+    expect(typeof hooks.streamWrite).toBe("function");
+    vi.stubEnv("WA_PROXY_URL", configured);
+    const logged = hooks.streamWrite!(
+      JSON.stringify({ msg: `dial ${configured}`, proxyUrl: configured }),
+    );
+    expectNoSecret(logged);
+    expect(logged).toContain("127.0.0.1:1080");
+
+    const response = toolError(`Instance failed: ${configured}`);
+    expectNoSecret(JSON.stringify(response));
+    vi.unstubAllEnvs();
+  });
+
+  it("redacts proxy credentials from GET /health", () => {
+    vi.stubEnv("WA_PROXY_URL", configured);
+    const body = buildHealthBody({
+      uptimeSeconds: 3,
+      instances: { total: 1, connected: 1, disconnected: 0 },
+      version: `2.0.0 via ${configured}`,
+      webhook: {
+        configured: false,
+        destinationCount: 0,
+        eventCount: 1,
+        authConfigured: false,
+        warnings: [],
+        droppedEvents: [],
+      },
+    });
+    const json = renderHealthBody(body);
+    expectNoSecret(json);
+    expectNoSecret(JSON.stringify(body));
+    expect(json).toContain("socks5://***:***@127.0.0.1:1080");
+    expect(body.version).not.toContain(SECRET);
+
+    vi.stubEnv("WA_PROXY_URL", "");
+    const direct = buildHealthBody({
+      uptimeSeconds: 3,
+      instances: { total: 0, connected: 0, disconnected: 0 },
+      version: "2.0.0",
+      webhook: {
+        configured: false,
+        destinationCount: 0,
+        eventCount: 1,
+        authConfigured: false,
+        warnings: ["not_configured"],
+        droppedEvents: [],
+      },
+    });
+    expect(renderHealthBody(direct)).toBe(JSON.stringify(direct));
+    expect(direct).toEqual({
+      status: "ok",
+      uptime: 3,
+      instances: { total: 0, connected: 0, disconnected: 0 },
+      version: "2.0.0",
+      webhook: {
+        configured: false,
+        destinationCount: 0,
+        eventCount: 1,
+        authConfigured: false,
+        warnings: ["not_configured"],
+      },
+    });
+    vi.unstubAllEnvs();
+  });
+});
+
+describe("Baileys proxy agents", () => {
+  it("maps socks5h to the socks5 dispatcher URL without rewriting credentials", () => {
+    expect(proxyDispatcherUrl(proxyUrl("socks5h", 1080))).toBe(proxyUrl("socks5", 1080));
+    expect(proxyDispatcherUrl(proxyUrl("http", 8080))).toBe(proxyUrl("http", 8080));
+  });
+
+  it("builds separate websocket and upload agents plus a download dispatcher", async () => {
+    const socks = createBaileysProxyAgents(proxyUrl("socks5", 1080));
+    const http = createBaileysProxyAgents(proxyUrl("http", 8080));
+    const secure = createBaileysProxyAgents(proxyUrl("https", 8443));
+    const remoteDns = createBaileysProxyAgents(proxyUrl("socks5h", 1080));
+    try {
+      expect(socks.agent).toBeInstanceOf(SocksProxyAgent);
+      expect(socks.fetchAgent).toBeInstanceOf(SocksProxyAgent);
+      expect(socks.agent).not.toBe(socks.fetchAgent);
+      expect(socks.dispatcher).toBeInstanceOf(ProxyAgent);
+      expect((socks.agent as SocksProxyAgent).proxyUrl.startsWith("socks5:")).toBe(true);
+      expect(http.agent).toBeInstanceOf(HttpsProxyAgent);
+      expect(http.fetchAgent).toBeInstanceOf(HttpsProxyAgent);
+      expect(secure.agent).toBeInstanceOf(HttpsProxyAgent);
+      expect(remoteDns.agent).toBeInstanceOf(SocksProxyAgent);
+      expect((remoteDns.agent as SocksProxyAgent).proxyUrl.startsWith("socks5h:")).toBe(true);
+      expect(remoteDns.dispatcher).toBeInstanceOf(ProxyAgent);
+      expectNoSecret(socks.redactedUrl);
+      expectNoSecret(remoteDns.redactedUrl);
+    } finally {
+      await closeBaileysProxyAgents(socks);
+      await closeBaileysProxyAgents(http);
+      await closeBaileysProxyAgents(secure);
+      await closeBaileysProxyAgents(remoteDns);
+    }
+  });
+
+  it("decodes percent-encoded credentials before SOCKS5 and HTTP proxy auth", async () => {
+    const username = "us@er";
+    const password = "p@ss:w0rd/x";
+    const userinfo = `${encodeURIComponent(username)}:${encodeURIComponent(password)}`;
+    const token = Buffer.from(`${username}:${password}`).toString("base64");
+
+    const socksAuth = listen((socket, done) => collectSocksAuth(socket, done));
+    const httpAuth = listen((socket, done) => collectHttpProxyHeader(socket, done));
+    const socks = await socksAuth;
+    const http = await httpAuth;
+    const socksAgents = createBaileysProxyAgents(`socks5://${userinfo}@127.0.0.1:${socks.port}`);
+    const httpAgents = createBaileysProxyAgents(`http://${userinfo}@127.0.0.1:${http.port}`);
+    try {
+      await Promise.all([
+        driveProxy(socksAgents.dispatcher, socks.done),
+        driveProxy(httpAgents.dispatcher, http.done),
+      ]);
+      expect(await socks.done).toEqual({ username, password });
+      const header = await http.done;
+      const authorization = header
+        .split("\r\n")
+        .find((line) => line.toLowerCase().startsWith("proxy-authorization:"));
+      expect(authorization?.endsWith(token)).toBe(true);
+      expect(header).not.toContain(encodeURIComponent(password));
+    } finally {
+      socksAgents.agent.destroy();
+      socksAgents.fetchAgent.destroy();
+      httpAgents.agent.destroy();
+      httpAgents.fetchAgent.destroy();
+      await Promise.all([socksAgents.dispatcher.destroy(), httpAgents.dispatcher.destroy()]);
+      await socks.close();
+      await http.close();
+    }
+  });
+
+  it.each(["websocket", "upload", "download"] as const)(
+    "sends the destination hostname to a SOCKS5h proxy for %s",
+    async (consumer) => {
+      const proxy = await listen<string>((socket, done) => {
+        let stage = 0;
+        let pending = Buffer.alloc(0);
+        socket.on("data", (chunk: Buffer) => {
+          pending = Buffer.concat([pending, chunk]);
+          if (stage === 0) {
+            const length = 2 + (pending[1] ?? 0);
+            if (pending.length < length) return;
+            pending = pending.subarray(length);
+            stage = 1;
+            socket.write(Buffer.from([5, 0]));
+          }
+          if (stage === 1 && pending.length >= 5) {
+            const length = pending[4] ?? 0;
+            if (pending.length < 7 + length) return;
+            done(pending[3] === 3 ? pending.subarray(5, 5 + length).toString() : "not a hostname");
+            // Explicit refusal ends the handshake without relying on the client's
+            // connect timeout after an abrupt TCP close.
+            socket.end(Buffer.from([5, 5, 0, 1, 127, 0, 0, 1, 0, 0]));
+          }
+        });
+      });
+      const agents = createBaileysProxyAgents(`socks5h://127.0.0.1:${proxy.port}`);
+      const target = "https://unresolvable.invalid/media";
+      const request =
+        consumer === "download"
+          ? fetch(target, mediaDownloadOptions(undefined, agents.dispatcher).options).catch(
+              () => undefined,
+            )
+          : new Promise<void>((resolve) => {
+              const request = httpsGet(target, {
+                agent: consumer === "websocket" ? agents.agent : agents.fetchAgent,
+              });
+              request.on("error", () => resolve());
+              request.setTimeout(2000, () => request.destroy());
+            });
+      try {
+        expect(await proxy.done).toBe("unresolvable.invalid");
+        await request;
+      } finally {
+        await closeBaileysProxyAgents(agents);
+        await proxy.close();
+      }
+    },
+  );
+
+  it("rejects a stuck request and closes its proxy socket", async () => {
+    const proxy = await silentProxy();
+    const agents = createBaileysProxyAgents(`http://127.0.0.1:${proxy.port}`);
+    const before = proxy.connections();
+    const closedBefore = proxy.closed();
+    const pending = undiciFetch("http://127.0.0.1:59999/", { dispatcher: agents.dispatcher }).then(
+      () => "fulfilled",
+      () => "rejected",
+    );
+    try {
+      await waitForProxyConnection(proxy.connections, before);
+      const started = performance.now();
+      await closeBaileysProxyAgents(agents);
+      expect(performance.now() - started).toBeLessThan(500);
+      expect(await pending).toBe("rejected");
+      await vi.waitFor(() => {
+        expect(proxy.closed()).toBeGreaterThan(closedBefore);
+        expect(proxy.connections()).toBe(before);
+      });
+    } finally {
+      await proxy.close();
+    }
+  });
+
+  it("downloads through Baileys native fetch using the installed Undici dispatcher", async () => {
+    const { getHttpStream } =
+      await vi.importActual<typeof import("@whiskeysockets/baileys")>("@whiskeysockets/baileys");
+    const proxy = await listen<string>((socket, done) => {
+      let received = "";
+      let connected = false;
+      socket.on("data", (chunk: Buffer) => {
+        received += chunk.toString();
+        if (!received.includes("\r\n\r\n")) return;
+        if (!connected && received.startsWith("CONNECT ")) {
+          done(received);
+          received = "";
+          connected = true;
+          socket.write("HTTP/1.1 200 Connection Established\r\n\r\n");
+        } else {
+          done(received);
+          socket.end("HTTP/1.1 200 OK\r\nContent-Length: 5\r\nConnection: close\r\n\r\nmedia");
+        }
+      });
+    });
+    const agents = createBaileysProxyAgents(`http://127.0.0.1:${proxy.port}`);
+    try {
+      const stream = await getHttpStream(
+        "http://download.invalid/media",
+        mediaDownloadOptions(undefined, agents.dispatcher).options,
+      );
+      const chunks: Buffer[] = [];
+      for await (const chunk of stream) chunks.push(Buffer.from(chunk));
+      expect(Buffer.concat(chunks).toString()).toBe("media");
+      expect(await proxy.done).toContain("GET http://download.invalid/media HTTP/1.1");
+    } finally {
+      await closeBaileysProxyAgents(agents);
+      await proxy.close();
+    }
+  });
+
+  it("returns the same download options as a direct connection when no proxy is set", () => {
+    expect(mediaDownloadOptions(undefined, undefined)).toEqual({});
+    const withTimeout = mediaDownloadOptions(1000, undefined);
+    expect(withTimeout.options?.signal).toBeInstanceOf(AbortSignal);
+    expect(withTimeout.options).not.toHaveProperty("dispatcher");
+  });
+});
+
+describe("BaileysAdapter proxy wiring", () => {
+  let socket: {
+    ev: { on: ReturnType<typeof vi.fn>; process: ReturnType<typeof vi.fn> };
+    end: ReturnType<typeof vi.fn>;
+    updateMediaMessage: ReturnType<typeof vi.fn>;
+  };
+  let activeAdapter: BaileysAdapter | undefined;
+  let activeInstanceId: string | undefined;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    socket = {
+      ev: { on: vi.fn(), process: vi.fn() },
+      end: vi.fn(),
+      updateMediaMessage: vi.fn(),
+    };
+    mocks.makeWASocket.mockReturnValue(socket);
+    mocks.downloadMediaMessage.mockResolvedValue(Readable.from([Buffer.from("media")]));
+  });
+
+  afterEach(async () => {
+    if (activeAdapter) {
+      await activeAdapter.disconnect();
+      activeAdapter = undefined;
+    }
+    vi.unstubAllEnvs();
+    if (activeInstanceId) {
+      sqlite.prepare("DELETE FROM instances WHERE id = ?").run(activeInstanceId);
+      activeInstanceId = undefined;
+    }
+  });
+
+  async function connectAdapter(instanceId = `proxy-${randomUUID()}`): Promise<BaileysAdapter> {
+    const adapter = new BaileysAdapter(instanceId);
+    activeAdapter = adapter;
+    await adapter.connect();
+    return adapter;
+  }
+
+  function socketOptions(): Record<string, unknown> {
+    return mocks.makeWASocket.mock.calls.at(-1)?.[0] as Record<string, unknown>;
+  }
+
+  it("omits agent and fetchAgent when no proxy is configured", async () => {
+    vi.stubEnv("WA_PROXY_URL", "");
+    await connectAdapter();
+    const options = socketOptions();
+    expect(options).not.toHaveProperty("agent");
+    expect(options).not.toHaveProperty("fetchAgent");
+    expect(options).not.toHaveProperty("options");
+    expect(options.version).toEqual([2, 3000, 0]);
+  });
+
+  it("closes proxy agents on every reconnect instead of accumulating them", async () => {
+    vi.stubEnv("WA_PROXY_URL", proxyUrl("socks5", 1080));
+    const adapter = await connectAdapter();
+    const destroyed = new Set<unknown>();
+    const destroyedDispatchers = new Set<unknown>();
+    const generations: Array<{ agent: unknown; fetchAgent: unknown; dispatcher: unknown }> = [];
+
+    const track = (): void => {
+      const options = socketOptions();
+      const agent = options.agent as { destroy: () => void };
+      const fetchAgent = options.fetchAgent as { destroy: () => void };
+      const held = (
+        adapter as unknown as {
+          proxyAgents?: { dispatcher: { destroy: () => Promise<void> } };
+        }
+      ).proxyAgents;
+      expect(held?.dispatcher).toBeInstanceOf(ProxyAgent);
+      const dispatcher = held!.dispatcher;
+      const originalDestroy = agent.destroy.bind(agent);
+      const originalFetchDestroy = fetchAgent.destroy.bind(fetchAgent);
+      const originalDispatcherDestroy = dispatcher.destroy.bind(dispatcher);
+      agent.destroy = () => {
+        destroyed.add(agent);
+        originalDestroy();
+      };
+      fetchAgent.destroy = () => {
+        destroyed.add(fetchAgent);
+        originalFetchDestroy();
+      };
+      dispatcher.destroy = (...args: unknown[]) => {
+        destroyedDispatchers.add(dispatcher);
+        dispatcher.destroy = originalDispatcherDestroy;
+        return originalDispatcherDestroy(...args);
+      };
+      generations.push({ agent, fetchAgent, dispatcher });
+    };
+    track();
+
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      const opened = mocks.makeWASocket.mock.calls.length;
+      const handler = socket.ev.on.mock.calls
+        .filter((call) => call[0] === "connection.update")
+        .at(-1)?.[1] as (update: {
+        connection: string;
+        lastDisconnect?: { error: Error };
+      }) => Promise<void>;
+      const closing = handler({
+        connection: "close",
+        lastDisconnect: { error: new Error("proxy reconnect fixture") },
+      });
+      await vi.waitFor(
+        () => {
+          expect(mocks.makeWASocket.mock.calls.length).toBe(opened + 1);
+        },
+        { timeout: 6_000 },
+      );
+      await closing;
+      track();
+    }
+
+    expect(mocks.makeWASocket).toHaveBeenCalledTimes(4);
+    expect(generations).toHaveLength(4);
+    for (const previous of generations.slice(0, -1)) {
+      expect(destroyed.has(previous.agent)).toBe(true);
+      expect(destroyed.has(previous.fetchAgent)).toBe(true);
+      expect(destroyedDispatchers.has(previous.dispatcher)).toBe(true);
+    }
+    const current = generations[3]!;
+    expect(destroyed.has(current.agent)).toBe(false);
+    expect(destroyed.has(current.fetchAgent)).toBe(false);
+    expect(destroyedDispatchers.has(current.dispatcher)).toBe(false);
+    expect(destroyed.size).toBe(6);
+    expect(destroyedDispatchers.size).toBe(3);
+  }, 20_000);
+
+  it("handles connection close synchronously", async () => {
+    vi.stubEnv("WA_PROXY_URL", proxyUrl("socks5", 1080));
+    await connectAdapter();
+    const handler = socket.ev.on.mock.calls.find((call) => call[0] === "connection.update")?.[1] as
+      ((update: { connection: string; lastDisconnect?: { error: Error } }) => unknown) | undefined;
+    const result = handler?.({
+      connection: "close",
+      lastDisconnect: { error: new Error("synchronous close") },
+    });
+    expect(result).toBeUndefined();
+  });
+
+  it("reconnects without waiting for a hung proxied request", async () => {
+    const proxy = await silentProxy();
+    try {
+      vi.stubEnv("WA_PROXY_URL", `http://127.0.0.1:${proxy.port}`);
+      const adapter = await connectAdapter();
+      const dispatcher = (adapter as unknown as { proxyAgents?: { dispatcher: Dispatcher } })
+        .proxyAgents?.dispatcher;
+      expect(dispatcher).toBeInstanceOf(ProxyAgent);
+      const before = proxy.connections();
+      const closedBefore = proxy.closed();
+      const pending = undiciFetch("http://127.0.0.1:59999/", { dispatcher }).then(
+        () => "fulfilled",
+        () => "rejected",
+      );
+      await waitForProxyConnection(proxy.connections, before);
+      (adapter as unknown as { sock: unknown }).sock = null;
+      const started = performance.now();
+      await adapter.connect();
+      expect(performance.now() - started).toBeLessThan(500);
+      expect(mocks.makeWASocket).toHaveBeenCalledTimes(2);
+      expect(socketOptions().options).toEqual({ dispatcher: expect.any(Dispatcher1Wrapper) });
+      expect(await pending).toBe("rejected");
+      await vi.waitFor(() => {
+        expect(proxy.closed()).toBeGreaterThan(closedBefore);
+        expect(proxy.connections()).toBe(before);
+      });
+    } finally {
+      await proxy.close();
+    }
+  });
+
+  it("releases proxy agents even when the socket throws during disconnect", async () => {
+    vi.stubEnv("WA_PROXY_URL", proxyUrl("http", 8080));
+    const adapter = await connectAdapter();
+    const agents = (
+      adapter as unknown as { proxyAgents: ReturnType<typeof createBaileysProxyAgents> }
+    ).proxyAgents;
+    const destroy = vi.spyOn(agents.dispatcher, "destroy");
+    socket.end.mockImplementationOnce(() => {
+      throw new Error("socket end failed");
+    });
+    await expect(adapter.disconnect()).rejects.toThrow("socket end failed");
+    expect(destroy).toHaveBeenCalled();
+    expect((adapter as unknown as { proxyAgents: unknown }).proxyAgents).toBeUndefined();
+  });
+
+  it("logs a warning when disconnect fails to destroy the proxy dispatcher", async () => {
+    vi.stubEnv("WA_PROXY_URL", proxyUrl("socks5", 1080));
+    const adapter = await connectAdapter();
+    const held = (
+      adapter as unknown as {
+        proxyAgents?: { dispatcher: Dispatcher & { destroy: () => Promise<void> } };
+      }
+    ).proxyAgents;
+    expect(held?.dispatcher).toBeInstanceOf(ProxyAgent);
+    const originalDestroy = held!.dispatcher.destroy.bind(held!.dispatcher);
+    held!.dispatcher.destroy = () =>
+      Promise.reject(new Error(`destroy failed via ${proxyUrl("socks5", 1080)}`));
+    const warn = vi.spyOn(logger, "warn").mockImplementation(() => undefined);
+    try {
+      await expect(adapter.disconnect()).resolves.toBeUndefined();
+      const warning = warn.mock.calls.find(
+        (call) => call[1] === "Failed to close outbound proxy agents",
+      );
+      expect(warning).toBeDefined();
+      const logged = warning?.[0] as { err?: Error; instanceId?: string };
+      expect(logged.err).toBeInstanceOf(Error);
+      expect(logged.err?.message).toContain("destroy failed");
+      expect(logged.instanceId).toBe((adapter as unknown as { instanceId: string }).instanceId);
+      expectNoSecret(`${logged.err?.message}\n${logged.err?.stack ?? ""}`);
+    } finally {
+      held!.dispatcher.destroy = originalDestroy;
+      warn.mockRestore();
+      activeAdapter = undefined;
+    }
+  });
+
+  it("passes SOCKS and HTTP agents to the socket", async () => {
+    vi.stubEnv("WA_PROXY_URL", proxyUrl("socks5", 1080));
+    await connectAdapter();
+    const socks = socketOptions();
+    expect(socks.agent).toBeInstanceOf(SocksProxyAgent);
+    expect(socks.fetchAgent).toBeInstanceOf(SocksProxyAgent);
+    expect(socks.agent).not.toBe(socks.fetchAgent);
+    expect(socks.options).toEqual({
+      dispatcher: expect.any(Dispatcher1Wrapper),
+    });
+    await activeAdapter?.disconnect();
+    activeAdapter = undefined;
+
+    vi.stubEnv("WA_PROXY_URL", proxyUrl("http", 8080));
+    await connectAdapter();
+    const http = socketOptions();
+    expect(http.agent).toBeInstanceOf(HttpsProxyAgent);
+    expect(http.fetchAgent).toBeInstanceOf(HttpsProxyAgent);
+  });
+
+  it("refuses an invalid proxy before opening a socket", () => {
+    vi.stubEnv("WA_PROXY_URL", `socks5://user:${SECRET}@127.0.0.1:1080/extra`);
+    expect(() => new BaileysAdapter("invalid-proxy")).toThrow(/path is not allowed/);
+    try {
+      new BaileysAdapter("invalid-proxy");
+    } catch (error) {
+      expectNoSecret(`${(error as Error).message} ${(error as Error).stack ?? ""}`);
+    }
+    expect(mocks.makeWASocket).not.toHaveBeenCalled();
+  });
+
+  it("downloads media through the proxy dispatcher and leaves direct downloads unchanged", async () => {
+    const instanceId = `proxy-download-${randomUUID()}`;
+    activeInstanceId = instanceId;
+    sqlite
+      .prepare(
+        "INSERT INTO instances (id, name, channel, status, created_at, updated_at) VALUES (?, ?, 'baileys', 'disconnected', 1700000000, 1700000000)",
+      )
+      .run(instanceId, "Proxy fixture");
+    const messageId = `PROXY-MEDIA-${randomUUID()}`;
+    const source = {
+      key: { id: messageId, remoteJid: CHAT, fromMe: false },
+      message: {
+        imageMessage: { url: "https://mmg.whatsapp.net/image.jpg", mimetype: "image/jpeg" },
+      },
+      messageTimestamp: 1_700_000_000,
+    } as WAMessage;
+    sqlite
+      .prepare(
+        `INSERT INTO messages (
+          id, instance_id, chat_id, sender_id, type, content, media_url, media_mimetype,
+          is_from_me, status, timestamp, raw_data
+        ) VALUES (?, ?, ?, ?, 'image', NULL, ?, 'image/jpeg', 0, 'received', 1700000000, ?)`,
+      )
+      .run(
+        messageId,
+        instanceId,
+        CHAT,
+        CHAT,
+        "https://mmg.whatsapp.net/image.jpg",
+        JSON.stringify(source),
+      );
+
+    const audioId = `PROXY-AUDIO-${randomUUID()}`;
+    const audio = {
+      key: { id: audioId, remoteJid: CHAT, fromMe: false },
+      message: {
+        audioMessage: { url: "https://mmg.whatsapp.net/audio.ogg", mimetype: "audio/ogg" },
+      },
+      messageTimestamp: 1_700_000_000,
+    } as WAMessage;
+    sqlite
+      .prepare(
+        `INSERT INTO messages (
+          id, instance_id, chat_id, sender_id, type, content, media_url, media_mimetype,
+          is_from_me, status, timestamp, raw_data
+        ) VALUES (?, ?, ?, ?, 'audio', NULL, ?, 'audio/ogg', 0, 'received', 1700000000, ?)`,
+      )
+      .run(
+        audioId,
+        instanceId,
+        CHAT,
+        CHAT,
+        "https://mmg.whatsapp.net/audio.ogg",
+        JSON.stringify(audio),
+      );
+
+    vi.stubEnv("WA_PROXY_URL", proxyUrl("socks5", 1080));
+    const adapter = await connectAdapter(instanceId);
+    Object.assign(adapter, { status: "connected" });
+    await adapter.downloadMessageMedia(messageId, CHAT);
+    await adapter.downloadMessageAudio(audioId);
+    for (const call of mocks.downloadMediaMessage.mock.calls) {
+      const proxied = call[2] as { options?: { dispatcher?: unknown; signal?: AbortSignal } };
+      expect(proxied.options?.dispatcher).toBeInstanceOf(Dispatcher1Wrapper);
+      expect(proxied.options).not.toHaveProperty("signal");
+    }
+    expect(mocks.downloadMediaMessage).toHaveBeenCalledTimes(2);
+
+    await adapter.disconnect();
+    activeAdapter = undefined;
+    mocks.downloadMediaMessage.mockClear();
+
+    vi.stubEnv("WA_PROXY_URL", "");
+    const direct = await connectAdapter(instanceId);
+    Object.assign(direct, { status: "connected" });
+    await direct.downloadMessageMedia(messageId, CHAT, undefined, 1500);
+    const directOptions = mocks.downloadMediaMessage.mock.calls[0]?.[2] as {
+      options?: { dispatcher?: unknown; signal?: AbortSignal };
+    };
+    expect(directOptions.options?.signal).toBeInstanceOf(AbortSignal);
+    expect(directOptions.options).not.toHaveProperty("dispatcher");
+  });
+});
+
+describe("proxy documentation", () => {
+  it("documents the opt-in variable without enabling it", () => {
+    const readme = readFileSync(new URL("../README.md", import.meta.url), "utf8");
+    const example = readFileSync(new URL("../.env.example", import.meta.url), "utf8");
+    expect(readme).toContain("WA_PROXY_URL");
+    expect(readme).not.toContain("WA_BAILEYS_PROXY");
+    expect(readme).toContain("from `GET /health`");
+    expect(readme).toContain("fetchAgent");
+    expect(readme).toContain("getHttpStream");
+    expect(readme).toContain("options.dispatcher");
+    expect(readme).toContain("link-preview-js");
+    expect(readme).toContain("shorter than 4 characters");
+    expect(readme).toContain("8 or more characters");
+    expect(readme).toContain("resolves DNS locally");
+    expect(readme).toContain("socks5h://");
+    expect(readme).toContain("remote DNS everywhere");
+    expect(readme).toContain("An invalid value stops startup.");
+    const changelog = readFileSync(new URL("../CHANGELOG.md", import.meta.url), "utf8");
+    expect(changelog).toContain("#146");
+    const entry = readFileSync(new URL("../src/index.ts", import.meta.url), "utf8");
+    expect(entry).toContain("parseBaileysProxyUrl(process.env.WA_PROXY_URL)");
+    expect(example).toContain("# WA_PROXY_URL=socks5://user:pass@proxy.example:1080");
+    expect(example).toContain("An invalid value stops the process at startup.");
+    expect(example).not.toContain("WA_BAILEYS_PROXY");
+    expect(example).not.toContain(SECRET);
+  });
+});

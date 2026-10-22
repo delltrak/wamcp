@@ -176,7 +176,7 @@ export function registerBusinessTools(server: McpServer, instanceManager: Instan
     "wa_create_newsletter",
     "Create a WhatsApp Channel. This server operation is blocked unless WA_GROUP_WRITES_ENABLED=true or WA_APP_STATE_WRITES_ENABLED=true.",
     CreateNewsletterSchema,
-    (adapter, params) => adapter.createNewsletter(params.name, params.description),
+    async (adapter, params) => await adapter.createNewsletter(params.name, params.description),
   );
 
   registerBusinessTool(

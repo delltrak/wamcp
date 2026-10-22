@@ -14,6 +14,7 @@ import { initAuthCreds, BufferJSON } from "@whiskeysockets/baileys";
 import { and, eq, inArray, sql } from "drizzle-orm";
 import { db } from "../../db/client.js";
 import { authKeys } from "../../db/schema.js";
+import { baileysCredsArePaired } from "./pairing-state.js";
 
 const CREDS_KEY = "creds";
 const KEY_BATCH = 100;
@@ -124,6 +125,19 @@ export async function useSqliteAuthState(
       await writeData(CREDS_KEY, JSON.stringify(creds, BufferJSON.replacer));
     },
   };
+}
+
+/**
+ * Read whether this instance already has registered Baileys credentials.
+ * Does not create, update, or delete auth keys.
+ */
+export async function isBaileysInstancePaired(instanceId: string): Promise<boolean> {
+  const row = await db
+    .select({ keyData: authKeys.keyData })
+    .from(authKeys)
+    .where(and(eq(authKeys.instanceId, instanceId), eq(authKeys.keyId, CREDS_KEY)))
+    .get();
+  return baileysCredsArePaired(row?.keyData);
 }
 
 /**

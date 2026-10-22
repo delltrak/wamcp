@@ -6,6 +6,8 @@
 // table or column must update SCHEMA_SQL in this file in the same change.
 // ============================================================
 
+import { AUTO_REPLY_COOLDOWNS_TABLE_SQL } from "./auto-reply-cooldown-sql.js";
+import { INSTANCE_WEBHOOKS_SCHEMA_SQL } from "./instance-webhooks-schema.js";
 import type { DatabaseDriverName } from "./config.js";
 import { sqliteDdlToPostgres } from "./sql-compat.js";
 
@@ -29,6 +31,15 @@ export const SCHEMA_SQL = `
       last_disconnected INTEGER,
       last_disconnect_reason TEXT,
       last_disconnect_status_code INTEGER
+    );
+
+    ${AUTO_REPLY_COOLDOWNS_TABLE_SQL};
+    ${INSTANCE_WEBHOOKS_SCHEMA_SQL};
+    CREATE TABLE IF NOT EXISTS group_history_sends (
+      instance_id TEXT NOT NULL REFERENCES instances(id) ON DELETE CASCADE,
+      message_id TEXT NOT NULL,
+      sent_at INTEGER NOT NULL,
+      PRIMARY KEY (instance_id, message_id)
     );
 
     CREATE TABLE IF NOT EXISTS auth_keys (

@@ -10,22 +10,31 @@ import { db } from "../db/client.js";
 import { contacts } from "../db/schema.js";
 import type { InstanceManager } from "./instance-manager.js";
 import { QUEUE_COMPLETED_AGE_S, QUEUE_FAILED_AGE_S } from "../constants.js";
-import type {
-  BusinessLabel,
-  ChannelEvent,
-  ChannelEventPayload,
-  EventResponseStatus,
-  InstanceAuthMethod,
-  MessageButton,
+import {
+  isWebhookRoutineEvent,
+  WEBHOOK_ROUTINE_EVENTS,
+  type BusinessLabel,
+  type ChannelEvent,
+  type ChannelEventPayload,
+  type EventResponseStatus,
+  type InstanceAuthMethod,
+  type MessageButton,
 } from "../types/channel.types.js";
 import { createChildLogger } from "../utils/logger.js";
 import { getRedisConnectionOptions } from "./redis.js";
 import { transcribeIncomingAudioIfConfigured } from "./incoming-audio-transcription.js";
 import {
+  destinationsForInstance,
+  eventWebhookAllowsHttp,
+  storedInstanceDestinations,
   loadEventWebhookConfig,
   type EventWebhookConfig,
   type EventWebhookDestination,
 } from "./event-webhook-config.js";
+import {
+  instanceWebhookStorageGeneration,
+  listInstanceWebhooks,
+} from "./instance-webhook-store.js";
 import { isNonPublicIp } from "../utils/validation.js";
 
 const logger = createChildLogger({ service: "event-webhook" });
@@ -49,6 +58,7 @@ export interface EventWebhookPayload {
   caption?: string;
   size?: number;
   isForwarded?: boolean;
+  isFromMe?: boolean;
   buttons?: MessageButton[];
   rawType?: string;
   action?: string;
@@ -70,6 +80,17 @@ export interface EventWebhookPayload {
   association?: { type: "chat" | "message"; chatId: string; messageId?: string };
   chatLabels?: BusinessLabel[];
   messageLabels?: BusinessLabel[];
+  newsletterId?: string;
+  mute?: "on" | "off";
+  labeled?: boolean;
+  labelId?: string;
+  subject?: string | null;
+  name?: string;
+  description?: string | null;
+  role?: string | null;
+  memberCount?: number;
+  serverId?: string | null;
+  views?: number | null;
 }
 
 export type InstanceLifecycleWebhookPayload =
@@ -153,14 +174,50 @@ export interface GrokBotInstanceWebhookPayload {
   expiresAt?: number;
 }
 
+type WebhookRoutineEvent = (typeof WEBHOOK_ROUTINE_EVENTS)[number];
+
+/**
+ * #141 compact body for the six routine events under the grok-bot preset.
+ * `timestamp` is the event time in Unix seconds. `event` keeps this body out of message batches.
+ */
+export interface GrokBotRoutineWebhookPayload {
+  event: WebhookRoutineEvent;
+  instanceId: string;
+  chatId: string;
+  chatName: string | null;
+  senderId: string | null;
+  senderName: string | null;
+  isGroup: boolean;
+  type: string;
+  text: string | null;
+  timestamp: number;
+  messageId: string;
+  memberCount?: number;
+  subject?: string | null;
+  description?: string | null;
+  newsletterId?: string;
+  mute?: "on" | "off";
+  name?: string;
+  role?: string | null;
+  labeled?: boolean;
+  labelId?: string;
+  serverId?: string | null;
+  views?: number | null;
+}
+
 export type EventWebhookBody =
   | EventWebhookPayload
   | InstanceLifecycleWebhookPayload
   | GrokBotWebhookPayload
   | GrokBotInstanceWebhookPayload
+  | GrokBotRoutineWebhookPayload
   | (EventWebhookPayload & { messages: EventWebhookPayload[] })
   | (GrokBotWebhookPayload & { messages: GrokBotWebhookPayload[] })
-  | { events: (NormalizedEventWebhookPayload | GrokBotInstanceWebhookPayload)[] }
+  | {
+      events: (
+        NormalizedEventWebhookPayload | GrokBotInstanceWebhookPayload | GrokBotRoutineWebhookPayload
+      )[];
+    }
   | { messages: GrokBotWebhookPayload[] };
 
 export interface EventWebhookJob {
@@ -204,10 +261,14 @@ export class EventWebhookRetryableError extends Error {
 type EnqueueWebhookJob = (job: EventWebhookJob) => Promise<unknown>;
 const MAX_BATCH_SIZE = 25;
 
+type BufferedDestinationPayload =
+  | NormalizedEventWebhookPayload
+  | GrokBotWebhookPayload
+  | GrokBotInstanceWebhookPayload
+  | GrokBotRoutineWebhookPayload;
+
 interface BufferedDestinationEvents {
-  payloads: (
-    NormalizedEventWebhookPayload | GrokBotWebhookPayload | GrokBotInstanceWebhookPayload
-  )[];
+  payloads: BufferedDestinationPayload[];
   timer: ReturnType<typeof setTimeout>;
 }
 
@@ -235,7 +296,7 @@ const resolveWebhookDns: EventWebhookDnsResolver = (hostname) =>
   lookupDns(hostname, { all: true, verbatim: true });
 
 function isGrokBotMessagePayload(
-  payload: NormalizedEventWebhookPayload | GrokBotWebhookPayload | GrokBotInstanceWebhookPayload,
+  payload: BufferedDestinationPayload,
 ): payload is GrokBotWebhookPayload {
   return !("event" in payload) && "messageId" in payload;
 }
@@ -527,7 +588,7 @@ export function normalizeEventWebhookPayload(
   return {
     event,
     instanceId,
-    chat: firstString(data.chatId, data.groupId, association?.chatId),
+    chat: firstString(data.chatId, data.groupId, data.newsletterId, association?.chatId),
     sender: firstString(
       message.sender,
       data.participant,
@@ -543,7 +604,9 @@ export function normalizeEventWebhookPayload(
         data.action,
         event === "event.response" ? undefined : data.status,
       ) ?? event,
-    text: firstString(message.content, data.newContent, data.emoji, changes.text),
+    text:
+      firstString(message.content, message.text, data.newContent, data.emoji, changes.text) ??
+      routineEventText(event, data),
     timestamp: firstNumber(message.timestamp, data.editedAt, data.timestamp),
     ...(typeof message.mediaUrl === "string" ? { mediaUrl: message.mediaUrl } : {}),
     ...(typeof message.mediaMimetype === "string" ? { mediaMimetype: message.mediaMimetype } : {}),
@@ -551,7 +614,9 @@ export function normalizeEventWebhookPayload(
     ...(fileName ? { fileName } : {}),
     ...(caption ? { caption } : {}),
     ...(size !== null ? { size } : {}),
-    ...(isRecord(data.message) ? { isForwarded: message.isForwarded === true } : {}),
+    ...(isRecord(data.message)
+      ? { isForwarded: message.isForwarded === true, isFromMe: message.isFromMe === true }
+      : {}),
     ...(buttons ? { buttons } : {}),
     ...(typeof message.rawType === "string" ? { rawType: message.rawType } : {}),
     ...(action ? { action } : {}),
@@ -596,6 +661,120 @@ export function normalizeEventWebhookPayload(
     ...(association ? { association } : {}),
     ...(chatLabels ? { chatLabels } : {}),
     ...(messageLabels ? { messageLabels } : {}),
+    ...optionalWebhookFields(event, data, message),
+  };
+}
+
+/** Short Portuguese text for the routine preset. Message content wins when it exists. */
+function routineEventText(event: ChannelEvent, data: Record<string, unknown>): string | null {
+  if (!isWebhookRoutineEvent(event)) return null;
+  const labelName = isRecord(data.label) ? firstString(data.label.name) : null;
+  switch (event) {
+    case "group.joined": {
+      const subject = firstString(data.subject);
+      return subject ? `Você entrou no grupo ${subject}` : "Você entrou em um grupo";
+    }
+    case "label.association":
+      if (data.labeled === true) {
+        return labelName ? `Etiqueta "${labelName}" aplicada` : "Etiqueta aplicada";
+      }
+      return labelName ? `Etiqueta "${labelName}" removida` : "Etiqueta removida";
+    case "newsletter.joined": {
+      const name = firstString(data.name);
+      return name ? `Você entrou no canal ${name}` : "Você entrou em um canal";
+    }
+    case "newsletter.left": {
+      const name = firstString(data.name);
+      return name ? `Você saiu do canal ${name}` : "Você saiu de um canal";
+    }
+    case "newsletter.message":
+      return "Nova mensagem no canal";
+    case "newsletter.mute":
+      if (data.mute === "on") return "Canal silenciado";
+      if (data.mute === "off") return "Canal com som";
+      return null;
+    default:
+      return null;
+  }
+}
+
+function optionalWebhookFields(
+  event: ChannelEvent,
+  data: Record<string, unknown>,
+  message: Record<string, unknown>,
+): Partial<EventWebhookPayload> {
+  const newsletterId = firstString(data.newsletterId);
+  const fields: Partial<EventWebhookPayload> = {
+    ...(newsletterId ? { newsletterId } : {}),
+  };
+  if (event === "group.joined") {
+    fields.subject = firstString(data.subject);
+    fields.description = firstString(data.description);
+    // #141: member count only. A full roster is not copied into the webhook body.
+    fields.memberCount = firstNumber(data.memberCount) ?? 0;
+  }
+  if (event === "newsletter.joined" || event === "newsletter.left") {
+    const name = firstString(data.name);
+    if (name) fields.name = name;
+    fields.description = firstString(data.description) ?? null;
+    fields.role = firstString(data.role) ?? null;
+  }
+  if (event === "newsletter.mute" && (data.mute === "on" || data.mute === "off")) {
+    fields.mute = data.mute;
+  }
+  if (event === "newsletter.message") {
+    fields.serverId = typeof message.serverId === "string" ? message.serverId : null;
+    fields.views = typeof message.views === "number" ? message.views : null;
+  }
+  if (event === "label.association") {
+    fields.labeled = data.labeled === true;
+    const labelId = firstString(data.labelId);
+    if (labelId) fields.labelId = labelId;
+  }
+  return fields;
+}
+
+/**
+ * #141: grok-bot destinations receive routine events with chatId, senderId, and messageId.
+ * timestamp is the event time in Unix seconds, or the time this body is built when the
+ * channel event has none. The standard body remains normalizeEventWebhookPayload.
+ */
+export function normalizeGrokBotRoutineWebhookPayload(
+  event: WebhookRoutineEvent,
+  instanceId: string,
+  payload: ChannelEventPayload[WebhookRoutineEvent],
+): GrokBotRoutineWebhookPayload {
+  const data = payload as unknown as Record<string, unknown>;
+  const message = isRecord(data.message) ? data.message : {};
+  const association = isRecord(data.association) ? data.association : {};
+  const chatId =
+    firstString(data.chatId, data.groupId, data.newsletterId, association.chatId) ?? "";
+  const observed = firstNumber(message.timestamp, data.timestamp);
+  const details = optionalWebhookFields(event, data, message);
+
+  return {
+    event,
+    instanceId,
+    chatId,
+    chatName: firstString(data.subject, data.name),
+    senderId: firstString(message.sender, data.author, data.participant),
+    senderName: null,
+    isGroup: chatId.toLowerCase().endsWith("@g.us"),
+    type: event,
+    text: firstString(message.text, message.content) ?? routineEventText(event, data),
+    timestamp: observed ?? Math.floor(Date.now() / 1000),
+    messageId: firstString(message.id, data.messageId, association.messageId) ?? "",
+    ...(details.memberCount !== undefined ? { memberCount: details.memberCount } : {}),
+    ...(details.subject !== undefined ? { subject: details.subject } : {}),
+    ...(details.description !== undefined ? { description: details.description } : {}),
+    ...(details.newsletterId ? { newsletterId: details.newsletterId } : {}),
+    ...(details.mute ? { mute: details.mute } : {}),
+    ...(details.name ? { name: details.name } : {}),
+    ...(details.role !== undefined ? { role: details.role } : {}),
+    ...(details.labeled !== undefined ? { labeled: details.labeled } : {}),
+    ...(details.labelId ? { labelId: details.labelId } : {}),
+    ...(details.serverId !== undefined ? { serverId: details.serverId } : {}),
+    ...(details.views !== undefined ? { views: details.views } : {}),
   };
 }
 
@@ -884,7 +1063,8 @@ export async function shouldSendEventWebhook(
   if (
     config.preset === "grok-bot" &&
     event !== "message.received" &&
-    !event.startsWith("instance.")
+    !event.startsWith("instance.") &&
+    !isWebhookRoutineEvent(event)
   ) {
     return false;
   }
@@ -909,9 +1089,10 @@ export async function shouldSendEventWebhook(
           ? data.callerId
           : "";
 
-  if (event === "message.received") {
+  if (event === "message.received" || event === "newsletter.message") {
     if (config.ignoreFromMe && message.isFromMe === true) return false;
     if (
+      event === "message.received" &&
       config.preset === "grok-bot" &&
       (chatId.toLowerCase() === "status@broadcast" ||
         chatId.toLowerCase().endsWith("@broadcast") ||
@@ -939,6 +1120,10 @@ export function registerEventWebhookHandler(
   enqueue: EnqueueWebhookJob,
   onEnqueueFailure: () => void = () =>
     logger.warn("Unable to enqueue outgoing event webhook; message processing continues"),
+  destinationsFor: (
+    instanceId: string,
+  ) => readonly EventWebhookDestination[] | Promise<readonly EventWebhookDestination[]> = () =>
+    config.destinations,
 ): EventWebhookUnsubscribe {
   if (config.messageDebounceMs > 0) {
     for (const destination of config.destinations) {
@@ -987,10 +1172,10 @@ export function registerEventWebhookHandler(
   };
 
   const flushDestination = (destination: EventWebhookDestination): Promise<void> => {
-    const buffer = buffers.get(destination.id);
+    const buffer = buffers.get(eventWebhookDestinationIdentity(destination));
     if (!buffer) return Promise.resolve();
     clearTimeout(buffer.timer);
-    buffers.delete(destination.id);
+    buffers.delete(eventWebhookDestinationIdentity(destination));
     if (buffer.payloads.length === 1) {
       return enqueuePayload(destination, buffer.payloads[0] as EventWebhookBody);
     }
@@ -999,7 +1184,9 @@ export function registerEventWebhookHandler(
         ? { messages: buffer.payloads as GrokBotWebhookPayload[] }
         : {
             events: buffer.payloads as (
-              NormalizedEventWebhookPayload | GrokBotInstanceWebhookPayload
+              | NormalizedEventWebhookPayload
+              | GrokBotInstanceWebhookPayload
+              | GrokBotRoutineWebhookPayload
             )[],
           };
     return enqueuePayload(destination, payload);
@@ -1058,7 +1245,7 @@ export function registerEventWebhookHandler(
     transcription: Promise<string> | undefined,
     withTranscription: (text: string) => BufferedMessagePayload,
   ): void => {
-    const key = JSON.stringify([destination.id, instanceId, chatId]);
+    const key = JSON.stringify([eventWebhookDestinationIdentity(destination), instanceId, chatId]);
     let batch = messageBuffers.get(key);
     if (!batch) {
       const maxDeadlineAt = Date.now() + config.messageDebounceMaxMs;
@@ -1126,14 +1313,14 @@ export function registerEventWebhookHandler(
 
   const queuePayload = (
     destination: EventWebhookDestination,
-    payload: NormalizedEventWebhookPayload | GrokBotWebhookPayload | GrokBotInstanceWebhookPayload,
+    payload: BufferedDestinationPayload,
   ): void => {
     if (destination.debounceMs === 0) {
       void enqueuePayload(destination, payload);
       return;
     }
 
-    let buffer = buffers.get(destination.id);
+    let buffer = buffers.get(eventWebhookDestinationIdentity(destination));
     if (
       buffer &&
       destination.preset === "grok-bot" &&
@@ -1147,7 +1334,7 @@ export function registerEventWebhookHandler(
         void flushDestination(destination);
       }, destination.debounceMs);
       buffer = { payloads: [], timer };
-      buffers.set(destination.id, buffer);
+      buffers.set(eventWebhookDestinationIdentity(destination), buffer);
     }
     buffer.payloads.push(payload);
     if (buffer.payloads.length >= MAX_BATCH_SIZE) void flushDestination(destination);
@@ -1160,11 +1347,10 @@ export function registerEventWebhookHandler(
     payload: ChannelEventPayload[E],
   ) => {
     try {
-      for (const destination of config.destinations) {
+      for (const destination of await destinationsFor(instanceId)) {
         if (!(await shouldSendEventWebhook(event, payload, destination))) continue;
 
-        let webhookPayload:
-          NormalizedEventWebhookPayload | GrokBotWebhookPayload | GrokBotInstanceWebhookPayload;
+        let webhookPayload: BufferedDestinationPayload;
         if (destination.preset === "grok-bot" && event === "message.received") {
           webhookPayload = normalizeGrokBotWebhookPayload(
             instanceId,
@@ -1175,6 +1361,12 @@ export function registerEventWebhookHandler(
             event as GrokBotInstanceEvent,
             instanceId,
             payload as ChannelEventPayload[ChannelEvent],
+          );
+        } else if (destination.preset === "grok-bot" && isWebhookRoutineEvent(event)) {
+          webhookPayload = normalizeGrokBotRoutineWebhookPayload(
+            event,
+            instanceId,
+            payload as ChannelEventPayload[typeof event],
           );
         } else {
           webhookPayload = normalizeEventWebhookPayload(
@@ -1582,13 +1774,102 @@ export async function processEventWebhookJob(
   timeoutMs: number,
   deliver: typeof postEventWebhook = postEventWebhook,
 ): Promise<void> {
-  const destination = destinations.get(job.destinationId);
-  if (!destination || job.destinationIdentity !== eventWebhookDestinationIdentity(destination)) {
+  const destination = destinations.get(job.destinationIdentity);
+  if (
+    !destination ||
+    job.destinationId !== destination.id ||
+    job.destinationIdentity !== eventWebhookDestinationIdentity(destination)
+  ) {
     throw new UnrecoverableError(
       "Event webhook destination does not match this service configuration",
     );
   }
   await deliver(destination, job.payload, timeoutMs);
+}
+
+const MAX_WEBHOOK_DELIVERIES = 30;
+const SAFE_DELIVERY_ID = /^[A-Za-z0-9_-]{1,64}$/;
+const SAFE_DELIVERY_EVENT = /^[a-z][a-z0-9._-]{0,63}$/i;
+const SAFE_DELIVERY_CODE = /^[A-Za-z0-9_.-]{1,80}$/;
+
+export interface WebhookDeliveryActivity {
+  at: number;
+  destinationId: string;
+  event: string;
+  outcome: "delivered" | "failed";
+  attempt: number | null;
+  httpStatus: number | null;
+  errorCode: string | null;
+}
+
+const webhookDeliveries: WebhookDeliveryActivity[] = [];
+
+function webhookActivityEvent(payload: unknown): string {
+  if (!payload || typeof payload !== "object") return "event";
+  const record = payload as Record<string, unknown>;
+  if (typeof record.event === "string" && SAFE_DELIVERY_EVENT.test(record.event))
+    return record.event;
+  if (Array.isArray(record.events)) return "batch";
+  if (Array.isArray(record.messages)) return "message.received";
+  return "event";
+}
+
+/** Remember a redacted delivery outcome for the operations dashboard. Never stores URLs or payloads. */
+export function noteWebhookJobOutcome(
+  outcome: "delivered" | "failed",
+  job:
+    | {
+        attemptsMade?: number;
+        data?: { destinationId?: string; payload?: unknown };
+      }
+    | null
+    | undefined,
+  error?: unknown,
+  destination?: EventWebhookDestination,
+): void {
+  try {
+    const rawId = job?.data?.destinationId;
+    const attemptsMade = job?.attemptsMade;
+    let attempt: number | null = null;
+    if (typeof attemptsMade === "number" && Number.isFinite(attemptsMade)) {
+      const normalized = Math.max(1, Math.floor(attemptsMade));
+      if (normalized <= 100) attempt = normalized;
+    }
+    let httpStatus: number | null = null;
+    let errorCode: string | null = null;
+    if (outcome === "failed") {
+      const data = eventWebhookFailureLogData(attemptsMade, error, destination);
+      if (typeof data.httpStatus === "number" && data.httpStatus >= 100 && data.httpStatus <= 599) {
+        httpStatus = data.httpStatus;
+      }
+      if (typeof data.errorCode === "string" && SAFE_DELIVERY_CODE.test(data.errorCode)) {
+        errorCode = data.errorCode;
+      }
+    }
+    webhookDeliveries.unshift({
+      at: Date.now(),
+      destinationId:
+        typeof rawId === "string" && SAFE_DELIVERY_ID.test(rawId) ? rawId : "destination",
+      event: webhookActivityEvent(job?.data?.payload),
+      outcome,
+      attempt,
+      httpStatus,
+      errorCode,
+    });
+    if (webhookDeliveries.length > MAX_WEBHOOK_DELIVERIES) {
+      webhookDeliveries.length = MAX_WEBHOOK_DELIVERIES;
+    }
+  } catch {
+    // Delivery history must not change webhook delivery.
+  }
+}
+
+export function getRecentWebhookDeliveries(): WebhookDeliveryActivity[] {
+  return webhookDeliveries.map((entry) => ({ ...entry }));
+}
+
+export function clearRecentWebhookDeliveries(): void {
+  webhookDeliveries.length = 0;
 }
 
 /** Dedicated BullMQ queue for outgoing normalized channel events. */
@@ -1597,15 +1878,25 @@ export class EventWebhookService {
   private queue: Queue<EventWebhookJob> | null = null;
   private worker: Worker<EventWebhookJob> | null = null;
   private removeEventHandler: EventWebhookUnsubscribe | null = null;
+  private readonly knownDestinations = new Map<string, EventWebhookDestination>();
+  private knownDestinationsGeneration = -1;
+  private boundManager: InstanceManager | null = null;
 
   constructor(config = loadEventWebhookConfig()) {
     this.config = config;
   }
 
-  start(instanceManager: InstanceManager): void {
-    if (this.queue || this.config.destinations.length === 0) return;
+  /** Reload instance webhooks and start the worker once any destination exists. */
+  async sync(): Promise<void> {
+    if (this.boundManager) await this.start(this.boundManager);
+  }
 
-    const destinations = new Map(this.config.destinations.map((item) => [item.id, item]));
+  async start(instanceManager: InstanceManager): Promise<void> {
+    this.boundManager = instanceManager;
+    await this.rebuildKnownDestinations();
+    if (!(await this.hasDeliveryWork())) return;
+    if (this.queue) return;
+
     this.queue = new Queue<EventWebhookJob>(WEBHOOK_QUEUE_NAME, {
       connection: getRedisConnectionOptions(),
       prefix: this.config.queuePrefix,
@@ -1613,29 +1904,63 @@ export class EventWebhookService {
     });
     this.worker = new Worker<EventWebhookJob>(
       WEBHOOK_QUEUE_NAME,
-      (job: Job<EventWebhookJob>) =>
-        processEventWebhookJob(job.data, destinations, this.config.timeoutMs),
+      async (job: Job<EventWebhookJob>) =>
+        processEventWebhookJob(job.data, await this.destinationMap(), this.config.timeoutMs),
       {
         connection: getRedisConnectionOptions(),
         prefix: this.config.queuePrefix,
         settings: { backoffStrategy: eventWebhookBackoffStrategy(this.config.retryDelayMs) },
       },
     );
-    this.worker.on("failed", (job, error) => {
-      const destination = job ? destinations.get(job.data.destinationId) : undefined;
+    this.worker.on("completed", (job) => {
+      noteWebhookJobOutcome("delivered", job);
+    });
+    this.worker.on("failed", async (job, error) => {
+      const destination = job
+        ? (await this.destinationMap()).get(job.data.destinationIdentity)
+        : undefined;
       logger.warn(
         eventWebhookFailureLogData(job?.attemptsMade, error, destination),
         "Outgoing event webhook delivery attempt failed",
       );
+      noteWebhookJobOutcome("failed", job, error, destination);
     });
     this.worker.on("error", () => {
       logger.error("Outgoing event webhook worker encountered an error");
     });
 
-    this.removeEventHandler = registerEventWebhookHandler(instanceManager, this.config, (job) => {
-      if (!this.queue) return Promise.reject(new Error("Event webhook queue is closed"));
-      return this.queue.add("deliver", job);
-    });
+    this.removeEventHandler = registerEventWebhookHandler(
+      instanceManager,
+      this.config,
+      (job) => {
+        if (!this.queue) return Promise.reject(new Error("Event webhook queue is closed"));
+        return this.queue.add("deliver", job);
+      },
+      undefined,
+      async (instanceId) => await destinationsForInstance(this.config, instanceId),
+    );
+  }
+
+  private async hasDeliveryWork(): Promise<boolean> {
+    return this.config.destinations.length > 0 || (await listInstanceWebhooks()).length > 0;
+  }
+
+  /** Cached map; storage changes invalidate it before the next delivery. */
+  async destinationMap(): Promise<ReadonlyMap<string, EventWebhookDestination>> {
+    if (this.knownDestinationsGeneration !== instanceWebhookStorageGeneration()) {
+      await this.rebuildKnownDestinations();
+    }
+    return this.knownDestinations;
+  }
+
+  private async rebuildKnownDestinations(): Promise<void> {
+    const generation = instanceWebhookStorageGeneration();
+    const stored = await storedInstanceDestinations(this.config, eventWebhookAllowsHttp());
+    this.knownDestinations.clear();
+    for (const destination of [...this.config.destinations, ...stored]) {
+      this.knownDestinations.set(eventWebhookDestinationIdentity(destination), destination);
+    }
+    this.knownDestinationsGeneration = generation;
   }
 
   async close(): Promise<void> {

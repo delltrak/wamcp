@@ -102,8 +102,8 @@ describe("instance lifecycle events", () => {
     const instance = await manager.createInstance("concurrent adapter");
     activeInstanceIds.add(instance.id);
     const [first, second] = await Promise.all([
-      manager.ensureAdapter(instance.id),
-      manager.ensureAdapter(instance.id),
+      (await manager.ensureAdapter(instance.id)),
+      (await manager.ensureAdapter(instance.id)),
     ]);
     expect(first).toBe(second);
     expect(manager.getAdapter(instance.id)).toBe(first);
@@ -313,14 +313,14 @@ describe("instance lifecycle webhook and status output", () => {
     const enqueue = vi.fn<(_: EventWebhookJob) => Promise<unknown>>(() => Promise.resolve());
     const unsubscribe = registerEventWebhookHandler(manager, config, enqueue);
 
-    eventHandler?.("instance.pairing_code_generated", "inst_lifecycle_test", {
+    (await eventHandler?.("instance.pairing_code_generated", "inst_lifecycle_test", {
       instanceId: "inst_lifecycle_test",
       method: "pairing_code",
       generatedAt: 1_800_000_000_000,
       expiresAt: 1_800_000_060_000,
       pairingCode: "fixture-pairing-code",
       qr: "fixture-qr-string",
-    } as never);
+    } as never));
     await vi.waitFor(() => expect(enqueue).toHaveBeenCalledOnce());
 
     const job = enqueue.mock.calls[0]?.[0];

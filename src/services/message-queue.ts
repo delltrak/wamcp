@@ -15,6 +15,8 @@ import {
 } from "../constants.js";
 import { createChildLogger } from "../utils/logger.js";
 import { QuotedMessageResolutionError } from "../utils/quoted-message.js";
+import { assertGroupHistoryWritesEnabled } from "../utils/group-history-error.js";
+import { validateGroupHistoryDelivery, type GroupHistoryDeliveryContext } from "./group-history.js";
 import { getRedisConnectionOptions } from "./redis.js";
 
 const logger = createChildLogger({ service: "message-queue" });
@@ -44,6 +46,13 @@ export type OutboundJob =
       instanceId: string;
       groupId: string;
       memberLabel: string | null;
+    }
+  | {
+      kind: "group-history";
+      validation?: GroupHistoryDeliveryContext;
+      instanceId: string;
+      to: string;
+      content: Extract<MessageContent, { type: "text" }>;
     };
 
 export interface EnqueueResult {
@@ -130,6 +139,10 @@ export class MessageQueue {
             await adapter.updateGroupMemberLabel(data.groupId, data.memberLabel);
           } else if (data.kind === "album") {
             await adapter.sendMediaAlbum(data.to, data.images);
+          } else if (data.kind === "group-history") {
+            assertGroupHistoryWritesEnabled();
+            await validateGroupHistoryDelivery(adapter, data.to, data.validation);
+            await adapter.sendMessage(data.to, data.content);
           } else {
             await adapter.sendMessage(data.to, data.content);
           }
@@ -239,6 +252,30 @@ export class MessageQueue {
     const queue = this.getOrCreateQueue(instanceId, channel);
     const jobData: OutboundJob = { kind: "group-member-label", instanceId, groupId, memberLabel };
     const job = await queue.add("group-member-label", jobData);
+    return { status: "queued", jobId: job.id ?? "" };
+  }
+
+  /** Queue one group-history digest chunk with the regular per-instance message limiter. */
+  async enqueueGroupHistoryMessage(
+    instanceId: string,
+    to: string,
+    text: string,
+    channel: ChannelType = "baileys",
+    validation?: GroupHistoryDeliveryContext,
+  ): Promise<EnqueueResult> {
+    if (channel !== "baileys") {
+      throw new Error("Group history sharing is only supported on Baileys");
+    }
+    assertGroupHistoryWritesEnabled();
+    const queue = this.getOrCreateQueue(instanceId, channel);
+    const jobData: OutboundJob = {
+      kind: "group-history",
+      validation,
+      instanceId,
+      to,
+      content: { type: "text", text },
+    };
+    const job = await queue.add("group-history", jobData, { attempts: 1 });
     return { status: "queued", jobId: job.id ?? "" };
   }
 

@@ -71,9 +71,9 @@ afterEach(() => {
 });
 
 describe("event webhook boot status", () => {
-  it("warns once when unconfigured and health shows configured false", () => {
+  it("warns once when unconfigured and health shows configured false", async () => {
     const logs = captureLogs();
-    const status = bootEventWebhook({});
+    const status = (await bootEventWebhook({}));
 
     expect(logs.warn).toHaveBeenCalledOnce();
     expect(logs.fatal).not.toHaveBeenCalled();
@@ -96,13 +96,11 @@ describe("event webhook boot status", () => {
     });
   });
 
-  it("exits when the webhook is required and no destination is configured", () => {
+  it("exits when the webhook is required and no destination is configured", async () => {
     const logs = captureLogs();
     const exit = vi.fn();
 
-    expect(() => bootEventWebhook({ WA_REQUIRE_EVENT_WEBHOOK: "true" }, exit)).toThrow(
-      /not configured/,
-    );
+    await expect(bootEventWebhook({ WA_REQUIRE_EVENT_WEBHOOK: "true" }, exit)).rejects.toThrow(/not configured/);
     expect(exit).toHaveBeenCalledOnce();
     expect(exit).toHaveBeenCalledWith(1);
     expect(logs.warn).toHaveBeenCalledOnce();
@@ -110,10 +108,10 @@ describe("event webhook boot status", () => {
     expect(JSON.stringify(logs.fatal.mock.calls)).toContain("no events will be delivered");
   });
 
-  it("logs nothing extra when the webhook is fully configured", () => {
+  it("logs nothing extra when the webhook is fully configured", async () => {
     const logs = captureLogs();
     const exit = vi.fn();
-    const status = bootEventWebhook(
+    const status = (await bootEventWebhook(
       {
         WA_EVENT_WEBHOOK_URL: "https://hooks.example.test/receive",
         WA_EVENT_WEBHOOK_EVENTS: "message.received,message.edited",
@@ -123,7 +121,7 @@ describe("event webhook boot status", () => {
         WA_REQUIRE_EVENT_WEBHOOK: "false",
       },
       exit,
-    );
+    ));
 
     expect(logs.warn).not.toHaveBeenCalled();
     expect(logs.info).not.toHaveBeenCalled();
@@ -155,10 +153,10 @@ describe("event webhook boot status", () => {
         WA_EVENT_WEBHOOK_AUTH_VALUE: FIXTURE_HEADER_VALUE,
       },
     },
-  ])("warns when auth is incomplete ($name)", ({ env }) => {
+  ])("warns when auth is incomplete ($name)", async ({ env }) => {
     const logs = captureLogs();
     const exit = vi.fn();
-    const status = bootEventWebhook(env, exit);
+    const status = (await bootEventWebhook(env, exit));
 
     expect(status.configured).toBe(true);
     expect(status.authConfigured).toBe(false);
@@ -169,13 +167,13 @@ describe("event webhook boot status", () => {
     expect(healthFor(status).webhook.warnings).toEqual(["incomplete_auth"]);
   });
 
-  it("treats a Grok Bot auth value with the default header as complete", () => {
+  it("treats a Grok Bot auth value with the default header as complete", async () => {
     const logs = captureLogs();
-    const status = bootEventWebhook({
+    const status = (await bootEventWebhook({
       WA_EVENT_WEBHOOK_URL: "https://hooks.example.test/receive",
       WA_EVENT_WEBHOOK_PRESET: "grok-bot",
       WA_EVENT_WEBHOOK_AUTH_VALUE: FIXTURE_HEADER_VALUE,
-    });
+    }));
 
     expect(logs.warn).not.toHaveBeenCalled();
     expect(status.authConfigured).toBe(true);
@@ -183,13 +181,13 @@ describe("event webhook boot status", () => {
     assertRedacted(status);
   });
 
-  it("warns when the event set is empty and exits if the webhook is required", () => {
+  it("warns when the event set is empty and exits if the webhook is required", async () => {
     const logs = captureLogs();
     const env = {
       WA_EVENT_WEBHOOK_URL: "https://hooks.example.test/receive",
       WA_EVENT_WEBHOOK_EVENTS: "",
     };
-    const status = getEventWebhookStatus(env);
+    const status = (await getEventWebhookStatus(env));
 
     expect(status).toMatchObject({
       configured: true,
@@ -200,22 +198,20 @@ describe("event webhook boot status", () => {
     expect(healthFor(status).webhook.eventCount).toBe(0);
 
     const exit = vi.fn();
-    expect(() => bootEventWebhook({ ...env, WA_REQUIRE_EVENT_WEBHOOK: "TRUE" }, exit)).toThrow(
-      /event set is empty/,
-    );
+    await expect(bootEventWebhook({ ...env, WA_REQUIRE_EVENT_WEBHOOK: "TRUE" }, exit)).rejects.toThrow(/event set is empty/);
     expect(exit).toHaveBeenCalledWith(1);
     expect(logs.warn).toHaveBeenCalledOnce();
     expect(logs.warn.mock.calls[0]?.[0]).toMatchObject({ warning: "empty_event_set" });
   });
 
-  it("reports configured events dropped by the Grok Bot preset", () => {
+  it("reports configured events dropped by the Grok Bot preset", async () => {
     const logs = captureLogs();
     const env = {
       WA_EVENT_WEBHOOK_URL: "https://hooks.example.test/receive",
       WA_EVENT_WEBHOOK_PRESET: "grok-bot",
       WA_EVENT_WEBHOOK_EVENTS: "message.received,instance.connected,connection.changed",
     };
-    const status = bootEventWebhook(env);
+    const status = (await bootEventWebhook(env));
 
     expect(status.eventCount).toBe(2);
     expect(status.warnings).toEqual(["preset_dropped_events"]);
@@ -231,27 +227,27 @@ describe("event webhook boot status", () => {
     });
   });
 
-  it("does not warn when all Grok Bot events are supported", () => {
+  it("does not warn when all Grok Bot events are supported", async () => {
     const logs = captureLogs();
-    const status = getEventWebhookStatus({
+    const status = (await getEventWebhookStatus({
       WA_EVENT_WEBHOOK_URL: "https://hooks.example.test/receive",
       WA_EVENT_WEBHOOK_PRESET: "grok-bot",
       WA_EVENT_WEBHOOK_EVENTS:
         "message.received,instance.connected,instance.disconnected,instance.qr_generated",
-    });
+    }));
 
     expect(status.eventCount).toBe(4);
     expect(status.warnings).toEqual([]);
     expect(logs.warn).not.toHaveBeenCalled();
   });
 
-  it("logs one warning per code when several problems are present", () => {
+  it("logs one warning per code when several problems are present", async () => {
     const logs = captureLogs();
-    const status = bootEventWebhook({
+    const status = (await bootEventWebhook({
       WA_EVENT_WEBHOOK_AUTH_HEADER: FIXTURE_HEADER_NAME,
       WA_EVENT_WEBHOOK_EVENTS: "",
       WA_EVENT_WEBHOOK_SECRET: FIXTURE_HMAC,
-    });
+    }));
 
     expect(status.warnings).toEqual(["not_configured", "incomplete_auth", "empty_event_set"]);
     expect(logs.warn).toHaveBeenCalledTimes(3);
@@ -264,10 +260,10 @@ describe("event webhook boot status", () => {
     assertRedacted(serializedLogs(logs));
   });
 
-  it("keeps URLs, header names, header values, and tokens out of logs and health", () => {
+  it("keeps URLs, header names, header values, and tokens out of logs and health", async () => {
     const logs = captureLogs();
     const secretUrl = `${FIXTURE_URL}?token=${FIXTURE_TOKEN}`;
-    const configured = bootEventWebhook({
+    const configured = (await bootEventWebhook({
       WA_EVENT_WEBHOOK_URL: secretUrl,
       WA_EVENT_WEBHOOK_AUTH_HEADER: FIXTURE_HEADER_NAME,
       WA_EVENT_WEBHOOK_AUTH_VALUE: FIXTURE_HEADER_VALUE,
@@ -276,23 +272,22 @@ describe("event webhook boot status", () => {
         [FIXTURE_HEADER_NAME]: FIXTURE_HEADER_VALUE,
         Authorization: `Bearer ${FIXTURE_TOKEN}`,
       }),
-    });
-    const missingValue = getEventWebhookStatus({
+    }));
+    const missingValue = (await getEventWebhookStatus({
       WA_EVENT_WEBHOOK_URL: secretUrl,
       WA_EVENT_WEBHOOK_AUTH_HEADER: FIXTURE_HEADER_NAME,
       WA_EVENT_WEBHOOK_SECRET: FIXTURE_HMAC,
       WA_EVENT_WEBHOOK_PRESET: "grok-bot",
       WA_EVENT_WEBHOOK_EVENTS: "message.received,connection.changed",
       WA_EVENT_WEBHOOK_HEADERS: JSON.stringify({ [FIXTURE_HEADER_NAME]: FIXTURE_HEADER_VALUE }),
-    });
-    const missingHeader = getEventWebhookStatus({
+    }));
+    const missingHeader = (await getEventWebhookStatus({
       WA_EVENT_WEBHOOK_URL: secretUrl,
       WA_EVENT_WEBHOOK_AUTH_VALUE: FIXTURE_HEADER_VALUE,
       WA_EVENT_WEBHOOK_SECRET: FIXTURE_HMAC,
-    });
+    }));
     const exit = vi.fn();
-    expect(() =>
-      bootEventWebhook(
+    await expect(bootEventWebhook(
         {
           WA_EVENT_WEBHOOK_URL: secretUrl,
           WA_EVENT_WEBHOOK_EVENTS: "",
@@ -300,8 +295,7 @@ describe("event webhook boot status", () => {
           WA_REQUIRE_EVENT_WEBHOOK: "true",
         },
         exit,
-      ),
-    ).toThrow(/event set is empty/);
+      )).rejects.toThrow(/event set is empty/);
 
     const health = healthFor(missingValue);
     expect(configured.configured).toBe(true);
@@ -367,7 +361,7 @@ describe("event webhook boot status", () => {
       instances: unknown[];
       webhook: ReturnType<typeof eventWebhookToolStatus>;
     };
-    const status = getEventWebhookStatus();
+    const status = (await getEventWebhookStatus());
     const expected = eventWebhookToolStatus(status);
     const health = healthFor(status).webhook;
 
@@ -409,10 +403,8 @@ describe("event webhook boot status", () => {
     assertRedacted(body.webhook);
   });
 
-  it("rejects an invalid WA_REQUIRE_EVENT_WEBHOOK value", () => {
+  it("rejects an invalid WA_REQUIRE_EVENT_WEBHOOK value", async () => {
     captureLogs();
-    expect(() => bootEventWebhook({ WA_REQUIRE_EVENT_WEBHOOK: "yes" })).toThrow(
-      "Invalid WA_REQUIRE_EVENT_WEBHOOK; expected true or false",
-    );
+    await expect(bootEventWebhook({ WA_REQUIRE_EVENT_WEBHOOK: "yes" })).rejects.toThrow("Invalid WA_REQUIRE_EVENT_WEBHOOK; expected true or false");
   });
 });

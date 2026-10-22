@@ -94,8 +94,8 @@ async function buildSqlite(options?: {
     source.exec(
       "CREATE TABLE __drizzle_migrations (id INTEGER PRIMARY KEY, hash TEXT, created_at NUMERIC)",
     );
-    source.exec("CREATE TABLE group_history_sends (id TEXT)");
-    source.exec("INSERT INTO group_history_sends (id) VALUES ('later')");
+    source.exec("CREATE TABLE future_feature_rows (id TEXT)");
+    source.exec("INSERT INTO future_feature_rows (id) VALUES ('later')");
   }
   source.close();
   return { path: sqlitePath, instanceId };
@@ -176,7 +176,7 @@ describe.skipIf(!postgresEnabled)("SQLite to Postgres migration", () => {
         sqlitePath: source.path,
         databaseUrl: target.url,
       });
-      expect(copied.skipped).toEqual(["__drizzle_migrations", "group_history_sends"]);
+      expect(copied.skipped).toEqual(["__drizzle_migrations", "future_feature_rows"]);
       expect(copied.tables.messages).toBe(1);
       const client = new Client({ connectionString: target.url });
       await client.connect();
@@ -186,7 +186,7 @@ describe.skipIf(!postgresEnabled)("SQLite to Postgres migration", () => {
           [source.instanceId],
         );
         expect(message.rows[0]?.content).toBe("ab");
-        const unknown = await client.query("SELECT to_regclass('group_history_sends') AS present");
+        const unknown = await client.query("SELECT to_regclass('future_feature_rows') AS present");
         expect(unknown.rows[0]?.present).toBeNull();
       } finally {
         await client.end();

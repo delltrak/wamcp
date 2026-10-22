@@ -21,6 +21,9 @@ import type { InstanceEntity } from "../types/db.types.js";
 import { INSTANCE_ID_PREFIX } from "../constants.js";
 import { createChildLogger } from "../utils/logger.js";
 import type { MessageQueue } from "./message-queue.js";
+import { claimGroupHistoryStub } from "./group-history-claim.js";
+import { registerGroupHistoryOnJoin } from "./group-history.js";
+import { touchInstanceWebhookStorage } from "./instance-webhook-store.js";
 
 const logger = createChildLogger({ service: "instance-manager" });
 
@@ -55,11 +58,14 @@ export class InstanceManager {
   private readonly adapters = new Map<string, ManagedInstance>();
   private readonly globalHandlers = new Set<InstanceEventHandler>();
   private messageQueue: MessageQueue | null = null;
+  private removeGroupHistoryOnJoin: (() => void) | null = null;
 
   /** Wire up the message queue for adapter resolution */
   setMessageQueue(mq: MessageQueue): void {
     this.messageQueue = mq;
     mq.setAdapterResolver((id) => this.getAdapter(id));
+    this.removeGroupHistoryOnJoin?.();
+    this.removeGroupHistoryOnJoin = registerGroupHistoryOnJoin(this, mq, claimGroupHistoryStub);
   }
 
   /** Register a global event handler that receives all instance events */
@@ -202,8 +208,9 @@ export class InstanceManager {
     // Delete auth keys
     await db.delete(authKeys).where(eq(authKeys.instanceId, id)).run();
 
-    // Delete instance (cascades to messages, contacts, groups, chats, queue_stats)
+    // Delete instance (cascades to messages, contacts, groups, chats, queue_stats, instance_webhooks)
     await db.delete(instances).where(eq(instances.id, id)).run();
+    touchInstanceWebhookStorage();
   }
 
   async restartInstance(id: string): Promise<void> {
@@ -214,6 +221,17 @@ export class InstanceManager {
   }
 
   // ---- Adapter access ----
+
+  /** Connected or created Baileys adapters. Cloud API instances are omitted. */
+  listBaileysAdapters(): Array<{ instanceId: string; adapter: BaileysAdapter }> {
+    const adapters: Array<{ instanceId: string; adapter: BaileysAdapter }> = [];
+    for (const [instanceId, managed] of this.adapters) {
+      if (managed.channel === "baileys") {
+        adapters.push({ instanceId, adapter: managed.adapter as BaileysAdapter });
+      }
+    }
+    return adapters;
+  }
 
   getAdapter(id: string): ChannelAdapter {
     const managed = this.adapters.get(id);
