@@ -365,7 +365,8 @@ Send a text message to a WhatsApp contact or group.
 
 Send a group text message with WhatsApp's native `@all` mention. Baileys sends `mentionAll`, which
 is encoded as `contextInfo.nonJidMentions = 1`, and does not put every participant in
-`mentionedJid`. That is the mention that notifies members even when they have muted the group.
+`mentionedJid`. Notification delivery depends on WhatsApp and recipient settings; generating the
+native mention payload does not verify that a notification appeared on each device.
 `@all` is appended to `text` when the text does not already contain that token.
 
 If the installed Baileys build does not emit `nonJidMentions`, the tool falls back to mentioning

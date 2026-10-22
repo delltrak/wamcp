@@ -726,7 +726,7 @@ Returns: { status: "queued", jobId }`,
     "wa_send_group_mention_all",
     {
       description:
-        "Send a group message with WhatsApp's native @all mention. Baileys sets mentionAll (contextInfo.nonJidMentions) and does not list every participant, so muted members are notified too. If that flag is unavailable, Baileys mentions each current participant instead. Cloud API does not support this helper.",
+        "Send a group message with WhatsApp's native @all mention. If native @all is unavailable, Baileys mentions each current participant instead. Notification delivery depends on WhatsApp and recipient settings. Cloud API does not support this helper.",
       inputSchema: SendGroupMentionAllSchema,
     },
     async (params) => {
