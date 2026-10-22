@@ -40,6 +40,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Baileys message operations now resolve full stored keys, including group authorship and ownership.
 - Fast Baileys reconnects now persist `status`, `last_connected`, and `last_disconnected`.
   Each socket open stores `connected` and `last_connected`. A close that ends that open stores
   `disconnected` and `last_disconnected`, including automatic reconnects after `408` and `428`.

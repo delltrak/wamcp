@@ -250,6 +250,14 @@ interface StoredAppStateMessage {
   messageTimestamp: number;
 }
 
+interface StoredMessageKeyRow {
+  id: string;
+  chatId: string;
+  senderId: string;
+  isFromMe: number;
+  rawData: string | null;
+}
+
 function getStoredMessage(rawData: string | null, id: string): WAMessage | undefined {
   if (!rawData) return undefined;
   try {
@@ -1683,6 +1691,53 @@ export class BaileysAdapter implements ChannelAdapter {
     };
   }
 
+  private resolveMessageKey(
+    remoteJid: string,
+    messageId: string,
+    fallbackFromMe = false,
+    storedRow?: StoredMessageKeyRow | null,
+  ): WAMessageKey {
+    const row =
+      storedRow === undefined
+        ? db
+            .select({
+              id: messagesTable.id,
+              chatId: messagesTable.chatId,
+              senderId: messagesTable.senderId,
+              isFromMe: messagesTable.isFromMe,
+              rawData: messagesTable.rawData,
+            })
+            .from(messagesTable)
+            .where(
+              and(
+                eq(messagesTable.instanceId, this.instanceId),
+                eq(messagesTable.chatId, remoteJid),
+                eq(messagesTable.id, messageId),
+              ),
+            )
+            .get()
+        : storedRow;
+    const storedKey = row ? getStoredMessage(row.rawData, messageId)?.key : undefined;
+    const fromMe = row ? row.isFromMe === 1 : fallbackFromMe;
+    const chatJid = row?.chatId ?? remoteJid;
+    // Groups and status broadcasts identify the original author with participant.
+    const needsParticipant = chatJid.endsWith("@g.us") || chatJid === STATUS_BROADCAST_JID;
+    const participant = needsParticipant
+      ? storedKey?.participant ||
+        (row?.senderId && row.senderId !== "me" ? row.senderId : undefined)
+      : undefined;
+
+    const key: WAMessageKey = {
+      ...storedKey,
+      remoteJid: storedKey?.remoteJid ?? row?.chatId ?? remoteJid,
+      id: messageId,
+      fromMe,
+    };
+    if (participant) key.participant = participant;
+    else delete key.participant;
+    return key;
+  }
+
   private buildStoredMessageContent(
     type: Message["type"],
     content: string | null,
@@ -2621,7 +2676,7 @@ export class BaileysAdapter implements ChannelAdapter {
     const jid = this.normalizeJid(chatId);
     await this.sendMessageWithActivity(sock, jid, {
       text: newText,
-      edit: { remoteJid: jid, id: msgId, fromMe: true },
+      edit: this.resolveMessageKey(jid, msgId, true),
     } as AnyMessageContent);
   }
 
@@ -2638,6 +2693,7 @@ export class BaileysAdapter implements ChannelAdapter {
         `Cannot revoke message '${msgId}': the stored message is not an outgoing message in chat '${jid}'.`,
       );
     }
+    const messageKey = this.resolveMessageKey(jid, msgId, true);
 
     if (jid === STATUS_BROADCAST_JID) {
       const storedJids =
@@ -2648,15 +2704,10 @@ export class BaileysAdapter implements ChannelAdapter {
           : storedJids !== undefined
             ? this.reuseStoredStatusAudience(sock, storedJids)
             : this.resolveStatusAudience(sock).statusJidList;
-      await this.sendMessageWithActivity(
-        sock,
-        jid,
-        { delete: { remoteJid: jid, id: msgId, fromMe: true } },
-        { statusJidList },
-      );
+      await this.sendMessageWithActivity(sock, jid, { delete: messageKey }, { statusJidList });
     } else {
       await this.sendMessageWithActivity(sock, jid, {
-        delete: { remoteJid: jid, id: msgId, fromMe: true },
+        delete: messageKey,
       });
     }
     this.updateMessageStatus(msgId, "revoked", jid, 1);
@@ -2670,6 +2721,7 @@ export class BaileysAdapter implements ChannelAdapter {
       .select({
         id: messagesTable.id,
         chatId: messagesTable.chatId,
+        senderId: messagesTable.senderId,
         type: messagesTable.type,
         content: messagesTable.content,
         isFromMe: messagesTable.isFromMe,
@@ -2703,15 +2755,14 @@ export class BaileysAdapter implements ChannelAdapter {
     }
 
     const hasStoredFullOriginal = sourceMessage !== undefined;
+    const sourceKey = this.resolveMessageKey(fromJid, msgId, false, row);
     if (!hasForwardableContent(sourceMessage ?? ({} as WAMessage), hasStoredFullOriginal)) {
       if (row.type === "text" && typeof row.content === "string" && row.content.trim()) {
         sourceMessage = {
           ...sourceMessage,
           key: {
             ...sourceMessage?.key,
-            remoteJid: row.chatId,
-            id: row.id,
-            fromMe: row.isFromMe === 1,
+            ...sourceKey,
           },
           message: { conversation: row.content },
           messageTimestamp: row.timestamp,
@@ -2727,9 +2778,7 @@ export class BaileysAdapter implements ChannelAdapter {
       ...sourceMessage,
       key: {
         ...sourceMessage?.key,
-        remoteJid: row.chatId,
-        id: row.id,
-        fromMe: row.isFromMe === 1,
+        ...sourceKey,
       },
     } as WAMessage;
 
@@ -2748,7 +2797,7 @@ export class BaileysAdapter implements ChannelAdapter {
     const sock = this.getSock();
     const jid = this.normalizeJid(chatId);
     await this.sendMessageWithActivity(sock, jid, {
-      react: { text: emoji, key: { remoteJid: jid, id: msgId } },
+      react: { text: emoji, key: this.resolveMessageKey(jid, msgId) },
     });
   }
 
@@ -2756,7 +2805,7 @@ export class BaileysAdapter implements ChannelAdapter {
     const sock = this.getSock();
     const jid = this.normalizeJid(chatId);
     const pinMsg = {
-      pin: { remoteJid: jid, id: msgId, fromMe: true },
+      pin: this.resolveMessageKey(jid, msgId, true),
       type: pin ? 1 : 0,
       time: pin ? 604800 : undefined,
     };
@@ -3007,6 +3056,8 @@ export class BaileysAdapter implements ChannelAdapter {
     const keys = [...new Set(messageIds)].flatMap((id) => {
       const storedMessage = db
         .select({
+          id: messagesTable.id,
+          chatId: messagesTable.chatId,
           senderId: messagesTable.senderId,
           isFromMe: messagesTable.isFromMe,
           rawData: messagesTable.rawData,
@@ -3020,16 +3071,12 @@ export class BaileysAdapter implements ChannelAdapter {
           ),
         )
         .get();
-
-      const rawKey = getStoredMessage(storedMessage?.rawData ?? null, id)?.key;
-      if (rawKey?.remoteJid) {
-        return [rawKey];
+      const messageKey = this.resolveMessageKey(jid, id, false, storedMessage ?? null);
+      if (!jid.endsWith("@g.us") || messageKey.participant || messageKey.fromMe) {
+        return [messageKey];
       }
 
-      if (!jid.endsWith("@g.us")) return [{ remoteJid: jid, id }];
-      const messageParticipant = storedMessage?.senderId || participant;
-
-      if (!messageParticipant || messageParticipant === "me") {
+      if (!participant) {
         logger.warn(
           { instanceId: this.instanceId, messageId: id },
           "Skipping group read receipt because the message participant is unavailable",
@@ -3039,10 +3086,8 @@ export class BaileysAdapter implements ChannelAdapter {
 
       return [
         {
-          remoteJid: jid,
-          id,
-          participant: messageParticipant,
-          fromMe: storedMessage?.isFromMe === 1,
+          ...messageKey,
+          participant,
         },
       ];
     });
@@ -4937,6 +4982,7 @@ export class BaileysAdapter implements ChannelAdapter {
     const oldest = db
       .select({
         id: messagesTable.id,
+        chatId: messagesTable.chatId,
         senderId: messagesTable.senderId,
         isFromMe: messagesTable.isFromMe,
         timestamp: messagesTable.timestamp,
@@ -4958,16 +5004,10 @@ export class BaileysAdapter implements ChannelAdapter {
         // The normalized database fields below are enough to construct an anchor key.
       }
     }
-    const oldestKey: WAMessageKey = {
-      ...(raw?.key ?? {}),
-      remoteJid: jid,
-      id: oldest.id,
-      fromMe: oldest.isFromMe === 1,
-    };
-    if (jid.endsWith("@g.us") && !oldestKey.fromMe && !oldestKey.participant) {
-      oldestKey.participant = oldest.senderId;
-    } else if (jid.endsWith("@g.us") && oldestKey.fromMe && !oldestKey.participant) {
-      oldestKey.participant = sock.user?.id;
+    const oldestKey = this.resolveMessageKey(jid, oldest.id, false, oldest);
+    const connectedUserId = sock.user?.id;
+    if (jid.endsWith("@g.us") && oldestKey.fromMe && !oldestKey.participant && connectedUserId) {
+      oldestKey.participant = connectedUserId;
     }
     const oldestTimestamp = messageTimestampToMilliseconds(
       raw?.messageTimestamp ?? oldest.timestamp,
