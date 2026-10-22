@@ -10,6 +10,7 @@ import {
   DEFAULT_PORT,
   MCP_ENDPOINT,
   HEALTH_ENDPOINT,
+  CHATWOOT_WEBHOOK_PATH,
   STDIO_MAX_BUFFER_BYTES,
 } from "./constants.js";
 import { InstanceManager } from "./services/instance-manager.js";
@@ -38,6 +39,8 @@ import {
 } from "./server/dashboard-config.js";
 import { createDashboardHandler } from "./server/dashboard.js";
 import { renderQrDataUrl } from "./server/dashboard-qr.js";
+import { loadChatwootConfig, type ChatwootConfig } from "./services/chatwoot-config.js";
+import { ChatwootService, handleChatwootHttpRequest } from "./services/chatwoot.js";
 import { parseBaileysProxyUrl } from "./channels/baileys/proxy.js";
 
 const CLOUD_WEBHOOK_PATH = "/cloud-webhook";
@@ -81,7 +84,7 @@ function checkApiKey(req: IncomingMessage, res: ServerResponse): boolean {
   return true;
 }
 
-async function initServices() {
+async function initServices(chatwootConfig: ChatwootConfig) {
   const autoReplyConfig = loadAutoReplyConfig();
   const presencePulseConfig = loadPresencePulseConfig();
   loadAutoMarkPlayedConfig();
@@ -91,10 +94,17 @@ async function initServices() {
   const instanceManager = new InstanceManager();
   const messageQueue = new MessageQueue();
   const eventWebhook = new EventWebhookService();
+  const chatwoot = new ChatwootService(chatwootConfig, {
+    enqueueMessage: (instanceId, to, content, channel) =>
+      messageQueue.enqueueMessage(instanceId, to, content, channel),
+    getInstanceChannel: (id) => instanceManager.getInstanceChannel(id),
+    listInstanceIds: () => instanceManager.getAllInstances().map((instance) => instance.id),
+  });
 
   // Wire them together
   instanceManager.setMessageQueue(messageQueue);
   eventWebhook.start(instanceManager);
+  chatwoot.start(instanceManager);
   const autoReply = startAutoReply(instanceManager, messageQueue, autoReplyConfig);
 
   // Load existing instances from DB and reconnect
@@ -120,12 +130,30 @@ async function initServices() {
     "Services initialized",
   );
 
-  return { instanceManager, messageQueue, eventWebhook, maintenance, presencePulse, autoReply };
+  return {
+    instanceManager,
+    messageQueue,
+    eventWebhook,
+    chatwoot,
+    maintenance,
+    presencePulse,
+    autoReply,
+  };
 }
 
-async function startHttp(dashboardConfig: DashboardConfig): Promise<void> {
-  const { instanceManager, messageQueue, eventWebhook, maintenance, presencePulse, autoReply } =
-    await initServices();
+async function startHttp(
+  dashboardConfig: DashboardConfig,
+  chatwootConfig: ChatwootConfig,
+): Promise<void> {
+  const {
+    instanceManager,
+    messageQueue,
+    eventWebhook,
+    chatwoot,
+    maintenance,
+    presencePulse,
+    autoReply,
+  } = await initServices(chatwootConfig);
   const mcpSessions = new McpHttpSessionManager(instanceManager, messageQueue, eventWebhook);
   const startTime = Date.now();
   const dashboardEvents = new DashboardEventLog();
@@ -254,6 +282,22 @@ async function startHttp(dashboardConfig: DashboardConfig): Promise<void> {
       return;
     }
 
+    // Chatwoot API-channel agent replies. Disabled installs keep the previous 404.
+    if (url.pathname === CHATWOOT_WEBHOOK_PATH) {
+      if (!chatwoot.isEnabled()) {
+        res.writeHead(404, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "Not found" }));
+        return;
+      }
+      if (req.method !== "POST") {
+        res.writeHead(405, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "Method not allowed" }));
+        return;
+      }
+      await handleChatwootHttpRequest(req, res, chatwoot);
+      return;
+    }
+
     if (await handleDashboard(req, res, url)) return;
 
     res.writeHead(404, { "Content-Type": "application/json" });
@@ -264,11 +308,14 @@ async function startHttp(dashboardConfig: DashboardConfig): Promise<void> {
   const closeServices = (): Promise<void> => {
     presencePulse.stop();
     autoReply.stop();
-    servicesClosePromise ??= Promise.all([
-      messageQueue.close(),
-      eventWebhook.close(),
-      maintenance.stop(),
-    ]).then(() => undefined);
+    // Finish in-flight Chatwoot replies before the outbound queue closes.
+    servicesClosePromise ??= chatwoot
+      .stop()
+      .then(() =>
+        Promise.all([messageQueue.close(), eventWebhook.close(), maintenance.stop()]).then(
+          () => undefined,
+        ),
+      );
     return servicesClosePromise;
   };
   httpServer.on("close", () => {
@@ -303,20 +350,30 @@ async function startHttp(dashboardConfig: DashboardConfig): Promise<void> {
   });
 }
 
-async function startStdio(): Promise<void> {
-  const { instanceManager, messageQueue, eventWebhook, maintenance, presencePulse, autoReply } =
-    await initServices();
+async function startStdio(chatwootConfig: ChatwootConfig): Promise<void> {
+  const {
+    instanceManager,
+    messageQueue,
+    eventWebhook,
+    chatwoot,
+    maintenance,
+    presencePulse,
+    autoReply,
+  } = await initServices(chatwootConfig);
   const { server: mcpServer } = createMcpServer(instanceManager, messageQueue, eventWebhook);
   const onServerClose = mcpServer.server.onclose;
   let servicesClosePromise: Promise<void> | null = null;
   const closeServices = (): Promise<void> => {
     presencePulse.stop();
     autoReply.stop();
-    servicesClosePromise ??= Promise.all([
-      messageQueue.close(),
-      eventWebhook.close(),
-      maintenance.stop(),
-    ]).then(() => undefined);
+    // Finish in-flight Chatwoot replies before the outbound queue closes.
+    servicesClosePromise ??= chatwoot
+      .stop()
+      .then(() =>
+        Promise.all([messageQueue.close(), eventWebhook.close(), maintenance.stop()]).then(
+          () => undefined,
+        ),
+      );
     return servicesClosePromise;
   };
   mcpServer.server.onclose = () => {
@@ -349,11 +406,17 @@ async function main(): Promise<void> {
   parseBaileysProxyUrl(process.env.WA_PROXY_URL);
   logger.info({ transport, version: VERSION }, "Starting WA MCP server");
   bootEventWebhook();
+  const chatwootConfig = loadChatwootConfig();
+  if (chatwootConfig.enabled && transport === "stdio") {
+    logger.warn(
+      "Chatwoot inbound sync is active on stdio; agent replies require the HTTP transport at POST /chatwoot/webhook",
+    );
+  }
 
   if (transport === "stdio") {
-    await startStdio();
+    await startStdio(chatwootConfig);
   } else {
-    await startHttp(dashboardConfig);
+    await startHttp(dashboardConfig, chatwootConfig);
   }
 }
 

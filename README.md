@@ -141,6 +141,8 @@ Add to your `claude_desktop_config.json`:
 | 🔁  | **Auto-reconnect**     | Automatic reconnection with exponential backoff.                                                          |
 | 🗃️  | **Persistent**         | SQLite storage for sessions, messages, contacts, groups.                                                  |
 | 🐳  | **Single container**   | `docker compose up` — only Redis as external dependency.                                                  |
+| 💬  | **Chatwoot**           | Optional API-inbox bridge. Inbound sync and agent replies stay off until `WA_CHATWOOT_ENABLED=true`.     |
+| 🔀  | **n8n**                | Local community node package with an event trigger and send actions. Not published to npm.               |
 | 🖥️  | **Operations dashboard** | Optional read-only `/dashboard` page for status, webhook health, and pairing an existing unpaired instance. Off by default. |
 
 ---
@@ -785,6 +787,20 @@ See [Outgoing event webhooks](docs/event-webhooks.md) for configuration details.
 
 ---
 
+## Integrations
+
+Chatwoot and n8n are optional and do not change `WA_EVENT_WEBHOOK_*` delivery.
+
+### Chatwoot
+
+`WA_CHATWOOT_ENABLED=false` by default. While it is false, WhatsApp messages are not copied to Chatwoot and `POST /chatwoot/webhook` stays a 404, so agent replies are not sent.
+
+When enabled, incoming WhatsApp messages create or reuse a contact and conversation in a Chatwoot API inbox. An agent reply on that inbox is queued to WhatsApp after the Chatwoot signature matches and `inbox_id` equals `WA_CHATWOOT_INBOX_ID`. `WA_CHATWOOT_IGNORE_JIDS` drops selected chats in both directions. Setup, the signed webhook, and the multi-instance source id are documented in [docs/chatwoot.md](docs/chatwoot.md).
+
+### n8n
+
+`integrations/n8n-nodes-wamcp` is a private community-node package with a webhook trigger and send actions (`text`, `image`, `audio`, `document`) plus instance status. Install it from that folder; it is not published to npm. The example flow in `integrations/n8n-nodes-wamcp/examples/reply-on-message.json` listens for `message.received` and sends a text reply. Point the existing event webhook at the trigger URL. See [integrations/n8n-nodes-wamcp/README.md](integrations/n8n-nodes-wamcp/README.md).
+
 ## 🏗️ Architecture
 
 ```
@@ -931,6 +947,19 @@ Copy `.env.example` to `.env` and configure:
 | `WA_EVENT_WEBHOOK_TIMEOUT_MS` | `10000` | Per-request timeout in milliseconds |
 | `WA_EVENT_WEBHOOK_RETRY_ATTEMPTS` | `5` | BullMQ delivery attempts, including the first attempt |
 | `WA_EVENT_WEBHOOK_RETRY_DELAY_MS` | `1000` | Initial exponential retry delay in milliseconds |
+| `WA_CHATWOOT_ENABLED` | `false` | Opt in to Chatwoot inbound sync and WhatsApp delivery of agent replies |
+| `WA_CHATWOOT_URL` | — | Chatwoot base URL. Required when Chatwoot is enabled |
+| `WA_CHATWOOT_TOKEN` | — | Chatwoot API access token. Required when Chatwoot is enabled |
+| `WA_CHATWOOT_ACCOUNT_ID` | — | Numeric Chatwoot account id. Required when Chatwoot is enabled |
+| `WA_CHATWOOT_INBOX_ID` | — | Numeric API-channel inbox id. Required when Chatwoot is enabled |
+| `WA_CHATWOOT_WEBHOOK_SECRET` | — | Shared secret for `POST /chatwoot/webhook`. Required when Chatwoot is enabled |
+| `WA_CHATWOOT_IGNORE_JIDS` | — | Comma-separated JID filter (exact, `@domain`, or `*` wildcard) |
+| `WA_CHATWOOT_INSTANCE_ID` | — | Limit sync and agent replies to one instance |
+| `WA_CHATWOOT_ALLOW_HTTP` | `false` | Permit an `http` Chatwoot URL. Private hosts stay blocked |
+| `WA_CHATWOOT_ALLOW_PRIVATE_URL` | `false` | Permit a private Chatwoot host. Metadata and link-local addresses stay blocked. Attachment downloads still only use that host |
+| `WA_CHATWOOT_ALLOW_LEGACY_SECRET` | `false` | Accept `?secret=` and the older Chatwoot secret headers |
+| `WA_CHATWOOT_BLOCK_GROUP_REPLIES` | `false` | Drop agent replies whose destination is a group |
+| `WA_CHATWOOT_TIMEOUT_MS` | `10000` | Chatwoot HTTP timeout, from 1 to 120000 ms |
 | `WA_REQUIRE_EVENT_WEBHOOK` | `false` | Exit on startup when no global or per-instance event webhook is configured, or the event set is empty. One instance webhook satisfies this for the process |
 | `WA_EVENT_WEBHOOK_INSTANCE_MERGE_GLOBAL` | `false` | When false, an instance webhook replaces global destinations for that instance. When true, the instance URL is added; a duplicate URL is delivered once |
 | `WA_INSTANCE_WEBHOOK_TOOLS_ENABLED` | `false` | Register `wa_set_instance_webhook`, `wa_get_instance_webhook`, and `wa_delete_instance_webhook` |
@@ -1369,6 +1398,7 @@ src/
 ├── services/
 │   ├── instance-manager.ts      # Instance lifecycle
 │   ├── message-queue.ts         # BullMQ rate limiting
+│   ├── chatwoot.ts              # Optional Chatwoot API-channel bridge
 │   ├── dedup.ts                 # Message deduplication
 │   ├── media.ts                 # Media handling
 │   └── transcription.ts         # Speech-to-text provider
@@ -1378,6 +1408,8 @@ src/
 │   └── client.ts                # SQLite connection
 ├── schemas/                     # Zod validation (10 files)
 └── types/                       # TypeScript definitions
+integrations/
+└── n8n-nodes-wamcp/             # Private n8n community nodes (not published)
 ```
 
 ---

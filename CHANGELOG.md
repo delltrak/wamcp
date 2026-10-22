@@ -30,6 +30,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Added the optional Chatwoot API inbox bridge and local n8n community nodes
+  ([#152](https://github.com/delltrak/wamcp/issues/152), [#135](https://github.com/delltrak/wamcp/pull/135)).
+  The n8n trigger requires a fresh HMAC signature and emits only verified raw JSON; credential
+  tests authenticate through MCP and close the session without calling tools. Chatwoot contact
+  conflicts retry exact normalized phones, and conversation reuse requires matching instance/chat
+  metadata. HTTP clients use the installed Undici dispatcher. Synthetic/local HTTP validation
+  only; real Chatwoot, n8n, and WhatsApp delivery remain unverified, and n8n is not published to npm.
+
 - Updated Undici from 7.30.0 to 8.12.3 and paired outgoing webhook requests with its
   HTTP client, preserving compatibility with the new dispatcher contract on Node 24
   ([#96](https://github.com/delltrak/wamcp/pull/96)).
@@ -227,6 +235,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Chatwoot maps an attachment that exceeds the remaining reply budget to `attachment_budget`
+  when the pinned download rejects it for size. Shutdown drains those replies before closing
+  the outbound queue and answers `503` to new webhooks. A full delivery-id cache returns `503`
+  instead of dropping a live id. `private: "true"` is treated as a private note.
+- Chatwoot replies accept `@lid` chats again, ignore `@newsletter` destinations with HTTP 200,
+  and return `422` when the instance does not exist before accepting the webhook. A background
+  download or queue failure posts a private note. Attachments past the 16 MB budget are reported
+  instead of dropped quietly. Shutdown waits up to 5 seconds for those replies.
+- The n8n WA MCP Trigger now requires Webhook Secret. An unsigned delivery is answered HTTP 401
+  and does not start a workflow. Existing flows that left the secret empty stop receiving events
+  until the node secret matches `WA_EVENT_WEBHOOK_SECRET`.
+- `WA_CHATWOOT_ALLOW_LEGACY_SECRET` defaults to `false`. `?secret=` and the older Chatwoot secret
+  headers are ignored unless it is `true`. `WA_CHATWOOT_BLOCK_GROUP_REPLIES` defaults to `false`
+  and drops agent replies whose destination is a group.
 - `wa_send_group_mention_all` now sends Baileys' native group `@all` (`mentionAll`, encoded as
   `contextInfo.nonJidMentions`) and does not list every participant. If that flag is unavailable,
   the tool still mentions each current participant individually

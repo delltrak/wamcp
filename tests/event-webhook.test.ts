@@ -335,6 +335,7 @@ describe("outgoing event webhook events", () => {
       text: "hello",
       timestamp: 1_700_000_000,
       isForwarded: false,
+      isFromMe: false,
     });
   });
 

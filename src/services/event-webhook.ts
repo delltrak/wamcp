@@ -58,6 +58,7 @@ export interface EventWebhookPayload {
   caption?: string;
   size?: number;
   isForwarded?: boolean;
+  isFromMe?: boolean;
   buttons?: MessageButton[];
   rawType?: string;
   action?: string;
@@ -613,7 +614,9 @@ export function normalizeEventWebhookPayload(
     ...(fileName ? { fileName } : {}),
     ...(caption ? { caption } : {}),
     ...(size !== null ? { size } : {}),
-    ...(isRecord(data.message) ? { isForwarded: message.isForwarded === true } : {}),
+    ...(isRecord(data.message)
+      ? { isForwarded: message.isForwarded === true, isFromMe: message.isFromMe === true }
+      : {}),
     ...(buttons ? { buttons } : {}),
     ...(typeof message.rawType === "string" ? { rawType: message.rawType } : {}),
     ...(action ? { action } : {}),

@@ -1,0 +1,14 @@
+{
+  "name": "n8n-nodes-wamcp",
+  "version": "0.1.0",
+  "private": true,
+  "description": "n8n community nodes for the WA MCP server. Not published to npm.",
+  "license": "MIT",
+  "keywords": ["n8n-community-node-package", "whatsapp", "wamcp"],
+  "files": ["credentials", "nodes", "lib", "examples", "README.md"],
+  "n8n": {
+    "n8nNodesApiVersion": 1,
+    "credentials": ["credentials/WamcpApi.credentials.js"],
+    "nodes": ["nodes/Wamcp/Wamcp.node.js", "nodes/WamcpTrigger/WamcpTrigger.node.js"]
+  }
+}

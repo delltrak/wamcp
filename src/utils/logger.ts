@@ -30,6 +30,13 @@ export const logger = pino(
       "*.auth_value",
       "req.headers.authorization",
       "req.headers['x-api-key']",
+      "*.chatwootToken",
+      "*.api_access_token",
+      "headers.api_access_token",
+      "req.headers['x-chatwoot-webhook-secret']",
+      "req.headers['x-wa-chatwoot-secret']",
+      "req.headers['x-hub-signature-256']",
+      "req.headers['x-chatwoot-signature']",
     ],
     hooks: {
       streamWrite(line: string): string {
