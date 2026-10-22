@@ -76,6 +76,13 @@ export const GetCommunityDetailsSchema = z
   .object({ instanceId: InstanceIdSchema, communityId: GroupIdSchema })
   .strict();
 
+export const GetCommunityHierarchySchema = z
+  .object({
+    instanceId: InstanceIdSchema,
+    communityId: GroupIdSchema.describe("Community parent ID or JID; not a subgroup or Avisos ID"),
+  })
+  .strict();
+
 export const LinkCommunityGroupSchema = z
   .object({
     instanceId: InstanceIdSchema,

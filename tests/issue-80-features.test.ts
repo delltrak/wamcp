@@ -546,7 +546,7 @@ describe("issue 80 feature completion", () => {
 
     await adapter.markRead(CONTACT_ID, ["same-message", "same-message"]);
     expect(socket.readMessages).toHaveBeenCalledWith([
-      { remoteJid: CONTACT_ID, id: "same-message" },
+      { remoteJid: CONTACT_ID, id: "same-message", fromMe: false },
     ]);
 
     const now = vi

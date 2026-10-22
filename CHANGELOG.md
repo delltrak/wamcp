@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- The Docker runtime stage now runs `ffmpeg -version` on every architecture the image build
+  targets, next to the existing `better-sqlite3` prebuild check. Published tags stay a single
+  `linux/amd64` + `linux/arm64` manifest list.
+
 ### Added
 
 - Added Baileys instance lifecycle webhooks for connection, disconnect, pairing-code, and QR events,
@@ -34,6 +40,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Baileys message operations now resolve full stored keys, including group authorship and ownership.
+- Fast Baileys reconnects now persist `status`, `last_connected`, and `last_disconnected`.
+  Each socket open stores `connected` and `last_connected`. A close that ends that open stores
+  `disconnected` and `last_disconnected`, including automatic reconnects after `408` and `428`.
+  Repeated closes that never reach open still keep the original outage start, and a close from a
+  replaced socket does not move either timestamp. `wa_get_instance_status` and `GET /health` read
+  those stored values. Lifecycle webhook emission is unchanged.
+- Baileys keeps reconnecting after a non-logout close such as `unavailableService` (503). The
+  current socket is cleared, retries continue every 30s after the exponential cap for a paired
+  session, and only one reconnect timer and one connect attempt are pending. A session that never
+  paired keeps the bounded 10-attempt retry. The stored status stays `disconnected` until a live socket exists, and
+  the health check recovers a `connecting` row older than 2 minutes with no live socket when the
+  instance connected before. When the
+  backoff cap is reached, one additional `instance.disconnected` event is sent with
+  `willReconnect: true` and `reconnectInMs: 30000`.
 - App-state writes now run through a per-instance queue with configurable spacing and a resync
   preflight that requires a retrievable current key, a positive collection version, a 128-byte hash,
   and no Baileys-reported sync, decode, missing-key, or hash-verification failure. Successful writes

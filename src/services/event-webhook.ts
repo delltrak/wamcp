@@ -1,3 +1,4 @@
+import { safeGroupChanges } from "../utils/group-event-fields.js";
 import { createHash, createHmac } from "node:crypto";
 import { lookup as lookupDns } from "node:dns/promises";
 import { isIP } from "node:net";
@@ -49,6 +50,9 @@ export interface EventWebhookPayload {
   rawType?: string;
   action?: string;
   groupId?: string;
+  groupChanges?: Record<string, unknown>;
+  participants?: string[];
+  requestMethod?: string | null;
   memberLabel?: string | null;
   eventMessageId?: string;
   responseMessageId?: string;
@@ -553,6 +557,20 @@ export function normalizeEventWebhookPayload(
           groupId: firstString(data.groupId) ?? "",
           memberLabel: memberLabel ?? null,
         }
+      : {}),
+    ...(event === "group.updated"
+      ? { groupId: firstString(data.groupId) ?? "", groupChanges: safeGroupChanges(changes) }
+      : {}),
+    ...(event === "group.participants_changed"
+      ? {
+          groupId: firstString(data.groupId) ?? "",
+          participants: Array.isArray(data.participants)
+            ? data.participants.filter((p): p is string => typeof p === "string")
+            : [],
+        }
+      : {}),
+    ...(event === "group.join_request"
+      ? { groupId: firstString(data.groupId) ?? "", requestMethod: firstString(data.method) }
       : {}),
     ...(eventMessageId ? { eventMessageId } : {}),
     ...(responseMessageId ? { responseMessageId } : {}),
