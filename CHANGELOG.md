@@ -39,6 +39,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Added an optional fixed auto-reply, off unless `WA_AUTO_REPLY_ENABLED=true`
+  ([#147](https://github.com/delltrak/wamcp/issues/147), [#158](https://github.com/delltrak/wamcp/pull/158)).
+  Recent incoming content is queued with per-contact/group cooldowns, per-instance limits,
+  PN/LID ignore aliases, and self/echo guards. The listener starts before reconnecting instances.
+  Pending enqueues block concurrent replies; cooldowns persist only after enqueue succeeds,
+  and failures release the reservation and rate slot for retry. Groups are opt-in.
+  Cooldowns track queue acceptance, not delivery; a crash between enqueue and persistence can
+  permit another reply. Multi-process coordination and real-account behavior remain unverified.
 - Added optional daily Baileys presence pulses, disabled by default, with bounded duration,
   spacing, and a configurable time zone ([#145](https://github.com/delltrak/wamcp/issues/145),
   [#156](https://github.com/delltrak/wamcp/pull/156)). Failed unavailable updates retry every

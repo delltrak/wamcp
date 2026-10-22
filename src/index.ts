@@ -22,6 +22,7 @@ import { normalizeWebhookPayload } from "./channels/cloud-api/cloud.events.js";
 import type { MetaWebhookPayload } from "./channels/cloud-api/cloud.events.js";
 import { installShutdownHandlers, SHUTDOWN_TIMEOUT_MS } from "./utils/shutdown.js";
 import { logger } from "./utils/logger.js";
+import { loadAutoReplyConfig, startAutoReply } from "./services/auto-reply.js";
 import { getAutoReadMode } from "./services/auto-read.js";
 import { loadPresencePulseConfig, PresencePulseScheduler } from "./services/presence-pulse.js";
 import { loadAutoMarkPlayedConfig } from "./services/auto-mark-played.js";
@@ -71,6 +72,7 @@ function checkApiKey(req: IncomingMessage, res: ServerResponse): boolean {
 }
 
 async function initServices() {
+  const autoReplyConfig = loadAutoReplyConfig();
   const presencePulseConfig = loadPresencePulseConfig();
   loadAutoMarkPlayedConfig();
   getAutoReadMode();
@@ -83,6 +85,7 @@ async function initServices() {
   // Wire them together
   instanceManager.setMessageQueue(messageQueue);
   eventWebhook.start(instanceManager);
+  const autoReply = startAutoReply(instanceManager, messageQueue, autoReplyConfig);
 
   // Load existing instances from DB and reconnect
   await instanceManager.init();
@@ -102,13 +105,16 @@ async function initServices() {
   });
   presencePulse.start();
 
-  logger.info({ presencePulse: presencePulseConfig.enabled }, "Services initialized");
+  logger.info(
+    { presencePulse: presencePulseConfig.enabled, autoReply: autoReplyConfig.enabled },
+    "Services initialized",
+  );
 
-  return { instanceManager, messageQueue, eventWebhook, maintenance, presencePulse };
+  return { instanceManager, messageQueue, eventWebhook, maintenance, presencePulse, autoReply };
 }
 
 async function startHttp(): Promise<void> {
-  const { instanceManager, messageQueue, eventWebhook, maintenance, presencePulse } =
+  const { instanceManager, messageQueue, eventWebhook, maintenance, presencePulse, autoReply } =
     await initServices();
   const mcpSessions = new McpHttpSessionManager(instanceManager, messageQueue, eventWebhook);
   const startTime = Date.now();
@@ -227,6 +233,7 @@ async function startHttp(): Promise<void> {
   let servicesClosePromise: Promise<void> | null = null;
   const closeServices = (): Promise<void> => {
     presencePulse.stop();
+    autoReply.stop();
     servicesClosePromise ??= Promise.all([
       messageQueue.close(),
       eventWebhook.close(),
@@ -267,13 +274,14 @@ async function startHttp(): Promise<void> {
 }
 
 async function startStdio(): Promise<void> {
-  const { instanceManager, messageQueue, eventWebhook, maintenance, presencePulse } =
+  const { instanceManager, messageQueue, eventWebhook, maintenance, presencePulse, autoReply } =
     await initServices();
   const { server: mcpServer } = createMcpServer(instanceManager, messageQueue, eventWebhook);
   const onServerClose = mcpServer.server.onclose;
   let servicesClosePromise: Promise<void> | null = null;
   const closeServices = (): Promise<void> => {
     presencePulse.stop();
+    autoReply.stop();
     servicesClosePromise ??= Promise.all([
       messageQueue.close(),
       eventWebhook.close(),

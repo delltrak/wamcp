@@ -6,6 +6,7 @@ import { existsSync, mkdirSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import Database, { type Database as DatabaseType } from "better-sqlite3";
 import { drizzle } from "drizzle-orm/better-sqlite3";
+import { AUTO_REPLY_COOLDOWNS_TABLE_SQL } from "./auto-reply-cooldown-sql.js";
 import { INSTANCE_WEBHOOKS_SCHEMA_SQL } from "./instance-webhooks-schema.js";
 import * as schema from "./schema.js";
 
@@ -241,6 +242,8 @@ function initializeDatabase(): void {
       last_sent_at    INTEGER,
       rate_limited_until INTEGER
     );
+
+    ${AUTO_REPLY_COOLDOWNS_TABLE_SQL};
   `);
   sqlite.exec(INSTANCE_WEBHOOKS_SCHEMA_SQL);
 }
