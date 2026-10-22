@@ -36,7 +36,7 @@
 
 **WA MCP** is a WhatsApp MCP server built with TypeScript that gives AI agents full access to WhatsApp through the [Model Context Protocol](https://modelcontextprotocol.io). It supports both **Baileys** (WhatsApp Web) and **Meta Cloud API** as dual-channel backends, deployable with **Docker** in a single command.
 
-Your agent connects once and auto-discovers **160 tools**, **10 resources**, and **22 real-time events** — zero configuration, zero REST wrappers, zero glue code.
+Your agent connects once and auto-discovers **163 tools**, **10 resources**, and **22 real-time events** — zero configuration, zero REST wrappers, zero glue code. Three instance webhook tools are added when `WA_INSTANCE_WEBHOOK_TOOLS_ENABLED=true`.
 
 ```
 Your AI Agent ←→ MCP Protocol ←→ WA MCP ←→ WhatsApp
@@ -82,7 +82,7 @@ from google.adk.tools.mcp_tool import McpToolset
 
 tools = McpToolset(url="http://localhost:3000/mcp")
 
-# Agent auto-discovers 160 WhatsApp tools
+# Agent auto-discovers 163 WhatsApp tools
 # wa_create_instance, wa_send_text, wa_send_image, ...
 ```
 
@@ -142,15 +142,19 @@ Add to your `claude_desktop_config.json`:
 | 🔁  | **Auto-reconnect**     | Automatic reconnection with exponential backoff.                                                          |
 | 🗃️  | **Persistent**         | SQLite storage for sessions, messages, contacts, groups.                                                  |
 | 🐳  | **Single container**   | `docker compose up` — only Redis as external dependency.                                                  |
+| 💬  | **Chatwoot**           | Optional API-inbox bridge. Inbound sync and agent replies stay off until `WA_CHATWOOT_ENABLED=true`.     |
+| 🔀  | **n8n**                | Local community node package with an event trigger and send actions. Not published to npm.               |
+| 🖥️  | **Operations dashboard** | Optional read-only `/dashboard` page for status, webhook health, and pairing an existing unpaired instance. Off by default. |
 
 ---
 
 ## 🛠️ Tools
 
-WA MCP exposes **160 tools** across 17 domains. All tools use the `wa_` prefix.
+WA MCP exposes **163 tools** across 17 domains. All tools use the `wa_` prefix.
+`WA_INSTANCE_WEBHOOK_TOOLS_ENABLED=true` adds the three #142 instance webhook tools.
 
 <details>
-<summary>📋 <strong>Instance Management</strong> (9 tools)</summary>
+<summary>📋 <strong>Instance Management</strong> (9 tools, plus 3 when enabled)</summary>
 
 | Tool                       | Description                      |
 | -------------------------- | -------------------------------- |
@@ -163,6 +167,9 @@ WA MCP exposes **160 tools** across 17 domains. All tools use the `wa_` prefix.
 | `wa_get_qr_code`           | Get QR as base64 (Baileys)       |
 | `wa_get_pairing_code`      | Get pairing code (Baileys)       |
 | `wa_set_cloud_credentials` | Set Cloud API token              |
+| `wa_set_instance_webhook`  | Set this instance's event webhook |
+| `wa_get_instance_webhook`  | Read this instance's event webhook |
+| `wa_delete_instance_webhook` | Remove this instance's event webhook |
 
 </details>
 
@@ -172,10 +179,10 @@ WA MCP exposes **160 tools** across 17 domains. All tools use the `wa_` prefix.
 | Tool                   | Description             |
 | ---------------------- | ----------------------- |
 | `wa_send_text`         | Send text message       |
-| `wa_send_image`        | Send image with caption |
-| `wa_send_video`        | Send video with caption |
+| `wa_send_image`        | Send image with caption; optional compression |
+| `wa_send_video`        | Send video with caption; optional compression |
 | `wa_send_ptv`          | Send a round video note (Baileys) |
-| `wa_send_sticker`      | Send a static or animated sticker |
+| `wa_send_sticker`      | Convert PNG, JPG, GIF, WebP, or short MP4 to a sticker |
 | `wa_send_gif`          | Send a GIF as a looping MP4 (Baileys) |
 | `wa_send_audio`        | Send audio; Baileys `ptt=true` adds waveform and duration when available |
 | `wa_send_document`     | Send file / document    |
@@ -303,18 +310,20 @@ A row stays `running` while its outbound job is waiting, sending, or retrying. O
 </details>
 
 <details>
-<summary>👥 <strong>Groups</strong> (26 tools)</summary>
+<summary>👥 <strong>Groups</strong> (28 tools)</summary>
 
 | Tool                           | Description                   |
 | ------------------------------ | ----------------------------- |
 | `wa_list_groups`               | List groups and account role  |
 | `wa_get_group_info`            | Get group metadata and members |
+| `wa_export_group_participants` | Export participants as CSV in the data directory (`contactsTruncated` when the name lookup stops at 5000 identities) |
 | `wa_group_set_member_label`     | Set this account's group member label (Baileys, gated, queued) |
 | `wa_group_remove_member_label`  | Remove this account's group member label (Baileys, gated, queued) |
 | `wa_get_group_invite_info`     | Read invite metadata before joining (Baileys) |
 | `wa_create_group`              | Create group                  |
 | `wa_create_group_from_group`   | Create a group from another group's members |
 | `wa_group_add_participants`    | Add members                   |
+| `wa_send_group_history_to_member` | Send recent local group history to a member's DM (Baileys, gated, queued) |
 | `wa_group_remove_participants` | Remove members                |
 | `wa_group_promote`             | Promote to admin              |
 | `wa_group_demote`              | Demote from admin             |
@@ -333,6 +342,14 @@ A row stays `running` while its outbound job is waiting, sending, or retrying. O
 | `wa_group_remove_picture`      | Remove group picture (Baileys) |
 | `wa_group_join_approval_mode`  | Set join-request approval mode (Baileys, gated write) |
 | `wa_group_member_add_mode`     | Set who can add members (Baileys, gated write) |
+
+Group-history digests require current PN/LID membership and skip revoked, view-once,
+disappearing, and unverifiable stored messages. The worker revalidates membership and source
+content before each chunk. `chunksSent` means queued, not delivered. Automatic join sharing
+is off by default, uses durable stub claims, and may remain partial after a crash or enqueue
+failure. Pending outbound jobs resume lazily after restart when the instance's worker starts.
+See [delivery limits](docs/API_REFERENCE.md#24-group-management-28-tools); live-account
+validation remains pending.
 
 </details>
 
@@ -387,7 +404,7 @@ this operation.
 </details>
 
 <details>
-<summary>📰 <strong>Newsletter / Channels</strong> (10 tools)</summary>
+<summary>📰 <strong>Newsletter / Channels</strong> (11 tools)</summary>
 
 | Tool                     | Description           |
 | ------------------------ | --------------------- |
@@ -401,6 +418,7 @@ this operation.
 | `wa_newsletter_update_picture` | Update Channel picture (Baileys, gated write) |
 | `wa_newsletter_react` | React to a Channel post (Baileys, gated write) |
 | `wa_newsletter_list_posts` | List Channel posts (Baileys) |
+| `wa_download_newsletter_media` | Download Channel post media, including plaintext posts without a media key (Baileys) |
 
 </details>
 
@@ -529,12 +547,18 @@ Events are pushed to connected agents via MCP notifications over SSE (Server-Sen
 | `whatsapp/chat.updated`               | Chat metadata changed                          |
 | `whatsapp/group.updated`              | Group info changed                             |
 | `whatsapp/group.participants_changed` | Member add/remove/promote/demote/modify               |
+| `whatsapp/group.joined`               | This account is listed in a group roster (#141) |
 | `whatsapp/group.member_label_changed` | A member's group label changed                 |
 | `whatsapp/group.join_request` | Membership request created, revoked or rejected |
 | `whatsapp/contact.updated`            | Contact info changed                           |
 | `whatsapp/connection.changed`         | Instance status change (includes QR as base64) |
 | `whatsapp/call.received`              | Call offer/status updates (`offer`, `reject`, `timeout`, etc.) |
 | `whatsapp/label.updated`              | Business label or association changed          |
+| `whatsapp/label.association`          | Label applied to or removed from a chat or message |
+| `whatsapp/newsletter.joined`          | This account subscribed to a newsletter        |
+| `whatsapp/newsletter.left`            | This account left a newsletter                 |
+| `whatsapp/newsletter.message`         | New newsletter post                            |
+| `whatsapp/newsletter.mute`            | Best-effort newsletter mute (#141)             |
 | `whatsapp/event.response`             | RSVP response to a WhatsApp event              |
 
 ### Outgoing event webhooks
@@ -545,8 +569,8 @@ interrupt WhatsApp message processing. The default filter is
 `message.received`, and messages sent by this instance are ignored by default.
 If no destination is configured, startup logs a warning that no events will be
 delivered. `GET /health` includes the same redacted `webhook` state. Set
-`WA_REQUIRE_EVENT_WEBHOOK=true` to refuse startup when no destination is
-configured or the event set is empty.
+`WA_REQUIRE_EVENT_WEBHOOK=true` to refuse startup when no global destination
+and no per-instance webhook is configured, or when the event set is empty.
 
 Webhook targets must use HTTPS and a public host. Set
 `WA_EVENT_WEBHOOK_ALLOW_HTTP=true` to permit the HTTP scheme; local and
@@ -639,6 +663,31 @@ For more routines, set `WA_EVENT_WEBHOOKS` to a JSON array instead of
 Destination-specific `events` override the shared `WA_EVENT_WEBHOOK_EVENTS`.
 See [Outgoing event webhooks](docs/event-webhooks.md) for a complete example.
 
+`wa_set_instance_webhook`, `wa_get_instance_webhook`, and
+`wa_delete_instance_webhook` store a webhook for one instance. They are
+registered only when `WA_INSTANCE_WEBHOOK_TOOLS_ENABLED=true` (#142); the
+default is false. `WA_INSTANCE_WEBHOOK_ALLOWED_HOSTS` optionally limits the
+saved host. The stored fields are the URL, an optional auth header, and an
+optional event list. Omitting the event list inherits `WA_EVENT_WEBHOOK_EVENTS`.
+The instance webhook also uses `WA_EVENT_WEBHOOK_PRESET` and
+`WA_EVENT_WEBHOOK_IGNORE_FROM_ME`. `auth_value` is stored in plaintext and is
+never returned by those tools, written to logs, or included in `GET /health`.
+The tools return the endpoint origin, not the full URL. Instance delivery uses
+`WA_EVENT_WEBHOOK_SECRET` when that global HMAC secret is set. If global
+destinations use different HMAC secrets and the instance URL matches none of
+them, that delivery is unsigned and one warning is logged. A stored row that
+fails validation makes `wa_get_instance_webhook` return `configured: false` and
+`invalid: true`. A webhook stored
+for any one instance satisfies `WA_REQUIRE_EVENT_WEBHOOK` for the process.
+`WA_EVENT_WEBHOOK_INSTANCE_MERGE_GLOBAL` defaults to false: that instance uses
+only its own webhook, and saving it logs a warning when a global destination
+exists. Set it to true to also deliver to the global destinations. When the
+instance URL matches a global URL, after lowercasing the host and dropping a
+trailing slash, the event is sent once, using the instance auth header, the
+instance event list, and the global HMAC secret. An instance without a stored
+webhook keeps today's global destinations. `GET /health` caches the webhook
+database read until that storage changes.
+
 The standard JSON body includes `event`, `instanceId`, `chat`, `sender`,
 `type`, `text`, and `timestamp`. When `WA_EVENT_WEBHOOK_SECRET` is set, requests
 also include `X-WA-Event-Timestamp` and `X-WA-Event-Signature`;
@@ -650,7 +699,42 @@ include `callId`, `callStatus`, `isVideo`, and `isGroup`.
 
 Baileys message events may also include `chatLabels` and `messageLabels`.
 Opt into the `label.updated` event to receive label edits and chat/message label
-association changes.
+association changes. `label.association` is a separate opt-in event for apply and
+remove changes; `label.updated` still fires for those changes.
+
+Opt into `group.joined` when a roster lists this account (#141). Opt into
+`newsletter.joined`, `newsletter.left`, `newsletter.message`, and `newsletter.mute`
+for newsletter membership, posts, and mute changes. Opt into `label.association`
+for a label applied to or removed from a chat or message. None of these names are
+in the default event list, so they are not delivered until `WA_EVENT_WEBHOOK_EVENTS`
+includes them. `newsletter.message` also honors `WA_EVENT_WEBHOOK_IGNORE_FROM_ME`.
+The Grok Bot preset delivers these six events when they are listed, using
+`chatId`, `senderId`, `messageId`, and a numeric `timestamp`. Every other
+non-message, non-lifecycle event stays dropped.
+
+The standard body keeps `event`, `instanceId`, `chat`, `sender`, `type`, `text`,
+and `timestamp` (`timestamp` may be null). `text` is a short Portuguese line the routine can show:
+
+| Event | `text` |
+| --- | --- |
+| `group.joined` | `Você entrou no grupo {subject}`, or `Você entrou em um grupo` |
+| `label.association` | `Etiqueta "{name}" aplicada` or `Etiqueta "{name}" removida` |
+| `newsletter.joined` | `Você entrou no canal {name}`, or `Você entrou em um canal` |
+| `newsletter.left` | `Você saiu do canal {name}`, or `Você saiu de um canal` |
+| `newsletter.message` | The post text, or `Nova mensagem no canal` when it is empty |
+| `newsletter.mute` | `Canal silenciado` or `Canal com som` |
+
+`group.joined` also includes `subject`, `description`, and `memberCount`. It does
+not include the member roster. `wa_create_group` does not emit it, and
+`wa_join_group` waits for a roster that includes this account.
+`label.association` includes `labelId`, `labeled`, `label`, and `association`.
+Newsletter events include `newsletterId`. `newsletter.joined` and `newsletter.left`
+include `description` and `role`. `newsletter.mute` includes `mute` (`on` or `off`).
+`newsletter.message` includes `serverId` and `views` (`views` is null on Baileys
+7.0.0-rc14). On that Baileys release, `newsletter.mute` and a follow started on the
+phone are best-effort: the settings stanza only carries name and description, so
+mute is forwarded only when the object contains `mute`, `mute_state`, or `muted`.
+See the event webhook doc for both body shapes.
 
 Opt into `event.response` to receive event RSVPs with `eventMessageId`,
 `participant`, `status`, and `timestamp`. The status is included after Baileys
@@ -728,6 +812,20 @@ See [Outgoing event webhooks](docs/event-webhooks.md) for configuration details.
 
 ---
 
+## Integrations
+
+Chatwoot and n8n are optional and do not change `WA_EVENT_WEBHOOK_*` delivery.
+
+### Chatwoot
+
+`WA_CHATWOOT_ENABLED=false` by default. While it is false, WhatsApp messages are not copied to Chatwoot and `POST /chatwoot/webhook` stays a 404, so agent replies are not sent.
+
+When enabled, incoming WhatsApp messages create or reuse a contact and conversation in a Chatwoot API inbox. An agent reply on that inbox is queued to WhatsApp after the Chatwoot signature matches and `inbox_id` equals `WA_CHATWOOT_INBOX_ID`. `WA_CHATWOOT_IGNORE_JIDS` drops selected chats in both directions. Setup, the signed webhook, and the multi-instance source id are documented in [docs/chatwoot.md](docs/chatwoot.md).
+
+### n8n
+
+`integrations/n8n-nodes-wamcp` is a private community-node package with a webhook trigger and send actions (`text`, `image`, `audio`, `document`) plus instance status. Install it from that folder; it is not published to npm. The example flow in `integrations/n8n-nodes-wamcp/examples/reply-on-message.json` listens for `message.received` and sends a text reply. Point the existing event webhook at the trigger URL. See [integrations/n8n-nodes-wamcp/README.md](integrations/n8n-nodes-wamcp/README.md).
+
 ## 🏗️ Architecture
 
 ```
@@ -783,6 +881,8 @@ Copy `.env.example` to `.env` and configure:
 | --------------------------- | ------------------------ | ---------------------------------------- |
 | `WA_TRANSPORT`              | `http`                   | `http` (Streamable HTTP) or `stdio`      |
 | `WA_MCP_API_KEY`            | —                        | Bearer token auth. Unset = no auth (dev) |
+| `WA_DASHBOARD_ENABLED`      | `false`                  | Serve `GET /dashboard`. Requires `WA_TRANSPORT=http` and `WA_DASHBOARD_USERS` |
+| `WA_DASHBOARD_USERS`        | —                        | Required when the dashboard is enabled. Comma-separated `user:password` entries |
 | `WA_MCP_PORT`               | `3000`                   | HTTP server port                         |
 | `WA_REDIS_URL`              | `redis://localhost:6379` | Redis for BullMQ queues                  |
 | `WA_LOG_LEVEL`              | `info`                   | `debug` \| `info` \| `warn` \| `error`   |
@@ -793,6 +893,7 @@ Copy `.env.example` to `.env` and configure:
 | `WA_SCHEDULER_MISSED_POLICY` | `skip`                  | `skip` drops occurrences missed during downtime; `send` queues that occurrence once on resume |
 | `WA_SCHEDULER_MAX_ACTIVE`   | `100`                    | Maximum active, paused, and running schedules per instance |
 | `WA_BAILEYS_RATE_LIMIT`     | `20`                     | Messages/min per Baileys instance        |
+| `WA_PROXY_URL` | — | Optional Baileys outbound proxy URL (`socks5`, `socks5h`, `http`, or `https`) with an explicit port. Unset or empty keeps a direct connection |
 | `WA_CLOUD_RATE_LIMIT`       | `80`                     | Messages/min per Cloud API instance      |
 | `WA_MESSAGE_RETENTION_DAYS` | `30`                     | Auto-delete old messages                 |
 | `WA_AUTO_RECONNECT`         | `true`                   | Auto-reconnect on disconnect             |
@@ -802,19 +903,39 @@ Copy `.env.example` to `.env` and configure:
 | `WA_BAILEYS_EVENT_BUFFER_STALL_MS` | `60000` | Time a Baileys event buffer may remain active after connect before the watchdog flushes it |
 | `WA_APP_STATE_WRITES_ENABLED` | `false`                 | Enable protected Baileys app-state patches and remaining gated account/server changes |
 | `WA_GROUP_WRITES_ENABLED` | `false` | Enable Baileys group, community, and Channel server writes without enabling app-state patches |
+| `WA_GROUP_HISTORY_ON_JOIN` | `false` | Automatically DM a new member a local group-history digest after a `GROUP_PARTICIPANT_ADD` stub authored by this account; requires `WA_GROUP_WRITES_ENABLED=true`. Only `true` or `false` |
+| `WA_GROUP_HISTORY_ON_JOIN_COUNT` | `50` | Integer count of local messages in automatic digests, clamped to `25`–`100`. Any other value fails startup |
 | `WA_APP_STATE_MIN_INTERVAL_MS` | `1500` | Minimum delay between app-state write attempts per instance; accepts `0` to disable spacing |
 | `WA_PRESENCE_MODE` | `on_activity` | Baileys presence policy: `on_activity` marks online around sends and typing/recording indicators; `always` preserves the legacy behavior |
 | `WA_PRESENCE_IDLE_SECONDS` | `30` | Seconds after activity before Baileys presence returns to unavailable; must be a positive integer no greater than `2147483` |
 | `WA_MARK_ONLINE_ON_CONNECT` | `false` | In `always` mode, mark the Baileys account online when its socket connects; `on_activity` forces this off |
+| `WA_PRESENCE_PULSE_ENABLED` | `false` | Briefly mark connected Baileys accounts available inside a daily window. Cloud API is skipped |
+| `WA_PRESENCE_PULSE_TIMES_PER_DAY` | `2` | How many pulses to place in the window (1–12), with at least 15 minutes offline between them |
+| `WA_PRESENCE_PULSE_MINUTES` | `5` | How long each pulse stays available (1–15 minutes) |
+| `WA_PRESENCE_PULSE_WINDOW` | `08:00-22:00` | Wall-clock window in `WA_PRESENCE_PULSE_TZ`. Must be `HH:MM-HH:MM` and end after it starts |
+| `WA_PRESENCE_PULSE_TZ` | process `TZ`, or the server zone | IANA time zone for the pulse window. A container without `TZ` runs in UTC |
 | `WA_AUTO_REJECT_CALLS`      | `false`                  | Automatically reject incoming one-to-one Baileys call offers |
 | `WA_STATUS_MAX_RECIPIENTS`  | `256`                    | Maximum recipients per Baileys status; excess recipients are truncated and reported |
 | `WA_AUTO_READ`              | `false`                  | `on_fetch` marks incoming messages read when fetched; `on_receive` marks them read on arrival |
+| `WA_AUTO_REPLY_ENABLED`     | `false`                  | Queue one fixed reply for incoming private messages. Other `WA_AUTO_REPLY_*` values are validated only when this is `true` |
+| `WA_AUTO_REPLY_TEXT`        | —                        | Reply text. Required and non-blank when auto-reply is enabled; at most 4000 characters |
+| `WA_AUTO_REPLY_COOLDOWN_HOURS` | `24`                  | Minimum delay between auto-replies to the same contact (1–8760 hours). Stored in the database. Groups share one key |
+| `WA_AUTO_REPLY_MAX_AGE_SECONDS` | `180`               | Skip messages with no timestamp or older than this (30–3600) |
+| `WA_AUTO_REPLY_IGNORE_JIDS` | —                        | Chats or senders to skip. Domain suffixes match the chat and, in a group, the sender. Exact entries also match aliases |
+| `WA_AUTO_REPLY_GROUPS`      | `false`                  | Also auto-reply in groups. Status broadcasts and hosted chats are never answered |
+| `WA_AUTO_REPLY_RATE_PER_MINUTE` | `6`                 | Maximum auto-replies per instance each rolling minute (1–30) |
+| `WA_AUTO_REPLY_INSTANCES`   | all instances            | Optional comma-separated instance ids. Blank replies on every instance |
 | `WA_AUTO_MARK_PLAYED`       | `false`                  | After a stored incoming audio message is transcribed, send a played receipt. `wa_mark_played` stays available either way |
 | `WA_MEDIA_CACHE_MAX_MB`     | `500`                    | Media cache size limit                   |
 | `WA_MEDIA_DOWNLOAD_DIR`     | `data/media-downloads`   | Dedicated directory for downloaded files; separate from Baileys session data |
 | `WA_MEDIA_DOWNLOAD_MAX_BYTES` | `26214400` (25 MB)     | Maximum size for received media downloads; base64 mode is capped at 5 MB |
-| `WA_MEDIA_FFMPEG_PATH`      | `ffmpeg` from `PATH`     | Optional ffmpeg executable for sticker and GIF conversion |
+| `WA_MEDIA_FFMPEG_PATH`      | `ffmpeg` from `PATH`     | Optional ffmpeg executable for stickers, GIFs, and opt-in compression |
 | `WA_MEDIA_FFMPEG_TIMEOUT_MS` | `60000`                 | Conversion timeout in milliseconds |
+| `WA_MEDIA_COMPRESS`         | `false`                  | Compress `wa_send_image` and `wa_send_video` before sending. `true` or `false` only |
+| `WA_MEDIA_IMAGE_MAX_EDGE`   | `600`                    | Longest edge for a compressed image, from 16 to 4096 |
+| `WA_MEDIA_IMAGE_QUALITY`    | `75`                     | JPEG quality for a compressed image, from 1 to 100 |
+| `WA_MEDIA_VIDEO_MAX_EDGE`   | `720`                    | Longest edge for a compressed video, from 16 to 4096 |
+| `WA_MEDIA_VIDEO_CRF`        | `28`                     | libx264 CRF for a compressed video, from 0 to 51 |
 | `WA_TRANSCRIPTION_ENABLED`  | `false`                  | Enable transcription and audio notifications |
 | `WA_TRANSCRIPTION_API_KEY`  | —                        | API key for the transcription endpoint   |
 | `WA_TRANSCRIPTION_BASE_URL` | `https://api.openai.com/v1` | OpenAI-compatible API base URL           |
@@ -854,8 +975,56 @@ Copy `.env.example` to `.env` and configure:
 | `WA_EVENT_WEBHOOK_TIMEOUT_MS` | `10000` | Per-request timeout in milliseconds |
 | `WA_EVENT_WEBHOOK_RETRY_ATTEMPTS` | `5` | BullMQ delivery attempts, including the first attempt |
 | `WA_EVENT_WEBHOOK_RETRY_DELAY_MS` | `1000` | Initial exponential retry delay in milliseconds |
-| `WA_REQUIRE_EVENT_WEBHOOK` | `false` | Exit on startup when no event webhook destination is configured or the event set is empty |
+| `WA_CHATWOOT_ENABLED` | `false` | Opt in to Chatwoot inbound sync and WhatsApp delivery of agent replies |
+| `WA_CHATWOOT_URL` | — | Chatwoot base URL. Required when Chatwoot is enabled |
+| `WA_CHATWOOT_TOKEN` | — | Chatwoot API access token. Required when Chatwoot is enabled |
+| `WA_CHATWOOT_ACCOUNT_ID` | — | Numeric Chatwoot account id. Required when Chatwoot is enabled |
+| `WA_CHATWOOT_INBOX_ID` | — | Numeric API-channel inbox id. Required when Chatwoot is enabled |
+| `WA_CHATWOOT_WEBHOOK_SECRET` | — | Shared secret for `POST /chatwoot/webhook`. Required when Chatwoot is enabled |
+| `WA_CHATWOOT_IGNORE_JIDS` | — | Comma-separated JID filter (exact, `@domain`, or `*` wildcard) |
+| `WA_CHATWOOT_INSTANCE_ID` | — | Limit sync and agent replies to one instance |
+| `WA_CHATWOOT_ALLOW_HTTP` | `false` | Permit an `http` Chatwoot URL. Private hosts stay blocked |
+| `WA_CHATWOOT_ALLOW_PRIVATE_URL` | `false` | Permit a private Chatwoot host. Metadata and link-local addresses stay blocked. Attachment downloads still only use that host |
+| `WA_CHATWOOT_ALLOW_LEGACY_SECRET` | `false` | Accept `?secret=` and the older Chatwoot secret headers |
+| `WA_CHATWOOT_BLOCK_GROUP_REPLIES` | `false` | Drop agent replies whose destination is a group |
+| `WA_CHATWOOT_TIMEOUT_MS` | `10000` | Chatwoot HTTP timeout, from 1 to 120000 ms |
+| `WA_REQUIRE_EVENT_WEBHOOK` | `false` | Exit on startup when no global or per-instance event webhook is configured, or the event set is empty. One instance webhook satisfies this for the process |
+| `WA_EVENT_WEBHOOK_INSTANCE_MERGE_GLOBAL` | `false` | When false, an instance webhook replaces global destinations for that instance. When true, the instance URL is added; a duplicate URL is delivered once |
+| `WA_INSTANCE_WEBHOOK_TOOLS_ENABLED` | `false` | Register `wa_set_instance_webhook`, `wa_get_instance_webhook`, and `wa_delete_instance_webhook` |
+| `WA_INSTANCE_WEBHOOK_ALLOWED_HOSTS` | unset | Comma-separated hosts allowed by `wa_set_instance_webhook` |
 | `WA_VERSION_CHECK`          | `true`                   | Daily WhatsApp Web version check         |
+
+### Baileys outbound proxy
+
+`WA_PROXY_URL` is optional. Leave it unset or empty and Baileys connects directly. Set a
+`socks5`, `socks5h`, `http`, or `https` URL with an explicit port to send the WhatsApp WebSocket
+and media transfers through that proxy:
+
+```bash
+WA_PROXY_URL=socks5://user:pass@proxy.example:1080
+```
+
+The URL may include a username and password. Percent-encoded credentials are decoded before the
+SOCKS5 handshake. Those credentials are removed from logs, from errors returned to agents, and
+from `GET /health`. A username or password shorter than 4 characters is removed only when it
+appears in the proxy URL or as a `user:password` pair. Values of 4 to 7 characters are also removed
+as a whole word. Values of 8 or more characters are removed wherever they appear. The value is
+checked when the process starts: only the schemes above are accepted, and a path, query, fragment,
+or missing port is rejected. Explicit default ports (`http://proxy.example:80` and
+`https://proxy.example:443`) are accepted. An invalid value stops startup.
+
+Baileys 7.0.0-rc14 applies the socket `agent` to the WebSocket and `fetchAgent` to media uploads
+made with Node's `https.request`. Media downloads in that release do not read `fetchAgent`. WA MCP
+passes an Undici 8 dispatcher through its `Dispatcher1Wrapper` compatibility adapter into
+`downloadMediaMessage`, which is the download hook rc14 supports, and the socket `options`.
+This preserves the native-fetch contract used by Baileys without replacing global fetch. History-sync and app-state blob downloads
+read that `options.dispatcher` and go through the proxy. With plain `socks5://`, the WebSocket
+resolves DNS locally, and media uploads do the same. Media downloads, history-sync, and app-state
+blob downloads send the hostname to the proxy. Prefer `socks5h://` for remote DNS everywhere. In
+that release, `getHttpStream` drops the request `signal`, so media download timeouts do not apply.
+Link-preview fetching does not run, because `link-preview-js` is an optional peer dependency and
+is not installed. Local proxy fixtures cover routing and cleanup; live WhatsApp connections and
+external proxies have not been tested.
 
 ### Message history and backups
 
@@ -944,14 +1113,32 @@ also recovers a `connecting` status older than 2 minutes when the adapter has no
 instance connected before.
 Connection close and reconnect logs include the disconnect reason, status code, and offline duration.
 
-`wa_send_sticker` accepts PNG, JPG, GIF, and WebP URLs or base64. PNG/JPG and GIF inputs are
-converted to 512x512 WebP with transparent padding. Static stickers are limited to 100 KB and
-animated stickers to 500 KB. Static WebP files that are not 512x512 are normalized with ffmpeg;
-animated WebP files pass through only when they are already 512x512, since ffmpeg cannot safely
-resize animated WebP. Send a GIF to convert an animated sticker to 512x512. Correctly sized WebP
-files pass through unchanged within their size limit. `wa_send_gif` converts GIF or MP4 input to
-silent H.264 MP4 and sends it with native GIF playback on Baileys. Cloud API does not support the
-GIF playback option.
+`wa_send_sticker` accepts PNG, JPG, GIF, WebP, and short MP4 URLs or base64. PNG, JPG, GIF, and
+MP4 inputs are converted to 512x512 WebP with transparent padding. A GIF or MP4 stays animated
+unless `animated` is false. MP4 stickers are read from a private temporary file and trimmed to 10
+seconds, including files whose `moov` atom follows `mdat`. Static stickers are limited to
+100 KB and animated stickers to 500 KB. Static WebP files that are not 512x512 are normalized with
+ffmpeg; animated WebP files pass through only when they are already 512x512, since ffmpeg cannot
+safely resize animated WebP. Send a GIF or short MP4 to convert an animated sticker to 512x512.
+Correctly sized WebP files pass through unchanged within their size limit. `wa_send_gif` converts
+GIF or MP4 input to silent H.264 MP4 and sends it with native GIF playback on Baileys. Cloud API
+does not support the GIF playback option.
+
+`wa_send_image` and `wa_send_video` send the original media unless compression is requested.
+`WA_MEDIA_COMPRESS=false` is the default. Set it to `true`, or pass `compress: true` on the call,
+to re-encode before sending. `hd: true` always sends the original, including when compression is
+otherwise enabled. `hd: true` and `compress: false` do not read the numeric compression settings.
+Those settings are validated only when a message is actually compressed. Compressed images become
+JPEG and are scaled so the longest edge is at most `WA_MEDIA_IMAGE_MAX_EDGE` (default 600) at
+`WA_MEDIA_IMAGE_QUALITY` (default 75). PNG files with transparency are left unchanged, because JPEG
+has no alpha channel. Compressed videos become H.264/AAC MP4, scaled to `WA_MEDIA_VIDEO_MAX_EDGE`
+(default 720) at `WA_MEDIA_VIDEO_CRF` (default 28). Video compression and MP4 sticker conversion
+read the input from a private temporary file, so an MP4 whose `moov` atom follows `mdat` still
+decodes. If ffmpeg fails, or the compressed result is not smaller, the original input is sent and
+the failure is logged. These calls need ffmpeg with `mjpeg` for images and `libx264` plus `aac`
+for videos. Sticker conversion needs `libwebp` and `libwebp_anim`. The Docker image installs
+Alpine `ffmpeg`, which provides those encoders. Sharp and the libwebp command-line tools are not
+used. On a host install, use `ffmpeg` from `PATH` or set `WA_MEDIA_FFMPEG_PATH`.
 
 `wa_download_media` locates a received media message by `messageId` and optional `chatId`. File
 mode saves it under `WA_MEDIA_DOWNLOAD_DIR` and returns a path; base64 mode returns inline data and
@@ -973,6 +1160,45 @@ for that chat, without delaying the transcription text. The transcription result
 receipt fails. `WA_AUTO_MARK_PLAYED` must be `true` or
 `false`; any other value stops startup with an error that names the variable.
 
+`WA_AUTO_REPLY_ENABLED` defaults to `false`, which disables auto-reply. The other
+`WA_AUTO_REPLY_*` variables are validated only when it is `true`, so a bad value does not stop
+startup while the feature is off. Set it to `true` and set `WA_AUTO_REPLY_TEXT` to a non-blank
+text of at most 4000 characters to queue that exact text for incoming private messages that carry
+real content: text, image, video, audio, document, sticker, location, contact, poll, event, or
+album, and only when the text, caption, or media is non-empty. Reactions, empty messages, protocol
+and stub messages, edits, and revokes are skipped. `WA_AUTO_REPLY_GROUPS` defaults to `false`; set
+it to `true` to also reply inside groups. Status broadcasts (`status@broadcast` and any
+`@broadcast` chat), newsletters, and `@hosted` / `@hosted.lid` chats are never answered. Messages
+sent by the same account are ignored, including when the chat or sender is that account's own
+phone or LID. An incoming message whose text equals the configured reply is ignored so two
+accounts with the same text cannot loop. Messages with a missing or zero timestamp, or older than
+`WA_AUTO_REPLY_MAX_AGE_SECONDS` (default 180, allowed 30–3600), are skipped so a reconnect does
+not answer the offline backlog.
+
+`WA_AUTO_REPLY_IGNORE_JIDS` skips matching chats and senders. A device suffix such as `:12` is
+removed before matching, and the user part and the domain are matched separately. An entry without
+`@`, such as `5577*` or a bare phone number, matches only `@s.whatsapp.net`, including the phone
+JID resolved from an `@lid`. A domain suffix such as `@lid`, `@s.whatsapp.net`, or `@g.us`
+matches the chat itself, and in a group it also matches the sender. It does not match the other
+identity in a PN/LID pair, so `@lid` leaves a phone chat alone. An exact JID still matches every
+alias. Accepted domains are `s.whatsapp.net`, `lid`,
+`g.us`, `broadcast`, `newsletter`, `hosted`, and `hosted.lid`. An entry that cannot match, such
+as `s.whatsapp.net` without `@` or `abc@xyz`, is rejected at startup. The same private contact is
+not answered again until `WA_AUTO_REPLY_COOLDOWN_HOURS` has passed (default 24, allowed 1–8760).
+That cooldown is stored in the database under one contact key, the phone JID when it is known, so
+`@s.whatsapp.net` and `@lid` aliases share it and it remains after a restart. In a group the key
+is the group JID, so one reply covers every sender in that group. Each instance also
+stops after `WA_AUTO_REPLY_RATE_PER_MINUTE` replies in a rolling minute (default 6, allowed 1–30).
+`WA_AUTO_REPLY_INSTANCES` is an optional comma-separated list of instance ids; blank means every
+instance. Replies go through the normal outbound queue. Cooldowns are persisted after the queue
+accepts a reply, and a failed enqueue releases its in-process reservation and rate slot. Queue
+acceptance does not confirm delivery. A process crash between enqueue and persistence can allow
+another reply; multi-process coordination and real-account behavior have not been validated. In `on_activity` presence mode each
+auto-reply is an outgoing message, so the account is shown online briefly and then returns to
+unavailable after the idle timeout. Invalid values, when the feature is enabled, stop startup
+with an error that names the variable and the accepted range. Leaving the feature disabled does
+not send a reply, even when `WA_AUTO_REPLY_TEXT` is set.
+
 `WA_PRESENCE_MODE` accepts `on_activity` or `always`. In `on_activity`, Baileys sends one global
 `unavailable` update after each connection opens, switches to global `available` before an outgoing
 message or typing/recording indicator, and returns to unavailable after `WA_PRESENCE_IDLE_SECONDS`
@@ -983,6 +1209,44 @@ precedence over `WA_MARK_ONLINE_ON_CONNECT` and forces Baileys' `markOnlineOnCon
 to `false`. In `always`, presence changes are left to Baileys and explicit presence tools, and
 `WA_MARK_ONLINE_ON_CONNECT` retains its existing behavior. Presence update failures are logged but
 do not block outgoing messages. Incoming messages and webhook delivery do not change presence.
+
+`WA_PRESENCE_PULSE_ENABLED` defaults to `false`. Set it to `true` to mark each connected Baileys
+account available `WA_PRESENCE_PULSE_TIMES_PER_DAY` times (default 2) for
+`WA_PRESENCE_PULSE_MINUTES` (default 5) inside `WA_PRESENCE_PULSE_WINDOW` (default `08:00-22:00`).
+The window is wall-clock time in `WA_PRESENCE_PULSE_TZ`. When that variable is unset, the window
+uses the process time zone (`TZ`) or the server's local zone. The Docker image and Compose file
+do not set `TZ`, so a container otherwise runs in UTC; set `TZ` or `WA_PRESENCE_PULSE_TZ` (for
+example `America/Bahia`) to follow a local clock. An invalid IANA name is rejected. Each start is
+placed at random in that window, including on days when daylight-saving time changes the UTC
+offset. Pulses cannot overlap: the next one starts at least 15 minutes after the previous one
+ends, and every pulse ends by the window's end. Times per day must be an integer from 1 to 12.
+Minutes must be an integer from 1 to 15. The window must be `HH:MM-HH:MM` and end after it starts
+on the same day. A schedule that cannot fit those pulses and gaps is rejected. Invalid values stop
+startup with an error that names the variable and the accepted range. The scheduler checks about
+once a minute and logs one short line when a pulse starts. An instance that disappears is removed
+from that day's plan on the next check. A spring-forward day whose real span can no longer hold
+the pulses is skipped with a warning, and the next day is planned again. Restarting the process
+plans the day again. Slots that start within 3 minutes of startup are skipped, so a restart does
+not immediately repeat a pulse; later slots in the new plan can still run. It does not change
+`WA_MARK_ONLINE_ON_CONNECT`. In `on_activity`, that
+option stays forced off and the idle timeout does not end a pulse early; an explicit `unavailable`
+presence request does. A send or typing indicator that is still active when the pulse ends keeps
+the existing idle timer, which then returns the account to unavailable. Otherwise the pulse sends
+unavailable when it ends. In `always` with `WA_MARK_ONLINE_ON_CONNECT=true` the account is already
+online, so the scheduler does not pulse and logs that once at startup. Otherwise a pulse sends
+global available only when the account is not already explicitly available, and it sends
+unavailable at the end only when that pulse itself made the account available. An explicit
+`available` presence request stays in effect. The pulse uses normal presence updates, not
+app-state writes, and Cloud API instances are skipped.
+
+Failed `unavailable` updates retry every 5 seconds while the same socket remains connected,
+even after the scheduled slot ends. No new pulse starts during cleanup. New activity can
+resume control through its idle timer; disconnect cancels the pending pulse wait and retries.
+Pulse, retry, and scheduler timers do not keep the process alive during shutdown. Presence
+updates remain best-effort: a persistent connection failure can delay the visible offline
+state. Real-account behavior is unverified, and this feature offers no protection against
+account restrictions.
+
 
 `WA_APP_STATE_WRITES_ENABLED` accepts `true` or `false` and defaults to `false`. It enables
 `wa_archive_chat`, `wa_pin_chat`, `wa_mute_chat`, `wa_delete_chat`, `wa_clear_chat`,
@@ -1009,6 +1273,33 @@ group/server operations that share that gate; member-label tools specifically re
 `WA_GROUP_WRITES_ENABLED=true`. Read-only metadata, invite details, pending-request listings,
 catalog reads, order reads, blocklist, and About calls remain available.
 Normal message sends, read receipts, and app-state reads/resyncs remain available as well.
+
+`wa_send_group_history_to_member` is a workaround for Baileys rc14's lack of WhatsApp's native
+recent-history sharing for new group members. It reads up to 100 latest local messages, skips
+revoked, view-once, individually disappearing, and unverifiable raw rows (widening the read until that many shareable messages remain or 1,000
+rows are scanned), truncates each line to 400 characters, and queues at most 5 chunks. When
+more than one chunk is queued they are numbered `(2/4)`. If the cap is reached, the oldest
+messages are left out with a `…mais N` note and the newest are sent in chronological order. The participant must be a current member, matched by phone
+number (PN) or LID in group metadata; the direct message goes to the PN when one is known. A group
+whose `ephemeralDuration` is greater than 0 is refused so disappearing messages are not copied into
+a permanent chat. If a later chunk fails to enqueue, the response still reports the `chunksSent`
+already accepted. Each queued delivery rechecks current membership and unchanged source content;
+received revocations, deletions, and edits are persisted before those checks. Queue acceptance does
+not confirm delivery. See the delivery and restart limits above and in the API reference.
+
+`WA_GROUP_HISTORY_ON_JOIN=true` enables the same digest and also requires
+`WA_GROUP_WRITES_ENABLED=true`. Both variables are strict: `WA_GROUP_HISTORY_ON_JOIN` accepts only
+`true` or `false`, and `WA_GROUP_HISTORY_ON_JOIN_COUNT` must be an integer (clamped to 25–100).
+Any other value fails startup. rc14 does not buffer `group-participants.update`, so that event
+arrives before the buffered `messages.upsert` and cannot be correlated with it. Automatic sends
+use `messages.upsert` (`notify` or offline `append`, not `messaging-history.set`): `messageStubType` `GROUP_PARTICIPANT_ADD`, `key.participant` or
+`participantAlt` equal to this account's LID or PN, and targets in `messageStubParameters`. The
+stub id is stored in `group_history_sends` before the direct messages are queued, so a copy
+delivered again after reconnect is not sent twice. Invite stubs
+(`GROUP_PARTICIPANT_INVITE`) and `GROUP_PARTICIPANT_ADD_REQUEST_JOIN` are ignored, as are other
+admins' stubs and self-targets. rc14's participant update has no reason, and an `add` notification
+is stored as `GROUP_PARTICIPANT_ADD`. An approved join request that arrives as that stub, authored
+by this account, cannot be distinguished from a direct add and will be sent.
 
 For `wa_mark_chat_unread`, archive, delete, and clear ranges, the adapter uses up to three recent
 stored raw message keys, keeps their original PN/LID addressing, and converts their timestamps to
@@ -1041,6 +1332,25 @@ See [Passkey pairing and ARM images](docs/passkey-and-arm.md) for what Baileys r
 
 ---
 
+## Operations dashboard
+
+`WA_DASHBOARD_ENABLED` defaults to `false`. Set it to `true` only with `WA_TRANSPORT=http` and `WA_DASHBOARD_USERS`. The value is one `user:password` pair, or several pairs separated by commas. Each password must be at least 12 characters. Passwords may contain colons and cannot contain commas. Leading and trailing spaces are trimmed.
+
+```bash
+WA_DASHBOARD_ENABLED=true
+WA_DASHBOARD_USERS=operator:replace-with-a-long-password
+```
+
+Open `http://<host>:3000/dashboard`. The browser asks for that username and password. Without them the server returns `401`. When the flag is off, `/dashboard` does not exist and returns `404`, the same as any other unknown path. Basic authentication repeats the password on every request, so terminate TLS in front of the server before exposing the page. The process does not redirect to HTTPS by itself. Failures are counted per address and username, and again per address across usernames. Eight wrong `Authorization` headers in 15 minutes return `401`. Further guesses return `429`. A correct login does not clear failures, so polling does not give an attacker on the same address a new set of guesses. While an address or username is limited, the password is checked at most once per 60 seconds. Anyone who shares that address, including an attacker, can take that one check. Other guesses are rejected before the password is compared. A username that signed in during the last 15 minutes skips the address total and the process-wide cap until that username fails again. Eight failures of that same username still limit it. The process rejects further failed password checks after 60 in a minute. Successful checks are not counted. During a distributed attack, a correct login from a username that has not signed in during the last 15 minutes can also return `429`. A request with no `Authorization` header is the browser login challenge and is not counted. The limit uses the socket address, with IPv6 grouped by `/64`, so clients that share a proxy share that counter.
+
+The page shows connection health, each instance's state, last connect and disconnect, webhook configuration, dropped events, recent delivery successes and failures, and recent channel events. It does not show webhook URLs, tokens, header values, or signing secrets. Cloud webhook settings appear only as yes/no configured flags. Its API calls are relative to the page URL, so the same handler can be mounted under a path prefix.
+
+The only write action is `POST /dashboard/api/instances/{instanceId}/pairing` for an existing Baileys instance that has never registered. The dashboard does not create instances. An instance whose stored credentials are already registered, whose credential record does not say `registered: false`, or whose state is `connected`, is left untouched: the dashboard does not connect it, request a pairing code, or load a QR. Pairing requires `Content-Type: application/json` even when the body is empty, and the server rejects a cross-site `Sec-Fetch-Site` or an `Origin` that does not match `Host`. Port 80 matches an `http` origin with no port, and port 443 matches `https` the same way. When nginx proxies the page, set `proxy_set_header Host $host;`. The default `$proxy_host` is the upstream address, so the browser origin does not match and pairing returns 403. `X-Forwarded-Proto` is not trusted. The scheme is compared only when the socket to this process is TLS; a TLS terminator that speaks plain HTTP to the process skips that check. It also does not send messages, log out, delete, or restart instances. `WA_DATABASE_PATH`, the Baileys auth keys, and the Compose volume stay where they are.
+
+**HTTP routing integration.** This branch serves the dashboard at `/dashboard` and uses the socket address for login limits. Integration with [#137](https://github.com/delltrak/wamcp/pull/137) must mount the handler at `basePath + "/dashboard"` through the shared listener and use its trusted-proxy client address while retaining IPv6 `/64` login buckets.
+
+---
+
 ## 🐳 Docker
 
 ### Production
@@ -1051,7 +1361,7 @@ docker compose up -d
 
 Services:
 
-- **wa-mcp** — The MCP server on port `3000`
+- **wa-mcp** — The MCP server on port `3000`. The image installs `ffmpeg` for sticker conversion and optional image/video compression (`libwebp`, `libwebp_anim`, `mjpeg`, `libx264`, `aac`). Sharp is not installed.
 - **redis** — BullMQ backend with AOF persistence
 
 The GitHub Container Registry image is one manifest list for `linux/amd64` and `linux/arm64`.
@@ -1105,7 +1415,8 @@ src/
 ├── index.ts                     # Entry point (HTTP/stdio)
 ├── constants.ts                 # Defaults and limits
 ├── server/mcp.ts                # MCP server setup
-├── tools/                       # 🔧 160 MCP tools (17 files)
+├── server/dashboard.ts          # Optional operations dashboard
+├── tools/                       # 🔧 163 MCP tools (17 files)
 ├── resources/                   # 📖 10 MCP resources (8 files)
 ├── notifications/events.ts      # 📡 15 documented event types
 ├── channels/
@@ -1115,6 +1426,7 @@ src/
 ├── services/
 │   ├── instance-manager.ts      # Instance lifecycle
 │   ├── message-queue.ts         # BullMQ rate limiting
+│   ├── chatwoot.ts              # Optional Chatwoot API-channel bridge
 │   ├── dedup.ts                 # Message deduplication
 │   ├── media.ts                 # Media handling
 │   └── transcription.ts         # Speech-to-text provider
@@ -1124,6 +1436,8 @@ src/
 │   └── client.ts                # SQLite connection
 ├── schemas/                     # Zod validation (10 files)
 └── types/                       # TypeScript definitions
+integrations/
+└── n8n-nodes-wamcp/             # Private n8n community nodes (not published)
 ```
 
 ---

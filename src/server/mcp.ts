@@ -8,6 +8,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { SERVER_NAME, VERSION } from "../constants.js";
 import type { InstanceManager } from "../services/instance-manager.js";
 import type { MessageQueue } from "../services/message-queue.js";
+import type { EventWebhookService } from "../services/event-webhook.js";
 
 // Tools
 import { registerInstanceTools } from "../tools/instance.tools.js";
@@ -46,6 +47,7 @@ export function createMcpServer(
   instanceManager: InstanceManager,
   messageQueue: MessageQueue,
   scheduler: MessageScheduler,
+  eventWebhook?: EventWebhookService,
 ): { server: McpServer; dispose: () => void; close: () => Promise<void> } {
   const server = new McpServer(
     {
@@ -60,7 +62,7 @@ export function createMcpServer(
   );
 
   // Register tools
-  registerInstanceTools(server, instanceManager, messageQueue);
+  registerInstanceTools(server, instanceManager, messageQueue, eventWebhook);
   registerMessagingTools(server, instanceManager, messageQueue);
   registerChatTools(server, instanceManager, messageQueue);
   registerGroupTools(server, instanceManager, messageQueue);

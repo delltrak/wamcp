@@ -7,15 +7,16 @@
 ## Table of Contents
 
 1. [Overview](#1-overview)
+   - [Operations dashboard](#operations-dashboard)
 2. [Tools Reference](#2-tools-reference)
    - [Instance Management](#21-instance-management-9-tools)
    - [Messaging](#22-messaging-32-tools)
    - [Chat Management](#23-chat-management-11-tools)
-   - [Group Management](#24-group-management-26-tools)
+   - [Group Management](#24-group-management-28-tools)
    - [Contact Management](#25-contact-management-8-tools)
    - [Profile Management](#26-profile-management-7-tools)
    - [Status / Stories](#27-status--stories-4-tools)
-   - [Newsletter / Channels](#28-newsletter--channels-10-tools)
+   - [Newsletter / Channels](#28-newsletter--channels-11-tools)
    - [Call Management](#29-call-management-1-tool)
    - [Message Search](#210-message-search-1-tool)
    - [WhatsApp Business Labels](#211-whatsapp-business-labels-8-tools)
@@ -27,6 +28,7 @@
 4. [Notifications Reference](#4-notifications-reference)
 5. [Error Handling](#5-error-handling)
 6. [Agent Integration Examples](#6-agent-integration-examples)
+7. [Chatwoot and n8n](#7-chatwoot-and-n8n)
 
 ---
 
@@ -50,6 +52,16 @@ Authorization: Bearer wamcp_sk_your_key
 
 The key is configured via the `WA_API_KEY` environment variable on the server.
 
+### Operations dashboard
+
+`GET /dashboard` redirects to `GET /dashboard/`, an optional browser page on the same HTTP server. It is absent unless `WA_DASHBOARD_ENABLED=true`. Enabling it also requires `WA_TRANSPORT=http` and `WA_DASHBOARD_USERS` (`user:password`, or several entries separated by commas). Each password must be at least 12 characters. A request without a matching `Authorization: Basic` header returns `401` and `WWW-Authenticate`. Wrong credentials also return `401`. With the flag off, `/dashboard` is a normal `404`. Basic authentication repeats the password on every request; terminate TLS in front of the server before exposing the page. Failures are counted per address and username, and again per address across usernames. Eight wrong `Authorization` headers in 15 minutes each return `401`. Further guesses return `429` without `WWW-Authenticate`. A correct login does not clear failures. While an address or username is limited, the password is checked at most once per 60 seconds; anyone who shares the address can take that check, and any other guess, including the right password, is `429` before the password is compared. A username that signed in during the last 15 minutes skips the address total and the process-wide cap until that username fails again. Eight failures of that same username still limit it. The process rejects further failed password checks after 60 in a minute. Successful checks are not counted. During a distributed attack, a correct login from a username that has not signed in during the last 15 minutes can also return `429`. A request that omits `Authorization` is not counted. The counter uses the socket address, with IPv6 grouped by `/64`.
+
+The page shows instance connection state, last connect and disconnect time, disconnect reason, pending pairing method (not the code or QR secret unless pairing is in progress), webhook configuration, dropped event names, and recent delivery successes and failures. It does not show webhook URLs, header names, header values, tokens, or signing secrets. Cloud webhook settings are reported only as configured or not configured. The page calls `api/overview` and `api/instances/{instanceId}/pairing` relative to its own URL.
+
+The page is read-only except `POST /dashboard/api/instances/{instanceId}/pairing`, which starts pairing for an existing unpaired Baileys instance. It does not create instances. The body must be `Content-Type: application/json`, including when it is empty. A `Sec-Fetch-Site: cross-site` header, an `Origin: null` value, or an `Origin` that does not match `Host` is rejected with `403` before any connect. An explicit port 80 matches an `http` origin that omits the port, and 443 matches `https` the same way. Behind nginx, set `proxy_set_header Host $host;` so `Host` is the name the browser used. The default `$proxy_host` is the upstream and makes that check fail. `X-Forwarded-Proto` is not trusted; the scheme is compared only when the socket to this process is TLS. The route refuses a non-Baileys instance, any instance whose stored Baileys credentials are registered, any credential object that does not explicitly set `registered` to `false`, and any instance whose state is `connected`. That refusal does not connect, request a pairing code, or read a QR. The dashboard does not log out, delete, restart, or send messages, and it does not change `WA_DATABASE_PATH`, the auth store, or Docker volumes.
+
+`GET /dashboard/api/overview` returns the same redacted status as JSON for the signed-in operator.
+
 ### Channel Types
 
 WA MCP supports two underlying WhatsApp connection methods:
@@ -67,10 +79,15 @@ Tools marked **Baileys only** are not available on Cloud API instances.
 - **`to`** -- Recipient for send operations. Use a phone number (e.g. `"5511999999999"`) or a group JID (e.g. `"120363...@g.us"`).
 - **JID** -- Jabber ID, WhatsApp's internal identifier. Individual: `5511999999999@s.whatsapp.net`. Group: `120363...@g.us`.
 - **Media** -- Image/video/audio/document fields accept a URL (`https://...`) or base64-encoded data.
-  Stickers and GIFs are converted to WhatsApp-compatible formats with ffmpeg. Received media can
-  be saved under `WA_MEDIA_DOWNLOAD_DIR` (default `data/media-downloads`) or returned as base64.
+  Stickers and GIFs are converted to WhatsApp-compatible formats with ffmpeg. `wa_send_sticker`
+  accepts PNG, JPG, GIF, WebP, and short MP4 and produces 512x512 WebP. `wa_send_image` and
+  `wa_send_video` send the original media unless `compress` is true or `WA_MEDIA_COMPRESS=true`
+  (default `false`). `hd: true` sends the original. Received media can be saved under
+  `WA_MEDIA_DOWNLOAD_DIR` (default `data/media-downloads`) or returned as base64.
   `WA_MEDIA_DOWNLOAD_MAX_BYTES` defaults to 25 MB, and base64 mode is capped at 5 MB. Docker
-  includes ffmpeg; `WA_MEDIA_FFMPEG_PATH` and `WA_MEDIA_FFMPEG_TIMEOUT_MS` configure conversions.
+  installs Alpine `ffmpeg` (`libwebp`, `libwebp_anim`, `mjpeg`, `libx264`, `aac`). Sharp and the
+  libwebp CLI tools are not required. `WA_MEDIA_FFMPEG_PATH` and `WA_MEDIA_FFMPEG_TIMEOUT_MS`
+  configure conversions.
 - **Automatic read receipts** -- `WA_AUTO_READ=false` (default), `on_fetch` to mark incoming
   messages read when a tool or resource returns them, or `on_receive` to mark them read when they
   arrive. Invalid values disable the feature and log a warning.
@@ -94,6 +111,15 @@ Tools marked **Baileys only** are not available on Cloud API instances.
   Setting `WA_APP_STATE_WRITES_ENABLED=true` continues to enable app-state and the existing
   group/server writes that share that gate; member-label tools specifically require
   `WA_GROUP_WRITES_ENABLED=true`.
+- **Group-history digests** -- `wa_send_group_history_to_member` is a Baileys workaround for the
+  unavailable native recent-history sharing feature. It reads local SQLite messages, skips revoked
+  and view-once messages, refuses groups with `ephemeralDuration` greater than 0, and queues a
+  text digest to a current member's PN when one is known. `WA_GROUP_HISTORY_ON_JOIN` optionally
+  enables the same digest from a `GROUP_PARTICIPANT_ADD` stub authored by this account, and still
+  requires `WA_GROUP_WRITES_ENABLED=true`. The flag accepts only `true` or `false`.
+  `WA_GROUP_HISTORY_ON_JOIN_COUNT` defaults to 50, must be an integer, and is clamped to 25–100.
+  Any other value fails startup. Approved joins that rc14 stores as a plain add stub cannot be
+  told apart from a direct add.
 - **Message keys for chat patches** -- Unread, archive, delete, and clear operations use up to three
   recent stored raw message keys with numeric Unix-second timestamps. The collection index uses the
   latest raw key's `remoteJid`, preserving the PN/LID address used by that message. Invalid rows are
@@ -127,7 +153,8 @@ Tools marked **Baileys only** are not available on Cloud API instances.
 
 ## 2. Tools Reference
 
-WA MCP exposes **160 tools** grouped by domain. All tools return MCP-standard responses.
+WA MCP exposes **163 tools** grouped by domain. All tools return MCP-standard responses.
+`WA_INSTANCE_WEBHOOK_TOOLS_ENABLED=true` adds three #142 instance webhook tools.
 
 ### Success Response Format
 
@@ -158,7 +185,7 @@ WA MCP exposes **160 tools** grouped by domain. All tools return MCP-standard re
 
 ---
 
-### 2.1 Instance Management (9 tools)
+### 2.1 Instance Management (9 tools, plus 3 when `WA_INSTANCE_WEBHOOK_TOOLS_ENABLED=true`)
 
 Tools for creating, connecting, and managing WhatsApp instances.
 
@@ -348,6 +375,85 @@ Configure Meta Cloud API credentials for a Cloud API instance. Required before c
 
 ---
 
+#### `wa_set_instance_webhook`
+
+Registered only when `WA_INSTANCE_WEBHOOK_TOOLS_ENABLED=true` (#142). Replace the outgoing event webhook stored for one instance. `auth_value` is saved in plaintext for delivery and is not returned. Omit `events` to inherit `WA_EVENT_WEBHOOK_EVENTS`. An empty event list is rejected. The instance webhook uses `WA_EVENT_WEBHOOK_PRESET`, `WA_EVENT_WEBHOOK_IGNORE_FROM_ME`, and `WA_EVENT_WEBHOOK_SECRET` when that global HMAC secret is set. If global destinations use different HMAC secrets and this URL matches none of them, delivery is unsigned and one warning is logged. The response `endpoint` is the URL origin, not the full URL.
+
+`WA_EVENT_WEBHOOK_INSTANCE_MERGE_GLOBAL` defaults to `false`: this instance then uses only this webhook, and a warning is logged when a global destination exists. Set it to `true` to also deliver to the global destinations. A URL that matches a global destination, after lowercasing the host and removing a trailing slash, is delivered once, with this instance's auth header, events, and the global HMAC secret. `WA_INSTANCE_WEBHOOK_ALLOWED_HOSTS` optionally restricts the host. Instances without a stored webhook keep the global destinations. One stored instance webhook satisfies `WA_REQUIRE_EVENT_WEBHOOK` for the whole process. An invalid stored row is skipped so the other destinations keep working.
+
+| Parameter    | Type     | Required | Description                                                                 |
+| ------------ | -------- | -------- | --------------------------------------------------------------------------- |
+| `instanceId` | string   | Yes      | Instance ID (`inst_` plus 8 hex characters)                                 |
+| `url`        | string   | Yes      | Public HTTPS URL. HTTP only when `WA_EVENT_WEBHOOK_ALLOW_HTTP=true`         |
+| `authHeader` | string   | No       | Auth header name. Must be set together with `authValue`                     |
+| `authValue`  | string   | No       | Auth header value. Write-only; omitted from this response, logs, and health |
+| `events`     | string[] | No       | Channel event names. Omit to inherit the global event list                  |
+
+**Channel support:** Both
+
+**Response:**
+
+```json
+{
+  "configured": true,
+  "endpoint": "https://automation.example.com",
+  "authHeader": "X-Instance-Token",
+  "authConfigured": true,
+  "events": null,
+  "updatedAt": 1709136000000
+}
+```
+
+`events: null` means the instance inherits `WA_EVENT_WEBHOOK_EVENTS`. `authHeader` is `null` when no auth header is stored. `endpoint` is the origin only.
+
+---
+
+#### `wa_get_instance_webhook`
+
+Read the webhook stored for one instance. The auth value and full URL are never returned. `configured: false` means the instance uses the global destinations. A stored row that fails validation returns `configured: false` and `invalid: true` instead of an error.
+
+| Parameter    | Type   | Required | Description                                 |
+| ------------ | ------ | -------- | ------------------------------------------- |
+| `instanceId` | string | Yes      | Instance ID (`inst_` plus 8 hex characters) |
+
+**Channel support:** Both
+
+**Response:**
+
+```json
+{
+  "configured": true,
+  "endpoint": "https://automation.example.com",
+  "authHeader": "X-Instance-Token",
+  "authConfigured": true,
+  "events": ["message.received"],
+  "updatedAt": 1709136000000
+}
+```
+
+---
+
+#### `wa_delete_instance_webhook`
+
+Remove the webhook stored for one instance. Later events for that instance use the global destinations.
+
+| Parameter    | Type   | Required | Description                                 |
+| ------------ | ------ | -------- | ------------------------------------------- |
+| `instanceId` | string | Yes      | Instance ID (`inst_` plus 8 hex characters) |
+
+**Channel support:** Both
+
+**Response:**
+
+```json
+{
+  "instanceId": "inst_abc123",
+  "deleted": true
+}
+```
+
+---
+
 ### 2.2 Messaging (32 tools)
 
 Tools for sending messages, media, reactions, and managing message state.
@@ -431,8 +537,15 @@ Send an image to a WhatsApp contact or group.
 | `caption`         | string | No       | Image caption                       |
 | `quotedMessageId` | string | No       | Message ID to reply to              |
 | `mentions`        | string[] | No     | Participant phone numbers or JIDs to mention |
+| `compress`        | boolean | No      | Compress before sending. Omit to follow `WA_MEDIA_COMPRESS` (default `false`) |
+| `hd`              | boolean | No      | Send the original image. Overrides `compress` and `WA_MEDIA_COMPRESS` |
 
-**Channel support:** Both
+Compression re-encodes to JPEG, limits the longest edge to `WA_MEDIA_IMAGE_MAX_EDGE` (default 600),
+and uses `WA_MEDIA_IMAGE_QUALITY` (default 75). The original is sent when the PNG has transparency,
+ffmpeg fails, or the result is not smaller. `hd: true` skips compression. Edge and quality are
+validated only when compression runs.
+
+**Channel support:** Both. A compressed Cloud API image is uploaded and sent by media id.
 
 **Response:**
 
@@ -457,8 +570,16 @@ Send a video to a WhatsApp contact or group.
 | `caption`         | string | No       | Video caption                       |
 | `quotedMessageId` | string | No       | Message ID to reply to              |
 | `mentions`        | string[] | No     | Participant phone numbers or JIDs to mention |
+| `compress`        | boolean | No      | Compress before sending. Omit to follow `WA_MEDIA_COMPRESS` (default `false`) |
+| `hd`              | boolean | No      | Send the original video. Overrides `compress` and `WA_MEDIA_COMPRESS` |
 
-**Channel support:** Both
+Compression re-encodes to H.264/AAC MP4, limits the longest edge to `WA_MEDIA_VIDEO_MAX_EDGE`
+(default 720), and uses `WA_MEDIA_VIDEO_CRF` (default 28). The source is read from a private
+temporary file so an MP4 with its `moov` atom at the end still decodes. The original is sent when
+ffmpeg fails or the result is not smaller. `hd: true` skips compression. Edge and CRF are validated
+only when compression runs.
+
+**Channel support:** Both. A compressed Cloud API video is uploaded and sent by media id.
 
 **Response:**
 
@@ -489,18 +610,21 @@ Send a round video note through the normal queued video path. Baileys sends it w
 
 #### `wa_send_sticker`
 
-Send a native WhatsApp sticker. PNG/JPG images and GIFs are converted to 512x512 WebP with
-transparent padding. Static stickers are limited to 100 KB and animated stickers to 500 KB. Static
-WebP files that are not 512x512 are normalized with ffmpeg; animated WebP passes through only at
-512x512 because ffmpeg cannot safely resize animated WebP. Send a GIF to convert an animated sticker
-to 512x512. Correctly sized WebP files pass through unchanged when they are within their size limit.
+Send a native WhatsApp sticker. PNG, JPG, GIF, and short MP4 inputs are converted to 512x512 WebP
+with transparent padding. GIF and MP4 sources stay animated unless `animated` is false. MP4 input
+is read from a private temporary file and trimmed to 10 seconds, including files whose `moov` atom
+follows `mdat`. Static stickers are limited to 100 KB and animated stickers to 500 KB.
+Static WebP files that are not 512x512 are normalized with ffmpeg; animated WebP passes through only
+at 512x512 because ffmpeg cannot safely resize animated WebP. Send a GIF or short MP4 to convert an
+animated sticker to 512x512. Correctly sized WebP files pass through unchanged when they are within
+their size limit.
 
 | Parameter         | Type    | Required | Description                                      |
 | ----------------- | ------- | -------- | ------------------------------------------------ |
 | `instanceId`      | string  | Yes      | The instance to send from                        |
 | `to`              | string  | Yes      | Recipient phone number or group JID              |
-| `sticker`         | string  | Yes      | PNG, JPG, GIF, or WebP URL or base64 data        |
-| `animated`        | boolean | No       | Hint to retain or flatten GIF animation          |
+| `sticker`         | string  | Yes      | PNG, JPG, GIF, WebP, or short MP4 URL or base64  |
+| `animated`        | boolean | No       | Keep or flatten GIF/MP4 animation                |
 | `quotedMessageId` | string  | No       | Message ID to reply to                           |
 
 **Channel support:** Both. Cloud API uploads the prepared WebP before sending it.
@@ -1329,7 +1453,7 @@ is blocked unless `WA_APP_STATE_WRITES_ENABLED=true`.
 
 ---
 
-### 2.4 Group Management (26 tools)
+### 2.4 Group Management (28 tools)
 
 Tools for creating and managing WhatsApp groups.
 
@@ -1345,6 +1469,92 @@ the regular message-send path and remains available while both flags are disable
 Member labels use Baileys protocol messages and require `WA_GROUP_WRITES_ENABLED=true`. WhatsApp
 member labels are self-assigned: these tools can only set or remove the connected account's own
 label, not another participant's label. Updates are queued and rate limited per instance.
+
+`wa_send_group_history_to_member` sends a readable digest of recent locally stored group messages
+to a current member's direct chat. Baileys rc14 cannot use WhatsApp's native recent-history
+sharing, so this sends plain text as a workaround. It requires `WA_GROUP_WRITES_ENABLED=true`; the
+app-state write flag alone does not enable it. The participant must match a current group
+participant by PN or LID. The direct message is addressed to the member's phone JID when group
+metadata has one. Unverified phone aliases from join stubs are never used as destinations. Groups with `ephemeralDuration` greater than
+0 are refused entirely, so disappearing messages are never copied into a permanent chat. Revoked
+messages, view-once messages, individually disappearing messages (even after the group timer is
+disabled), and rows without a verifiable raw payload are skipped; the read widens until the requested count of shareable
+messages is reached or 1,000 stored rows have been scanned. Each digest line is truncated to 400
+characters. At most 5 chunks are queued. Chunks are numbered `(2/4)` when there is more than one.
+If the cap is reached, the oldest messages are omitted with a `…mais N` line and the newest are
+sent in chronological order. If enqueue fails after at least one
+chunk was accepted, the tool still returns that `chunksSent` count. Digest chunks use the
+per-instance outbound message limiter.
+
+`chunksSent` counts chunks accepted by Redis, not confirmed WhatsApp deliveries. Before every
+chunk the worker rechecks current PN/LID membership, the group timer, and source-message
+fingerprints against at most 1,000 stored rows. Revocation, edits, disappearance, unverifiable
+raw content, or a source falling outside that window cancel the remaining job. Old persisted
+jobs without validation context fail closed. Each chunk has one normal queue attempt because
+an ambiguous send failure may already have delivered it; stalled-job recovery can still replay
+a job, so exactly-once delivery is not guaranteed.
+
+The automatic stub claim is durable and made after preparation, immediately before queueing.
+A crash or enqueue failure after the claim can leave an incomplete digest; redelivery does not
+automatically resend it. Review the received chunks before manually requesting another digest.
+Outbound workers currently start lazily: after process restart pending jobs resume when another
+outbound job starts that instance's worker. This change does not add startup queue recovery.
+Live-account delivery remains unverified; all tests use synthetic messages and mocked sockets.
+
+
+Optional automatic sending is controlled by `WA_GROUP_HISTORY_ON_JOIN` (default `false`, only
+`true` or `false`) and `WA_GROUP_HISTORY_ON_JOIN_COUNT` (default `50`, an integer clamped to
+25–100). Any other value fails startup. Both still require `WA_GROUP_WRITES_ENABLED=true`.
+
+rc14 does not buffer `group-participants.update` (`Utils/event-buffer.js`). `process-message.js`
+emits it immediately, before the buffered `messages.upsert`, so the two events are not in one
+batch. Automatic sends are detected from `messages.upsert` only (live `notify` and offline
+`append`); `messaging-history.set` is not scanned. The stub must be: `messageStubType`
+`GROUP_PARTICIPANT_ADD`, `key.participant` or `key.participantAlt` equal to this account's LID or
+PN, and targets in `messageStubParameters`. The stub `key.id` is inserted into `group_history_sends`
+before queueing, so a stub redelivered after reconnect is not sent twice.
+`GROUP_PARTICIPANT_INVITE` and `GROUP_PARTICIPANT_ADD_REQUEST_JOIN` are ignored, along with stubs
+from other authors and targets that are this account. rc14's `group-participants.update` action
+`add` has no reason: invite, request-join, and direct-add stubs share that action, and the
+notification parser maps an `add` child only to `GROUP_PARTICIPANT_ADD`. An approved join that
+WhatsApp delivers as `GROUP_PARTICIPANT_ADD` authored by this account cannot be distinguished from
+a direct add and will be sent. Errors are logged without interrupting event processing.
+
+#### `wa_send_group_history_to_member`
+
+Send the latest locally stored group messages as a readable, oldest-first digest in a current
+member's direct chat. The sender name uses a stored contact name or message push name, with the JID
+number as fallback. Media is represented by Portuguese placeholders such as `[imagem]`, `[áudio]`,
+and `[documento: nome]`, followed by any caption. Revoked and view-once messages are omitted. Lines
+longer than 400 characters are truncated. The digest is split into at most 5 queued chunks of 4,000
+characters, numbered `(1/N)` when split. When messages do not fit, the oldest are left out
+(`…mais N`) and the newest are sent in chronological order. If no shareable
+local messages are available, nothing is sent and the response includes a note. A group with
+disappearing messages enabled is refused before anything is queued.
+
+| Parameter     | Type   | Required | Description |
+| ------------- | ------ | -------- | ----------- |
+| `instanceId`  | string | Yes      | The instance ID to send from |
+| `groupJid`    | string | Yes      | WhatsApp group JID or bare group ID |
+| `participant` | string | Yes      | Current member's individual JID (PN or LID) or phone number. Bare phone numbers are normalized to a PN JID. The send is refused when this identity is not a current participant |
+| `count`       | number | No       | Requested shareable message count; defaults to 50 and is clamped to 25–100 |
+
+**Channel support:** Baileys only. Requires `WA_GROUP_WRITES_ENABLED=true`.
+
+**Response:** `messagesIncluded`, `chunksSent` (accepted by the outbound queue, including a partial
+count when a later enqueue fails), `requestedCount`, `count` (after clamping), `clamped`,
+`omittedMessages`, and an optional `note`.
+
+```json
+{
+  "messagesIncluded": 42,
+  "chunksSent": 2,
+  "requestedCount": 50,
+  "count": 50,
+  "clamped": false,
+  "omittedMessages": 0
+}
+```
 
 #### `wa_list_groups`
 
@@ -1417,6 +1627,42 @@ locally.
   ]
 }
 ```
+
+---
+
+#### `wa_export_group_participants`
+
+Export the participants of a group as a CSV file. The file is written under the data directory
+(`<database directory>/exports`, `data/exports` by default) and the response returns that path.
+That directory is mode `0700`. On the next export, regular files in it that are older than 24 hours
+are deleted. One row is written per participant. Phone is empty when it is not known. `name` is the
+saved contact name when one is stored; `push_name` is the name the contact set on WhatsApp. `role`
+is `admin`, `superadmin`, or `member`. `contactsTruncated` is true when the saved-name lookup was
+limited to the first 5000 identities.
+
+| Parameter    | Type   | Required | Description                        |
+| ------------ | ------ | -------- | ---------------------------------- |
+| `instanceId` | string | Yes      | The instance ID                    |
+| `groupJid`   | string | Yes      | Group JID or bare numeric group ID |
+
+**Channel support:** Baileys only. Read-only; no write flag is required. Cloud API does not support
+group participant export.
+
+**Response:**
+
+```json
+{
+  "groupJid": "120363000000000000@g.us",
+  "participantCount": 3,
+  "contactsTruncated": false,
+  "mimeType": "text/csv",
+  "path": "data/exports/group-120363000000000000_g.us-participants.csv",
+  "fileName": "group-120363000000000000_g.us-participants.csv",
+  "size": 240
+}
+```
+
+CSV header: `jid,phone,lid,name,push_name,role`.
 
 ---
 
@@ -2412,7 +2658,7 @@ receipt; Cloud API does not expose status viewers.
 
 ---
 
-### 2.8 Newsletter / Channels (10 tools)
+### 2.8 Newsletter / Channels (11 tools)
 
 Tools for interacting with WhatsApp Channels (Newsletters). **Baileys only.**
 
@@ -2496,6 +2742,7 @@ unsupported-operation error for these Baileys-only operations.
 | `wa_newsletter_update_picture`     | `instanceId`, `jid`, `image`                       | Update picture. Gated write.                     |
 | `wa_newsletter_react`              | `instanceId`, `jid`, `serverId`, `reaction`        | Add or remove a post reaction. Gated write.       |
 | `wa_newsletter_list_posts`         | `instanceId`, `jid`, optional `count`, `since`, `after` | Fetch parsed posts with timestamp and server-ID cursors. |
+| `wa_download_newsletter_media`     | `instanceId`, `newsletterJid`, `messageId`         | Download media from a Channel post and return the saved path. |
 
 Channel picture URLs use the existing public-HTTPS validation and media size limits, then are
 converted to JPEG before upload.
@@ -2505,6 +2752,45 @@ Post results contain JSON-safe `posts` with `id`, `serverId`, Unix-seconds `time
 `pagination.newestServerId` identify the page bounds. `pagination.after` is the newest numeric server
 ID; pass it as `after` on the next call to continue through newer posts. `since` accepts a Unix
 timestamp lower bound.
+
+#### `wa_download_newsletter_media`
+
+Download image, video, audio, document, sticker, or video-note media from one Channel post. Pass
+`serverId` or the post `id` from `wa_newsletter_list_posts` as `messageId`. The bytes are saved with
+the same directory, size cap, and file-name rules as `wa_download_media`, and the response returns
+that path. Posts that include a media key are decrypted. Posts uploaded without a media key are
+downloaded as plaintext from `https://mmg.whatsapp.net` plus the post `directPath`, with the same
+size cap and timeout, with redirects refused, and are kept only when the SHA-256 matches
+`fileSha256`. URL-only posts are accepted only on that same HTTPS origin. Encrypted downloads
+also stay on that origin and refuse redirects. A numeric server ID is looked up with the rc14
+`message_updates` stanza and exclusive `after = serverId - 1` cursor (`since = 0`); IDs retain
+integer precision. A missing numeric result or a non-numeric ID searches one additional page of
+at most 100 posts. History outside that bounded lookup can be unavailable; use `serverId` when
+possible. Media download timeout is 60 seconds; configured file-download size limits apply.
+
+| Parameter       | Type   | Required | Description                                      |
+| --------------- | ------ | -------- | ------------------------------------------------ |
+| `instanceId`    | string | Yes      | The instance ID                                  |
+| `newsletterJid` | string | Yes      | Channel JID ending in `@newsletter`              |
+| `messageId`     | string | Yes      | Post server ID or message ID                     |
+
+**Channel support:** Baileys only. Read-only; no write flag is required. Cloud API does not support
+Channel post media.
+
+**Response:**
+
+```json
+{
+  "newsletterJid": "123456789012345@newsletter",
+  "messageId": "102",
+  "mediaType": "image",
+  "mimeType": "image/jpeg",
+  "mode": "file",
+  "path": "data/media-downloads/102.jpg",
+  "fileName": "102.jpg",
+  "size": 2048
+}
+```
 
 ---
 
@@ -3514,7 +3800,63 @@ Fired when Baileys reports a label edit or a chat/message label association chan
 
 ---
 
-### 4.15 `whatsapp/event.response`
+### 4.15 `whatsapp/group.joined`
+
+Fired when a group roster or a participant-add lists this Baileys account (#141). An empty roster
+does not emit. `wa_create_group` does not emit this notification. `wa_join_group` waits until a
+later roster includes this account. Other participants joining still use
+`whatsapp/group.participants_changed`.
+
+**Payload:** `instanceId`, `groupId`, `chatId`, `subject`, `description`, `memberCount`, `author`,
+and `timestamp` (Unix seconds). `memberCount` is the size of the list that contained this account.
+Member JIDs are not included. `subject` and `description` are null when the add notification does
+not include them.
+
+---
+
+### 4.16 `whatsapp/label.association`
+
+Fired when a label is applied to or removed from a chat or message. `whatsapp/label.updated` is
+also fired for the same change.
+
+**Payload:** `instanceId`, `labelId`, `labeled`, `chatId`, `label`, and `association`. `messageId`
+is included for a message association. `labeled` is true when the label is applied.
+
+---
+
+### 4.17 `whatsapp/newsletter.joined` and `whatsapp/newsletter.left`
+
+Fired when this account subscribes to or leaves a newsletter. Local follow, unfollow, and newsletter
+create emit these events. A newsletter participant update emits them only when the affected user is
+this account and the action is a join or leave. A follow started on the phone is best-effort on
+Baileys 7.0.0-rc14 (#141): that release does not confirm it from the settings stanza.
+
+**Payload:** `instanceId`, `newsletterId`, `chatId`, `name`, `description`, and `role`.
+
+---
+
+### 4.18 `whatsapp/newsletter.message`
+
+Fired for a newsletter post. Append-path posts are not duplicated as `whatsapp/message.received`.
+
+**Payload:** `instanceId`, `newsletterId`, `chatId`, and `message` (`id`, `serverId`, `sender`,
+`timestamp`, `type`, `text`, `views`, `isFromMe`). `views` is null when Baileys does not include a
+view count. `serverId` is set when the message id is numeric.
+
+---
+
+### 4.19 `whatsapp/newsletter.mute`
+
+Best-effort on Baileys 7.0.0-rc14 (#141). Fired when a newsletter settings object includes `mute`,
+`mute_state`, or `muted`. The binary settings stanza on that release carries only name and
+description, so a mute or follow started on the phone cannot be confirmed from it.
+
+**Payload:** `instanceId`, `newsletterId`, `chatId`, `mute` (`on` or `off`), and `timestamp`
+(Unix seconds).
+
+---
+
+### 4.20 `whatsapp/event.response`
 
 Fired when a Baileys event RSVP is decrypted and stored. A response recovered after its event
 message or LID mapping becomes available emits this event at that time.
@@ -3633,7 +3975,7 @@ Add to your Claude Desktop MCP configuration:
 }
 ```
 
-Once configured, the client will auto-discover all 155 WA MCP tools and can interact with WhatsApp directly.
+Once configured, the client will auto-discover all 158 WA MCP tools and can interact with WhatsApp directly.
 
 ### 6.3 LangChain (Python)
 
@@ -3646,8 +3988,46 @@ toolkit = MCPToolkit(
 )
 
 tools = toolkit.get_tools()
-# tools now contains all 155 WA MCP tools, ready for any LangChain agent
+# tools now contains all 158 WA MCP tools, ready for any LangChain agent
 ```
+
+---
+
+## 7. Chatwoot and n8n
+
+These integrations are not MCP tools. The tool count stays **137**. Neither path changes `WA_EVENT_WEBHOOK_*`.
+
+### Chatwoot API inbox
+
+`WA_CHATWOOT_ENABLED` defaults to `false`. Inbound sync and WhatsApp delivery of agent replies both stay off until it is `true`.
+
+| Variable | Default | Required when enabled |
+| --- | --- | --- |
+| `WA_CHATWOOT_ENABLED` | `false` | — |
+| `WA_CHATWOOT_URL` | unset | yes |
+| `WA_CHATWOOT_TOKEN` | unset | yes |
+| `WA_CHATWOOT_ACCOUNT_ID` | unset | yes |
+| `WA_CHATWOOT_INBOX_ID` | unset | yes |
+| `WA_CHATWOOT_WEBHOOK_SECRET` | unset | yes, at least 16 characters |
+| `WA_CHATWOOT_IGNORE_JIDS` | unset | no |
+| `WA_CHATWOOT_INSTANCE_ID` | unset | no |
+| `WA_CHATWOOT_ALLOW_HTTP` | `false` | no |
+| `WA_CHATWOOT_ALLOW_PRIVATE_URL` | `false` | no |
+| `WA_CHATWOOT_ALLOW_LEGACY_SECRET` | `false` | no |
+| `WA_CHATWOOT_BLOCK_GROUP_REPLIES` | `false` | no |
+| `WA_CHATWOOT_TIMEOUT_MS` | `10000` | no |
+
+`POST /chatwoot/webhook` accepts `message_created` agent replies. Chatwoot generates the API inbox secret; copy it into `WA_CHATWOOT_WEBHOOK_SECRET`. Chatwoot v4.13+ signs the raw body: `X-Chatwoot-Signature` is `sha256=` plus HMAC-SHA256 of `<X-Chatwoot-Timestamp>.<raw body>`, and `X-Chatwoot-Delivery` is remembered until that timestamp leaves the 300 second window. A valid reply returns `202` before attachments download. `?secret=` and the older secret headers work only when `WA_CHATWOOT_ALLOW_LEGACY_SECRET=true`. The conversation `inbox_id` must equal `WA_CHATWOOT_INBOX_ID`, and the contact source id must be a WhatsApp JID (`@s.whatsapp.net`, `@g.us`, or `@lid`) or `inst_<id>|<jid>`. The instance must already exist, or the webhook returns `422`. A `@newsletter` destination is ignored with `200`. Messages this server created in Chatwoot use source id `WAID:<whatsapp message id>` and are not sent back to WhatsApp. Attachments are downloaded with pinned DNS and sent as bytes. Private attachment hosts are limited to the Chatwoot origin. A background download or queue failure, and an attachment past the 16 MB budget, are reported with a private note.
+
+`WA_CHATWOOT_IGNORE_JIDS` is a comma-separated list of exact JIDs, `@domain` suffixes, or `*` wildcards. `status@broadcast`, other `@broadcast` chats, and `@newsletter` chats are always ignored.
+
+With more than one instance, set `WA_CHATWOOT_INSTANCE_ID` or let the bridge store `instanceId|chatJid` as the Chatwoot contact source id so the reply returns to the same instance.
+
+Details and the Chatwoot inbox checklist are in [docs/chatwoot.md](chatwoot.md).
+
+### n8n community nodes
+
+`integrations/n8n-nodes-wamcp` is a local package (`private: true`) and is not published to npm. The action node calls the existing `POST /mcp` session (`wa_send_text`, `wa_send_image`, `wa_send_audio`, `wa_send_document`, `wa_get_instance_status`). The trigger is a webhook and checks `x-wa-event-signature` (HMAC-SHA256 of `<x-wa-event-timestamp>.<raw body>`, 300 second window) against its Webhook Secret. Import `integrations/n8n-nodes-wamcp/examples/reply-on-message.json` for a flow that starts on `message.received`, drops groups, newsletters, status broadcasts, and `isFromMe`, then sends a text reply. Webhook Secret is required, so older flows need `WA_EVENT_WEBHOOK_SECRET` on the trigger. Set `WA_EVENT_WEBHOOK_URL` to that trigger's production URL and `WA_EVENT_WEBHOOK_SECRET` to the same secret.
 
 ---
 
@@ -3663,15 +4043,15 @@ tools = toolkit.get_tools()
 | Message Search                    | 1     | Both                                 |
 | WhatsApp Business Labels          | 8     | Baileys                              |
 | WhatsApp Events                   | 2     | Baileys                              |
-| Group Management                  | 26    | Baileys                              |
+| Group Management                  | 28    | Baileys                              |
 | Contact Management                | 8     | Both                                 |
 | Profile Management                | 7     | Both                                 |
 | Status / Stories                  | 4     | Baileys only                         |
-| Newsletter / Channels             | 10    | Baileys only                         |
+| Newsletter / Channels             | 11    | Baileys only                         |
 | Business, Communities, and Catalog| 16    | Baileys only                         |
 | Call Management                   | 1     | Baileys only                         |
 | Community administration | 16 | Baileys only |
-| **Total**                         | **155** |                                    |
+| **Total**                         | **158** |                                    |
 
 | Resources     | 10  |
 | ------------- | --- |

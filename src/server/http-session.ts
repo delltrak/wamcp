@@ -8,6 +8,7 @@ import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/
 import type { InstanceManager } from "../services/instance-manager.js";
 import type { MessageQueue } from "../services/message-queue.js";
 import type { MessageScheduler } from "../services/scheduler.js";
+import type { EventWebhookService } from "../services/event-webhook.js";
 import { logger } from "../utils/logger.js";
 import { createMcpServer } from "./mcp.js";
 
@@ -25,6 +26,7 @@ export class McpHttpSessionManager {
     private readonly instanceManager: InstanceManager,
     private readonly messageQueue: MessageQueue,
     private readonly scheduler: MessageScheduler,
+    private readonly eventWebhook?: EventWebhookService,
   ) {}
 
   get sessionCount(): number {
@@ -98,7 +100,12 @@ export class McpHttpSessionManager {
   }
 
   private createSession(): HttpMcpSession {
-    const mcpServer = createMcpServer(this.instanceManager, this.messageQueue, this.scheduler);
+    const mcpServer = createMcpServer(
+      this.instanceManager,
+      this.messageQueue,
+      this.scheduler,
+      this.eventWebhook,
+    );
     const sessionRef: { current?: HttpMcpSession } = {};
 
     const transport = new StreamableHTTPServerTransport({
