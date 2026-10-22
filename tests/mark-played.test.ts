@@ -48,16 +48,16 @@ describe("CloudApiAdapter.markPlayed", () => {
 describe("BaileysAdapter.markPlayed", () => {
   let instanceId: string;
 
-  beforeEach(() => {
+  beforeEach(async () => {
     instanceId = `test_${randomUUID()}`;
     const now = Date.now();
-    db.insert(instances)
+    (await db.insert(instances)
       .values({ id: instanceId, name: "played test", createdAt: now, updatedAt: now })
-      .run();
+      .run());
   });
 
-  afterEach(() => {
-    db.delete(instances).where(eq(instances.id, instanceId)).run();
+  afterEach(async () => {
+    (await db.delete(instances).where(eq(instances.id, instanceId)).run());
   });
 
   function connectedAdapter(): {
@@ -72,15 +72,15 @@ describe("BaileysAdapter.markPlayed", () => {
     return { adapter, sendNode, sendReceipt };
   }
 
-  function insertAudio(options: {
+  async function insertAudio(options: {
     id: string;
     chatId?: string;
     senderId?: string;
     isFromMe?: number;
     type?: "audio" | "text" | "image" | "video";
     rawData?: string | null;
-  }): void {
-    db.insert(messages)
+  }): Promise<void> {
+    (await db.insert(messages)
       .values({
         id: options.id,
         instanceId,
@@ -92,7 +92,7 @@ describe("BaileysAdapter.markPlayed", () => {
         timestamp: 1_700_000_000,
         rawData: options.rawData === undefined ? null : options.rawData,
       })
-      .run();
+      .run());
   }
 
   function rawAudio(key: WAMessageKey, ptt = true): string {
@@ -104,7 +104,7 @@ describe("BaileysAdapter.markPlayed", () => {
   }
 
   it("sends one played receipt with a timestamp for a direct voice note", async () => {
-    insertAudio({ id: "voice-1" });
+    (await insertAudio({ id: "voice-1" }));
     const { adapter, sendNode, sendReceipt } = connectedAdapter();
     const before = Math.floor(Date.now() / 1000);
 
@@ -135,8 +135,8 @@ describe("BaileysAdapter.markPlayed", () => {
       fromMe: false,
       participant: SENDER_JID,
     };
-    insertAudio({ id: firstKey.id!, chatId: GROUP_JID, rawData: rawAudio(firstKey) });
-    insertAudio({ id: secondKey.id!, chatId: GROUP_JID, rawData: rawAudio(secondKey, false) });
+    (await insertAudio({ id: firstKey.id!, chatId: GROUP_JID, rawData: rawAudio(firstKey) }));
+    (await insertAudio({ id: secondKey.id!, chatId: GROUP_JID, rawData: rawAudio(secondKey, false) }));
     const { adapter, sendNode } = connectedAdapter();
 
     await adapter.markPlayed(GROUP_JID, [firstKey.id!, secondKey.id!]);
@@ -164,9 +164,9 @@ describe("BaileysAdapter.markPlayed", () => {
       id: "lid-voice",
       fromMe: false,
     };
-    insertAudio({ id: key.id!, rawData: rawAudio(key) });
+    (await insertAudio({ id: key.id!, rawData: rawAudio(key) }));
     const groupId = "group-voice-fallback";
-    insertAudio({ id: groupId, chatId: GROUP_JID, senderId: "me" });
+    (await insertAudio({ id: groupId, chatId: GROUP_JID, senderId: "me" }));
     const { adapter, sendNode } = connectedAdapter();
 
     await adapter.markPlayed(PN_JID, [key.id!]);
@@ -186,7 +186,7 @@ describe("BaileysAdapter.markPlayed", () => {
   });
 
   it("falls back to sendReceipt when the socket has no sendNode", async () => {
-    insertAudio({ id: "voice-fallback" });
+    (await insertAudio({ id: "voice-fallback" }));
     const adapter = new BaileysAdapter(instanceId);
     const sendReceipt = vi.fn().mockResolvedValue(undefined);
     Object.assign(adapter, { status: "connected", sock: { sendReceipt } });
@@ -197,9 +197,9 @@ describe("BaileysAdapter.markPlayed", () => {
   });
 
   it("refuses missing, outgoing, non-audio, and group messages without a sender", async () => {
-    insertAudio({ id: "outgoing-audio", isFromMe: 1 });
-    insertAudio({ id: "text-message", type: "text" });
-    insertAudio({ id: "group-without-sender", chatId: GROUP_JID, senderId: "me" });
+    (await insertAudio({ id: "outgoing-audio", isFromMe: 1 }));
+    (await insertAudio({ id: "text-message", type: "text" }));
+    (await insertAudio({ id: "group-without-sender", chatId: GROUP_JID, senderId: "me" }));
     const { adapter, sendNode, sendReceipt } = connectedAdapter();
 
     await expect(adapter.markPlayed(PN_JID, ["missing-audio"])).rejects.toThrow(
@@ -219,9 +219,9 @@ describe("BaileysAdapter.markPlayed", () => {
   });
 
   it("sends a played receipt for video and for a video note stored as ptv", async () => {
-    insertAudio({ id: "video-1", type: "video" });
+    (await insertAudio({ id: "video-1", type: "video" }));
     const ptvKey: WAMessageKey = { remoteJid: PN_JID, id: "ptv-1", fromMe: false };
-    insertAudio({
+    (await insertAudio({
       id: "ptv-1",
       type: "text",
       rawData: JSON.stringify({
@@ -229,7 +229,7 @@ describe("BaileysAdapter.markPlayed", () => {
         message: { ptvMessage: { mimetype: "video/mp4", seconds: 4 } },
         messageTimestamp: 1_700_000_000,
       }),
-    });
+    }));
     const { adapter, sendNode } = connectedAdapter();
 
     await adapter.markPlayed(PN_JID, ["video-1", "ptv-1"]);
@@ -251,7 +251,7 @@ describe("BaileysAdapter.markPlayed", () => {
       id: "status-voice",
       fromMe: false,
     };
-    insertAudio({
+    (await insertAudio({
       id: "status-voice",
       chatId: "status@broadcast",
       rawData: JSON.stringify({
@@ -259,9 +259,9 @@ describe("BaileysAdapter.markPlayed", () => {
         message: { audioMessage: { ptt: true, mimetype: "audio/ogg" } },
         messageTimestamp: 1_700_000_000,
       }),
-    });
-    insertAudio({ id: "newsletter-voice", chatId: "12345@newsletter" });
-    insertAudio({ id: "list-voice", chatId: "12345@broadcast" });
+    }));
+    (await insertAudio({ id: "newsletter-voice", chatId: "12345@newsletter" }));
+    (await insertAudio({ id: "list-voice", chatId: "12345@broadcast" }));
     const { adapter, sendNode, sendReceipt } = connectedAdapter();
 
     await expect(adapter.markPlayed("status@broadcast", ["status-voice"])).rejects.toThrow(
@@ -286,7 +286,7 @@ describe("BaileysAdapter.markPlayed", () => {
       id: "wrapped-status",
       fromMe: false,
     };
-    insertAudio({
+    (await insertAudio({
       id: "wrapped-status",
       chatId: PN_JID,
       rawData: JSON.stringify({
@@ -294,7 +294,7 @@ describe("BaileysAdapter.markPlayed", () => {
         message: { audioMessage: { ptt: true } },
         messageTimestamp: 1_700_000_000,
       }),
-    });
+    }));
     const { adapter, sendNode } = connectedAdapter();
 
     await expect(adapter.markPlayed(PN_JID, ["wrapped-status"])).rejects.toThrow(
@@ -305,7 +305,7 @@ describe("BaileysAdapter.markPlayed", () => {
 
   it("sends a played receipt to an optional hosted chat", async () => {
     const hosted = "123456789@hosted.lid";
-    insertAudio({ id: "hosted-voice", chatId: hosted });
+    (await insertAudio({ id: "hosted-voice", chatId: hosted }));
     const { adapter, sendNode } = connectedAdapter();
 
     await adapter.markPlayed(hosted, ["hosted-voice"]);
@@ -316,8 +316,8 @@ describe("BaileysAdapter.markPlayed", () => {
   });
 
   it("marks a stored incoming message only when the chat matches", async () => {
-    insertAudio({ id: "voice-stored", chatId: PN_JID });
-    insertAudio({ id: "outgoing-only", chatId: PN_JID, isFromMe: 1 });
+    (await insertAudio({ id: "voice-stored", chatId: PN_JID }));
+    (await insertAudio({ id: "outgoing-only", chatId: PN_JID, isFromMe: 1 }));
     const { adapter, sendNode } = connectedAdapter();
 
     await expect(adapter.markPlayedMessage("voice-stored", LID_JID)).rejects.toThrow(
@@ -335,7 +335,7 @@ describe("BaileysAdapter.markPlayed", () => {
   });
 
   it("marks a stored message from its saved chat without a separate chat argument", async () => {
-    insertAudio({ id: "voice-stored", chatId: PN_JID });
+    (await insertAudio({ id: "voice-stored", chatId: PN_JID }));
     const { adapter, sendNode } = connectedAdapter();
 
     await adapter.markPlayedMessage("voice-stored");

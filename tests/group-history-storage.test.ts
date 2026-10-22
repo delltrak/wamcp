@@ -9,20 +9,20 @@ vi.mock("../src/db/client.js", async () => {
   const { drizzle } = await import("drizzle-orm/better-sqlite3");
   const schema = await import("../src/db/schema.js");
   const sqlite = new Database(":memory:");
-  sqlite.exec(`CREATE TABLE messages (
+  (await sqlite.exec(`CREATE TABLE messages (
     instance_id TEXT NOT NULL, id TEXT NOT NULL, chat_id TEXT NOT NULL,
     sender_id TEXT NOT NULL, type TEXT NOT NULL, content TEXT, media_url TEXT,
     media_local TEXT, media_mimetype TEXT, quoted_id TEXT, is_from_me INTEGER DEFAULT 0,
     is_forwarded INTEGER DEFAULT 0, status TEXT DEFAULT 'received', timestamp INTEGER NOT NULL,
     push_name TEXT, raw_data TEXT, starred INTEGER DEFAULT 0,
     PRIMARY KEY (instance_id, id)
-  )`);
+  )`));
   return { sqlite, db: drizzle(sqlite, { schema }) };
 });
 
 const group = "123456789@g.us";
-function insert(id: string, raw: unknown, instanceId = "fixture") {
-  db.insert(messages)
+async function insert(id: string, raw: unknown, instanceId = "fixture") {
+  (await (await db.insert(messages))
     .values({
       instanceId,
       id,
@@ -33,7 +33,7 @@ function insert(id: string, raw: unknown, instanceId = "fixture") {
       timestamp: 1000,
       rawData: typeof raw === "string" ? raw : raw === null ? null : JSON.stringify(raw),
     })
-    .run();
+    .run());
 }
 function fixture() {
   let process: (events: Partial<BaileysEventMap>) => Promise<void> = async () => {};
@@ -55,22 +55,22 @@ function fixture() {
   internals.bindEvents(socket);
   return { adapter, process: (events: Partial<BaileysEventMap>) => process(events) };
 }
-beforeEach(() => {
-  sqlite.exec("DELETE FROM messages");
+beforeEach(async () => {
+  (await sqlite.exec("DELETE FROM messages"));
 });
-afterAll(() => {
-  sqlite.close();
+afterAll(async () => {
+  (await sqlite.close());
 });
 
 describe("persisted history privacy", () => {
   it("preserves raw ephemeral/view-once flags and fails closed for absent or corrupt raw payloads", async () => {
-    insert("ephemeral", {
+    (await insert("ephemeral", {
       message: { extendedTextMessage: { text: "secret", contextInfo: { expiration: 86400 } } },
-    });
-    insert("once", { message: { viewOnceMessageV2: { message: { imageMessage: {} } } } });
-    insert("missing", null);
-    insert("corrupt", "{");
-    insert("normal", { message: { conversation: "normal" } });
+    }));
+    (await insert("once", { message: { viewOnceMessageV2: { message: { imageMessage: {} } } } }));
+    (await insert("missing", null));
+    (await insert("corrupt", "{"));
+    (await insert("normal", { message: { conversation: "normal" } }));
     const rows = new Map(
       (await fixture().adapter.getMessages(group)).map((message) => [message.id, message]),
     );
@@ -81,7 +81,7 @@ describe("persisted history privacy", () => {
     expect(rows.get("normal")?.historySharingBlocked).not.toBe(true);
   });
   it("persists received revocations and does not restore shareability after late receipts", async () => {
-    insert("deleted", { message: { conversation: "secret" } });
+    (await insert("deleted", { message: { conversation: "secret" } }));
     const f = fixture();
     await f.process({
       "messages.update": [
@@ -99,10 +99,10 @@ describe("persisted history privacy", () => {
   it.each(["ephemeralMessage", "viewOnceMessageV2"])(
     "persists received edits while preserving %s",
     async (wrapper) => {
-      insert("edited", {
+      (await insert("edited", {
         key: { remoteJid: group, id: "edited" },
         message: { [wrapper]: { message: { conversation: "secret" } } },
-      });
+      }));
       const f = fixture();
       await f.process({
         "messages.update": [
@@ -122,9 +122,9 @@ describe("persisted history privacy", () => {
   );
 
   it("marks explicit and whole-chat deletion events without affecting another instance", async () => {
-    insert("first", { message: { conversation: "secret" } });
-    insert("second", { message: { conversation: "secret" } });
-    insert("other", { message: { conversation: "secret" } }, "other-instance");
+    (await insert("first", { message: { conversation: "secret" } }));
+    (await insert("second", { message: { conversation: "secret" } }));
+    (await insert("other", { message: { conversation: "secret" } }, "other-instance"));
     const f = fixture();
     await f.process({ "messages.delete": { keys: [{ remoteJid: group, id: "first" }] } });
     expect((await f.adapter.getMessages(group)).find((m) => m.id === "first")?.status).toBe(
@@ -133,10 +133,10 @@ describe("persisted history privacy", () => {
     await f.process({ "messages.delete": { jid: group, all: true } });
     expect((await f.adapter.getMessages(group)).every((m) => m.status === "revoked")).toBe(true);
     expect(
-      db
+      (await db
         .select()
         .from(messages)
-        .all()
+        .all())
         .find((m) => m.id === "other")?.status,
     ).toBe("received");
   });

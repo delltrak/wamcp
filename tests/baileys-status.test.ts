@@ -35,15 +35,15 @@ function createAdapter(options?: { ownJid?: string; contacts?: string[]; maxReci
 }
 
 describe("Baileys status audiences", () => {
-  beforeEach(() => {
+  beforeEach(async () => {
     const now = Date.now();
-    db.insert(instances)
+    (await db.insert(instances)
       .values({ id: "synthetic-status-instance", name: "test", createdAt: now, updatedAt: now })
-      .run();
+      .run());
   });
 
-  afterEach(() => {
-    db.delete(instances).where(eq(instances.id, "synthetic-status-instance")).run();
+  afterEach(async () => {
+    (await db.delete(instances).where(eq(instances.id, "synthetic-status-instance")).run());
     vi.unstubAllEnvs();
   });
 

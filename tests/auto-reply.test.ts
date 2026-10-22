@@ -296,33 +296,44 @@ describe("auto-reply decisions", () => {
     const { service, send, advance, event } = harness(enabledConfig({ cooldownMs: HOUR_MS }));
 
     service.handle("inst_auto", event());
+await new Promise<void>((resolve) => setImmediate(resolve));
     service.handle("inst_auto", event({ message: { id: "again" } }));
+await new Promise<void>((resolve) => setImmediate(resolve));
     expect(send).toHaveBeenCalledTimes(1);
     expect(send).toHaveBeenCalledWith("inst_auto", DIRECT, REPLY);
 
     await Promise.resolve();
     advance(HOUR_MS);
     service.handle("inst_auto", event({ message: { id: "after-cooldown" } }));
+await new Promise<void>((resolve) => setImmediate(resolve));
     expect(send).toHaveBeenCalledTimes(2);
   });
 
-  it("never replies to itself, broadcasts, newsletters, groups, or its own echo", () => {
+  it("never replies to itself, broadcasts, newsletters, groups, or its own echo", async () => {
     const { service, send, event } = harness();
 
     service.handle("inst_auto", event({ message: { id: "me", isFromMe: true } }));
+await new Promise<void>((resolve) => setImmediate(resolve));
     service.handle("inst_auto", event({ chatId: "status@broadcast", message: { id: "status" } }));
+await new Promise<void>((resolve) => setImmediate(resolve));
     service.handle("inst_auto", event({ chatId: "12345@broadcast", message: { id: "list" } }));
+await new Promise<void>((resolve) => setImmediate(resolve));
     service.handle("inst_auto", event({ chatId: "12345@newsletter", message: { id: "channel" } }));
+await new Promise<void>((resolve) => setImmediate(resolve));
     service.handle("inst_auto", event({ message: { id: "echo", content: `  ${REPLY}  ` } }));
+await new Promise<void>((resolve) => setImmediate(resolve));
     service.handle("inst_auto", event({ chatId: GROUP, message: { id: "group" } }));
+await new Promise<void>((resolve) => setImmediate(resolve));
     service.handle("inst_auto", event({ message: { id: "audio", type: "audio", content: null } }));
+await new Promise<void>((resolve) => setImmediate(resolve));
 
     expect(send).not.toHaveBeenCalled();
   });
 
-  it("replies in a group only when groups are enabled, and still skips status there", () => {
+  it("replies in a group only when groups are enabled, and still skips status there", async () => {
     const disabled = harness();
     disabled.service.handle("inst_auto", disabled.event({ chatId: GROUP, isGroup: true }));
+await new Promise<void>((resolve) => setImmediate(resolve));
     expect(disabled.send).not.toHaveBeenCalled();
 
     const enabled = harness(enabledConfig({ groups: true }));
@@ -330,16 +341,18 @@ describe("auto-reply decisions", () => {
       "inst_auto",
       enabled.event({ chatId: GROUP, isGroup: true, message: { id: "group-ok" } }),
     );
+await new Promise<void>((resolve) => setImmediate(resolve));
     enabled.service.handle(
       "inst_auto",
       enabled.event({ chatId: "status@broadcast", message: { id: "status-group-mode" } }),
     );
+await new Promise<void>((resolve) => setImmediate(resolve));
 
     expect(enabled.send).toHaveBeenCalledTimes(1);
     expect(enabled.send).toHaveBeenCalledWith("inst_auto", GROUP, REPLY);
   });
 
-  it("skips ignored chats and senders, including suffix and prefix wildcards", () => {
+  it("skips ignored chats and senders, including suffix and prefix wildcards", async () => {
     const { service, send, event } = harness(
       enabledConfig({
         ignoreJids: ["@lid", "5577*@s.whatsapp.net", DIRECT],
@@ -347,6 +360,7 @@ describe("auto-reply decisions", () => {
     );
 
     service.handle("inst_auto", event({ message: { id: "exact" } }));
+await new Promise<void>((resolve) => setImmediate(resolve));
     service.handle(
       "inst_auto",
       event({
@@ -354,64 +368,78 @@ describe("auto-reply decisions", () => {
         message: { id: "sender", sender: "5577000000000@s.whatsapp.net" },
       }),
     );
+await new Promise<void>((resolve) => setImmediate(resolve));
     service.handle("inst_auto", event({ chatId: "1999991111@lid", message: { id: "lid" } }));
+await new Promise<void>((resolve) => setImmediate(resolve));
     service.handle(
       "inst_auto",
       event({ chatId: "5511666666666@s.whatsapp.net", message: { id: "allowed" } }),
     );
+await new Promise<void>((resolve) => setImmediate(resolve));
 
     expect(send).toHaveBeenCalledTimes(1);
     expect(send).toHaveBeenCalledWith("inst_auto", "5511666666666@s.whatsapp.net", REPLY);
   });
 
-  it("answers a direct lid chat and ignores hosted and legacy servers", () => {
+  it("answers a direct lid chat and ignores hosted and legacy servers", async () => {
     const { service, send, event } = harness();
 
     service.handle("inst_auto", event({ chatId: "1999991111@lid", message: { id: "lid" } }));
+await new Promise<void>((resolve) => setImmediate(resolve));
     service.handle("inst_auto", event({ chatId: "13135550002@c.us", message: { id: "legacy" } }));
+await new Promise<void>((resolve) => setImmediate(resolve));
     service.handle("inst_auto", event({ chatId: "123@hosted", message: { id: "hosted" } }));
+await new Promise<void>((resolve) => setImmediate(resolve));
     service.handle("inst_auto", event({ chatId: "123@hosted.lid", message: { id: "hosted-lid" } }));
+await new Promise<void>((resolve) => setImmediate(resolve));
 
     expect(send).toHaveBeenCalledTimes(1);
     expect(send).toHaveBeenCalledWith("inst_auto", "1999991111@lid", REPLY);
   });
 
-  it("does not reply twice to the same message id", () => {
+  it("does not reply twice to the same message id", async () => {
     const { service, send, advance, event } = harness(enabledConfig({ cooldownMs: HOUR_MS }));
     const first = event({ message: { id: "same" } });
 
     service.handle("inst_auto", first);
+await new Promise<void>((resolve) => setImmediate(resolve));
     advance(HOUR_MS);
     service.handle("inst_auto", first);
+await new Promise<void>((resolve) => setImmediate(resolve));
 
     expect(send).toHaveBeenCalledTimes(1);
   });
 
-  it("keeps one chat cooldown from blocking another chat inside the rate limit", () => {
+  it("keeps one chat cooldown from blocking another chat inside the rate limit", async () => {
     const { service, send, event } = harness(
       enabledConfig({ cooldownMs: HOUR_MS, ratePerMinute: 2 }),
     );
 
     service.handle("inst_auto", event({ message: { id: "a" } }));
+await new Promise<void>((resolve) => setImmediate(resolve));
     service.handle(
       "inst_auto",
       event({ chatId: "5511777777777@s.whatsapp.net", message: { id: "b" } }),
     );
+await new Promise<void>((resolve) => setImmediate(resolve));
     service.handle("inst_auto", event({ message: { id: "a2" } }));
+await new Promise<void>((resolve) => setImmediate(resolve));
 
     expect(send).toHaveBeenCalledTimes(2);
   });
 
-  it("stops after the per-instance rate limit without consuming that chat cooldown", () => {
+  it("stops after the per-instance rate limit without consuming that chat cooldown", async () => {
     const { service, send, advance, event } = harness(
       enabledConfig({ ratePerMinute: 1, cooldownMs: HOUR_MS }),
     );
 
     service.handle("inst_auto", event({ chatId: DIRECT, message: { id: "r1" } }));
+await new Promise<void>((resolve) => setImmediate(resolve));
     service.handle(
       "inst_auto",
       event({ chatId: "5511222222222@s.whatsapp.net", message: { id: "r2" } }),
     );
+await new Promise<void>((resolve) => setImmediate(resolve));
     expect(send).toHaveBeenCalledTimes(1);
 
     advance(60_000);
@@ -419,17 +447,20 @@ describe("auto-reply decisions", () => {
       "inst_auto",
       event({ chatId: "5511222222222@s.whatsapp.net", message: { id: "r3" } }),
     );
+await new Promise<void>((resolve) => setImmediate(resolve));
     service.handle("inst_auto", event({ chatId: DIRECT, message: { id: "r4" } }));
+await new Promise<void>((resolve) => setImmediate(resolve));
 
     expect(send).toHaveBeenCalledTimes(2);
     expect(send).toHaveBeenLastCalledWith("inst_auto", "5511222222222@s.whatsapp.net", REPLY);
   });
 
-  it("replies only to real user content and skips old messages", () => {
+  it("replies only to real user content and skips old messages", async () => {
     const { service, send, event, now } = harness();
     const fresh = Math.floor(now() / 1000);
 
     service.handle("inst_auto", event({ message: { id: "text", content: "hello" } }));
+await new Promise<void>((resolve) => setImmediate(resolve));
     service.handle(
       "inst_auto",
       event({
@@ -442,6 +473,7 @@ describe("auto-reply decisions", () => {
         },
       }),
     );
+await new Promise<void>((resolve) => setImmediate(resolve));
     service.handle(
       "inst_auto",
       event({
@@ -449,6 +481,7 @@ describe("auto-reply decisions", () => {
         message: { id: "empty-audio", type: "audio", content: null, mediaUrl: null },
       }),
     );
+await new Promise<void>((resolve) => setImmediate(resolve));
     service.handle(
       "inst_auto",
       event({
@@ -456,6 +489,7 @@ describe("auto-reply decisions", () => {
         message: { id: "reaction", type: "reaction", content: "👍" },
       }),
     );
+await new Promise<void>((resolve) => setImmediate(resolve));
     service.handle(
       "inst_auto",
       event({
@@ -463,6 +497,7 @@ describe("auto-reply decisions", () => {
         message: { id: "protocol", type: "text", content: "edit", rawType: "protocolMessage" },
       }),
     );
+await new Promise<void>((resolve) => setImmediate(resolve));
     service.handle(
       "inst_auto",
       event({
@@ -470,6 +505,7 @@ describe("auto-reply decisions", () => {
         message: { id: "stub", type: "text", content: "joined", rawType: "messageStub" },
       }),
     );
+await new Promise<void>((resolve) => setImmediate(resolve));
     service.handle(
       "inst_auto",
       event({
@@ -477,6 +513,7 @@ describe("auto-reply decisions", () => {
         message: { id: "revoke", type: "text", content: "revoked", rawType: "revoke" },
       }),
     );
+await new Promise<void>((resolve) => setImmediate(resolve));
     service.handle(
       "inst_auto",
       event({
@@ -484,6 +521,7 @@ describe("auto-reply decisions", () => {
         message: { id: "zero", content: "old", timestamp: 0 },
       }),
     );
+await new Promise<void>((resolve) => setImmediate(resolve));
     service.handle(
       "inst_auto",
       event({
@@ -491,11 +529,12 @@ describe("auto-reply decisions", () => {
         message: { id: "aged", content: "old", timestamp: fresh - 181 },
       }),
     );
+await new Promise<void>((resolve) => setImmediate(resolve));
 
     expect(send).toHaveBeenCalledTimes(2);
   });
 
-  it("skips the account's own phone and lid even when the message is not fromMe", () => {
+  it("skips the account's own phone and lid even when the message is not fromMe", async () => {
     const { service, send, event } = harness();
     const own: AutoReplyContact = {
       contactKey: OTHER,
@@ -504,16 +543,18 @@ describe("auto-reply decisions", () => {
     };
 
     service.handle("inst_auto", event({ message: { id: "own-sender" } }), own);
+await new Promise<void>((resolve) => setImmediate(resolve));
     service.handle(
       "inst_auto",
       event({ chatId: "1999991111:3@lid", message: { id: "own-lid", sender: OTHER } }),
       { ...own, contactKey: "1999991111@lid" },
     );
+await new Promise<void>((resolve) => setImmediate(resolve));
 
     expect(send).not.toHaveBeenCalled();
   });
 
-  it("applies one cooldown and one ignore list across PN and LID aliases", () => {
+  it("applies one cooldown and one ignore list across PN and LID aliases", async () => {
     const { service, send, event } = harness(
       enabledConfig({
         cooldownMs: HOUR_MS,
@@ -531,7 +572,9 @@ describe("auto-reply decisions", () => {
       event({ chatId: "1999991111@lid", message: { id: "lid" } }),
       person,
     );
+await new Promise<void>((resolve) => setImmediate(resolve));
     service.handle("inst_auto", event({ chatId: DIRECT, message: { id: "pn" } }), person);
+await new Promise<void>((resolve) => setImmediate(resolve));
     service.handle(
       "inst_auto",
       event({ chatId: "5577000000000@lid", message: { id: "ignored-lid" } }),
@@ -541,12 +584,13 @@ describe("auto-reply decisions", () => {
         ownJids: [],
       },
     );
+await new Promise<void>((resolve) => setImmediate(resolve));
 
     expect(send).toHaveBeenCalledTimes(1);
     expect(send).toHaveBeenCalledWith("inst_auto", "1999991111@lid", REPLY);
   });
 
-  it("applies a domain suffix to the chat or group sender, and exact entries to aliases", () => {
+  it("applies a domain suffix to the chat or group sender, and exact entries to aliases", async () => {
     const domain = harness(enabledConfig({ ignoreJids: ["@lid"] }));
     domain.service.handle(
       "inst_auto",
@@ -556,10 +600,12 @@ describe("auto-reply decisions", () => {
         message: { id: "pn-with-lid", sender: DIRECT, senderLid: "1999991111@lid" },
       }),
     );
+await new Promise<void>((resolve) => setImmediate(resolve));
     domain.service.handle(
       "inst_auto",
       domain.event({ chatId: "1999991111@lid", message: { id: "lid-chat" } }),
     );
+await new Promise<void>((resolve) => setImmediate(resolve));
     expect(domain.send).toHaveBeenCalledTimes(1);
     expect(domain.send).toHaveBeenCalledWith("inst_auto", DIRECT, REPLY);
 
@@ -572,6 +618,7 @@ describe("auto-reply decisions", () => {
         message: { id: "sender-pn", sender: DIRECT, senderLid: "1999991111@lid" },
       }),
     );
+await new Promise<void>((resolve) => setImmediate(resolve));
     groups.service.handle(
       "inst_auto",
       groups.event({
@@ -580,6 +627,7 @@ describe("auto-reply decisions", () => {
         message: { id: "sender-lid", sender: "1999991111@lid" },
       }),
     );
+await new Promise<void>((resolve) => setImmediate(resolve));
     expect(groups.send).toHaveBeenCalledTimes(1);
     expect(groups.send).toHaveBeenCalledWith("inst_auto", GROUP, REPLY);
 
@@ -596,10 +644,11 @@ describe("auto-reply decisions", () => {
         ownJids: [],
       },
     );
+await new Promise<void>((resolve) => setImmediate(resolve));
     expect(exact.send).not.toHaveBeenCalled();
   });
 
-  it("skips every group when ignore is @g.us and still replies in a private chat", () => {
+  it("skips every group when ignore is @g.us and still replies in a private chat", async () => {
     const { service, send, event } = harness(
       enabledConfig({ groups: true, ignoreJids: ["@g.us"] }),
     );
@@ -612,13 +661,15 @@ describe("auto-reply decisions", () => {
         message: { id: "group", sender: OTHER },
       }),
     );
+await new Promise<void>((resolve) => setImmediate(resolve));
     service.handle("inst_auto", event({ message: { id: "direct" } }));
+await new Promise<void>((resolve) => setImmediate(resolve));
 
     expect(send).toHaveBeenCalledTimes(1);
     expect(send).toHaveBeenCalledWith("inst_auto", DIRECT, REPLY);
   });
 
-  it("skips every group when ignore is *@g.us and still replies in a private chat", () => {
+  it("skips every group when ignore is *@g.us and still replies in a private chat", async () => {
     const { service, send, event } = harness(
       enabledConfig({ groups: true, ignoreJids: ["*@g.us"] }),
     );
@@ -631,13 +682,15 @@ describe("auto-reply decisions", () => {
         message: { id: "group", sender: OTHER },
       }),
     );
+await new Promise<void>((resolve) => setImmediate(resolve));
     service.handle("inst_auto", event({ message: { id: "direct" } }));
+await new Promise<void>((resolve) => setImmediate(resolve));
 
     expect(send).toHaveBeenCalledTimes(1);
     expect(send).toHaveBeenCalledWith("inst_auto", DIRECT, REPLY);
   });
 
-  it("shares one cooldown across every sender in a group", () => {
+  it("shares one cooldown across every sender in a group", async () => {
     const { service, send, event } = harness(enabledConfig({ groups: true, cooldownMs: HOUR_MS }));
     const otherGroup = "120363000000000001@g.us";
 
@@ -649,6 +702,7 @@ describe("auto-reply decisions", () => {
         message: { id: "g1", sender: "5511111111111@s.whatsapp.net" },
       }),
     );
+await new Promise<void>((resolve) => setImmediate(resolve));
     service.handle(
       "inst_auto",
       event({
@@ -657,6 +711,7 @@ describe("auto-reply decisions", () => {
         message: { id: "g2", sender: "5511222222222@s.whatsapp.net" },
       }),
     );
+await new Promise<void>((resolve) => setImmediate(resolve));
     service.handle(
       "inst_auto",
       event({
@@ -665,17 +720,20 @@ describe("auto-reply decisions", () => {
         message: { id: "g3", sender: "5511111111111@s.whatsapp.net" },
       }),
     );
+await new Promise<void>((resolve) => setImmediate(resolve));
 
     expect(send).toHaveBeenCalledTimes(2);
     expect(send).toHaveBeenNthCalledWith(1, "inst_auto", GROUP, REPLY);
     expect(send).toHaveBeenNthCalledWith(2, "inst_auto", otherGroup, REPLY);
   });
 
-  it("limits replies to the configured instances", () => {
+  it("limits replies to the configured instances", async () => {
     const { service, send, event } = harness(enabledConfig({ instances: ["inst_other"] }));
 
     service.handle("inst_auto", event({ message: { id: "skip" } }));
+await new Promise<void>((resolve) => setImmediate(resolve));
     service.handle("inst_other", event({ message: { id: "keep" } }));
+await new Promise<void>((resolve) => setImmediate(resolve));
 
     expect(send).toHaveBeenCalledTimes(1);
     expect(send).toHaveBeenCalledWith("inst_other", DIRECT, REPLY);
@@ -692,6 +750,7 @@ describe("auto-reply decisions", () => {
       store,
     );
     first.handle("inst_auto", incoming({}, now));
+await new Promise<void>((resolve) => setImmediate(resolve));
     await Promise.resolve();
     expect(firstSend).toHaveBeenCalledTimes(1);
 
@@ -704,6 +763,7 @@ describe("auto-reply decisions", () => {
       store,
     );
     second.handle("inst_auto", incoming({ message: { id: "later" } }, now));
+await new Promise<void>((resolve) => setImmediate(resolve));
 
     expect(secondSend).not.toHaveBeenCalled();
   });
@@ -723,12 +783,15 @@ describe("auto-reply decisions", () => {
     );
     const event = incoming();
     service.handle("inst_auto", event);
+await new Promise<void>((resolve) => setImmediate(resolve));
     service.handle("inst_auto", incoming({ message: { id: "concurrent" } }));
+await new Promise<void>((resolve) => setImmediate(resolve));
     expect(send).toHaveBeenCalledTimes(1);
     expect(store.load("inst_auto", DIRECT)).toBeUndefined();
     reject(new Error("redis unavailable"));
-    await vi.waitFor(() => {
+    await vi.waitFor(async () => {
       service.handle("inst_auto", event);
+await new Promise<void>((resolve) => setImmediate(resolve));
       expect(send).toHaveBeenCalledTimes(2);
     });
     await vi.waitFor(() => expect(store.load("inst_auto", DIRECT)).toBeTypeOf("number"));
@@ -737,6 +800,7 @@ describe("auto-reply decisions", () => {
       "inst_auto",
       incoming({ message: { id: "after-restart" } }),
     );
+await new Promise<void>((resolve) => setImmediate(resolve));
     expect(restartedSend).not.toHaveBeenCalled();
   });
 
@@ -750,11 +814,15 @@ describe("auto-reply decisions", () => {
       store,
     );
     service.handle("first", incoming());
+await new Promise<void>((resolve) => setImmediate(resolve));
     service.handle("second", incoming());
+await new Promise<void>((resolve) => setImmediate(resolve));
     expect(send).toHaveBeenCalledTimes(2);
     await Promise.resolve();
     service.handle("first", incoming({ message: { id: "later" } }));
+await new Promise<void>((resolve) => setImmediate(resolve));
     service.handle("second", incoming({ message: { id: "later" } }));
+await new Promise<void>((resolve) => setImmediate(resolve));
     expect(send).toHaveBeenCalledTimes(2);
     expect(store.load("first", DIRECT)).toBeTypeOf("number");
     expect(store.load("second", DIRECT)).toBeTypeOf("number");
@@ -770,17 +838,20 @@ describe("auto-reply decisions", () => {
     };
     const service = new AutoReplyService(enabledConfig(), send, Date.now, store);
     service.handle("inst_auto", incoming());
+await new Promise<void>((resolve) => setImmediate(resolve));
     await Promise.resolve();
     service.handle("inst_auto", incoming({ message: { id: "later" } }));
+await new Promise<void>((resolve) => setImmediate(resolve));
     expect(send).toHaveBeenCalledTimes(1);
   });
 
-  it("uses supplied group sender phone aliases before the LID mapping exists", () => {
+  it("uses supplied group sender phone aliases before the LID mapping exists", async () => {
     const { service, send, event } = harness(enabledConfig({ groups: true, ignoreJids: [DIRECT] }));
     service.handle(
       "inst_auto",
       event({ chatId: GROUP, isGroup: true, message: { sender: "123@lid", senderPn: DIRECT } }),
     );
+await new Promise<void>((resolve) => setImmediate(resolve));
     expect(send).not.toHaveBeenCalled();
   });
 
@@ -932,9 +1003,9 @@ describe("auto-reply cooldown table", () => {
   it("survives a new service and is removed with the instance", async () => {
     const instanceId = `test_${randomUUID()}`;
     const now = 1_700_000_000_000;
-    db.insert(instances)
+    (await db.insert(instances)
       .values({ id: instanceId, name: "auto reply", createdAt: now, updatedAt: now })
-      .run();
+      .run());
 
     try {
       const firstSend = vi.fn(async () => undefined);
@@ -944,10 +1015,11 @@ describe("auto-reply cooldown table", () => {
         () => now,
         sqliteAutoReplyCooldownStore,
       );
-      first.handle(instanceId, incoming({}, now));
+      await first.handle(instanceId, incoming({}, now));
+await new Promise<void>((resolve) => setImmediate(resolve));
       await Promise.resolve();
       expect(firstSend).toHaveBeenCalledTimes(1);
-      expect(sqliteAutoReplyCooldownStore.load(instanceId, DIRECT)).toBe(now);
+      expect((await sqliteAutoReplyCooldownStore.load(instanceId, DIRECT))).toBe(now);
 
       const secondSend = vi.fn(async () => undefined);
       const second = new AutoReplyService(
@@ -956,13 +1028,14 @@ describe("auto-reply cooldown table", () => {
         () => now + 60_000,
         sqliteAutoReplyCooldownStore,
       );
-      second.handle(instanceId, incoming({ message: { id: "restart" } }, now + 60_000));
+      await second.handle(instanceId, incoming({ message: { id: "restart" } }, now + 60_000));
+await new Promise<void>((resolve) => setImmediate(resolve));
       expect(secondSend).not.toHaveBeenCalled();
     } finally {
-      db.delete(instances).where(eq(instances.id, instanceId)).run();
+      (await db.delete(instances).where(eq(instances.id, instanceId)).run());
     }
 
-    expect(sqliteAutoReplyCooldownStore.load(instanceId, DIRECT)).toBeUndefined();
+    expect((await sqliteAutoReplyCooldownStore.load(instanceId, DIRECT))).toBeUndefined();
   });
 
   it("reads last_reply_at without a camelCase alias", () => {

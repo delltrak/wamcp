@@ -48,7 +48,7 @@ export interface GroupHistoryChunkLimits {
   maxLineChars?: number;
 }
 
-type GroupHistoryStubClaim = (instanceId: string, messageId: string) => boolean;
+type GroupHistoryStubClaim = (instanceId: string, messageId: string) => boolean | Promise<boolean>;
 
 export function clampGroupHistoryCount(requested?: number): GroupHistoryCount {
   const requestedCount = requested ?? DEFAULT_GROUP_HISTORY_COUNT;
@@ -483,7 +483,7 @@ export async function sendGroupHistoryToMember(options: {
   adapter: ChannelAdapter;
   messageQueue: MessageQueue;
   timeZone?: string;
-  claimBeforeSend?: () => boolean;
+  claimBeforeSend?: () => boolean | Promise<boolean>;
 }): Promise<GroupHistorySendResult> {
   assertGroupHistoryWritesEnabled();
   const count = clampGroupHistoryCount(options.count);
@@ -532,7 +532,7 @@ export async function sendGroupHistoryToMember(options: {
     );
   }
 
-  if (!(options.claimBeforeSend?.() ?? true)) {
+  if (!((await options.claimBeforeSend?.()) ?? true)) {
     return empty("Este aviso de entrada já foi processado; nada foi enviado.");
   }
   const deliveryContext: GroupHistoryDeliveryContext = {
@@ -610,8 +610,14 @@ export function registerGroupHistoryOnJoin(
   claim: GroupHistoryStubClaim,
 ): () => void {
   assertGroupHistoryOnJoinConfig();
-  return subscribeOwnDirectParticipantAdds((instanceId, add) => {
-    void deliverOwnDirectParticipantAdd(instanceManager, messageQueue, claim, instanceId, add);
+  return subscribeOwnDirectParticipantAdds(async (instanceId, add) => {
+    void (await deliverOwnDirectParticipantAdd(
+      instanceManager,
+      messageQueue,
+      claim,
+      instanceId,
+      add,
+    ));
   });
 }
 
@@ -625,7 +631,7 @@ async function deliverOwnDirectParticipantAdd(
   try {
     if (!isGroupHistoryOnJoinEnabled()) return;
     if (process.env.WA_GROUP_WRITES_ENABLED?.trim().toLowerCase() !== "true") return;
-    if (instanceManager.getInstanceChannel(instanceId) !== "baileys") return;
+    if ((await instanceManager.getInstanceChannel(instanceId)) !== "baileys") return;
 
     const adapter = instanceManager.getAdapter(instanceId);
     const own = adapter.getLifecycleStatus?.();
@@ -635,15 +641,15 @@ async function deliverOwnDirectParticipantAdd(
     );
     let decided = false;
     let owned = false;
-    const claimBeforeSend = (): boolean => {
+    const claimBeforeSend = async (): Promise<boolean> => {
       if (!decided) {
-        owned = claim(instanceId, add.messageId);
+        owned = await claim(instanceId, add.messageId);
         decided = true;
       }
       return owned;
     };
     if (targets.length === 0) {
-      claimBeforeSend();
+      await claimBeforeSend();
       return;
     }
 

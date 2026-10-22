@@ -1531,13 +1531,13 @@ describe("Chatwoot and event webhooks", () => {
     const payload: ChannelEventPayload["message.received"] = messageEvent({
       instanceId: instance.id,
     });
-    const adapter = instanceManager.ensureAdapter(instance.id) as unknown as {
+    const adapter = (await instanceManager.ensureAdapter(instance.id)) as unknown as {
       emit: (
         event: "message.received",
         eventPayload: ChannelEventPayload["message.received"],
       ) => void;
     };
-    adapter.emit("message.received", payload);
+    (await adapter.emit("message.received", payload));
 
     await vi.waitFor(() => {
       expect(enqueue).toHaveBeenCalledWith(

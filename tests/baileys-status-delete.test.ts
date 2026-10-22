@@ -17,16 +17,16 @@ const STATUS_MESSAGE_ID = "synthetic-status-delete-message";
 describe("Baileys status deletion", () => {
   let instanceId: string;
 
-  beforeEach(() => {
+  beforeEach(async () => {
     instanceId = `status_delete_${randomUUID()}`;
     const now = Date.now();
-    db.insert(instances)
+    (await db.insert(instances)
       .values({ id: instanceId, name: "test", createdAt: now, updatedAt: now })
-      .run();
+      .run());
   });
 
-  afterEach(() => {
-    db.delete(instances).where(eq(instances.id, instanceId)).run();
+  afterEach(async () => {
+    (await db.delete(instances).where(eq(instances.id, instanceId)).run());
     vi.unstubAllEnvs();
   });
 
@@ -47,8 +47,8 @@ describe("Baileys status deletion", () => {
     return { adapter, sendMessage, contactStore };
   }
 
-  function insertSentMessage(chatId: string, messageId = STATUS_MESSAGE_ID, isFromMe = 1): void {
-    db.insert(messages)
+  async function insertSentMessage(chatId: string, messageId = STATUS_MESSAGE_ID, isFromMe = 1): Promise<void> {
+    (await db.insert(messages)
       .values({
         id: messageId,
         instanceId,
@@ -59,7 +59,7 @@ describe("Baileys status deletion", () => {
         status: isFromMe === 1 ? "sent" : "received",
         timestamp: Date.now(),
       })
-      .run();
+      .run());
   }
 
   it("reuses the stored audience, includes own JID, and marks a status revoked", async () => {
@@ -69,7 +69,7 @@ describe("Baileys status deletion", () => {
       text: "A saved status",
       statusJidList: [SAVED_JID],
     });
-    insertSentMessage("status@broadcast");
+    (await insertSentMessage("status@broadcast"));
 
     await adapter.deleteMessage("status@broadcast", STATUS_MESSAGE_ID);
 
@@ -79,26 +79,26 @@ describe("Baileys status deletion", () => {
       { delete: { remoteJid: "status@broadcast", id: STATUS_MESSAGE_ID, fromMe: true } },
       { statusJidList: [OWN_JID, SAVED_JID] },
     );
-    const row = db
+    const row = (await db
       .select({ status: messages.status })
       .from(messages)
       .where(and(eq(messages.instanceId, instanceId), eq(messages.id, STATUS_MESSAGE_ID)))
-      .get();
+      .get());
     expect(row?.status).toBe("revoked");
   });
 
   it("reuses every saved status recipient without applying the current cap", async () => {
     const { adapter, sendMessage, contactStore } = createAdapter([CONTACT_JID], 1);
     const storedJids = [SAVED_JID, CONTACT_JID, SAVED_JID, OWN_JID];
-    db.insert(statusAudiences)
+    (await db.insert(statusAudiences)
       .values({
         instanceId,
         messageId: STATUS_MESSAGE_ID,
         recipientJids: JSON.stringify(storedJids),
         createdAt: Date.now(),
       })
-      .run();
-    insertSentMessage("status@broadcast");
+      .run());
+    (await insertSentMessage("status@broadcast"));
 
     await adapter.deleteMessage("status@broadcast", STATUS_MESSAGE_ID);
 
@@ -149,11 +149,11 @@ describe("Baileys status deletion", () => {
     );
     expect(contactStore.getContacts).toHaveBeenCalledOnce();
     expect(
-      db
+      (await db
         .select({ id: messages.id })
         .from(messages)
         .where(and(eq(messages.instanceId, instanceId), eq(messages.id, "older-status-message")))
-        .get(),
+        .get()),
     ).toBeUndefined();
   });
 
@@ -161,18 +161,18 @@ describe("Baileys status deletion", () => {
     const chatId = "5500000000005@s.whatsapp.net";
     const messageId = "regular-delete-message";
     const { adapter, sendMessage } = createAdapter();
-    insertSentMessage(chatId, messageId);
+    (await insertSentMessage(chatId, messageId));
 
     await adapter.deleteMessage(chatId, messageId);
 
     expect(sendMessage.mock.calls).toEqual([
       [chatId, { delete: { remoteJid: chatId, id: messageId, fromMe: true } }],
     ]);
-    const row = db
+    const row = (await db
       .select({ status: messages.status })
       .from(messages)
       .where(and(eq(messages.instanceId, instanceId), eq(messages.id, messageId)))
-      .get();
+      .get());
     expect(row?.status).toBe("revoked");
   });
 
@@ -191,39 +191,39 @@ describe("Baileys status deletion", () => {
     const messageId = `invalid-revoke-${randomUUID()}`;
     const requestedChatId = "5500000000008@s.whatsapp.net";
     const { adapter, sendMessage } = createAdapter();
-    insertSentMessage(chatId, messageId, storedIsFromMe);
+    (await insertSentMessage(chatId, messageId, storedIsFromMe));
 
     await expect(adapter.deleteMessage(requestedChatId, messageId)).rejects.toThrow(
       "the stored message is not an outgoing message",
     );
     expect(sendMessage).not.toHaveBeenCalled();
     expect(
-      db
+      (await db
         .select({ status: messages.status })
         .from(messages)
         .where(and(eq(messages.instanceId, instanceId), eq(messages.id, messageId)))
-        .get()?.status,
+        .get())?.status,
     ).toBe(storedIsFromMe === 1 ? "sent" : "received");
   });
 
-  it("keeps revoked terminal across delivery updates and message upserts", () => {
+  it("keeps revoked terminal across delivery updates and message upserts", async () => {
     const chatId = "5500000000009@s.whatsapp.net";
     const messageId = "terminal-revoked-message";
     const { adapter } = createAdapter();
-    insertSentMessage(chatId, messageId);
-    db.update(messages)
+    (await insertSentMessage(chatId, messageId));
+    (await db.update(messages)
       .set({ status: "revoked" })
       .where(and(eq(messages.instanceId, instanceId), eq(messages.id, messageId)))
-      .run();
+      .run());
 
-    (
+    await (
       adapter as unknown as {
-        updateMessageStatus: (id: string, status: "delivered") => void;
+        updateMessageStatus: (id: string, status: "delivered") => Promise<void>;
       }
     ).updateMessageStatus(messageId, "delivered");
-    (
+    await (
       adapter as unknown as {
-        persistMessage: (event: NormalizedMessageEvent) => void;
+        persistMessage: (event: NormalizedMessageEvent) => Promise<void>;
       }
     ).persistMessage({
       instanceId,
@@ -240,11 +240,11 @@ describe("Baileys status deletion", () => {
       },
     });
 
-    const row = db
+    const row = (await db
       .select({ status: messages.status })
       .from(messages)
       .where(and(eq(messages.instanceId, instanceId), eq(messages.id, messageId)))
-      .get();
+      .get());
     expect(row?.status).toBe("revoked");
   });
 });

@@ -47,6 +47,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Added optional PostgreSQL storage selected by `WA_DATABASE_URL`, while SQLite remains the
+  default ([#129](https://github.com/delltrak/wamcp/issues/129),
+  [#138](https://github.com/delltrak/wamcp/pull/138)). Both drivers use asynchronous queries;
+  the manual snapshot copy preserves Baileys auth keys, skips migration journals and unknown
+  tables/columns, and requires an empty target unless `--force` is selected. No data is copied
+  automatically. PostgreSQL uses the shared runtime schema rather than SQLite Drizzle files;
+  text NUL bytes are stripped and collation can differ. Webhooks, cooldowns, group-history claims,
+  and schedules use the selected driver; OAuth keeps its separate local SQLite database.
+  Live-account migration remains unverified.
 - Added opt-in HTTP authentication and routing for remote MCP clients. `WA_MCP_OAUTH_ENABLED=true`
   enables an OAuth 2.1 authorization-code server with PKCE, discovery metadata, and dynamic client
   registration. `WA_BASIC_AUTH` accepts multiple users, `WA_BASE_PATH` prefixes the HTTP routes, and
@@ -57,7 +66,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Validation uses local HTTP clients; real remote-client authorization remains unverified.
 - Added five tools for one-shot and daily, weekly, or monthly scheduled sends
   ([#139](https://github.com/delltrak/wamcp/issues/139), [#136](https://github.com/delltrak/wamcp/pull/136)).
-  Schedules persist in the existing SQLite database; `WA_SCHEDULER_ENABLED=false` by default.
+  Schedules persist in the selected application database; `WA_SCHEDULER_ENABLED=false` by default.
   Each schedule uses an IANA timezone (default `America/Bahia`), a one-year initial horizon,
   and optional end/occurrence limits. Invalid RFC3339 calendar dates are rejected.
   Pause and cancel remain available with the gate off. Missed occurrences follow `skip` or `send`.

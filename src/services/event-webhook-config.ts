@@ -886,31 +886,37 @@ function tryInstanceWebhookDestination(
 
 let cachedInstanceWebhookRows: {
   generation: number;
-  byInstance: Map<string, InstanceWebhookRow>;
+  byInstance: Promise<Map<string, InstanceWebhookRow>>;
 } | null = null;
 
 /**
  * #142: one read of every stored row until set or delete bumps the storage generation.
  * The same generation key already invalidates the /health status cache.
  */
-function instanceWebhookRows(): ReadonlyMap<string, InstanceWebhookRow> {
+async function instanceWebhookRows(): Promise<ReadonlyMap<string, InstanceWebhookRow>> {
   const generation = instanceWebhookStorageGeneration();
   if (cachedInstanceWebhookRows?.generation === generation) {
     return cachedInstanceWebhookRows.byInstance;
   }
-  const byInstance = new Map<string, InstanceWebhookRow>();
-  for (const row of listInstanceWebhooks()) byInstance.set(row.instanceId, row);
+  const byInstance = listInstanceWebhooks().then(
+    (rows) => new Map(rows.map((row) => [row.instanceId, row])),
+  );
   cachedInstanceWebhookRows = { generation, byInstance };
-  return byInstance;
+  try {
+    return await byInstance;
+  } catch (error) {
+    if (cachedInstanceWebhookRows?.byInstance === byInstance) cachedInstanceWebhookRows = null;
+    throw error;
+  }
 }
 
 /** Global destinations, or the instance webhook in replace mode, or both when merge is on. */
-export function destinationsForInstance(
+export async function destinationsForInstance(
   config: EventWebhookConfig,
   instanceId: string,
   allowHttp = eventWebhookAllowsHttp(),
-): EventWebhookDestination[] {
-  const row = instanceWebhookRows().get(instanceId);
+): Promise<EventWebhookDestination[]> {
+  const row = (await instanceWebhookRows()).get(instanceId);
   if (!row) return config.destinations;
   const instanceDestination = tryInstanceWebhookDestination(row, config, allowHttp);
   if (!instanceDestination) return config.destinations;
@@ -921,12 +927,12 @@ export function destinationsForInstance(
   return [...globals, instanceDestination];
 }
 
-export function storedInstanceDestinations(
+export async function storedInstanceDestinations(
   config: EventWebhookConfig,
   allowHttp: boolean,
-): EventWebhookDestination[] {
+): Promise<EventWebhookDestination[]> {
   const destinations: EventWebhookDestination[] = [];
-  for (const row of instanceWebhookRows().values()) {
+  for (const row of (await instanceWebhookRows()).values()) {
     const destination = tryInstanceWebhookDestination(row, config, allowHttp);
     if (destination) destinations.push(destination);
   }
@@ -965,10 +971,10 @@ function eventWebhookStatusFingerprint(env: Environment): string {
  * Nothing returned includes a URL, header name, header value, token, or secret.
  * #142: the no-config path caches the database read until instance webhook storage changes.
  */
-export function getEventWebhookStatus(
+export async function getEventWebhookStatus(
   env: Environment = process.env,
   config?: EventWebhookConfig,
-): EventWebhookStatus {
+): Promise<EventWebhookStatus> {
   const generation = instanceWebhookStorageGeneration();
   const fingerprint = config ? "" : eventWebhookStatusFingerprint(env);
   if (
@@ -980,20 +986,23 @@ export function getEventWebhookStatus(
     return cachedEventWebhookStatus.status;
   }
 
-  const status = readEventWebhookStatus(env, config);
+  const status = await readEventWebhookStatus(env, config);
   if (!config) cachedEventWebhookStatus = { generation, fingerprint, status };
   return status;
 }
 
-function readEventWebhookStatus(
+async function readEventWebhookStatus(
   env: Environment,
   config: EventWebhookConfig | undefined,
-): EventWebhookStatus {
+): Promise<EventWebhookStatus> {
   const multi = usesMultiDestinationConfig(env);
   const preset = parsePreset(env.WA_EVENT_WEBHOOK_PRESET, "WA_EVENT_WEBHOOK_PRESET");
   const auth = resolveSingleDestinationAuth(env, preset);
   const resolved = config ?? loadConfigForStatus(env, !multi && auth.incomplete);
-  const instanceDestinations = storedInstanceDestinations(resolved, eventWebhookAllowsHttp(env));
+  const instanceDestinations = await storedInstanceDestinations(
+    resolved,
+    eventWebhookAllowsHttp(env),
+  );
   const destinationCount = resolved.destinations.length + instanceDestinations.length;
   const configured = destinationCount > 0;
   const eventCount = countEffectiveEvents(resolved, preset, instanceDestinations);
@@ -1107,13 +1116,13 @@ function requiredEventWebhookMessage(status: EventWebhookStatus): string {
  * Log webhook boot warnings and, when WA_REQUIRE_EVENT_WEBHOOK=true, stop
  * startup if no destination is configured or the event set is empty.
  */
-export function bootEventWebhook(
+export async function bootEventWebhook(
   env: Environment = process.env,
   exit: (code: number) => void = (code) => {
     process.exit(code);
   },
-): EventWebhookStatus {
-  const status = getEventWebhookStatus(env);
+): Promise<EventWebhookStatus> {
+  const status = await getEventWebhookStatus(env);
   logEventWebhookBootStatus(status);
   if (
     parseBoolean(env, "WA_REQUIRE_EVENT_WEBHOOK", false) &&

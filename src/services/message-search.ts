@@ -1,4 +1,4 @@
-import type Database from "better-sqlite3";
+import type { SqlDatabase } from "../db/client.js";
 import type { Message, MessageSearchOptions } from "../types/channel.types.js";
 
 interface MessageSearchRow {
@@ -22,11 +22,11 @@ function escapeLikeWildcards(value: string): string {
 }
 
 /** Search one instance's local SQLite message store using bound SQL parameters. */
-export function searchStoredMessages(
-  sqlite: Database.Database,
+export async function searchStoredMessages(
+  sqlite: SqlDatabase,
   instanceId: string,
   options: MessageSearchOptions,
-): { messages: Message[]; hasMore: boolean; nextOffset: number | null } {
+): Promise<{ messages: Message[]; hasMore: boolean; nextOffset: number | null }> {
   const filters = ["instance_id = ?", "lower(content) LIKE lower(?) ESCAPE '\\'"];
   const values: Array<string | number> = [instanceId, `%${escapeLikeWildcards(options.query)}%`];
 
@@ -48,7 +48,7 @@ export function searchStoredMessages(
   }
 
   values.push(options.limit + 1, options.offset);
-  const rows = sqlite
+  const rows = (await sqlite
     .prepare(
       `SELECT id, chat_id, sender_id, type, content, media_url, media_mimetype,
               quoted_id, is_from_me, is_forwarded, status, timestamp, starred
@@ -57,7 +57,7 @@ export function searchStoredMessages(
        ORDER BY timestamp DESC, id DESC
        LIMIT ? OFFSET ?`,
     )
-    .all(...values) as MessageSearchRow[];
+    .all(...values)) as unknown as MessageSearchRow[];
 
   const hasMore = rows.length > options.limit;
   const messages = rows.slice(0, options.limit).map((row): Message => ({

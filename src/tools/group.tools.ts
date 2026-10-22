@@ -103,7 +103,7 @@ export function registerGroupTools(
       const start = Date.now();
       try {
         assertGroupHistoryWritesEnabled();
-        if (instanceManager.getInstanceChannel(params.instanceId) !== "baileys") {
+        if ((await instanceManager.getInstanceChannel(params.instanceId)) !== "baileys") {
           throw new Error("Group history sharing is only supported on Baileys");
         }
         const adapter = instanceManager.getAdapter(params.instanceId);
@@ -183,7 +183,7 @@ export function registerGroupTools(
           params.instanceId,
           params.groupId,
           params.memberLabel,
-          instanceManager.getInstanceChannel(params.instanceId),
+          await instanceManager.getInstanceChannel(params.instanceId),
         );
         log.info({ duration: Date.now() - start }, "Group member label update queued");
         return toolSuccess(result);
@@ -210,7 +210,7 @@ export function registerGroupTools(
           params.instanceId,
           params.groupId,
           null,
-          instanceManager.getInstanceChannel(params.instanceId),
+          await instanceManager.getInstanceChannel(params.instanceId),
         );
         log.info({ duration: Date.now() - start }, "Group member label removal queued");
         return toolSuccess(result);

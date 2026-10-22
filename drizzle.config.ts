@@ -5,6 +5,6 @@ export default defineConfig({
   out: "./drizzle",
   dialect: "sqlite",
   dbCredentials: {
-    url: "data/whatsapp.db",
+    url: process.env.WA_DATABASE_PATH?.trim() || "data/whatsapp.db",
   },
 });

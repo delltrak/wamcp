@@ -1,5 +1,5 @@
 import "dotenv/config";
-import { sqlite } from "./db/client.js";
+import { sqlite, databaseDriver } from "./db/client.js";
 import { MessageScheduler } from "./services/scheduler.js";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
@@ -28,7 +28,7 @@ import { getAutoReadMode } from "./services/auto-read.js";
 import { loadPresencePulseConfig, PresencePulseScheduler } from "./services/presence-pulse.js";
 import { loadAutoMarkPlayedConfig } from "./services/auto-mark-played.js";
 import { bootEventWebhook, getEventWebhookStatus } from "./services/event-webhook-config.js";
-import { buildHealthBody, renderHealthBody } from "./server/health.js";
+import { buildHealthBody, renderHealthBody, isDatabaseError } from "./server/health.js";
 import { DashboardEventLog } from "./server/dashboard-activity.js";
 import {
   assertDashboardTransport,
@@ -56,6 +56,10 @@ import { createHttpRequestHandler } from "./server/http-listener.js";
 import { authorizeMcpHttpRequest } from "./server/mcp-auth.js";
 import { createMcpOAuthServer, type McpOAuthServer } from "./server/oauth/server.js";
 
+process.on("unhandledRejection", (reason) => {
+  logger.error({ err: reason }, "Unhandled promise rejection");
+});
+
 const transport = process.env.WA_TRANSPORT ?? DEFAULT_TRANSPORT;
 const port = parseInt(process.env.WA_MCP_PORT ?? String(DEFAULT_PORT), 10);
 
@@ -72,13 +76,14 @@ async function initServices(chatwootConfig: ChatwootConfig) {
   const chatwoot = new ChatwootService(chatwootConfig, {
     enqueueMessage: (instanceId, to, content, channel) =>
       messageQueue.enqueueMessage(instanceId, to, content, channel),
-    getInstanceChannel: (id) => instanceManager.getInstanceChannel(id),
-    listInstanceIds: () => instanceManager.getAllInstances().map((instance) => instance.id),
+    getInstanceChannel: async (id) => await instanceManager.getInstanceChannel(id),
+    listInstanceIds: async () =>
+      (await instanceManager.getAllInstances()).map((instance) => instance.id),
   });
 
   // Wire them together
   instanceManager.setMessageQueue(messageQueue);
-  eventWebhook.start(instanceManager);
+  await eventWebhook.start(instanceManager);
   chatwoot.start(instanceManager);
   const autoReply = startAutoReply(instanceManager, messageQueue, autoReplyConfig);
 
@@ -98,10 +103,10 @@ async function initServices(chatwootConfig: ChatwootConfig) {
     removeJob: (instanceId, jobId, channel) =>
       messageQueue.removeScheduledJob(instanceId, jobId, channel),
     resolveChannel: (instanceId) => instanceManager.getInstanceChannel(instanceId),
-    instanceExists: (instanceId) => {
-      instanceManager.getInstance(instanceId);
+    instanceExists: async (instanceId) => {
+      await instanceManager.getInstance(instanceId);
     },
-    driver: "sqlite",
+    driver: databaseDriver,
   });
   scheduler.start();
 
@@ -218,7 +223,7 @@ async function handleCloudWebhook(
         }
 
         (evt.payload as unknown as { instanceId: string }).instanceId = match.instanceId;
-        match.adapter.emit(evt.event, evt.payload);
+        await match.adapter.emit(evt.event, evt.payload);
       }
     } catch (err) {
       logger.error({ err }, "Failed to process cloud webhook payload");
@@ -274,7 +279,7 @@ async function startHttp(
     startedAt: startTime,
     instances: instanceManager,
     isPaired: isBaileysInstancePaired,
-    webhookStatus: () => getEventWebhookStatus(),
+    webhookStatus: async () => await getEventWebhookStatus(),
     deliveries: getRecentWebhookDeliveries,
     events: dashboardEvents,
     cloudWebhook: () => cloudWebhookFlags(),
@@ -297,8 +302,8 @@ async function startHttp(
         },
         oauth,
       ),
-    health: (_req, res) => {
-      const allInstances = instanceManager.getAllInstances();
+    health: async (_req, res) => {
+      const allInstances = await instanceManager.getAllInstances();
       const connected = allInstances.filter((instance) => instance.status === "connected").length;
       const health = buildHealthBody({
         uptimeSeconds: Math.floor((Date.now() - startTime) / 1000),
@@ -308,7 +313,7 @@ async function startHttp(
           disconnected: allInstances.length - connected,
         },
         version: VERSION,
-        webhook: getEventWebhookStatus(),
+        webhook: await getEventWebhookStatus(),
       });
       res.writeHead(200, { "Content-Type": "application/json" });
       res.end(renderHealthBody(health));
@@ -336,8 +341,12 @@ async function startHttp(
     void handleRequest(req, res).catch((err: unknown) => {
       logger.error({ err }, "HTTP request failed");
       if (!res.headersSent) {
-        res.writeHead(500, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ error: "Internal server error" }));
+        res.writeHead(isDatabaseError(err) ? 503 : 500, { "Content-Type": "application/json" });
+        res.end(
+          JSON.stringify({
+            error: isDatabaseError(err) ? "Database unavailable" : "Internal server error",
+          }),
+        );
       }
     });
   });
@@ -449,7 +458,7 @@ async function main(): Promise<void> {
   assertDashboardTransport(dashboardConfig, transport);
   parseBaileysProxyUrl(process.env.WA_PROXY_URL);
   logger.info({ transport, version: VERSION }, "Starting WA MCP server");
-  bootEventWebhook();
+  await bootEventWebhook();
   const chatwootConfig = loadChatwootConfig();
   if (chatwootConfig.enabled && transport === "stdio") {
     logger.warn(

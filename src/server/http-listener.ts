@@ -8,7 +8,7 @@ export interface HttpListenerDeps {
   routes: HttpRoutes;
   authorize: (req: IncomingMessage, res: ServerResponse) => boolean | Promise<boolean>;
   oauth: McpOAuthServer | null;
-  health: (req: IncomingMessage, res: ServerResponse) => void;
+  health: (req: IncomingMessage, res: ServerResponse) => void | Promise<void>;
   mcp: (req: IncomingMessage, res: ServerResponse) => Promise<void>;
   webhook: (req: IncomingMessage, res: ServerResponse, url: URL) => Promise<void>;
   /** Return true when the request was handled. Called only after the built-in routes miss. */
@@ -33,7 +33,7 @@ export function createHttpRequestHandler(
       return;
     }
     if (url.pathname === deps.routes.health && req.method === "GET") {
-      deps.health(req, res);
+      await deps.health(req, res);
       return;
     }
     if (url.pathname === deps.routes.mcp) {

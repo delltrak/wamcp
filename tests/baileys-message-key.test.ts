@@ -14,19 +14,19 @@ const DIRECT_JID = "333333333@s.whatsapp.net";
 describe("Baileys message operation keys", () => {
   let instanceId: string;
 
-  beforeEach(() => {
+  beforeEach(async () => {
     instanceId = `message_key_${randomUUID()}`;
     const now = Date.now();
-    db.insert(instances)
+    (await db.insert(instances)
       .values({ id: instanceId, name: "message key test", createdAt: now, updatedAt: now })
-      .run();
+      .run());
   });
 
-  afterEach(() => {
-    db.delete(instances).where(eq(instances.id, instanceId)).run();
+  afterEach(async () => {
+    (await db.delete(instances).where(eq(instances.id, instanceId)).run());
   });
 
-  function insertMessage({
+  async function insertMessage({
     id,
     chatId,
     senderId,
@@ -38,8 +38,8 @@ describe("Baileys message operation keys", () => {
     senderId: string;
     isFromMe: boolean;
     rawKey?: WAMessage["key"];
-  }): void {
-    db.insert(messages)
+  }): Promise<void> {
+    (await db.insert(messages)
       .values({
         id,
         instanceId,
@@ -54,7 +54,7 @@ describe("Baileys message operation keys", () => {
           ? JSON.stringify({ key: rawKey, message: { conversation: "stored" } })
           : null,
       })
-      .run();
+      .run());
   }
 
   function createAdapter() {
@@ -75,13 +75,13 @@ describe("Baileys message operation keys", () => {
 
   it("reacts to another group member's message with the stored author key", async () => {
     const messageId = "group-incoming-reaction";
-    insertMessage({
+    (await insertMessage({
       id: messageId,
       chatId: GROUP_JID,
       senderId: AUTHOR_JID,
       isFromMe: false,
       rawKey: { remoteJid: GROUP_JID, id: messageId, fromMe: false, participant: AUTHOR_JID },
-    });
+    }));
     const { adapter, sendMessage } = createAdapter();
 
     await adapter.sendReaction(GROUP_JID, messageId, "🔥");
@@ -110,13 +110,13 @@ describe("Baileys message operation keys", () => {
 
   it("keeps group reactions to this account's own message marked fromMe", async () => {
     const messageId = "group-own-reaction";
-    insertMessage({
+    (await insertMessage({
       id: messageId,
       chatId: GROUP_JID,
       senderId: "me",
       isFromMe: true,
       rawKey: { remoteJid: GROUP_JID, id: messageId, fromMe: false, participant: OWN_JID },
-    });
+    }));
     const { adapter, sendMessage } = createAdapter();
 
     await adapter.sendReaction(GROUP_JID, messageId, "👍");
@@ -130,7 +130,7 @@ describe("Baileys message operation keys", () => {
   it("uses stored ownership for one-to-one reactions and omits participants", async () => {
     const incomingId = "direct-incoming-reaction";
     const outgoingId = "direct-outgoing-reaction";
-    insertMessage({
+    (await insertMessage({
       id: incomingId,
       chatId: DIRECT_JID,
       senderId: DIRECT_JID,
@@ -141,14 +141,14 @@ describe("Baileys message operation keys", () => {
         fromMe: false,
         participant: AUTHOR_JID,
       },
-    });
-    insertMessage({
+    }));
+    (await insertMessage({
       id: outgoingId,
       chatId: DIRECT_JID,
       senderId: "me",
       isFromMe: true,
       rawKey: { remoteJid: DIRECT_JID, id: outgoingId, fromMe: true },
-    });
+    }));
     const { adapter, sendMessage } = createAdapter();
 
     await adapter.sendReaction(DIRECT_JID, incomingId, "❤️");
@@ -180,13 +180,13 @@ describe("Baileys message operation keys", () => {
 
   it("pins a stored group message with its author and ownership key", async () => {
     const messageId = "group-pin-target";
-    insertMessage({
+    (await insertMessage({
       id: messageId,
       chatId: GROUP_JID,
       senderId: AUTHOR_JID,
       isFromMe: false,
       rawKey: { remoteJid: GROUP_JID, id: messageId, fromMe: false },
-    });
+    }));
     const { adapter, sendMessage } = createAdapter();
 
     await adapter.pinMessage(GROUP_JID, messageId, true);
@@ -201,13 +201,13 @@ describe("Baileys message operation keys", () => {
 
   it("keeps edits of own group messages marked fromMe", async () => {
     const messageId = "group-edit-target";
-    insertMessage({
+    (await insertMessage({
       id: messageId,
       chatId: GROUP_JID,
       senderId: "me",
       isFromMe: true,
       rawKey: { remoteJid: GROUP_JID, id: messageId, fromMe: false },
-    });
+    }));
     const { adapter, sendMessage } = createAdapter();
 
     await adapter.editMessage(GROUP_JID, messageId, "Updated text");

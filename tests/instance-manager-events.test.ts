@@ -19,7 +19,7 @@ describe("InstanceManager adapter event forwarding", () => {
   it("forwards adapter-emitted event responses to global handlers, MCP, and webhooks", async () => {
     const instanceManager = new InstanceManager();
     const instance = await instanceManager.createInstance("event response forwarding test");
-    cleanups.push(() => instanceManager.deleteInstance(instance.id));
+    cleanups.push(async () => (await instanceManager.deleteInstance(instance.id)));
 
     const eventHandler = vi.fn();
     const removeEventHandler = instanceManager.onAnyEvent(eventHandler);
@@ -62,7 +62,7 @@ describe("InstanceManager adapter event forwarding", () => {
       timestamp: 1_800_000_123_000,
       extraGuestCount: 1,
     };
-    const adapter = instanceManager.ensureAdapter(instance.id) as unknown as {
+    const adapter = (await instanceManager.ensureAdapter(instance.id)) as unknown as {
       emit: (event: "event.response", eventPayload: ChannelEventPayload["event.response"]) => void;
     };
 

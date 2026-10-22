@@ -48,39 +48,39 @@ export function registerInstanceTools(
       const log = createRequestLogger("wa_get_instance_status", params.instanceId);
       const start = Date.now();
       try {
-        const instances = instanceManager
-          .getInstanceLifecycleStatuses(params.instanceId)
-          .map((item) => ({
-            instanceId: item.instanceId,
-            name: item.name,
-            channel: item.channel,
-            connectionState: item.state,
-            phone: item.phone,
-            lid: item.lid,
-            pushName: item.pushName,
-            lastConnected:
-              item.lastConnectedAt === null ? null : new Date(item.lastConnectedAt).toISOString(),
-            lastDisconnected:
-              item.lastDisconnectedAt === null
-                ? null
-                : new Date(item.lastDisconnectedAt).toISOString(),
-            lastDisconnectReason: item.disconnectReason,
-            lastDisconnectStatusCode: item.disconnectStatusCode,
-            pendingPairing: {
-              status: item.pendingChallenge?.method ?? "none",
-              generatedAt: item.pendingChallenge
-                ? new Date(item.pendingChallenge.generatedAt).toISOString()
-                : null,
-              expiresAt: item.pendingChallenge
-                ? new Date(item.pendingChallenge.expiresAt).toISOString()
-                : null,
-            },
-            presenceMode: item.presenceMode,
-          }));
+        const instances = (
+          await instanceManager.getInstanceLifecycleStatuses(params.instanceId)
+        ).map((item) => ({
+          instanceId: item.instanceId,
+          name: item.name,
+          channel: item.channel,
+          connectionState: item.state,
+          phone: item.phone,
+          lid: item.lid,
+          pushName: item.pushName,
+          lastConnected:
+            item.lastConnectedAt === null ? null : new Date(item.lastConnectedAt).toISOString(),
+          lastDisconnected:
+            item.lastDisconnectedAt === null
+              ? null
+              : new Date(item.lastDisconnectedAt).toISOString(),
+          lastDisconnectReason: item.disconnectReason,
+          lastDisconnectStatusCode: item.disconnectStatusCode,
+          pendingPairing: {
+            status: item.pendingChallenge?.method ?? "none",
+            generatedAt: item.pendingChallenge
+              ? new Date(item.pendingChallenge.generatedAt).toISOString()
+              : null,
+            expiresAt: item.pendingChallenge
+              ? new Date(item.pendingChallenge.expiresAt).toISOString()
+              : null,
+          },
+          presenceMode: item.presenceMode,
+        }));
         log.info({ duration: Date.now() - start, count: instances.length }, "Instance status read");
         return toolSuccess({
           instances,
-          webhook: eventWebhookToolStatus(getEventWebhookStatus()),
+          webhook: eventWebhookToolStatus(await getEventWebhookStatus()),
         });
       } catch (err) {
         return handleToolError("wa_get_instance_status", err, params.instanceId);
@@ -257,7 +257,7 @@ export function registerInstanceTools(
       try {
         // ensureAdapter, not getAdapter: credentials are a prerequisite for
         // connecting, so this has to work before the instance is connected.
-        const adapter = instanceManager.ensureAdapter(params.instanceId);
+        const adapter = await instanceManager.ensureAdapter(params.instanceId);
         await adapter.setCredentials({
           accessToken: params.accessToken,
           phoneNumberId: params.phoneNumberId,

@@ -489,12 +489,12 @@ export class AutoReplyGate {
     private readonly store: AutoReplyCooldownStore,
   ) {}
 
-  decide(
+  async decide(
     instanceId: string,
     event: NormalizedMessageEvent,
     now: number,
     contact: AutoReplyContact,
-  ): AutoReplyDecision {
+  ): Promise<AutoReplyDecision> {
     if (!this.config.enabled || this.config.message.length === 0) {
       return { action: "skip", reason: "disabled" };
     }
@@ -552,7 +552,8 @@ export class AutoReplyGate {
     if (this.pending.has(cooldownKey)) return { action: "skip", reason: "cooldown" };
     let storedReplyAt: number | undefined;
     try {
-      storedReplyAt = this.unpersisted.get(cooldownKey) ?? this.store.load(instanceId, contactKey);
+      storedReplyAt =
+        this.unpersisted.get(cooldownKey) ?? (await this.store.load(instanceId, contactKey));
     } catch (error) {
       logger.warn(
         { err: error instanceof Error ? error.message : String(error), instanceId },
@@ -560,6 +561,7 @@ export class AutoReplyGate {
       );
       return { action: "skip", reason: "cooldown" };
     }
+    if (this.pending.has(cooldownKey)) return { action: "skip", reason: "cooldown" };
     if (storedReplyAt !== undefined && now - storedReplyAt < this.config.cooldownMs) {
       return { action: "skip", reason: "cooldown" };
     }
@@ -570,9 +572,9 @@ export class AutoReplyGate {
     this.pending.add(cooldownKey);
     return {
       action: "reply",
-      queued: () => {
+      queued: async () => {
         try {
-          this.store.save(instanceId, contactKey, now);
+          await this.store.save(instanceId, contactKey, now);
           this.unpersisted.delete(cooldownKey);
         } catch (error) {
           // Keep the cooldown in this process when persistence is unavailable.
@@ -634,10 +636,20 @@ export class AutoReplyService {
     this.gate = new AutoReplyGate(config, store);
   }
 
-  handle(instanceId: string, event: NormalizedMessageEvent, contact?: AutoReplyContact): void {
+  handle(
+    instanceId: string,
+    event: NormalizedMessageEvent,
+    contact?: AutoReplyContact,
+  ): Promise<void> {
     if (!this.resolveContact || contact) {
-      void this.dispatch(instanceId, event, contact ?? contactFromEvent(event));
-      return;
+      return this.dispatch(instanceId, event, contact ?? contactFromEvent(event)).catch(
+        (error: unknown) => {
+          logger.warn(
+            { err: error instanceof Error ? error.message : String(error), instanceId },
+            "Auto-reply failed",
+          );
+        },
+      );
     }
     const resolveContact = this.resolveContact;
     const previous = this.tails.get(instanceId) ?? Promise.resolve();
@@ -646,7 +658,7 @@ export class AutoReplyService {
       .then(async () => {
         if (!resolveContact) return;
         const resolved = await resolveContact(instanceId, event);
-        void this.dispatch(instanceId, event, resolved);
+        await this.dispatch(instanceId, event, resolved);
       })
       .catch((error: unknown) => {
         logger.warn(
@@ -655,6 +667,7 @@ export class AutoReplyService {
         );
       });
     this.tails.set(instanceId, next);
+    return next;
   }
 
   private async dispatch(
@@ -662,7 +675,7 @@ export class AutoReplyService {
     event: NormalizedMessageEvent,
     contact: AutoReplyContact,
   ): Promise<void> {
-    const decision = this.gate.decide(instanceId, event, this.now(), contact);
+    const decision = await this.gate.decide(instanceId, event, this.now(), contact);
     if (decision.action === "skip") {
       logger.debug(
         { instanceId, chatId: event.chatId, reason: decision.reason },
@@ -673,7 +686,7 @@ export class AutoReplyService {
 
     try {
       await this.send(instanceId, event.chatId, this.config.message);
-      decision.queued?.();
+      await decision.queued?.();
     } catch (error: unknown) {
       decision.failed?.();
       logger.warn(
@@ -704,7 +717,7 @@ export function startAutoReply(
   const service = new AutoReplyService(
     config,
     async (instanceId, chatId, text) => {
-      const channel = instances.getInstanceChannel(instanceId);
+      const channel = await instances.getInstanceChannel(instanceId);
       await queue.enqueueMessage(instanceId, chatId, { type: "text", text }, channel);
     },
     Date.now,
@@ -734,9 +747,13 @@ export function startAutoReply(
     },
   );
   const unsubscribe = instances.onAnyEvent(
-    <E extends ChannelEvent>(event: E, instanceId: string, payload: ChannelEventPayload[E]) => {
+    async <E extends ChannelEvent>(
+      event: E,
+      instanceId: string,
+      payload: ChannelEventPayload[E],
+    ) => {
       if (event !== "message.received") return;
-      service.handle(instanceId, payload as ChannelEventPayload["message.received"]);
+      await service.handle(instanceId, payload as ChannelEventPayload["message.received"]);
     },
   );
   return { stop: unsubscribe };

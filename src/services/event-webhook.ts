@@ -982,7 +982,10 @@ function phoneJidFromStoredPhone(phone: string): string | undefined {
  * (jid, lid, phone) so an exact or starred phone entry can still match.
  * Address wildcards do not use these aliases.
  */
-function lookupStoredJidAliases(instanceId: string, jids: readonly string[]): string[] {
+async function lookupStoredJidAliases(
+  instanceId: string,
+  jids: readonly string[],
+): Promise<string[]> {
   const needles = [
     ...new Set(
       jids
@@ -994,7 +997,7 @@ function lookupStoredJidAliases(instanceId: string, jids: readonly string[]): st
   ];
   if (!instanceId || needles.length === 0) return [];
   try {
-    const rows = db
+    const rows = await db
       .select({ jid: contacts.jid, phone: contacts.phone, lid: contacts.lid })
       .from(contacts)
       .where(
@@ -1020,10 +1023,10 @@ function lookupStoredJidAliases(instanceId: string, jids: readonly string[]): st
   }
 }
 
-export function eventMatchesIgnoreJids(
+export async function eventMatchesIgnoreJids(
   payload: ChannelEventPayload[ChannelEvent],
   ignoreJids: readonly string[] | undefined,
-): boolean {
+): Promise<boolean> {
   if (!ignoreJids || ignoreJids.length === 0) return false;
   const { chatJids, identityJids } = eventIgnoreJidSets(payload);
   const domainPatterns: string[] = [];
@@ -1042,20 +1045,20 @@ export function eventMatchesIgnoreJids(
     typeof (payload as { instanceId?: unknown }).instanceId === "string"
       ? (payload as { instanceId: string }).instanceId
       : "";
-  const resolved = lookupStoredJidAliases(instanceId, [...chatJids, ...identityJids]);
+  const resolved = await lookupStoredJidAliases(instanceId, [...chatJids, ...identityJids]);
   return [...chatJids, ...identityJids, ...resolved].some((jid) =>
     specificPatterns.some((pattern) => jidMatchesIgnorePattern(jid, pattern)),
   );
 }
 
-export function shouldSendEventWebhook(
+export async function shouldSendEventWebhook(
   event: ChannelEvent,
   payload: ChannelEventPayload[ChannelEvent],
   config: Pick<EventWebhookConfig, "events" | "ignoreFromMe"> &
     Partial<
       Pick<EventWebhookDestination, "preset" | "chatAllowlist" | "senderAllowlist" | "ignoreJids">
     >,
-): boolean {
+): Promise<boolean> {
   if (!config.events.includes(event)) return false;
   if (
     config.preset === "grok-bot" &&
@@ -1100,7 +1103,7 @@ export function shouldSendEventWebhook(
   }
 
   if (!event.startsWith("instance.")) {
-    if (eventMatchesIgnoreJids(payload, config.ignoreJids)) return false;
+    if (await eventMatchesIgnoreJids(payload, config.ignoreJids)) return false;
     if (config.chatAllowlist && !config.chatAllowlist.includes(chatId)) return false;
     if (config.senderAllowlist && !config.senderAllowlist.includes(senderId)) return false;
   }
@@ -1117,7 +1120,9 @@ export function registerEventWebhookHandler(
   enqueue: EnqueueWebhookJob,
   onEnqueueFailure: () => void = () =>
     logger.warn("Unable to enqueue outgoing event webhook; message processing continues"),
-  destinationsFor: (instanceId: string) => readonly EventWebhookDestination[] = () =>
+  destinationsFor: (
+    instanceId: string,
+  ) => readonly EventWebhookDestination[] | Promise<readonly EventWebhookDestination[]> = () =>
     config.destinations,
 ): EventWebhookUnsubscribe {
   if (config.messageDebounceMs > 0) {
@@ -1335,103 +1340,113 @@ export function registerEventWebhookHandler(
     if (buffer.payloads.length >= MAX_BATCH_SIZE) void flushDestination(destination);
   };
 
-  const removeListener = instanceManager.onAnyEvent(
-    <E extends ChannelEvent>(event: E, instanceId: string, payload: ChannelEventPayload[E]) => {
-      try {
-        for (const destination of destinationsFor(instanceId)) {
-          if (!shouldSendEventWebhook(event, payload, destination)) continue;
+  const pendingHandlers = new Set<Promise<void>>();
+  const handleEvent = async <E extends ChannelEvent>(
+    event: E,
+    instanceId: string,
+    payload: ChannelEventPayload[E],
+  ) => {
+    try {
+      for (const destination of await destinationsFor(instanceId)) {
+        if (!(await shouldSendEventWebhook(event, payload, destination))) continue;
 
-          let webhookPayload: BufferedDestinationPayload;
-          if (destination.preset === "grok-bot" && event === "message.received") {
-            webhookPayload = normalizeGrokBotWebhookPayload(
-              instanceId,
-              payload as ChannelEventPayload["message.received"],
-            );
-          } else if (destination.preset === "grok-bot" && event.startsWith("instance.")) {
-            webhookPayload = normalizeGrokBotInstanceWebhookPayload(
-              event as GrokBotInstanceEvent,
-              instanceId,
-              payload as ChannelEventPayload[ChannelEvent],
-            );
-          } else if (destination.preset === "grok-bot" && isWebhookRoutineEvent(event)) {
-            webhookPayload = normalizeGrokBotRoutineWebhookPayload(
-              event,
-              instanceId,
-              payload as ChannelEventPayload[typeof event],
-            );
-          } else {
-            webhookPayload = normalizeEventWebhookPayload(
-              event,
-              instanceId,
-              payload as ChannelEventPayload[ChannelEvent],
-            );
-          }
+        let webhookPayload: BufferedDestinationPayload;
+        if (destination.preset === "grok-bot" && event === "message.received") {
+          webhookPayload = normalizeGrokBotWebhookPayload(
+            instanceId,
+            payload as ChannelEventPayload["message.received"],
+          );
+        } else if (destination.preset === "grok-bot" && event.startsWith("instance.")) {
+          webhookPayload = normalizeGrokBotInstanceWebhookPayload(
+            event as GrokBotInstanceEvent,
+            instanceId,
+            payload as ChannelEventPayload[ChannelEvent],
+          );
+        } else if (destination.preset === "grok-bot" && isWebhookRoutineEvent(event)) {
+          webhookPayload = normalizeGrokBotRoutineWebhookPayload(
+            event,
+            instanceId,
+            payload as ChannelEventPayload[typeof event],
+          );
+        } else {
+          webhookPayload = normalizeEventWebhookPayload(
+            event,
+            instanceId,
+            payload as ChannelEventPayload[ChannelEvent],
+          );
+        }
 
-          if (config.messageDebounceMs > 0) {
-            if (event !== "message.received") {
-              void enqueuePayload(destination, webhookPayload);
-              continue;
-            }
-
-            const messageEvent = payload as ChannelEventPayload["message.received"];
-            const chatId = messageEvent.chatId;
-            if (!chatId) {
-              void enqueuePayload(destination, webhookPayload);
-              continue;
-            }
-
-            let transcription: Promise<string> | undefined;
-            if (messageEvent.message.type === "audio") {
-              try {
-                transcription = transcribeIncomingAudioIfConfigured(
-                  instanceManager,
-                  instanceId,
-                  messageEvent,
-                );
-              } catch {
-                logger.warn(
-                  { instanceId },
-                  "Unable to start incoming audio transcription; outgoing webhook will use the original message",
-                );
-              }
-            }
-
-            const withTranscription = (text: string): BufferedMessagePayload => {
-              const transcribedEvent = {
-                ...messageEvent,
-                message: { ...messageEvent.message, transcription: text },
-              } as unknown as ChannelEventPayload["message.received"];
-              const normalized =
-                destination.preset === "grok-bot"
-                  ? normalizeGrokBotWebhookPayload(instanceId, transcribedEvent)
-                  : normalizeEventWebhookPayload("message.received", instanceId, transcribedEvent);
-              return { ...(normalized as EventWebhookPayload), transcription: text };
-            };
-
-            queueMessagePayload(
-              destination,
-              instanceId,
-              chatId,
-              webhookPayload as BufferedMessagePayload,
-              transcription,
-              withTranscription,
-            );
+        if (config.messageDebounceMs > 0) {
+          if (event !== "message.received") {
+            void enqueuePayload(destination, webhookPayload);
             continue;
           }
 
-          queuePayload(destination, webhookPayload);
+          const messageEvent = payload as ChannelEventPayload["message.received"];
+          const chatId = messageEvent.chatId;
+          if (!chatId) {
+            void enqueuePayload(destination, webhookPayload);
+            continue;
+          }
+
+          let transcription: Promise<string> | undefined;
+          if (messageEvent.message.type === "audio") {
+            try {
+              transcription = transcribeIncomingAudioIfConfigured(
+                instanceManager,
+                instanceId,
+                messageEvent,
+              );
+            } catch {
+              logger.warn(
+                { instanceId },
+                "Unable to start incoming audio transcription; outgoing webhook will use the original message",
+              );
+            }
+          }
+
+          const withTranscription = (text: string): BufferedMessagePayload => {
+            const transcribedEvent = {
+              ...messageEvent,
+              message: { ...messageEvent.message, transcription: text },
+            } as unknown as ChannelEventPayload["message.received"];
+            const normalized =
+              destination.preset === "grok-bot"
+                ? normalizeGrokBotWebhookPayload(instanceId, transcribedEvent)
+                : normalizeEventWebhookPayload("message.received", instanceId, transcribedEvent);
+            return { ...(normalized as EventWebhookPayload), transcription: text };
+          };
+
+          queueMessagePayload(
+            destination,
+            instanceId,
+            chatId,
+            webhookPayload as BufferedMessagePayload,
+            transcription,
+            withTranscription,
+          );
+          continue;
         }
-      } catch {
-        safeFailureNotice();
+
+        queuePayload(destination, webhookPayload);
       }
-    },
-  );
+    } catch {
+      safeFailureNotice();
+    }
+  };
+  const removeListener = instanceManager.onAnyEvent((event, instanceId, payload) => {
+    const pending = handleEvent(event, instanceId, payload);
+    pendingHandlers.add(pending);
+    void pending.finally(() => pendingHandlers.delete(pending));
+    return pending;
+  });
 
   const unsubscribe = (() => {
     removeListener();
     void unsubscribe.flush();
   }) as EventWebhookUnsubscribe;
   unsubscribe.flush = async () => {
+    while (pendingHandlers.size > 0) await Promise.all([...pendingHandlers]);
     for (const batch of messageBuffers.values()) void flushMessageBatch(batch, true);
     for (const destination of config.destinations) void flushDestination(destination);
     while (pendingEnqueues.size > 0) await Promise.all([...pendingEnqueues]);
@@ -1872,14 +1887,14 @@ export class EventWebhookService {
   }
 
   /** Reload instance webhooks and start the worker once any destination exists. */
-  sync(): void {
-    if (this.boundManager) this.start(this.boundManager);
+  async sync(): Promise<void> {
+    if (this.boundManager) await this.start(this.boundManager);
   }
 
-  start(instanceManager: InstanceManager): void {
+  async start(instanceManager: InstanceManager): Promise<void> {
     this.boundManager = instanceManager;
-    this.rebuildKnownDestinations();
-    if (!this.hasDeliveryWork()) return;
+    await this.rebuildKnownDestinations();
+    if (!(await this.hasDeliveryWork())) return;
     if (this.queue) return;
 
     this.queue = new Queue<EventWebhookJob>(WEBHOOK_QUEUE_NAME, {
@@ -1889,8 +1904,8 @@ export class EventWebhookService {
     });
     this.worker = new Worker<EventWebhookJob>(
       WEBHOOK_QUEUE_NAME,
-      (job: Job<EventWebhookJob>) =>
-        processEventWebhookJob(job.data, this.destinationMap(), this.config.timeoutMs),
+      async (job: Job<EventWebhookJob>) =>
+        processEventWebhookJob(job.data, await this.destinationMap(), this.config.timeoutMs),
       {
         connection: getRedisConnectionOptions(),
         prefix: this.config.queuePrefix,
@@ -1900,8 +1915,10 @@ export class EventWebhookService {
     this.worker.on("completed", (job) => {
       noteWebhookJobOutcome("delivered", job);
     });
-    this.worker.on("failed", (job, error) => {
-      const destination = job ? this.destinationMap().get(job.data.destinationIdentity) : undefined;
+    this.worker.on("failed", async (job, error) => {
+      const destination = job
+        ? (await this.destinationMap()).get(job.data.destinationIdentity)
+        : undefined;
       logger.warn(
         eventWebhookFailureLogData(job?.attemptsMade, error, destination),
         "Outgoing event webhook delivery attempt failed",
@@ -1920,31 +1937,30 @@ export class EventWebhookService {
         return this.queue.add("deliver", job);
       },
       undefined,
-      (instanceId) => destinationsForInstance(this.config, instanceId),
+      async (instanceId) => await destinationsForInstance(this.config, instanceId),
     );
   }
 
-  private hasDeliveryWork(): boolean {
-    return this.config.destinations.length > 0 || listInstanceWebhooks().length > 0;
+  private async hasDeliveryWork(): Promise<boolean> {
+    return this.config.destinations.length > 0 || (await listInstanceWebhooks()).length > 0;
   }
 
   /** Cached map; storage changes invalidate it before the next delivery. */
-  destinationMap(): ReadonlyMap<string, EventWebhookDestination> {
+  async destinationMap(): Promise<ReadonlyMap<string, EventWebhookDestination>> {
     if (this.knownDestinationsGeneration !== instanceWebhookStorageGeneration()) {
-      this.rebuildKnownDestinations();
+      await this.rebuildKnownDestinations();
     }
     return this.knownDestinations;
   }
 
-  private rebuildKnownDestinations(): void {
-    this.knownDestinationsGeneration = instanceWebhookStorageGeneration();
+  private async rebuildKnownDestinations(): Promise<void> {
+    const generation = instanceWebhookStorageGeneration();
+    const stored = await storedInstanceDestinations(this.config, eventWebhookAllowsHttp());
     this.knownDestinations.clear();
-    for (const destination of this.config.destinations) {
+    for (const destination of [...this.config.destinations, ...stored]) {
       this.knownDestinations.set(eventWebhookDestinationIdentity(destination), destination);
     }
-    for (const destination of storedInstanceDestinations(this.config, eventWebhookAllowsHttp())) {
-      this.knownDestinations.set(eventWebhookDestinationIdentity(destination), destination);
-    }
+    this.knownDestinationsGeneration = generation;
   }
 
   async close(): Promise<void> {

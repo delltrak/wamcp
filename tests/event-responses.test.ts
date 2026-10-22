@@ -101,23 +101,23 @@ function encryptedResponseMessage(
 describe("Baileys event responses", () => {
   const activeInstances = new Set<string>();
 
-  afterEach(() => {
+  afterEach(async () => {
     for (const instanceId of activeInstances) {
-      sqlite.prepare("DELETE FROM instances WHERE id = ?").run(instanceId);
+      (await sqlite.prepare("DELETE FROM instances WHERE id = ?").run(instanceId));
     }
     activeInstances.clear();
     vi.unstubAllEnvs();
   });
 
-  function createFixture(extraSocket: Record<string, unknown> = {}) {
+  async function createFixture(extraSocket: Record<string, unknown> = {}) {
     vi.stubEnv("WA_AUTO_READ", "false");
     const instanceId = `event-response-test-${randomUUID()}`;
     activeInstances.add(instanceId);
-    sqlite
+    (await sqlite
       .prepare(
         "INSERT INTO instances (id, name, channel, status, created_at, updated_at) VALUES (?, ?, 'baileys', 'connected', 1, 1)",
       )
-      .run(instanceId, "Synthetic event response test");
+      .run(instanceId, "Synthetic event response test"));
 
     const adapter = new BaileysAdapter(instanceId);
     let processEvents: ((events: Partial<BaileysEventMap>) => Promise<void> | void) | undefined;
@@ -188,7 +188,7 @@ describe("Baileys event responses", () => {
         return sentEvent;
       },
     );
-    const { adapter, processEvents } = createFixture({ sendMessage });
+    const { adapter, processEvents } = (await createFixture({ sendMessage }));
 
     const sent = await adapter.sendEvent({
       to: RESPONDER_ID,
@@ -230,21 +230,21 @@ describe("Baileys event responses", () => {
     await expect(adapter.getEventResponses(RESPONDER_ID, eventId)).resolves.toMatchObject([
       { participant: RESPONDER_ID, status: "GOING", response: "GOING" },
     ]);
-    const storedRawData = sqlite
+    const storedRawData = (await sqlite
       .prepare("SELECT raw_data FROM messages WHERE id = ?")
-      .get(eventId) as { raw_data: string };
+      .get(eventId)) as { raw_data: string };
     const storedEvent = JSON.parse(storedRawData.raw_data, BufferJSON.reviver) as WAMessage;
     expect(storedEvent.message?.messageContextInfo?.messageSecret).toEqual(messageSecret);
   });
 
   it("restores event secrets stored by older versions as protobuf JSON base64", async () => {
-    const { instanceId, adapter, processEvents } = createFixture();
+    const { instanceId, adapter, processEvents } = (await createFixture());
     const eventId = `legacy-sent-event-${randomUUID()}`;
     const messageSecret = Buffer.alloc(32, 0x63);
     const eventKey: WAMessageKey = { id: eventId, remoteJid: RESPONDER_ID, fromMe: true };
     await upsert(processEvents, eventMessage(eventId, RESPONDER_ID, eventKey, messageSecret));
 
-    sqlite.prepare("UPDATE messages SET raw_data = ? WHERE instance_id = ? AND id = ?").run(
+    (await sqlite.prepare("UPDATE messages SET raw_data = ? WHERE instance_id = ? AND id = ?").run(
       JSON.stringify({
         key: eventKey,
         message: {
@@ -255,7 +255,7 @@ describe("Baileys event responses", () => {
       }),
       instanceId,
       eventId,
-    );
+    ));
 
     const encrypted = encryptEventResponse(
       messageSecret,
@@ -296,7 +296,7 @@ describe("Baileys event responses", () => {
   ] as const)(
     "decrypts an encrypted $status RSVP after its event arrives and returns it through storage, tools, notifications, and webhooks",
     async ({ responseType, status }) => {
-      const { instanceId, adapter, processEvents } = createFixture();
+      const { instanceId, adapter, processEvents } = (await createFixture());
       const eventId = `private-event-${status.toLowerCase()}`;
       const chatId = RESPONDER_ID;
       const messageSecret = Buffer.alloc(32, 0x42);
@@ -354,11 +354,11 @@ describe("Baileys event responses", () => {
 
       await upsert(processEvents, responseMessage);
 
-      const pending = sqlite
+      const pending = (await sqlite
         .prepare(
           "SELECT response, raw_data FROM event_responses WHERE instance_id = ? AND event_message_id = ?",
         )
-        .get(instanceId, eventId) as { response: string; raw_data: string };
+        .get(instanceId, eventId)) as { response: string; raw_data: string };
       expect(pending.response).toBe("UNKNOWN");
       expect(JSON.parse(pending.raw_data)).toHaveProperty(
         "message.encEventResponseMessage.encPayload",
@@ -366,9 +366,9 @@ describe("Baileys event responses", () => {
 
       await upsert(processEvents, eventMessage(eventId, chatId, originalEventKey, messageSecret));
 
-      const storedEventRawData = sqlite
+      const storedEventRawData = (await sqlite
         .prepare("SELECT raw_data FROM messages WHERE instance_id = ? AND id = ?")
-        .get(instanceId, eventId) as { raw_data: string };
+        .get(instanceId, eventId)) as { raw_data: string };
       const storedEvent = JSON.parse(storedEventRawData.raw_data, BufferJSON.reviver) as WAMessage;
       expect(storedEvent.message?.messageContextInfo?.messageSecret).toEqual(messageSecret);
       expect(emittedResponse).toMatchObject({
@@ -487,7 +487,7 @@ describe("Baileys event responses", () => {
   });
 
   it("re-decodes an existing UNKNOWN row on read when its stored encrypted payload is available", async () => {
-    const { instanceId, adapter, processEvents } = createFixture();
+    const { instanceId, adapter, processEvents } = (await createFixture());
     const eventId = "private-event-lazy-redecode";
     const chatId = RESPONDER_ID;
     const messageSecret = Buffer.alloc(32, 0x51);
@@ -513,11 +513,11 @@ describe("Baileys event responses", () => {
         encrypted,
       ),
     );
-    sqlite
+    (await sqlite
       .prepare(
         "UPDATE event_responses SET response = 'UNKNOWN' WHERE instance_id = ? AND event_message_id = ?",
       )
-      .run(instanceId, eventId);
+      .run(instanceId, eventId));
 
     await expect(adapter.getEventResponses(chatId, eventId)).resolves.toMatchObject([
       { status: "MAYBE", response: "MAYBE" },
@@ -525,7 +525,7 @@ describe("Baileys event responses", () => {
   });
 
   it("re-decodes an old UNKNOWN messages.update row from its stored IEventResponse payload", async () => {
-    const { instanceId, adapter, processEvents } = createFixture();
+    const { instanceId, adapter, processEvents } = (await createFixture());
     const eventId = "private-event-old-update-response";
     const messageSecret = Buffer.alloc(32, 0x52);
     const eventKey: WAMessageKey = {
@@ -561,20 +561,20 @@ describe("Baileys event responses", () => {
       ],
     } as unknown as Partial<BaileysEventMap>);
 
-    const rawRow = sqlite
+    const rawRow = (await sqlite
       .prepare(
         "SELECT raw_data FROM event_responses WHERE instance_id = ? AND event_message_id = ?",
       )
-      .get(instanceId, eventId) as { raw_data: string };
+      .get(instanceId, eventId)) as { raw_data: string };
     expect(JSON.parse(rawRow.raw_data)).toMatchObject({
       eventResponseMessageKey: { id: "private-response-old-update" },
       response: { response: 2, extraGuestCount: 3 },
     });
-    sqlite
+    (await sqlite
       .prepare(
         "UPDATE event_responses SET response = 'UNKNOWN' WHERE instance_id = ? AND event_message_id = ?",
       )
-      .run(instanceId, eventId);
+      .run(instanceId, eventId));
 
     await expect(adapter.getEventResponses(RESPONDER_LID, eventId)).resolves.toMatchObject([
       {
@@ -589,16 +589,16 @@ describe("Baileys event responses", () => {
   });
 
   it("reports when an UNKNOWN response has no stored payload", async () => {
-    const { instanceId, adapter } = createFixture();
+    const { instanceId, adapter } = (await createFixture());
     const eventId = "event-response-without-payload";
-    sqlite
+    (await sqlite
       .prepare(
         `INSERT INTO event_responses
           (instance_id, event_message_id, chat_id, responder, response, timestamp,
            extra_guest_count, response_message_id, raw_data)
          VALUES (?, ?, ?, ?, 'UNKNOWN', NULL, NULL, NULL, NULL)`,
       )
-      .run(instanceId, eventId, GROUP_ID, RESPONDER_ID);
+      .run(instanceId, eventId, GROUP_ID, RESPONDER_ID));
 
     await expect(adapter.getEventResponses(GROUP_ID, eventId)).resolves.toMatchObject([
       {
@@ -610,7 +610,7 @@ describe("Baileys event responses", () => {
   });
 
   it("reports when an encrypted response cannot be decrypted because its event secret is missing", async () => {
-    const { adapter, processEvents } = createFixture();
+    const { adapter, processEvents } = (await createFixture());
     const eventId = "event-response-without-event-secret";
     const eventKey: WAMessageKey = { id: eventId, remoteJid: GROUP_ID, fromMe: true };
     await upsert(processEvents, {
@@ -648,7 +648,7 @@ describe("Baileys event responses", () => {
   });
 
   it("does not replace a resolved response with a later UNKNOWN update", async () => {
-    const { instanceId, adapter, processEvents } = createFixture();
+    const { instanceId, adapter, processEvents } = (await createFixture());
     const eventId = "group-event-unknown-does-not-overwrite";
     const eventKey: WAMessageKey = {
       id: eventId,
@@ -689,11 +689,11 @@ describe("Baileys event responses", () => {
       ],
     } as unknown as Partial<BaileysEventMap>);
 
-    const stored = sqlite
+    const stored = (await sqlite
       .prepare(
         "SELECT response, response_message_id FROM event_responses WHERE instance_id = ? AND event_message_id = ?",
       )
-      .get(instanceId, eventId) as { response: string; response_message_id: string };
+      .get(instanceId, eventId)) as { response: string; response_message_id: string };
     expect(stored).toEqual({
       response: "GOING",
       response_message_id: "response-known-before-unknown",
@@ -723,7 +723,7 @@ describe("Baileys event responses", () => {
     { name: "eventResponse enum field", expected: "NOT_GOING", eventResponse: "NOT_GOING" },
     { name: "unknown enum zero", expected: "UNKNOWN", response: { response: 0 } },
   ] as const)("persists $name from a Baileys messages.update", async (shape) => {
-    const { adapter, processEvents } = createFixture();
+    const { adapter, processEvents } = (await createFixture());
     const eventId = `group-event-update-${shape.expected.toLowerCase()}`;
     const eventKey: WAMessageKey = {
       id: eventId,
@@ -766,7 +766,7 @@ describe("Baileys event responses", () => {
   });
 
   it("resolves LID event creators and responders to their PN authors", async () => {
-    const { adapter, processEvents } = createFixture();
+    const { adapter, processEvents } = (await createFixture());
     const eventId = "group-event-lid-authors";
     const messageSecret = Buffer.alloc(32, 0x24);
     const eventKey: WAMessageKey = {
@@ -808,7 +808,7 @@ describe("Baileys event responses", () => {
   });
 
   it("decrypts a LID-authored event response with its PN responder in the live and lazy paths", async () => {
-    const { instanceId, adapter, processEvents } = createFixture();
+    const { instanceId, adapter, processEvents } = (await createFixture());
     const eventId = "group-event-lid-creator-pn-responder";
     const messageSecret = Buffer.alloc(32, 0x71);
     const eventKey: WAMessageKey = {
@@ -841,18 +841,18 @@ describe("Baileys event responses", () => {
       { participant: RESPONDER_ID, status: "GOING", response: "GOING" },
     ]);
 
-    sqlite
+    (await sqlite
       .prepare(
         "UPDATE event_responses SET response = 'UNKNOWN' WHERE instance_id = ? AND event_message_id = ?",
       )
-      .run(instanceId, eventId);
+      .run(instanceId, eventId));
     await expect(adapter.getEventResponses(GROUP_ID, eventId)).resolves.toMatchObject([
       { participant: RESPONDER_ID, status: "GOING", response: "GOING" },
     ]);
   });
 
   it("decrypts a PN-authored event response with its LID responder", async () => {
-    const { adapter, processEvents } = createFixture();
+    const { adapter, processEvents } = (await createFixture());
     const eventId = "group-event-pn-creator-lid-responder";
     const messageSecret = Buffer.alloc(32, 0x72);
     const eventKey: WAMessageKey = {
@@ -888,7 +888,7 @@ describe("Baileys event responses", () => {
   });
 
   it("tries the linked account LID when a fromMe event creator was encrypted as a LID", async () => {
-    const { adapter, processEvents } = createFixture();
+    const { adapter, processEvents } = (await createFixture());
     const eventId = "group-event-own-lid-creator";
     const messageSecret = Buffer.alloc(32, 0x73);
     const eventKey: WAMessageKey = {
@@ -924,7 +924,7 @@ describe("Baileys event responses", () => {
   });
 
   it("reports failed JID attempts without logging event secrets or encrypted payloads", async () => {
-    const { adapter, processEvents } = createFixture();
+    const { adapter, processEvents } = (await createFixture());
     const eventId = "group-event-decrypt-failed-candidates";
     const messageSecret = Buffer.alloc(32, 0x74);
     const eventKey: WAMessageKey = {
@@ -997,7 +997,7 @@ describe("Baileys event responses", () => {
   });
 
   it("marks responses unrecoverable when the stored event secret fails every candidate", async () => {
-    const { adapter, processEvents } = createFixture();
+    const { adapter, processEvents } = (await createFixture());
     const eventId = "group-event-stale-secret";
     const storedMessageSecret = Buffer.alloc(32, 0x75);
     const responseMessageSecret = Buffer.alloc(32, 0x76);
@@ -1040,7 +1040,7 @@ describe("Baileys event responses", () => {
   });
 
   it("keeps decryption failures recoverable when no responder candidates are available", async () => {
-    const { adapter, processEvents } = createFixture();
+    const { adapter, processEvents } = (await createFixture());
     const eventId = "group-event-no-responder-candidate";
     const messageSecret = Buffer.alloc(32, 0x77);
     const eventKey: WAMessageKey = {
@@ -1077,7 +1077,7 @@ describe("Baileys event responses", () => {
   });
 
   it("uses participantAlt PN when an event response author LID has no mapping", async () => {
-    const { instanceId, adapter, processEvents } = createFixture();
+    const { instanceId, adapter, processEvents } = (await createFixture());
     const eventId = "group-event-unresolved-lid-author";
     const messageSecret = Buffer.alloc(32, 0x31);
     const eventKey: WAMessageKey = {
@@ -1108,11 +1108,11 @@ describe("Baileys event responses", () => {
       encryptedResponseMessage("group-response-unresolved-lid", GROUP_ID, responseKey, encrypted),
     );
 
-    const stored = sqlite
+    const stored = (await sqlite
       .prepare(
         "SELECT responder, response FROM event_responses WHERE instance_id = ? AND event_message_id = ?",
       )
-      .get(instanceId, eventId) as { responder: string; response: string };
+      .get(instanceId, eventId)) as { responder: string; response: string };
     expect(stored).toEqual({ responder: UNRESOLVED_RESPONDER_ID, response: "GOING" });
     await expect(adapter.getEventResponses(GROUP_ID, eventId)).resolves.toMatchObject([
       {
@@ -1124,7 +1124,7 @@ describe("Baileys event responses", () => {
   });
 
   it("uses remoteJidAlt PN when an unresolved one-to-one author LID has no mapping", async () => {
-    const { instanceId, adapter, processEvents } = createFixture();
+    const { instanceId, adapter, processEvents } = (await createFixture());
     const eventId = "private-event-unresolved-lid-author";
     const messageSecret = Buffer.alloc(32, 0x32);
     const eventKey: WAMessageKey = {
@@ -1162,11 +1162,11 @@ describe("Baileys event responses", () => {
       ),
     );
 
-    const stored = sqlite
+    const stored = (await sqlite
       .prepare(
         "SELECT responder, response FROM event_responses WHERE instance_id = ? AND event_message_id = ?",
       )
-      .get(instanceId, eventId) as { responder: string; response: string };
+      .get(instanceId, eventId)) as { responder: string; response: string };
     expect(stored).toEqual({ responder: UNRESOLVED_RESPONDER_ID, response: "MAYBE" });
     await expect(
       adapter.getEventResponses(UNRESOLVED_RESPONDER_ID, eventId),
@@ -1180,7 +1180,7 @@ describe("Baileys event responses", () => {
   });
 
   it("keeps only the latest response from each participant", async () => {
-    const { adapter, processEvents } = createFixture();
+    const { adapter, processEvents } = (await createFixture());
     const eventId = "group-event-last-wins";
     const eventKey: WAMessageKey = {
       id: eventId,

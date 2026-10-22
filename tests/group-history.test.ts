@@ -174,16 +174,16 @@ function memoryClaim() {
   };
 }
 
-function sqliteClaim() {
+async function sqliteClaim() {
   const sqlite = new Database(":memory:");
-  sqlite.exec(`
+  (await sqlite.exec(`
     CREATE TABLE group_history_sends (
       instance_id TEXT NOT NULL,
       message_id TEXT NOT NULL,
       sent_at INTEGER NOT NULL,
       PRIMARY KEY (instance_id, message_id)
     );
-  `);
+  `));
   const insert = sqlite.prepare(
     "INSERT OR IGNORE INTO group_history_sends (instance_id, message_id, sent_at) VALUES (?, ?, ?)",
   );
@@ -738,7 +738,7 @@ describe("automatic group history on direct adds", () => {
 
   it("does not send a redelivered stub again after the id was recorded", async () => {
     vi.stubEnv("WA_GROUP_HISTORY_ON_JOIN", "true");
-    const store = sqliteClaim();
+    const store = (await sqliteClaim());
     const first = autoJoinFixture(store.claim);
     publishOwnDirectParticipantAdds(INSTANCE_ID, [directAddStub("reconnect-stub")], {
       phone: OWN_PN,

@@ -59,7 +59,7 @@ vi.mock("../src/channels/baileys/baileys.version.js", () => ({
 
 interface FakeSocket {
   socket: WASocket;
-  emit: (update: Record<string, unknown>) => void;
+  emit: (update: Record<string, unknown>) => Promise<void>;
 }
 
 const sockets: FakeSocket[] = [];
@@ -67,7 +67,7 @@ const adapters: BaileysAdapter[] = [];
 const instanceIds: string[] = [];
 
 function createFakeSocket(): FakeSocket {
-  const listeners = new Map<string, Array<(payload: unknown) => void>>();
+  const listeners = new Map<string, Array<(payload: unknown) => void | Promise<void>>>();
   const socket = {
     user: {
       id: "5511999999999@s.whatsapp.net",
@@ -75,7 +75,7 @@ function createFakeSocket(): FakeSocket {
       name: "Reconnect fixture",
     },
     ev: {
-      on: (event: string, handler: (payload: unknown) => void) => {
+      on: (event: string, handler: (payload: unknown) => void | Promise<void>) => {
         const handlers = listeners.get(event) ?? [];
         handlers.push(handler);
         listeners.set(event, handlers);
@@ -90,8 +90,8 @@ function createFakeSocket(): FakeSocket {
   } as unknown as WASocket;
   return {
     socket,
-    emit: (update) => {
-      for (const handler of listeners.get("connection.update") ?? []) handler(update);
+    emit: async (update) => {
+      for (const handler of listeners.get("connection.update") ?? []) await handler(update);
     },
   };
 }
@@ -101,47 +101,64 @@ function reconnectDelay(attempt: number): number {
   return Math.min(RECONNECT_INITIAL_DELAY_MS * 2 ** attempt, RECONNECT_MAX_DELAY_MS);
 }
 
-function closeSocket(index: number, statusCode: number): void {
+function connectionAttempt(adapter: BaileysAdapter): Promise<void> | null {
+  return (adapter as unknown as { connectInFlight: Promise<void> | null }).connectInFlight;
+}
+
+async function advanceTimersAndConnections(milliseconds: number): Promise<void> {
+  // Stop at each possible reconnect boundary so PostgreSQL I/O can finish before
+  // advancing through its query timeout. A single large jump can time out a new
+  // connection before the real event loop has had a chance to answer its queries.
+  for (let remaining = milliseconds; remaining > 0;) {
+    const step = Math.min(remaining, RECONNECT_INITIAL_DELAY_MS);
+    await vi.advanceTimersByTimeAsync(step);
+    // Await only attempts started by timers; never trigger connect() from the fixture.
+    await Promise.all(adapters.map(connectionAttempt));
+    remaining -= step;
+  }
+}
+
+async function closeSocket(index: number, statusCode: number): Promise<void> {
   const fake = sockets[index];
   if (!fake) throw new Error(`Missing socket ${index}`);
-  fake.emit({
+  await fake.emit({
     connection: "close",
     lastDisconnect: { error: { output: { statusCode } } },
   });
 }
 
-function openSocket(index: number): void {
+async function openSocket(index: number): Promise<void> {
   const fake = sockets[index];
   if (!fake) throw new Error(`Missing socket ${index}`);
-  fake.emit({ connection: "open" });
+  await fake.emit({ connection: "open" });
 }
 
-function instanceStatus(id: string): string {
-  return instanceLifecycle(id).status;
+async function instanceStatus(id: string): Promise<string> {
+  return (await instanceLifecycle(id)).status;
 }
 
-function instanceLifecycle(id: string): {
+async function instanceLifecycle(id: string): Promise<{
   status: string;
   lastConnected: number | null;
   lastDisconnected: number | null;
-} {
-  const row = sqlite
+}> {
+  const row = (await sqlite
     .prepare(
       `SELECT status,
-              last_connected AS lastConnected,
-              last_disconnected AS lastDisconnected
+              last_connected AS "lastConnected",
+              last_disconnected AS "lastDisconnected"
        FROM instances WHERE id = ?`,
     )
-    .get(id) as
+    .get(id)) as
     { status: string; lastConnected: number | null; lastDisconnected: number | null } | undefined;
   if (!row) throw new Error(`Missing instance ${id}`);
   return row;
 }
 
-function authKeyCount(id: string): number {
-  const row = sqlite
+async function authKeyCount(id: string): Promise<number> {
+  const row = (await sqlite
     .prepare("SELECT COUNT(*) AS count FROM auth_keys WHERE instance_id = ?")
-    .get(id) as { count: number };
+    .get(id)) as { count: number };
   return row.count;
 }
 
@@ -161,9 +178,9 @@ async function createConnectedInstance(paired = true): Promise<{
   instanceIds.push(instance.id);
   if (paired) await markPaired(instance.id);
   await manager.connectInstance(instance.id);
-  const adapter = manager.ensureAdapter(instance.id) as BaileysAdapter;
+  const adapter = (await manager.ensureAdapter(instance.id)) as BaileysAdapter;
   adapters.push(adapter);
-  openSocket(sockets.length - 1);
+  await openSocket(sockets.length - 1);
   return { manager, id: instance.id, adapter };
 }
 
@@ -180,7 +197,10 @@ describe("Baileys reconnect after unavailable service", () => {
     vi.stubEnv("WA_MARK_ONLINE_ON_CONNECT", "false");
     vi.stubEnv("WA_BAILEYS_HEALTH_WATCHDOG_MS", "86400000");
     vi.stubEnv("WA_AUTO_RECONNECT", "true");
-    mocks.makeWASocket.mockImplementation(() => {
+    vi.mocked(getWaVersion)
+      .mockReset()
+      .mockResolvedValue({ version: [2, 3000, 0], isLatest: true });
+    mocks.makeWASocket.mockReset().mockImplementation(() => {
       const fake = createFakeSocket();
       sockets.push(fake);
       return fake.socket;
@@ -190,7 +210,8 @@ describe("Baileys reconnect after unavailable service", () => {
   afterEach(async () => {
     for (const adapter of adapters) await adapter.disconnect();
     adapters.length = 0;
-    for (const id of instanceIds) sqlite.prepare("DELETE FROM instances WHERE id = ?").run(id);
+    for (const id of instanceIds)
+      await sqlite.prepare("DELETE FROM instances WHERE id = ?").run(id);
     instanceIds.length = 0;
     vi.useRealTimers();
     vi.unstubAllEnvs();
@@ -204,8 +225,8 @@ describe("Baileys reconnect after unavailable service", () => {
     adapter.on("instance.disconnected", (payload) => disconnected.push(payload));
 
     expect(mocks.makeWASocket).toHaveBeenCalledTimes(1);
-    closeSocket(0, DisconnectReason.unavailableService);
-    expect(instanceStatus(id)).toBe("disconnected");
+    await closeSocket(0, DisconnectReason.unavailableService);
+    expect(await instanceStatus(id)).toBe("disconnected");
     expect(disconnected).toEqual([
       expect.objectContaining({
         reason: "unavailableService",
@@ -218,11 +239,11 @@ describe("Baileys reconnect after unavailable service", () => {
 
     for (let attempt = 0; attempt < RECONNECT_MAX_ATTEMPTS + 2; attempt++) {
       const before = mocks.makeWASocket.mock.calls.length;
-      await vi.advanceTimersByTimeAsync(reconnectDelay(attempt));
+      await advanceTimersAndConnections(reconnectDelay(attempt));
       expect(mocks.makeWASocket.mock.calls.length).toBe(before + 1);
-      expect(instanceStatus(id)).toBe("connecting");
-      closeSocket(sockets.length - 1, DisconnectReason.unavailableService);
-      expect(instanceStatus(id)).toBe("disconnected");
+      expect(await instanceStatus(id)).toBe("connecting");
+      await closeSocket(sockets.length - 1, DisconnectReason.unavailableService);
+      expect(await instanceStatus(id)).toBe("disconnected");
     }
 
     expect(mocks.makeWASocket.mock.calls.length).toBeGreaterThan(RECONNECT_MAX_ATTEMPTS + 1);
@@ -240,11 +261,31 @@ describe("Baileys reconnect after unavailable service", () => {
     ]);
   });
 
+  it("persists an overlapping open and close in socket event order", async () => {
+    const manager = new InstanceManager();
+    const instance = await manager.createInstance("overlapping lifecycle");
+    instanceIds.push(instance.id);
+    await markPaired(instance.id);
+    await manager.connectInstance(instance.id);
+    const adapter = (await manager.ensureAdapter(instance.id)) as BaileysAdapter;
+    adapters.push(adapter);
+    await Promise.all([
+      openSocket(sockets.length - 1),
+      closeSocket(sockets.length - 1, DisconnectReason.timedOut),
+    ]);
+    expect(adapter.getStatus()).toBe("disconnected");
+    expect(manager.hasLiveSocket(instance.id)).toBe(false);
+    const stored = await instanceLifecycle(instance.id);
+    expect(stored.status).toBe("disconnected");
+    expect(stored.lastConnected).not.toBeNull();
+    expect(stored.lastDisconnected).toBeGreaterThanOrEqual(stored.lastConnected!);
+  });
+
   it("creates a new socket when connect() runs after a 503", async () => {
     vi.useFakeTimers();
     const { manager, id } = await createConnectedInstance();
-    closeSocket(0, DisconnectReason.unavailableService);
-    expect(instanceStatus(id)).toBe("disconnected");
+    await closeSocket(0, DisconnectReason.unavailableService);
+    expect(await instanceStatus(id)).toBe("disconnected");
     expect(manager.hasLiveSocket(id)).toBe(false);
 
     const before = mocks.makeWASocket.mock.calls.length;
@@ -254,48 +295,48 @@ describe("Baileys reconnect after unavailable service", () => {
     expect(mocks.makeWASocket.mock.calls.length).toBe(before + 1);
     expect(mocks.warnings).not.toContain("Already connected or connecting");
     expect(manager.hasLiveSocket(id)).toBe(true);
-    expect(instanceStatus(id)).toBe("connecting");
+    expect(await instanceStatus(id)).toBe("connecting");
 
-    await vi.advanceTimersByTimeAsync(RECONNECT_MAX_DELAY_MS);
+    await advanceTimersAndConnections(RECONNECT_MAX_DELAY_MS);
     expect(mocks.makeWASocket.mock.calls.length).toBe(before + 1);
   });
 
   it("does not schedule another reconnect for a close from an old socket", async () => {
     vi.useFakeTimers();
     await createConnectedInstance();
-    closeSocket(0, DisconnectReason.unavailableService);
-    closeSocket(0, DisconnectReason.unavailableService);
+    await closeSocket(0, DisconnectReason.unavailableService);
+    await closeSocket(0, DisconnectReason.unavailableService);
 
-    await vi.advanceTimersByTimeAsync(reconnectDelay(0));
+    await advanceTimersAndConnections(reconnectDelay(0));
     expect(mocks.makeWASocket).toHaveBeenCalledTimes(2);
 
     const previous = sockets[0];
     if (!previous) throw new Error("Missing the replaced socket");
-    previous.emit({
+    await previous.emit({
       connection: "close",
       lastDisconnect: { error: { output: { statusCode: DisconnectReason.unavailableService } } },
     });
-    await vi.advanceTimersByTimeAsync(RECONNECT_MAX_DELAY_MS);
+    await advanceTimersAndConnections(RECONNECT_MAX_DELAY_MS);
     expect(mocks.makeWASocket).toHaveBeenCalledTimes(2);
   });
 
   it("stops reconnecting after logout", async () => {
     vi.useFakeTimers();
     const { id } = await createConnectedInstance();
-    expect(authKeyCount(id)).toBeGreaterThan(0);
+    expect(await authKeyCount(id)).toBeGreaterThan(0);
 
-    closeSocket(0, DisconnectReason.loggedOut);
-    expect(authKeyCount(id)).toBe(0);
-    await vi.advanceTimersByTimeAsync(RECONNECT_MAX_DELAY_MS * 2);
+    await closeSocket(0, DisconnectReason.loggedOut);
+    expect(await authKeyCount(id)).toBe(0);
+    await advanceTimersAndConnections(RECONNECT_MAX_DELAY_MS * 2);
     expect(mocks.makeWASocket).toHaveBeenCalledTimes(1);
-    expect(instanceStatus(id)).toBe("disconnected");
+    expect(await instanceStatus(id)).toBe("disconnected");
 
     const { id: retryId } = await createConnectedInstance();
     const socketsBeforeRetry = mocks.makeWASocket.mock.calls.length;
-    closeSocket(sockets.length - 1, DisconnectReason.unavailableService);
-    closeSocket(sockets.length - 1, DisconnectReason.loggedOut);
-    expect(authKeyCount(retryId)).toBe(0);
-    await vi.advanceTimersByTimeAsync(RECONNECT_MAX_DELAY_MS * 2);
+    await closeSocket(sockets.length - 1, DisconnectReason.unavailableService);
+    await closeSocket(sockets.length - 1, DisconnectReason.loggedOut);
+    expect(await authKeyCount(retryId)).toBe(0);
+    await advanceTimersAndConnections(RECONNECT_MAX_DELAY_MS * 2);
     expect(mocks.makeWASocket.mock.calls.length).toBe(socketsBeforeRetry);
   });
 
@@ -307,25 +348,36 @@ describe("Baileys reconnect after unavailable service", () => {
       const disconnected: ChannelEventPayload["instance.disconnected"][] = [];
       adapter.on("instance.disconnected", (payload) => disconnected.push(payload));
       const versionLookup = Promise.withResolvers<Awaited<ReturnType<typeof getWaVersion>>>();
-      vi.mocked(getWaVersion).mockReturnValueOnce(versionLookup.promise);
+      const versionStarted = Promise.withResolvers<void>();
+      vi.mocked(getWaVersion).mockImplementationOnce(() => {
+        versionStarted.resolve();
+        return versionLookup.promise;
+      });
 
-      closeSocket(0, DisconnectReason.unavailableService);
+      await closeSocket(0, DisconnectReason.unavailableService);
       await vi.advanceTimersByTimeAsync(RECONNECT_INITIAL_DELAY_MS);
+      await versionStarted.promise;
       // The timer has fired and loaded credentials, but no replacement socket exists yet.
       expect(mocks.makeWASocket).toHaveBeenCalledTimes(1);
       expect(adapter.getStatus()).toBe("connecting");
-      closeSocket(0, DisconnectReason.loggedOut);
-      expect(authKeyCount(id)).toBe(0);
+      await closeSocket(0, DisconnectReason.loggedOut);
+      expect(await authKeyCount(id)).toBe(0);
 
+      const inFlight = connectionAttempt(adapter);
+      expect(inFlight).not.toBeNull();
+      const settled = lookupFails
+        ? expect(inFlight).rejects.toThrow("Version lookup failed")
+        : expect(inFlight).resolves.toBeUndefined();
       if (lookupFails) versionLookup.reject(new Error("Version lookup failed"));
       else versionLookup.resolve({ version: [2, 3000, 0], isLatest: true });
-      await vi.advanceTimersByTimeAsync(RECONNECT_MAX_DELAY_MS * 2);
+      await settled;
+      await advanceTimersAndConnections(RECONNECT_MAX_DELAY_MS * 2);
 
       expect(mocks.makeWASocket).toHaveBeenCalledTimes(1);
       expect(manager.hasLiveSocket(id)).toBe(false);
       expect(adapter.getStatus()).toBe("disconnected");
-      expect(instanceStatus(id)).toBe("disconnected");
-      expect(authKeyCount(id)).toBe(0);
+      expect(await instanceStatus(id)).toBe("disconnected");
+      expect(await authKeyCount(id)).toBe(0);
       expect(disconnected.at(-1)).toMatchObject({ loggedOut: true, willReconnect: false });
     },
   );
@@ -338,35 +390,35 @@ describe("Baileys reconnect after unavailable service", () => {
     const unpaired = await manager.createInstance("abandoned pairing");
     instanceIds.push(recent.id, stuck.id, live.id, unpaired.id);
     adapters.push(
-      manager.ensureAdapter(recent.id) as BaileysAdapter,
-      manager.ensureAdapter(stuck.id) as BaileysAdapter,
-      manager.ensureAdapter(unpaired.id) as BaileysAdapter,
+      (await manager.ensureAdapter(recent.id)) as BaileysAdapter,
+      (await manager.ensureAdapter(stuck.id)) as BaileysAdapter,
+      (await manager.ensureAdapter(unpaired.id)) as BaileysAdapter,
     );
     await manager.connectInstance(live.id);
-    adapters.push(manager.ensureAdapter(live.id) as BaileysAdapter);
+    adapters.push((await manager.ensureAdapter(live.id)) as BaileysAdapter);
 
     const now = Date.now();
-    sqlite
+    await sqlite
       .prepare("UPDATE instances SET status = 'connecting', updated_at = ? WHERE id = ?")
       .run(now, recent.id);
-    sqlite
+    await sqlite
       .prepare(
         "UPDATE instances SET status = 'connecting', updated_at = ?, last_connected = ? WHERE id = ?",
       )
       .run(now - CONNECTING_STUCK_AFTER_MS - 1_000, now - 600_000, stuck.id);
-    sqlite
+    await sqlite
       .prepare(
         "UPDATE instances SET status = 'connecting', updated_at = ?, last_connected = NULL WHERE id = ?",
       )
       .run(now - CONNECTING_STUCK_AFTER_MS - 1_000, unpaired.id);
-    sqlite
+    await sqlite
       .prepare("UPDATE instances SET status = 'connecting', updated_at = ? WHERE id = ?")
       .run(now - CONNECTING_STUCK_AFTER_MS - 1_000, live.id);
 
     const watched = new Set([recent.id, stuck.id, live.id, unpaired.id]);
     const listInstances = manager.getAllInstances.bind(manager);
-    vi.spyOn(manager, "getAllInstances").mockImplementation(() =>
-      listInstances().filter((instance) => watched.has(instance.id)),
+    vi.spyOn(manager, "getAllInstances").mockImplementation(async () =>
+      (await listInstances()).filter((instance) => watched.has(instance.id)),
     );
 
     const callsBeforeHealthCheck = mocks.makeWASocket.mock.calls.length;
@@ -376,8 +428,8 @@ describe("Baileys reconnect after unavailable service", () => {
     expect(manager.hasLiveSocket(stuck.id)).toBe(true);
     expect(manager.hasLiveSocket(recent.id)).toBe(false);
     expect(manager.hasLiveSocket(live.id)).toBe(true);
-    expect(instanceStatus(stuck.id)).toBe("connecting");
-    expect(instanceStatus(recent.id)).toBe("connecting");
+    expect(await instanceStatus(stuck.id)).toBe("connecting");
+    expect(await instanceStatus(recent.id)).toBe("connecting");
     expect(manager.hasLiveSocket(unpaired.id)).toBe(false);
   });
 
@@ -389,33 +441,33 @@ describe("Baileys reconnect after unavailable service", () => {
     adapter.on("instance.connected", (payload) => connected.push(payload));
     adapter.on("instance.disconnected", (payload) => disconnected.push(payload));
 
-    const initial = instanceLifecycle(id);
+    const initial = await instanceLifecycle(id);
     expect(initial.status).toBe("connected");
     expect(initial.lastConnected).not.toBeNull();
 
-    await vi.advanceTimersByTimeAsync(60_000);
-    closeSocket(0, DisconnectReason.timedOut);
-    const dropped = instanceLifecycle(id);
+    await advanceTimersAndConnections(60_000);
+    await closeSocket(0, DisconnectReason.timedOut);
+    const dropped = await instanceLifecycle(id);
     expect(dropped.status).toBe("disconnected");
     expect(dropped.lastDisconnected).toBeGreaterThan(initial.lastConnected ?? 0);
     expect(disconnected).toHaveLength(1);
     expect(connected).toHaveLength(0);
 
-    const staleBeforeReconnect = instanceLifecycle(id);
-    closeSocket(0, DisconnectReason.timedOut);
-    expect(instanceLifecycle(id)).toEqual(staleBeforeReconnect);
+    const staleBeforeReconnect = await instanceLifecycle(id);
+    await closeSocket(0, DisconnectReason.timedOut);
+    expect(await instanceLifecycle(id)).toEqual(staleBeforeReconnect);
     expect(disconnected).toHaveLength(1);
 
-    await vi.advanceTimersByTimeAsync(RECONNECT_INITIAL_DELAY_MS);
+    await advanceTimersAndConnections(RECONNECT_INITIAL_DELAY_MS);
     expect(mocks.makeWASocket).toHaveBeenCalledTimes(2);
-    await vi.advanceTimersByTimeAsync(60_000);
-    openSocket(sockets.length - 1);
-    const restored = instanceLifecycle(id);
+    await advanceTimersAndConnections(60_000);
+    await openSocket(sockets.length - 1);
+    const restored = await instanceLifecycle(id);
     expect(restored.status).toBe("connected");
     expect(restored.lastDisconnected).toBe(dropped.lastDisconnected);
     expect(restored.lastConnected).toBeGreaterThan(dropped.lastDisconnected ?? 0);
     expect(connected).toHaveLength(1);
-    expect(manager.getInstanceLifecycleStatuses(id)[0]).toMatchObject({
+    expect((await manager.getInstanceLifecycleStatuses(id))[0]).toMatchObject({
       state: "connected",
       lastConnectedAt: restored.lastConnected,
       lastDisconnectedAt: restored.lastDisconnected,
@@ -425,18 +477,18 @@ describe("Baileys reconnect after unavailable service", () => {
   it("keeps advancing persisted timestamps across repeated automatic reconnects", async () => {
     vi.useFakeTimers();
     const { id } = await createConnectedInstance();
-    let previousConnected = instanceLifecycle(id).lastConnected ?? 0;
+    let previousConnected = (await instanceLifecycle(id)).lastConnected ?? 0;
 
     for (let cycle = 0; cycle < 3; cycle++) {
-      await vi.advanceTimersByTimeAsync(60_000);
-      closeSocket(sockets.length - 1, DisconnectReason.timedOut);
-      const dropped = instanceLifecycle(id);
+      await advanceTimersAndConnections(60_000);
+      await closeSocket(sockets.length - 1, DisconnectReason.timedOut);
+      const dropped = await instanceLifecycle(id);
       expect(dropped.status).toBe("disconnected");
       expect(dropped.lastDisconnected).toBeGreaterThan(previousConnected);
 
-      await vi.advanceTimersByTimeAsync(RECONNECT_INITIAL_DELAY_MS + 60_000);
-      openSocket(sockets.length - 1);
-      const restored = instanceLifecycle(id);
+      await advanceTimersAndConnections(RECONNECT_INITIAL_DELAY_MS + 60_000);
+      await openSocket(sockets.length - 1);
+      const restored = await instanceLifecycle(id);
       expect(restored.status).toBe("connected");
       expect(restored.lastDisconnected).toBe(dropped.lastDisconnected);
       expect(restored.lastConnected).toBeGreaterThan(dropped.lastDisconnected ?? 0);
@@ -449,17 +501,17 @@ describe("Baileys reconnect after unavailable service", () => {
     const { id, adapter } = await createConnectedInstance();
     const disconnected: ChannelEventPayload["instance.disconnected"][] = [];
     adapter.on("instance.disconnected", (payload) => disconnected.push(payload));
-    const initial = instanceLifecycle(id);
+    const initial = await instanceLifecycle(id);
 
-    await vi.advanceTimersByTimeAsync(60_000);
-    closeSocket(0, DisconnectReason.connectionClosed);
-    const outageStart = instanceLifecycle(id).lastDisconnected;
+    await advanceTimersAndConnections(60_000);
+    await closeSocket(0, DisconnectReason.connectionClosed);
+    const outageStart = (await instanceLifecycle(id)).lastDisconnected;
     expect(outageStart).toBeGreaterThan(initial.lastConnected ?? 0);
 
     for (let attempt = 0; attempt < 3; attempt++) {
-      await vi.advanceTimersByTimeAsync(reconnectDelay(attempt) + 5_000);
-      closeSocket(sockets.length - 1, DisconnectReason.connectionClosed);
-      expect(instanceLifecycle(id)).toEqual({
+      await advanceTimersAndConnections(reconnectDelay(attempt) + 5_000);
+      await closeSocket(sockets.length - 1, DisconnectReason.connectionClosed);
+      expect(await instanceLifecycle(id)).toEqual({
         status: "disconnected",
         lastConnected: initial.lastConnected,
         lastDisconnected: outageStart,
@@ -467,9 +519,9 @@ describe("Baileys reconnect after unavailable service", () => {
     }
     expect(disconnected).toHaveLength(1);
 
-    await vi.advanceTimersByTimeAsync(reconnectDelay(3));
-    openSocket(sockets.length - 1);
-    expect(instanceLifecycle(id).lastDisconnected).toBe(outageStart);
+    await advanceTimersAndConnections(reconnectDelay(3));
+    await openSocket(sockets.length - 1);
+    expect((await instanceLifecycle(id)).lastDisconnected).toBe(outageStart);
     // The append watermark is the outage start minus the 5-minute clock-skew allowance.
     expect(
       (adapter as unknown as { appendNotifyWatermarkMs: number | null }).appendNotifyWatermarkMs,
@@ -479,57 +531,57 @@ describe("Baileys reconnect after unavailable service", () => {
   it("does not move persisted timestamps when a replaced socket closes", async () => {
     vi.useFakeTimers();
     const { manager, id } = await createConnectedInstance();
-    await vi.advanceTimersByTimeAsync(60_000);
-    closeSocket(0, DisconnectReason.timedOut);
-    await vi.advanceTimersByTimeAsync(RECONNECT_INITIAL_DELAY_MS + 60_000);
-    openSocket(sockets.length - 1);
+    await advanceTimersAndConnections(60_000);
+    await closeSocket(0, DisconnectReason.timedOut);
+    await advanceTimersAndConnections(RECONNECT_INITIAL_DELAY_MS + 60_000);
+    await openSocket(sockets.length - 1);
 
-    const current = instanceLifecycle(id);
+    const current = await instanceLifecycle(id);
     expect(current.status).toBe("connected");
     const replaced = sockets[0];
     if (!replaced) throw new Error("Missing the replaced socket");
-    replaced.emit({
+    await replaced.emit({
       connection: "close",
       lastDisconnect: { error: { output: { statusCode: DisconnectReason.timedOut } } },
     });
 
-    expect(instanceLifecycle(id)).toEqual(current);
-    expect(manager.getInstanceLifecycleStatuses(id)[0]).toMatchObject({
+    expect(await instanceLifecycle(id)).toEqual(current);
+    expect((await manager.getInstanceLifecycleStatuses(id))[0]).toMatchObject({
       state: "connected",
       lastConnectedAt: current.lastConnected,
       lastDisconnectedAt: current.lastDisconnected,
     });
-    await vi.advanceTimersByTimeAsync(RECONNECT_MAX_DELAY_MS);
+    await advanceTimersAndConnections(RECONNECT_MAX_DELAY_MS);
     expect(mocks.makeWASocket).toHaveBeenCalledTimes(2);
-    expect(instanceLifecycle(id)).toEqual(current);
+    expect(await instanceLifecycle(id)).toEqual(current);
   });
 
   it("opens one socket when connect() runs concurrently", async () => {
     vi.useFakeTimers();
     const { adapter } = await createConnectedInstance();
-    closeSocket(0, DisconnectReason.unavailableService);
+    await closeSocket(0, DisconnectReason.unavailableService);
 
     const before = mocks.makeWASocket.mock.calls.length;
     await Promise.all([adapter.connect(), adapter.connect(), vi.advanceTimersByTimeAsync(0)]);
     expect(mocks.makeWASocket.mock.calls.length).toBe(before + 1);
 
-    await vi.advanceTimersByTimeAsync(RECONNECT_MAX_DELAY_MS);
+    await advanceTimersAndConnections(RECONNECT_MAX_DELAY_MS);
     expect(mocks.makeWASocket.mock.calls.length).toBe(before + 1);
   });
 
   it("keeps the bounded retry for a session that never paired", async () => {
     vi.useFakeTimers();
     await createConnectedInstance(false);
-    closeSocket(0, DisconnectReason.timedOut);
+    await closeSocket(0, DisconnectReason.timedOut);
 
     for (let attempt = 0; attempt < RECONNECT_MAX_ATTEMPTS; attempt++) {
-      await vi.advanceTimersByTimeAsync(reconnectDelay(attempt));
-      closeSocket(sockets.length - 1, DisconnectReason.timedOut);
+      await advanceTimersAndConnections(reconnectDelay(attempt));
+      await closeSocket(sockets.length - 1, DisconnectReason.timedOut);
     }
     const afterBackoff = mocks.makeWASocket.mock.calls.length;
     expect(afterBackoff).toBe(RECONNECT_MAX_ATTEMPTS + 1);
 
-    await vi.advanceTimersByTimeAsync(RECONNECT_MAX_DELAY_MS * 3);
+    await advanceTimersAndConnections(RECONNECT_MAX_DELAY_MS * 3);
     expect(mocks.makeWASocket.mock.calls.length).toBe(afterBackoff);
   });
 });

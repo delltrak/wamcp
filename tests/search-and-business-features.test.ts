@@ -65,7 +65,7 @@ function seedSearchMessage(
 }
 
 describe("local message search", () => {
-  it("matches case-insensitive substrings and treats LIKE wildcards literally", () => {
+  it("matches case-insensitive substrings and treats LIKE wildcards literally", async () => {
     const database = memorySearchDb();
     seedSearchMessage(database, {
       id: "literal",
@@ -78,7 +78,7 @@ describe("local message search", () => {
       timestamp: 11,
     });
 
-    const result = searchStoredMessages(database, "search-instance", {
+    const result = await searchStoredMessages(database, "search-instance", {
       query: "%_done\\",
       limit: 10,
       offset: 0,
@@ -88,7 +88,7 @@ describe("local message search", () => {
     database.close();
   });
 
-  it("applies inclusive date, sender, and chat filters with stable newest-first offset pages", () => {
+  it("applies inclusive date, sender, and chat filters with stable newest-first offset pages", async () => {
     const database = memorySearchDb();
     seedSearchMessage(database, { id: "same-a", content: "HELLO", timestamp: 20 });
     seedSearchMessage(database, { id: "same-z", content: "hello again", timestamp: 20 });
@@ -105,7 +105,7 @@ describe("local message search", () => {
       chatId: "5500000000004@s.whatsapp.net",
     });
 
-    const first = searchStoredMessages(database, "search-instance", {
+    const first = await searchStoredMessages(database, "search-instance", {
       query: "hello",
       from: 20,
       to: 20,
@@ -114,7 +114,7 @@ describe("local message search", () => {
       limit: 1,
       offset: 0,
     });
-    const second = searchStoredMessages(database, "search-instance", {
+    const second = await searchStoredMessages(database, "search-instance", {
       query: "hello",
       from: 20,
       to: 20,
@@ -136,10 +136,10 @@ describe("Baileys business and message features", () => {
   const instanceId = `feature-test-${randomUUID()}`;
   let activeInstanceId: string | undefined;
 
-  afterEach(() => {
+  afterEach(async () => {
     vi.unstubAllEnvs();
     if (activeInstanceId) {
-      sqlite.prepare("DELETE FROM instances WHERE id = ?").run(activeInstanceId);
+      await sqlite.prepare("DELETE FROM instances WHERE id = ?").run(activeInstanceId);
       activeInstanceId = undefined;
     }
   });
@@ -149,15 +149,15 @@ describe("Baileys business and message features", () => {
     vi.stubEnv("WA_APP_STATE_MIN_INTERVAL_MS", "0");
   }
 
-  function createFixture(): { instanceId: string; adapter: BaileysAdapter } {
+  async function createFixture(): Promise<{ instanceId: string; adapter: BaileysAdapter }> {
     const id = `${instanceId}-${randomUUID()}`;
     activeInstanceId = id;
-    sqlite
+    await sqlite
       .prepare(
         "INSERT INTO instances (id, name, channel, status, created_at, updated_at) VALUES (?, ?, 'baileys', 'connected', 1, 1)",
       )
       .run(id, "Feature test instance");
-    sqlite
+    await sqlite
       .prepare(
         `INSERT INTO chats (instance_id, jid, name, is_group, updated_at)
          VALUES (?, ?, 'Example chat', 0, 1)`,
@@ -166,7 +166,7 @@ describe("Baileys business and message features", () => {
     return { instanceId: id, adapter: new BaileysAdapter(id) };
   }
 
-  function addStoredMessage(
+  async function addStoredMessage(
     instanceId: string,
     id: string,
     options: {
@@ -176,8 +176,8 @@ describe("Baileys business and message features", () => {
       timestamp?: number;
       rawData?: string;
     } = {},
-  ): void {
-    sqlite
+  ): Promise<void> {
+    await sqlite
       .prepare(
         `INSERT INTO messages
          (id, instance_id, chat_id, sender_id, type, content, media_url,
@@ -279,7 +279,7 @@ describe("Baileys business and message features", () => {
 
   it("creates, edits, deletes, and associates Business labels; label events reach chat listings", async () => {
     enableAppStateWrites();
-    const { instanceId: id, adapter } = createFixture();
+    const { instanceId: id, adapter } = await createFixture();
     const { socket, processEvents } = installSocket(adapter);
 
     const label = await adapter.createLabel("Follow up", 4);
@@ -325,31 +325,31 @@ describe("Baileys business and message features", () => {
 
   it("returns a clear error when a non-Business account attempts label operations", async () => {
     enableAppStateWrites();
-    const { adapter } = createFixture();
+    const { adapter } = await createFixture();
     installSocket(adapter, { getBusinessProfile: vi.fn().mockResolvedValue(undefined) });
     await expect(adapter.createLabel("Follow up", 4)).rejects.toThrow(/Business account/);
   });
 
   it("marks chats unread with the reverse-chronological lastMessages range and stars stored messages", async () => {
     enableAppStateWrites();
-    const { instanceId: id, adapter } = createFixture();
+    const { instanceId: id, adapter } = await createFixture();
     const groupId = "120363000000000001@g.us";
-    sqlite
+    await sqlite
       .prepare(
         "INSERT INTO chats (instance_id, jid, name, is_group, updated_at) VALUES (?, ?, 'Example group', 1, 1)",
       )
       .run(id, groupId);
-    addStoredMessage(id, "earlier", {
+    await addStoredMessage(id, "earlier", {
       chatId: groupId,
       timestamp: 90,
       rawData: rawKeyMessage(groupId, "earlier", false, 90, ACCOUNT_ID),
     });
-    addStoredMessage(id, "later", {
+    await addStoredMessage(id, "later", {
       chatId: groupId,
       timestamp: 100,
       rawData: rawKeyMessage(groupId, "later", false, 100, ACCOUNT_ID),
     });
-    addStoredMessage(id, "outgoing", {
+    await addStoredMessage(id, "outgoing", {
       fromMe: true,
       timestamp: 110,
       rawData: rawKeyMessage(CHAT_ID, "outgoing", true, 110),
@@ -378,7 +378,7 @@ describe("Baileys business and message features", () => {
       CHAT_ID,
     );
     expect(
-      sqlite
+      await sqlite
         .prepare("SELECT starred FROM messages WHERE instance_id = ? AND id = ?")
         .get(id, "outgoing"),
     ).toEqual({ starred: 1 });
@@ -388,8 +388,8 @@ describe("Baileys business and message features", () => {
     const originalValue = process.env.WA_APP_STATE_WRITES_ENABLED;
     delete process.env.WA_APP_STATE_WRITES_ENABLED;
     try {
-      const { instanceId: id, adapter } = createFixture();
-      addStoredMessage(id, "starred-message");
+      const { instanceId: id, adapter } = await createFixture();
+      await addStoredMessage(id, "starred-message");
       const { socket } = installSocket(adapter);
       const disabledError =
         "WhatsApp account, server, and app-state writes are disabled. Set WA_APP_STATE_WRITES_ENABLED=true to enable them.";
@@ -425,15 +425,17 @@ describe("Baileys business and message features", () => {
       expect(socket.updateProfileName).not.toHaveBeenCalled();
       expect(socket.getBusinessProfile).not.toHaveBeenCalled();
       expect(
-        sqlite
+        await sqlite
           .prepare("SELECT starred FROM messages WHERE instance_id = ? AND id = ?")
           .get(id, "starred-message"),
       ).toEqual({ starred: 0 });
-      expect(sqlite.prepare("SELECT label_id FROM labels WHERE instance_id = ?").all(id)).toEqual(
-        [],
-      );
       expect(
-        sqlite.prepare("SELECT label_id FROM label_associations WHERE instance_id = ?").all(id),
+        await sqlite.prepare("SELECT label_id FROM labels WHERE instance_id = ?").all(id),
+      ).toEqual([]);
+      expect(
+        await sqlite
+          .prepare("SELECT label_id FROM label_associations WHERE instance_id = ?")
+          .all(id),
       ).toEqual([]);
     } finally {
       if (originalValue === undefined) delete process.env.WA_APP_STATE_WRITES_ENABLED;
@@ -443,8 +445,8 @@ describe("Baileys business and message features", () => {
 
   it("passes app-state writes through when explicitly enabled", async () => {
     enableAppStateWrites();
-    const { instanceId: id, adapter } = createFixture();
-    addStoredMessage(id, "archive-row", {
+    const { instanceId: id, adapter } = await createFixture();
+    await addStoredMessage(id, "archive-row", {
       rawData: rawKeyMessage(CHAT_ID, "archive-row", false, 110),
     });
     const { socket } = installSocket(adapter);
@@ -465,8 +467,8 @@ describe("Baileys business and message features", () => {
   });
 
   it("sends quoted event messages and returns decrypted responses persisted from Baileys updates", async () => {
-    const { instanceId: id, adapter } = createFixture();
-    addStoredMessage(id, "quoted-message");
+    const { instanceId: id, adapter } = await createFixture();
+    await addStoredMessage(id, "quoted-message");
     const outgoing = {
       key: { id: "event-1", remoteJid: CHAT_ID, fromMe: true },
       message: {
@@ -532,15 +534,15 @@ describe("Baileys business and message features", () => {
       },
     ]);
     expect(
-      sqlite
+      await sqlite
         .prepare("SELECT type, raw_data FROM messages WHERE instance_id = ? AND id = ?")
         .get(id, "event-1"),
     ).toMatchObject({ type: "event", raw_data: expect.any(String) });
   });
 
   it("anchors on-demand history at the oldest stored message and persists only new results", async () => {
-    const { instanceId: id, adapter } = createFixture();
-    addStoredMessage(id, "history-anchor", {
+    const { instanceId: id, adapter } = await createFixture();
+    await addStoredMessage(id, "history-anchor", {
       timestamp: 50,
       rawData: JSON.stringify({
         key: { id: "history-anchor", remoteJid: CHAT_ID, fromMe: false },
@@ -606,10 +608,10 @@ describe("Baileys business and message features", () => {
   });
 
   it("adds the connected user as participant to an own group history anchor", async () => {
-    const { instanceId: id, adapter } = createFixture();
+    const { instanceId: id, adapter } = await createFixture();
     const groupChatId = "120363000000000001@g.us";
     const anchorId = "own-group-history-anchor";
-    addStoredMessage(id, anchorId, {
+    await addStoredMessage(id, anchorId, {
       chatId: groupChatId,
       sender: "me",
       fromMe: true,
@@ -619,6 +621,7 @@ describe("Baileys business and message features", () => {
     const { socket, processEvents } = installSocket(adapter);
 
     const request = adapter.fetchMessageHistory(groupChatId, 20, 1_000);
+    await vi.waitFor(() => expect(socket.fetchMessageHistory).toHaveBeenCalledOnce());
 
     expect(socket.fetchMessageHistory).toHaveBeenCalledWith(
       20,
@@ -655,7 +658,7 @@ describe("Baileys business and message features", () => {
 
   it("automatically requests bounded history when a chat has no stored messages", async () => {
     vi.stubEnv("WA_BAILEYS_HISTORY_SYNC_MAX_MESSAGES", "7");
-    const { adapter } = createFixture();
+    const { adapter } = await createFixture();
     const { socket, processEvents } = installSocket(adapter);
     const emptyChatId = "5500000000003@s.whatsapp.net";
     const latestMessage: WAMessage = {
@@ -667,7 +670,9 @@ describe("Baileys business and message features", () => {
     await processEvents({
       "messages.upsert": { messages: [latestMessage], type: "notify" },
     });
-    await Promise.resolve();
+    await vi.waitFor(() => {
+      expect(socket.fetchMessageHistory).toHaveBeenCalled();
+    });
 
     expect(socket.fetchMessageHistory).toHaveBeenCalledWith(
       7,
@@ -696,7 +701,7 @@ describe("Baileys business and message features", () => {
     });
 
     expect(
-      sqlite
+      await sqlite
         .prepare("SELECT COUNT(*) AS count FROM messages WHERE instance_id = ? AND chat_id = ?")
         .get(activeInstanceId, emptyChatId),
     ).toEqual({ count: 2 });
@@ -704,12 +709,14 @@ describe("Baileys business and message features", () => {
 
   it("reports when an on-demand history request was reduced to its configured limit", async () => {
     vi.stubEnv("WA_BAILEYS_HISTORY_SYNC_MAX_MESSAGES", "7");
-    const { instanceId: id, adapter } = createFixture();
-    addStoredMessage(id, "history-cap-anchor", { timestamp: 50 });
+    const { instanceId: id, adapter } = await createFixture();
+    await addStoredMessage(id, "history-cap-anchor", { timestamp: 50 });
     const { socket, processEvents } = installSocket(adapter);
 
     const request = adapter.fetchMessageHistory(CHAT_ID, 20, 1_000);
-    await Promise.resolve();
+    await vi.waitFor(() => {
+      expect(socket.fetchMessageHistory).toHaveBeenCalled();
+    });
     await processEvents({
       "messaging-history.set": {
         contacts: [],
@@ -740,7 +747,7 @@ describe("Baileys business and message features", () => {
   });
 
   it("emits an offline message once when its append arrives during automatic history recovery", async () => {
-    const { instanceId: id, adapter } = createFixture();
+    const { instanceId: id, adapter } = await createFixture();
     const { socket, processEvents } = installSocket(adapter);
     const recoveredChatId = "5500000000090@s.whatsapp.net";
     const offlineMessage: WAMessage = {
@@ -754,7 +761,9 @@ describe("Baileys business and message features", () => {
     await processEvents({
       "messages.upsert": { messages: [offlineMessage], type: "notify" },
     });
-    await Promise.resolve();
+    await vi.waitFor(() => {
+      expect(socket.fetchMessageHistory).toHaveBeenCalled();
+    });
     expect(socket.fetchMessageHistory).toHaveBeenCalledWith(
       expect.any(Number),
       expect.objectContaining({ id: "offline-before-append", remoteJid: recoveredChatId }),
@@ -790,7 +799,7 @@ describe("Baileys business and message features", () => {
   });
 
   it("persists all history sync message types idempotently", async () => {
-    const { instanceId: id, adapter } = createFixture();
+    const { instanceId: id, adapter } = await createFixture();
     const { processEvents } = installSocket(adapter);
     const historyMessage: WAMessage = {
       key: { id: "initial-history-message", remoteJid: CHAT_ID, fromMe: false },
@@ -808,7 +817,7 @@ describe("Baileys business and message features", () => {
     await processEvents({ "messaging-history.set": historySet });
 
     expect(
-      sqlite
+      await sqlite
         .prepare("SELECT COUNT(*) AS count FROM messages WHERE instance_id = ? AND id = ?")
         .get(id, "initial-history-message"),
     ).toEqual({ count: 1 });
@@ -818,8 +827,8 @@ describe("Baileys business and message features", () => {
   });
 
   it("does not let a timed-out history session complete the next request", async () => {
-    const { instanceId: id, adapter } = createFixture();
-    addStoredMessage(id, "history-anchor", { timestamp: 50 });
+    const { instanceId: id, adapter } = await createFixture();
+    await addStoredMessage(id, "history-anchor", { timestamp: 50 });
     let processEvents: ((events: Partial<BaileysEventMap>) => Promise<void> | void) | undefined;
     const oldMessage: WAMessage = {
       key: { id: "late-history-message", remoteJid: CHAT_ID, fromMe: false },
@@ -864,7 +873,9 @@ describe("Baileys business and message features", () => {
     });
 
     const currentRequest = adapter.fetchMessageHistory(CHAT_ID, 20, 1_000);
-    await Promise.resolve();
+    await vi.waitFor(() => {
+      expect(socket.fetchMessageHistory).toHaveBeenCalledTimes(2);
+    });
     await processEvents?.({
       "messaging-history.set": {
         contacts: [],

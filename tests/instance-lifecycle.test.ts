@@ -26,7 +26,7 @@ type FakeConnectionListener = (payload: unknown) => void;
 
 interface SocketFixture {
   socket: WASocket;
-  update: (payload: unknown) => void;
+  update: (payload: unknown) => void | Promise<void>;
 }
 
 function socketFixture(): SocketFixture {
@@ -85,11 +85,11 @@ function invokePrivate<T>(adapter: BaileysAdapter, name: string, ...args: unknow
 const activeAdapters = new Set<BaileysAdapter>();
 const activeInstanceIds = new Set<string>();
 
-afterEach(() => {
+afterEach(async () => {
   for (const adapter of activeAdapters) invokePrivate(adapter, "clearAuthChallenges");
   activeAdapters.clear();
   for (const instanceId of activeInstanceIds) {
-    sqlite.prepare("DELETE FROM instances WHERE id = ?").run(instanceId);
+    await sqlite.prepare("DELETE FROM instances WHERE id = ?").run(instanceId);
   }
   activeInstanceIds.clear();
   vi.useRealTimers();
@@ -97,6 +97,18 @@ afterEach(() => {
 });
 
 describe("instance lifecycle events", () => {
+  it("shares one adapter across concurrent database lookups", async () => {
+    const manager = new InstanceManager();
+    const instance = await manager.createInstance("concurrent adapter");
+    activeInstanceIds.add(instance.id);
+    const [first, second] = await Promise.all([
+      (await manager.ensureAdapter(instance.id)),
+      (await manager.ensureAdapter(instance.id)),
+    ]);
+    expect(first).toBe(second);
+    expect(manager.getAdapter(instance.id)).toBe(first);
+  });
+
   it("emits a safe pairing-code event and marks the following open as paired", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-10-19T12:00:00.000Z"));
@@ -130,7 +142,7 @@ describe("instance lifecycle events", () => {
     expect(JSON.stringify(pairingEvents[0])).not.toContain("fixture-pairing-code");
     expect(JSON.stringify(pairingEvents[0])).not.toContain("fixture-qr-string");
 
-    fixture.update({ connection: "open" });
+    await fixture.update({ connection: "open" });
     expect(connectedEvents).toEqual([
       expect.objectContaining({
         phone: "5511999999999@s.whatsapp.net",
@@ -149,7 +161,7 @@ describe("instance lifecycle events", () => {
     const instanceManager = new InstanceManager();
     const instance = await instanceManager.createInstance("disconnect persistence fixture");
     activeInstanceIds.add(instance.id);
-    const adapter = instanceManager.ensureAdapter(instance.id) as BaileysAdapter;
+    const adapter = (await instanceManager.ensureAdapter(instance.id)) as BaileysAdapter;
     activeAdapters.add(adapter);
 
     invokePrivate(adapter, "emit", "instance.disconnected", {
@@ -162,7 +174,7 @@ describe("instance lifecycle events", () => {
     } satisfies ChannelEventPayload["instance.disconnected"]);
 
     expect(
-      sqlite
+      await sqlite
         .prepare(
           "SELECT last_disconnect_reason, last_disconnect_status_code FROM instances WHERE id = ?",
         )
@@ -170,9 +182,9 @@ describe("instance lifecycle events", () => {
     ).toEqual({ last_disconnect_reason: "logged out", last_disconnect_status_code: 401 });
 
     const recreatedManager = new InstanceManager();
-    const recreatedAdapter = recreatedManager.ensureAdapter(instance.id) as BaileysAdapter;
+    const recreatedAdapter = (await recreatedManager.ensureAdapter(instance.id)) as BaileysAdapter;
     activeAdapters.add(recreatedAdapter);
-    expect(recreatedManager.getInstanceLifecycleStatuses(instance.id)[0]).toMatchObject({
+    expect((await recreatedManager.getInstanceLifecycleStatuses(instance.id))[0]).toMatchObject({
       disconnectReason: "logged out",
       disconnectStatusCode: 401,
     });
@@ -194,7 +206,7 @@ describe("instance lifecycle events", () => {
     internals.qrCode = "fixture-qr-string";
     bindFixture(adapter, fixture.socket);
 
-    fixture.update({ qr: "fixture-qr-string" });
+    await fixture.update({ qr: "fixture-qr-string" });
     const pairingCode = adapter.getPairingCode("5511999999999");
     await vi.advanceTimersByTimeAsync(1_000);
     await pairingCode;
@@ -231,19 +243,19 @@ describe("instance lifecycle events", () => {
     expect(internals.pairingCodeValue).toBeNull();
   });
 
-  it("emits restartRequired details and coalesces reconnect storm closes", () => {
+  it("emits restartRequired details and coalesces reconnect storm closes", async () => {
     const { adapter, scheduleReconnect } = adapterFixture();
     const fixture = socketFixture();
     const disconnected = vi.fn();
     adapter.on("instance.disconnected", disconnected);
     bindFixture(adapter, fixture.socket);
 
-    fixture.update({ connection: "open" });
-    fixture.update({
+    await fixture.update({ connection: "open" });
+    await fixture.update({
       connection: "close",
       lastDisconnect: { error: { output: { statusCode: DisconnectReason.restartRequired } } },
     });
-    fixture.update({
+    await fixture.update({
       connection: "close",
       lastDisconnect: { error: { output: { statusCode: DisconnectReason.restartRequired } } },
     });
@@ -259,11 +271,11 @@ describe("instance lifecycle events", () => {
       }),
     );
 
-    fixture.update({
+    await fixture.update({
       connection: "close",
       lastDisconnect: { error: { output: { statusCode: DisconnectReason.loggedOut } } },
     });
-    fixture.update({
+    await fixture.update({
       connection: "close",
       lastDisconnect: { error: { output: { statusCode: DisconnectReason.loggedOut } } },
     });
@@ -301,14 +313,14 @@ describe("instance lifecycle webhook and status output", () => {
     const enqueue = vi.fn<(_: EventWebhookJob) => Promise<unknown>>(() => Promise.resolve());
     const unsubscribe = registerEventWebhookHandler(manager, config, enqueue);
 
-    eventHandler?.("instance.pairing_code_generated", "inst_lifecycle_test", {
+    (await eventHandler?.("instance.pairing_code_generated", "inst_lifecycle_test", {
       instanceId: "inst_lifecycle_test",
       method: "pairing_code",
       generatedAt: 1_800_000_000_000,
       expiresAt: 1_800_000_060_000,
       pairingCode: "fixture-pairing-code",
       qr: "fixture-qr-string",
-    } as never);
+    } as never));
     await vi.waitFor(() => expect(enqueue).toHaveBeenCalledOnce());
 
     const job = enqueue.mock.calls[0]?.[0];
@@ -349,7 +361,7 @@ describe("instance lifecycle webhook and status output", () => {
     const manager = new InstanceManager();
     const instance = await manager.createInstance("Lifecycle status fixture");
     activeInstanceIds.add(instance.id);
-    const adapter = manager.ensureAdapter(instance.id) as BaileysAdapter;
+    const adapter = (await manager.ensureAdapter(instance.id)) as BaileysAdapter;
     activeAdapters.add(adapter);
     const internals = adapter as unknown as Record<string, unknown>;
     internals.status = "connected";

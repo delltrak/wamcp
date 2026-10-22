@@ -135,7 +135,7 @@ describe("Baileys direct-add stub detection", () => {
     ).toEqual([]);
   });
 
-  it("detects the add from the upsert flushed by the real rc14 event buffer, not from the same batch as group-participants.update", () => {
+  it("detects the add from the upsert flushed by the real rc14 event buffer, not from the same batch as group-participants.update", async () => {
     const ev = makeEventBuffer(silentLogger);
     const batches: Array<Record<string, unknown>> = [];
     ev.process((events) => {
@@ -144,8 +144,8 @@ describe("Baileys direct-add stub detection", () => {
 
     const stub = stubMessage(WAMessageStubType.GROUP_PARTICIPANT_ADD);
     ev.buffer();
-    ev.emit("group-participants.update", update);
-    ev.emit("messages.upsert", { messages: [stub], type: "notify" });
+    (await ev.emit("group-participants.update", update));
+    (await ev.emit("messages.upsert", { messages: [stub], type: "notify" }));
 
     expect(batches).toHaveLength(1);
     expect(batches[0]).toHaveProperty("group-participants.update");

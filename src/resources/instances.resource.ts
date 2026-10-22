@@ -22,7 +22,7 @@ export function registerInstancesResource(
       mimeType: "application/json",
     },
     async () => {
-      const allInstances = instanceManager.getAllInstances();
+      const allInstances = await instanceManager.getAllInstances();
       const data = allInstances.map((inst) => ({
         id: inst.id,
         name: inst.name,
@@ -60,7 +60,7 @@ export function registerInstancesResource(
     },
     async (uri, variables) => {
       const id = varAsString(variables, "id");
-      const instance = instanceManager.getInstance(id);
+      const instance = await instanceManager.getInstance(id);
       const stats = await messageQueue.getQueueStats(id);
       // Strip sensitive fields before returning to agents
       const { cloudAccessToken: _token, ...safeInstance } = instance;

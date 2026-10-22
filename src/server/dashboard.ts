@@ -49,7 +49,9 @@ export interface DashboardAdapter {
 }
 
 export interface DashboardInstances {
-  getInstanceLifecycleStatuses(id?: string): InstanceLifecycleStatusSnapshot[];
+  getInstanceLifecycleStatuses(
+    id?: string,
+  ): InstanceLifecycleStatusSnapshot[] | Promise<InstanceLifecycleStatusSnapshot[]>;
   connectInstance(id: string): Promise<void>;
   getAdapter(id: string): DashboardAdapter;
 }
@@ -77,8 +79,8 @@ export interface DashboardHandlerOptions {
   config: DashboardConfig;
   startedAt: number;
   instances: DashboardInstances;
-  isPaired: (instanceId: string) => boolean;
-  webhookStatus: () => DashboardWebhookStatus;
+  isPaired: (instanceId: string) => boolean | Promise<boolean>;
+  webhookStatus: () => DashboardWebhookStatus | Promise<DashboardWebhookStatus>;
   deliveries: () => readonly DashboardDelivery[];
   events: DashboardEventLog;
   cloudWebhook: () => CloudWebhookFlags;
@@ -608,9 +610,9 @@ export function createDashboardHandler(options: DashboardHandlerOptions): Dashbo
   );
   const matchCredentials = options.matchCredentials ?? dashboardCredentialsMatch;
 
-  function readSnapshot(instanceId: string): InstanceLifecycleStatusSnapshot {
+  async function readSnapshot(instanceId: string): Promise<InstanceLifecycleStatusSnapshot> {
     try {
-      const row = options.instances.getInstanceLifecycleStatuses(instanceId)[0];
+      const row = (await options.instances.getInstanceLifecycleStatuses(instanceId))[0];
       if (!row) throw new DashboardHttpError(404, "Instance not found");
       return row;
     } catch (err) {
@@ -634,13 +636,14 @@ export function createDashboardHandler(options: DashboardHandlerOptions): Dashbo
   }
 
   async function qrForUnpaired(row: InstanceLifecycleStatusSnapshot): Promise<string | null> {
-    const storedPaired = options.isPaired(row.instanceId);
+    const storedPaired = await options.isPaired(row.instanceId);
     const allowed =
       pairingRefusal({ channel: row.channel, state: row.state, paired: storedPaired }) === null;
     if (!allowed || (row.state !== "qr_pending" && row.state !== "connecting")) return null;
     try {
       const adapter = options.instances.getAdapter(row.instanceId);
-      if (adapter.getStatus() === "connected" || options.isPaired(row.instanceId)) return null;
+      if (adapter.getStatus() === "connected" || (await options.isPaired(row.instanceId)))
+        return null;
       const qr = await adapter.getQrCode();
       return qr ? await safeQr(qr) : null;
     } catch (err) {
@@ -653,10 +656,10 @@ export function createDashboardHandler(options: DashboardHandlerOptions): Dashbo
   }
 
   async function overview(): Promise<Record<string, unknown>> {
-    const rows = options.instances.getInstanceLifecycleStatuses();
+    const rows = await options.instances.getInstanceLifecycleStatuses();
     const instances = [];
     for (const row of rows) {
-      const storedPaired = options.isPaired(row.instanceId);
+      const storedPaired = await options.isPaired(row.instanceId);
       const paired = storedPaired || row.state === "connected";
       const pending = row.pendingChallenge;
       instances.push({
@@ -690,7 +693,7 @@ export function createDashboardHandler(options: DashboardHandlerOptions): Dashbo
         qrImage: await qrForUnpaired(row),
       });
     }
-    const webhook = options.webhookStatus();
+    const webhook = await options.webhookStatus();
     const cloud = options.cloudWebhook();
     return {
       version: options.version,
@@ -753,11 +756,11 @@ export function createDashboardHandler(options: DashboardHandlerOptions): Dashbo
     if (locks.has(instanceId)) throw new DashboardHttpError(429, "Pairing is already starting");
     locks.add(instanceId);
     try {
-      const snapshot = readSnapshot(instanceId);
+      const snapshot = await readSnapshot(instanceId);
       const refusal = pairingRefusal({
         channel: snapshot.channel,
         state: snapshot.state,
-        paired: options.isPaired(instanceId),
+        paired: await options.isPaired(instanceId),
       });
       if (refusal === "channel") {
         throw new DashboardHttpError(400, "Pairing is only available for a new Baileys instance");
@@ -770,30 +773,30 @@ export function createDashboardHandler(options: DashboardHandlerOptions): Dashbo
           pairingRefusal({
             channel: snapshot.channel,
             state: snapshot.state,
-            paired: options.isPaired(instanceId),
+            paired: await options.isPaired(instanceId),
           })
         ) {
           throw new DashboardHttpError(409, "This instance is already paired");
         }
         await options.instances.connectInstance(instanceId);
       }
-      const current = readSnapshot(instanceId);
+      const current = await readSnapshot(instanceId);
       if (
         pairingRefusal({
           channel: current.channel,
           state: current.state,
-          paired: options.isPaired(instanceId),
+          paired: await options.isPaired(instanceId),
         }) ||
-        options.isPaired(instanceId)
+        (await options.isPaired(instanceId))
       ) {
         throw new DashboardHttpError(409, "This instance is already paired");
       }
       const adapter = options.instances.getAdapter(instanceId);
-      if (adapter.getStatus() === "connected" || options.isPaired(instanceId)) {
+      if (adapter.getStatus() === "connected" || (await options.isPaired(instanceId))) {
         throw new DashboardHttpError(409, "This instance is already paired");
       }
       const pairingCode = phone ? await adapter.getPairingCode(phone) : null;
-      if (adapter.getStatus() === "connected" || options.isPaired(instanceId)) {
+      if (adapter.getStatus() === "connected" || (await options.isPaired(instanceId))) {
         throw new DashboardHttpError(409, "This instance is already paired");
       }
       const qr = await adapter.getQrCode();

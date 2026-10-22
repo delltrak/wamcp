@@ -137,10 +137,10 @@ Add to your `claude_desktop_config.json`:
 | 👥  | **Groups**             | List groups, inspect participants, manage membership and settings, invite links, and group pictures. |
 | 👤  | **Contacts & Profile** | Number check, block/unblock, business profiles, privacy, status updates.                                  |
 | 📡  | **Real-time events**   | 15 notification types via SSE: messages, typing, groups, calls, connection status.                       |
-| ⏰  | **Scheduled sends**    | One-shot, daily, weekly, and monthly messages in SQLite. Off until `WA_SCHEDULER_ENABLED=true`.          |
+| ⏰  | **Scheduled sends**    | One-shot, daily, weekly, and monthly messages in SQLite or PostgreSQL. Off until `WA_SCHEDULER_ENABLED=true`.          |
 | ⚡  | **Rate limiting**      | BullMQ queues prevent WhatsApp bans (20 msg/min Baileys, 80 msg/min Cloud).                               |
 | 🔁  | **Auto-reconnect**     | Automatic reconnection with exponential backoff.                                                          |
-| 🗃️  | **Persistent**         | SQLite storage for sessions, messages, contacts, groups.                                                  |
+| 🗃️  | **Persistent**         | SQLite storage for sessions, messages, contacts, and groups. Set `WA_DATABASE_URL` to use Postgres instead. |
 | 🐳  | **Single container**   | `docker compose up` — only Redis as external dependency.                                                  |
 | 💬  | **Chatwoot**           | Optional API-inbox bridge. Inbound sync and agent replies stay off until `WA_CHATWOOT_ENABLED=true`.     |
 | 🔀  | **n8n**                | Local community node package with an event trigger and send actions. Not published to npm.               |
@@ -224,7 +224,7 @@ WA MCP exposes **163 tools** across 17 domains. All tools use the `wa_` prefix.
 | `wa_resume_scheduled` | Resume a paused schedule                                                    |
 | `wa_cancel_scheduled` | Cancel a schedule so it is not sent                                         |
 
-Schedules are stored in the existing SQLite file (`WA_DATABASE_PATH`, default `data/whatsapp.db`). The database path and Docker volume do not change. `WA_SCHEDULER_ENABLED=false` by default: create and resume refuse, the worker does not run, and nothing is queued. Pause and cancel still work, so overdue rows can be stopped before the worker is turned on. Listing still works. When the gate is on, a due send is handed to the same per-instance BullMQ limiter as `wa_send_text` (`WA_BAILEYS_RATE_LIMIT` / `WA_CLOUD_RATE_LIMIT`). A catch-up backlog is not enqueued faster than that per-minute limit. Rows that do not fit stay active. If they were on time when held, their due time moves to that moment so the wait is not later treated as a missed run. Rows that were already late still follow the missed-run policy.
+Schedules use the selected application database: SQLite at `WA_DATABASE_PATH` (default `data/whatsapp.db`), or PostgreSQL when `WA_DATABASE_URL` is set. Existing SQLite paths and Docker volumes stay in place. `WA_SCHEDULER_ENABLED=false` by default: create and resume refuse, the worker does not run, and nothing is queued. Pause and cancel still work, so overdue rows can be stopped before the worker is turned on. Listing still works. When the gate is on, a due send is handed to the same per-instance BullMQ limiter as `wa_send_text` (`WA_BAILEYS_RATE_LIMIT` / `WA_CLOUD_RATE_LIMIT`). A catch-up backlog is not enqueued faster than that per-minute limit. Rows that do not fit stay active. If they were on time when held, their due time moves to that moment so the wait is not later treated as a missed run. Rows that were already late still follow the missed-run policy.
 
 `scheduledAt` is an RFC3339 instant at most one year ahead. The recipient is a phone number (stored as `<digits>@s.whatsapp.net`) or a group JID. `status@broadcast` and `@newsletter` are rejected. Daily, weekly, and monthly repeats use that instant's wall clock in the schedule timezone. The timezone is an IANA name (`America/Bahia` when omitted) and is stored in canonical form (`america/bahia` becomes `America/Bahia`). Names that resolve to UTC are stored as `UTC`, including `UTC`, `GMT`, `UCT`, `Zulu`, `Etc/UTC`, and `Etc/GMT`. Numeric offsets such as `+03:00`, abbreviations such as `EST`, and `Etc/*` zones that do not resolve to UTC (such as `Etc/GMT+3`) are rejected. Sends that share a due time are claimed in due time, then creation time, then insertion order. The first weekly or monthly run is the first matching weekday or day of month at or after `scheduledAt`, not `scheduledAt` itself when that civil day does not match. Weekly `weekdays` are `0` (Sunday) through `6` (Saturday). Monthly `dayOfMonth` uses the last day of a short month. Each instance can hold `WA_SCHEDULER_MAX_ACTIVE` schedules that are active, paused, or running (default 100). Recurring rows stay in that count until they are cancelled or finish. Text is supported, as are image, video, audio, document, and sticker inputs (HTTPS or base64, same rules as immediate sends).
 
@@ -373,7 +373,7 @@ For an existing linked Baileys session, connect the stored instance with `wa_con
 and call `wa_resync_contacts` with its `instanceId`. If it is already connected, call the resync
 tool directly. It refreshes app-state collections and supplements them with individual contacts
 from locally stored chats and messages. It does not require pairing again. Recovered contacts are
-stored in SQLite and remain available after server restarts. The Cloud API channel does not support
+stored in the configured database and remain available after server restarts. The Cloud API channel does not support
 this operation.
 
 <details>
@@ -852,7 +852,7 @@ When enabled, incoming WhatsApp messages create or reuse a contact and conversat
 │  │  │  (WebSocket) │ │    (HTTPS)     │  │ │
 │  │  └──────────────┘ └────────────────┘  │ │
 │  └────────────────────────────────────────┘ │
-│       SQLite (Drizzle)    BullMQ (Redis)    │
+│    SQLite or Postgres     BullMQ (Redis)    │
 └─────────────────────────────────────────────┘
                    │
                    ▼  WebSocket / HTTPS
@@ -895,7 +895,8 @@ Copy `.env.example` to `.env` and configure. Leave the new HTTP auth settings un
 | `WA_MCP_PORT`               | `3000`                   | HTTP server port                         |
 | `WA_REDIS_URL`              | `redis://localhost:6379` | Redis for BullMQ queues                  |
 | `WA_LOG_LEVEL`              | `info`                   | `debug` \| `info` \| `warn` \| `error`   |
-| `WA_DATABASE_PATH`          | `data/whatsapp.db`       | SQLite database path; in Docker this resolves under `/app` |
+| `WA_DATABASE_PATH`          | `data/whatsapp.db`       | SQLite database path when `WA_DATABASE_URL` is empty; in Docker this resolves under `/app` |
+| `WA_DATABASE_URL`           | empty                    | Optional `postgres://` or `postgresql://` URL. Empty keeps SQLite at `WA_DATABASE_PATH` |
 | `WA_BAILEYS_HISTORY_SYNC_MAX_MESSAGES` | `100` | Maximum messages requested per chat by automatic and on-demand history fetches (1–10000) |
 | `WA_DATA_DIR`               | `wa-data` in Compose     | Optional absolute host directory mounted at `/app/data`; unset preserves the existing named volume |
 | `WA_SCHEDULER_ENABLED`      | `false`                  | Allow scheduled sends. While false, nothing is queued. Pause and cancel still work |
@@ -1103,6 +1104,93 @@ when intentionally overriding a leftover WAL file, for example:
 ./scripts/restore.sh /srv/wamcp-data/whatsapp.db /srv/wamcp-data /srv/wamcp-data/.env --force
 ```
 
+### PostgreSQL
+
+Leave `WA_DATABASE_URL` empty to keep using SQLite at `WA_DATABASE_PATH`. Setting a
+`postgres://` or `postgresql://` URL stores instances, messages, contacts, groups, and the Baileys
+auth keys in that database, including instance webhooks, auto-reply cooldowns, group-history
+deduplication, and scheduled sends. The main SQLite file is not opened, moved, or migrated on startup.
+OAuth authorization data remains in its separate local SQLite `oauth.db`; `WA_DATABASE_URL` and
+the copy command do not move it. Keep that file on persistent storage when OAuth is enabled.
+
+`npm run db:migrate` applies the SQLite Drizzle migrations when the URL is empty, and applies the
+Postgres schema when it is set. Postgres records that baseline in `schema_migrations`. The files in
+`drizzle/` are SQLite-only: Postgres never runs them. A pull request that adds a table or column
+must update `src/db/schema-sql.ts` in the same change (and `src/db/schema.ts`). `npm run db:generate`
+does not update that script. The SQLite copy inserts only columns that exist on both sides, so an
+extra SQLite column is skipped instead of aborting the copy.
+
+To copy an existing SQLite database, including the session, stop wa-mcp and run the copy **once**,
+before the first process that boots with `WA_DATABASE_URL` set:
+
+```bash
+WA_DATABASE_PATH=data/whatsapp.db \
+WA_DATABASE_URL=postgres://USER:PASSWORD@127.0.0.1:5432/wamcp \
+npm run db:migrate-to-postgres
+```
+
+The command refuses to run without a Postgres URL. It reads SQLite (a consistent snapshot, including
+the WAL) and inserts rows into an empty Postgres database. It does not delete the SQLite file and
+does not pair the WhatsApp account again. Start wa-mcp with the same `WA_DATABASE_URL` only after
+that copy finishes. A later run is refused when `instances` or `auth_keys` already has rows: copying
+again would replace the live Baileys session with the older SQLite snapshot. `--force` truncates
+the application tables in Postgres and then loads the snapshot. `TRUNCATE ... CASCADE` also empties
+tables that reference those tables. It does not merge leftover rows.
+Do not rerun the copy to refresh Postgres.
+
+Postgres queries run off the Node.js event loop, so a remote database or a history sync does not
+freeze Baileys, HTTP, or BullMQ. Each statement fails after 10 seconds instead of hanging. A dropped
+connection is retried once only for a read (`SELECT`, `EXPLAIN`, `SHOW`, `TABLE`, `VALUES`) that is
+not inside an open transaction. Writes are not retried. Text sort order follows the database
+collation (often `en_US.UTF-8`) rather than SQLite's binary order. Create the cluster with
+`LC_COLLATE=C` when you need that binary order. Integers above 2^53 are returned as strings. NUL
+bytes in text are stripped, because Postgres rejects them.
+
+`npm run db:migrate` for SQLite needs a checkout that has drizzle-kit installed. The production
+image has neither `tsx` nor `scripts/`. Apply the Postgres schema inside the image with the compiled
+CLI, and run the SQLite Drizzle migrate from a host checkout:
+
+```bash
+docker compose run --rm \
+  -e WA_DATABASE_URL=postgres://USER:PASSWORD@postgres:5432/wamcp \
+  wa-mcp node dist/db/migrate-cli.js
+```
+
+The copy CLI is compiled to `dist/db/migrate-to-postgres-cli.js`. Mount the SQLite file when you run
+it in the container. From a checkout, `npm run db:migrate-to-postgres` remains the normal command.
+
+Back up Postgres with `pg_dump` while the server can stay up. The dump contains auth keys: mode
+`0600`, treat it as a secret, and do not commit it. The backup and restore scripts need `node` on
+the host. They write a temporary `.pgpass` file and pass the database URL to `node` through the
+environment, so the password is not a process argument. The scripts run on the host; the runtime
+image does not include `pg_dump`.
+
+```bash
+./scripts/postgres-backup.sh "$WA_DATABASE_URL" /srv/wamcp-backups
+```
+
+Restore only after stopping WA MCP. The default restore loads a custom-format dump into the target
+database. `--force` drops existing objects in that database first:
+
+```bash
+./scripts/postgres-restore.sh /srv/wamcp-backups/wamcp-postgres-YYYYMMDDTHHMMSSZ.dump "$WA_DATABASE_URL"
+```
+
+Docker Compose does not start Postgres unless you opt in, and it does not publish `5432`. wa-mcp
+reaches `postgres:5432` on the Compose network. A published Docker port is reachable past ufw; if a
+host tool needs the database, add `127.0.0.1:5432:5432` in a Compose override. Set
+`POSTGRES_PASSWORD` before starting the profile (there is no default password):
+
+```bash
+POSTGRES_PASSWORD='choose-a-password' \
+WA_DATABASE_URL=postgres://USER:PASSWORD@postgres:5432/wamcp \
+docker compose --profile postgres up -d
+```
+
+The named volume `wa-data` and `WA_DATABASE_PATH` stay in place for SQLite installs. The Postgres
+service waits until `pg_isready` succeeds, and wa-mcp does not require that service when the
+profile is off.
+
 Baileys may emit an incoming offline message delivered as an `append` once when its timestamp is
 after the instance's last disconnect (or last connect) or latest stored message. When those timestamps
 are unavailable, `WA_BAILEYS_APPEND_NOTIFY_WINDOW_HOURS` provides the fallback window. History-sync
@@ -1121,6 +1209,7 @@ maintenance health check still retries disconnected instances that have connecte
 also recovers a `connecting` status older than 2 minutes when the adapter has no live socket and the
 instance connected before.
 Connection close and reconnect logs include the disconnect reason, status code, and offline duration.
+A Baileys `ev.process` batch that throws is logged and discarded. The events in that batch are not replayed; later batches are still processed.
 
 `wa_send_sticker` accepts PNG, JPG, GIF, WebP, and short MP4 URLs or base64. PNG, JPG, GIF, and
 MP4 inputs are converted to 512x512 WebP with transparent padding. A GIF or MP4 stays animated
@@ -1442,7 +1531,13 @@ src/
 ├── tts/                         # Text-to-speech provider interface and registry
 ├── db/
 │   ├── schema.ts                # Drizzle table definitions
-│   └── client.ts                # SQLite connection
+│   ├── client.ts                # SQLite or Postgres connection
+│   ├── executor.ts              # Async drivers, timeouts, reconnect
+│   ├── async-session.ts         # Async Drizzle session for both drivers
+│   ├── schema-sql.ts            # Runtime schema for both drivers
+│   ├── migrate-cli.ts           # db:migrate (compiled into the image)
+│   ├── migrate-to-postgres-cli.ts
+│   └── sqlite-to-postgres.ts    # One-shot SQLite copy
 ├── schemas/                     # Zod validation (10 files)
 └── types/                       # TypeScript definitions
 integrations/

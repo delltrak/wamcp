@@ -26,10 +26,10 @@ import type { ChannelType, MessageContent } from "../src/types/channel.types.js"
 
 const INSTANCE_ID = "inst-sched";
 
-function openDatabase(path = ":memory:") {
+async function openDatabase(path = ":memory:") {
   const sqlite = new Database(path);
   sqlite.pragma("foreign_keys = ON");
-  sqlite.exec(`
+  (await sqlite.exec(`
     CREATE TABLE IF NOT EXISTS instances (
       id TEXT PRIMARY KEY,
       name TEXT NOT NULL,
@@ -38,18 +38,18 @@ function openDatabase(path = ":memory:") {
       created_at INTEGER NOT NULL,
       updated_at INTEGER NOT NULL
     );
-  `);
+  `));
   createScheduledMessagesTable(sqlite);
-  sqlite
+  (await sqlite
     .prepare(
       `INSERT OR IGNORE INTO instances (id, name, channel, status, created_at, updated_at)
        VALUES (?, 'scheduled', 'baileys', 'connected', 1, 1)`,
     )
-    .run(INSTANCE_ID);
+    .run(INSTANCE_ID));
   return sqlite;
 }
 
-function harness(options: {
+async function harness(options: {
   now: () => number;
   enabled?: boolean;
   missedPolicy?: "skip" | "send";
@@ -58,7 +58,7 @@ function harness(options: {
   rateLimit?: number;
 }) {
   const sent: Array<{ to: string; content: MessageContent; channel: ChannelType }> = [];
-  const sqlite = openDatabase(options.path);
+  const sqlite = (await openDatabase(options.path));
   const enqueue = vi.fn(
     async (
       _instanceId: string,
@@ -354,20 +354,20 @@ describe("scheduled sends", () => {
     const dir = mkdtempSync(join(tmpdir(), "wamcp-sched-"));
     const path = join(dir, "whatsapp.db");
     let now = Date.parse("2026-10-20T12:00:00Z");
-    const first = harness({ now: () => now, path });
-    const created = first.scheduler.create({
+    const first = (await harness({ now: () => now, path }));
+    const created = (await first.scheduler.create({
       instanceId: INSTANCE_ID,
       to: "5500000000001",
       scheduledAt: "2026-10-21T09:00:00-03:00",
       recurrence: "daily",
       content: { type: "text", text: "daily hello" },
-    });
+    }));
     expect(created.timezone).toBe("America/Bahia");
     expect(created.scheduledAt).toBe("2026-10-21T12:00:00.000Z");
     first.sqlite.close();
 
     now = Date.parse("2026-10-21T12:00:00Z");
-    const restarted = harness({ now: () => now, path });
+    const restarted = (await harness({ now: () => now, path }));
     const tick = await restarted.scheduler.tick();
     expect(tick.dispatched).toBe(1);
     expect(restarted.sent).toEqual([
@@ -377,7 +377,7 @@ describe("scheduled sends", () => {
         channel: "baileys",
       },
     ]);
-    const listed = restarted.scheduler.list({ instanceId: INSTANCE_ID });
+    const listed = (await restarted.scheduler.list({ instanceId: INSTANCE_ID }));
     expect(listed.schedules[0]?.occurrenceCount).toBe(1);
     expect(listed.schedules[0]?.nextRunAt).toBe("2026-10-22T12:00:00.000Z");
     expect(listed.schedules[0]?.status).toBe("active");
@@ -387,19 +387,19 @@ describe("scheduled sends", () => {
 
   it("skips an occurrence missed during downtime and waits for the following slot", async () => {
     let now = Date.parse("2026-10-20T12:00:00Z");
-    const { scheduler, sent } = harness({ now: () => now, missedPolicy: "skip" });
-    scheduler.create({
+    const { scheduler, sent } = (await harness({ now: () => now, missedPolicy: "skip" }));
+    (await scheduler.create({
       instanceId: INSTANCE_ID,
       to: "5500000000001",
       scheduledAt: "2026-10-21T09:00:00-03:00",
       recurrence: "daily",
       content: { type: "text", text: "skip me" },
-    });
+    }));
     now = Date.parse("2026-10-21T15:00:00Z");
     const tick = await scheduler.tick();
     expect(tick).toEqual({ dispatched: 0, skipped: 1 });
     expect(sent).toEqual([]);
-    const listed = scheduler.list({ instanceId: INSTANCE_ID });
+    const listed = (await scheduler.list({ instanceId: INSTANCE_ID }));
     expect(listed.schedules[0]?.status).toBe("active");
     expect(listed.schedules[0]?.nextRunAt).toBe("2026-10-22T12:00:00.000Z");
     expect(listed.schedules[0]?.occurrenceCount).toBe(0);
@@ -408,79 +408,79 @@ describe("scheduled sends", () => {
 
   it("sends one catch-up message when the missed policy is send", async () => {
     let now = Date.parse("2026-10-20T12:00:00Z");
-    const { scheduler, sent } = harness({ now: () => now, missedPolicy: "send" });
-    scheduler.create({
+    const { scheduler, sent } = (await harness({ now: () => now, missedPolicy: "send" }));
+    (await scheduler.create({
       instanceId: INSTANCE_ID,
       to: "5500000000001",
       scheduledAt: "2026-10-21T09:00:00-03:00",
       recurrence: "daily",
       content: { type: "text", text: "catch up" },
-    });
+    }));
     now = Date.parse("2026-10-23T15:00:00Z");
     await scheduler.tick();
     expect(sent).toHaveLength(1);
-    const listed = scheduler.list({ instanceId: INSTANCE_ID });
+    const listed = (await scheduler.list({ instanceId: INSTANCE_ID }));
     expect(listed.schedules[0]?.occurrenceCount).toBe(1);
     expect(listed.schedules[0]?.nextRunAt).toBe("2026-10-24T12:00:00.000Z");
   });
 
   it("still sends a one-shot that is only slightly late", async () => {
     let now = Date.parse("2026-10-20T12:00:00Z");
-    const { scheduler, sent } = harness({ now: () => now, missedPolicy: "skip" });
-    scheduler.create({
+    const { scheduler, sent } = (await harness({ now: () => now, missedPolicy: "skip" }));
+    (await scheduler.create({
       instanceId: INSTANCE_ID,
       to: "5500000000001",
       scheduledAt: "2026-10-21T09:00:00-03:00",
       content: { type: "text", text: "on time" },
-    });
+    }));
     now = Date.parse("2026-10-21T12:00:30Z");
     await scheduler.tick();
     expect(sent).toHaveLength(1);
-    expect(scheduler.list({ instanceId: INSTANCE_ID }).schedules[0]?.status).toBe("completed");
+    expect((await scheduler.list({ instanceId: INSTANCE_ID })).schedules[0]?.status).toBe("completed");
   });
 
   it("marks a one-shot missed under skip and does not send it", async () => {
     let now = Date.parse("2026-10-20T12:00:00Z");
-    const { scheduler, sent } = harness({ now: () => now, missedPolicy: "skip" });
-    scheduler.create({
+    const { scheduler, sent } = (await harness({ now: () => now, missedPolicy: "skip" }));
+    (await scheduler.create({
       instanceId: INSTANCE_ID,
       to: "5500000000001",
       scheduledAt: "2026-10-21T09:00:00-03:00",
       content: { type: "text", text: "too late" },
-    });
+    }));
     now = Date.parse("2026-10-21T15:00:00Z");
     await scheduler.tick();
     expect(sent).toEqual([]);
-    expect(scheduler.list({ instanceId: INSTANCE_ID }).schedules[0]?.status).toBe("skipped");
+    expect((await scheduler.list({ instanceId: INSTANCE_ID })).schedules[0]?.status).toBe("skipped");
   });
 
   it("does not send a paused or cancelled schedule", async () => {
     let now = Date.parse("2026-10-20T12:00:00Z");
-    const { scheduler, sent } = harness({ now: () => now });
-    const paused = scheduler.create({
+    const { scheduler, sent } = (await harness({ now: () => now }));
+    const paused = (await scheduler.create({
       instanceId: INSTANCE_ID,
       to: "5500000000001",
       scheduledAt: "2026-10-21T09:00:00-03:00",
       content: { type: "text", text: "paused" },
-    });
-    const cancelled = scheduler.create({
+    }));
+    const cancelled = (await scheduler.create({
       instanceId: INSTANCE_ID,
       to: "5500000000002",
       scheduledAt: "2026-10-21T09:05:00-03:00",
       content: { type: "text", text: "cancelled" },
-    });
-    expect(scheduler.pause(INSTANCE_ID, paused.id).status).toBe("paused");
-    expect(scheduler.cancel(INSTANCE_ID, cancelled.id).status).toBe("cancelled");
+    }));
+    expect((await scheduler.pause(INSTANCE_ID, paused.id)).status).toBe("paused");
+    expect((await scheduler.cancel(INSTANCE_ID, cancelled.id)).status).toBe("cancelled");
     now = Date.parse("2026-10-21T12:10:00Z");
     await scheduler.tick();
     expect(sent).toEqual([]);
-    expect(scheduler.list({ instanceId: INSTANCE_ID, status: "paused" }).total).toBe(1);
+    expect((await scheduler.list({ instanceId: INSTANCE_ID, status: "paused" })).total).toBe(1);
   });
 
   it("sends nothing while the scheduler is disabled", async () => {
     let now = Date.parse("2026-10-21T12:00:00Z");
-    const { scheduler, sent, sqlite } = harness({ now: () => now, enabled: false });
-    sqlite
+    const { scheduler, sent, sqlite } = (await harness({ now: () => now, enabled: false }));
+    (await sqlite
       .prepare(
         `INSERT INTO scheduled_messages (
           id, instance_id, recipient, message_type, payload_json, timezone, recurrence,
@@ -496,36 +496,32 @@ describe("scheduled sends", () => {
         now,
         now,
         now,
-      );
+      ));
     expect(await scheduler.tick()).toEqual({ dispatched: 0, skipped: 0 });
     expect(sent).toEqual([]);
-    expect(() =>
-      scheduler.create({
+    await expect(scheduler.create({
         instanceId: INSTANCE_ID,
         to: "5500000000001",
         scheduledAt: "2026-10-22T09:00:00-03:00",
         content: { type: "text", text: "blocked" },
-      }),
-    ).toThrow(/WA_SCHEDULER_ENABLED=true/);
-    expect(scheduler.list({ instanceId: INSTANCE_ID }).total).toBe(1);
+      })).rejects.toThrow(/WA_SCHEDULER_ENABLED=true/);
+    expect((await scheduler.list({ instanceId: INSTANCE_ID })).total).toBe(1);
   });
 
-  it("rejects a private media URL before storing it", () => {
-    const { scheduler } = harness({ now: () => Date.parse("2026-10-20T12:00:00Z") });
-    expect(() =>
-      scheduler.create({
+  it("rejects a private media URL before storing it", async () => {
+    const { scheduler } = (await harness({ now: () => Date.parse("2026-10-20T12:00:00Z") }));
+    await expect(scheduler.create({
         instanceId: INSTANCE_ID,
         to: "5500000000001",
         scheduledAt: "2026-10-21T09:00:00-03:00",
         content: { type: "image", image: "http://127.0.0.1/secret.png" },
-      }),
-    ).toThrow(/HTTPS/);
+      })).rejects.toThrow(/HTTPS/);
   });
 
   it("does not resend an interrupted one-shot", async () => {
     let now = Date.parse("2026-10-21T12:00:00Z");
-    const { scheduler, sent, sqlite } = harness({ now: () => now, missedPolicy: "send" });
-    sqlite
+    const { scheduler, sent, sqlite } = (await harness({ now: () => now, missedPolicy: "send" }));
+    (await sqlite
       .prepare(
         `INSERT INTO scheduled_messages (
           id, instance_id, recipient, message_type, payload_json, timezone, recurrence,
@@ -543,23 +539,21 @@ describe("scheduled sends", () => {
         now - 1_000,
         now,
         now,
-      );
+      ));
     await scheduler.tick();
     expect(sent).toEqual([]);
-    expect(scheduler.list({ instanceId: INSTANCE_ID }).schedules[0]?.status).toBe("failed");
+    expect((await scheduler.list({ instanceId: INSTANCE_ID })).schedules[0]?.status).toBe("failed");
   });
 
   it("pauses and cancels overdue rows while the scheduler is disabled", async () => {
     const now = Date.parse("2026-10-21T15:00:00Z");
-    const disabled = harness({ now: () => now, enabled: false, missedPolicy: "send" });
-    insertDue(disabled.sqlite, "sched-pause", now - 60 * 60_000, "paused later");
-    insertDue(disabled.sqlite, "sched-cancel", now - 60 * 60_000, "cancelled later");
-    insertDue(disabled.sqlite, "sched-keep", now - 60 * 60_000, "still due");
-    expect(disabled.scheduler.pause(INSTANCE_ID, "sched-pause").status).toBe("paused");
-    expect(disabled.scheduler.cancel(INSTANCE_ID, "sched-cancel").status).toBe("cancelled");
-    expect(() => disabled.scheduler.resume(INSTANCE_ID, "sched-pause")).toThrow(
-      /WA_SCHEDULER_ENABLED=true/,
-    );
+    const disabled = (await harness({ now: () => now, enabled: false, missedPolicy: "send" }));
+    (await insertDue(disabled.sqlite, "sched-pause", now - 60 * 60_000, "paused later"));
+    (await insertDue(disabled.sqlite, "sched-cancel", now - 60 * 60_000, "cancelled later"));
+    (await insertDue(disabled.sqlite, "sched-keep", now - 60 * 60_000, "still due"));
+    expect((await disabled.scheduler.pause(INSTANCE_ID, "sched-pause")).status).toBe("paused");
+    expect((await disabled.scheduler.cancel(INSTANCE_ID, "sched-cancel")).status).toBe("cancelled");
+    await expect(disabled.scheduler.resume(INSTANCE_ID, "sched-pause")).rejects.toThrow(/WA_SCHEDULER_ENABLED=true/);
 
     const enabled = new MessageScheduler({
       sqlite: disabled.sqlite,
@@ -572,155 +566,147 @@ describe("scheduled sends", () => {
     const tick = await enabled.tick();
     expect(tick.dispatched).toBe(1);
     expect(disabled.sent.map((row) => row.content)).toEqual([{ type: "text", text: "still due" }]);
-    expect(enabled.list({ instanceId: INSTANCE_ID, status: "paused" }).total).toBe(1);
-    expect(enabled.list({ instanceId: INSTANCE_ID, status: "cancelled" }).total).toBe(1);
+    expect((await enabled.list({ instanceId: INSTANCE_ID, status: "paused" })).total).toBe(1);
+    expect((await enabled.list({ instanceId: INSTANCE_ID, status: "cancelled" })).total).toBe(1);
   });
 
-  it("stores the first weekly and monthly slot instead of scheduledAt", () => {
+  it("stores the first weekly and monthly slot instead of scheduledAt", async () => {
     const now = Date.parse("2026-10-01T12:00:00Z");
-    const { scheduler } = harness({ now: () => now });
-    const weekly = scheduler.create({
+    const { scheduler } = (await harness({ now: () => now }));
+    const weekly = (await scheduler.create({
       instanceId: INSTANCE_ID,
       to: "5500000000001",
       scheduledAt: "2026-10-20T09:00:00-03:00",
       recurrence: "weekly",
       weekdays: [1],
       content: { type: "text", text: "monday" },
-    });
+    }));
     expect(weekly.scheduledAt).toBe("2026-10-20T12:00:00.000Z");
     expect(weekly.nextRunAt).toBe("2026-10-26T12:00:00.000Z");
     expect(weekly.to).toBe("5500000000001@s.whatsapp.net");
 
-    const monthly = scheduler.create({
+    const monthly = (await scheduler.create({
       instanceId: INSTANCE_ID,
       to: "120363000000000000@g.us",
       scheduledAt: "2026-10-10T09:00:00-03:00",
       recurrence: "monthly",
       dayOfMonth: 15,
       content: { type: "text", text: "fifteenth" },
-    });
+    }));
     expect(monthly.nextRunAt).toBe("2026-10-15T12:00:00.000Z");
     expect(monthly.to).toBe("120363000000000000@g.us");
   });
 
-  it("rejects a recipient that is not a phone number or group JID", () => {
-    const { scheduler } = harness({ now: () => Date.parse("2026-10-20T12:00:00Z") });
+  it("rejects a recipient that is not a phone number or group JID", async () => {
+    const { scheduler } = (await harness({ now: () => Date.parse("2026-10-20T12:00:00Z") }));
     for (const to of ["hello there", "status@broadcast", "1234567890@newsletter"]) {
-      expect(() =>
-        scheduler.create({
+      await expect(scheduler.create({
           instanceId: INSTANCE_ID,
           to,
           scheduledAt: "2026-10-21T09:00:00-03:00",
           content: { type: "text", text: "nope" },
-        }),
-      ).toThrow(/Invalid recipient/);
+        })).rejects.toThrow(/Invalid recipient/);
     }
   });
 
-  it("rejects scheduledAt more than a year ahead", () => {
+  it("rejects scheduledAt more than a year ahead", async () => {
     const now = Date.parse("2026-10-20T12:00:00Z");
-    const { scheduler } = harness({ now: () => now });
-    expect(() =>
-      scheduler.create({
+    const { scheduler } = (await harness({ now: () => now }));
+    await expect(scheduler.create({
         instanceId: INSTANCE_ID,
         to: "5500000000001",
         scheduledAt: new Date(now + 366 * 24 * 60 * 60 * 1000).toISOString(),
         content: { type: "text", text: "too far" },
-      }),
-    ).toThrow(/1 year/);
+      })).rejects.toThrow(/1 year/);
   });
 
-  it("counts a recurring schedule toward the cap and still allows cancel", () => {
+  it("counts a recurring schedule toward the cap and still allows cancel", async () => {
     let now = Date.parse("2026-10-20T12:00:00Z");
-    const { scheduler, sent } = harness({ now: () => now, maxActive: 1 });
-    const recurring = scheduler.create({
+    const { scheduler, sent } = (await harness({ now: () => now, maxActive: 1 }));
+    const recurring = (await scheduler.create({
       instanceId: INSTANCE_ID,
       to: "5500000000001",
       scheduledAt: "2026-10-21T09:00:00-03:00",
       recurrence: "daily",
       content: { type: "text", text: "one slot" },
-    });
-    expect(() =>
-      scheduler.create({
+    }));
+    await expect(scheduler.create({
         instanceId: INSTANCE_ID,
         to: "5500000000002",
         scheduledAt: "2026-10-21T10:00:00-03:00",
         content: { type: "text", text: "second" },
-      }),
-    ).toThrow(/maximum of 1 active schedules/);
+      })).rejects.toThrow(/maximum of 1 active schedules/);
     now = Date.parse("2026-10-21T12:00:00Z");
     return scheduler.tick().then(async () => {
       expect(sent).toHaveLength(1);
-      expect(scheduler.list({ instanceId: INSTANCE_ID }).schedules[0]?.status).toBe("active");
-      expect(() =>
-        scheduler.create({
+      expect((await scheduler.list({ instanceId: INSTANCE_ID })).schedules[0]?.status).toBe("active");
+      await expect(scheduler.create({
           instanceId: INSTANCE_ID,
           to: "5500000000002",
           scheduledAt: "2026-10-22T10:00:00-03:00",
           content: { type: "text", text: "still full" },
-        }),
-      ).toThrow(/maximum of 1/);
-      expect(scheduler.cancel(INSTANCE_ID, recurring.id).status).toBe("cancelled");
-      const replacement = scheduler.create({
+        })).rejects.toThrow(/maximum of 1/);
+      expect((await scheduler.cancel(INSTANCE_ID, recurring.id)).status).toBe("cancelled");
+      const replacement = (await scheduler.create({
         instanceId: INSTANCE_ID,
         to: "+55 (00) 00000-0002",
         scheduledAt: "2026-10-22T10:00:00-03:00",
         content: { type: "text", text: "after cancel" },
-      });
+      }));
       expect(replacement.to).toBe("5500000000002@s.whatsapp.net");
     });
   });
 
   it("sends a missed backlog only as fast as the outbound rate limit", async () => {
     let now = Date.parse("2026-10-20T12:00:00Z");
-    const { scheduler, sent } = harness({
+    const { scheduler, sent } = (await harness({
       now: () => now,
       missedPolicy: "send",
       rateLimit: 1,
-    });
-    scheduler.create({
+    }));
+    (await scheduler.create({
       instanceId: INSTANCE_ID,
       to: "5500000000001",
       scheduledAt: "2026-10-21T09:00:00-03:00",
       content: { type: "text", text: "first" },
-    });
-    const recurring = scheduler.create({
+    }));
+    const recurring = (await scheduler.create({
       instanceId: INSTANCE_ID,
       to: "5500000000002",
       scheduledAt: "2026-10-21T09:05:00-03:00",
       recurrence: "daily",
       content: { type: "text", text: "daily" },
-    });
-    scheduler.create({
+    }));
+    (await scheduler.create({
       instanceId: INSTANCE_ID,
       to: "5500000000003",
       scheduledAt: "2026-10-21T09:10:00-03:00",
       content: { type: "text", text: "third" },
-    });
+    }));
     now = Date.parse("2026-10-21T15:00:00Z");
     const first = await scheduler.tick();
     expect(first).toEqual({ dispatched: 1, skipped: 0 });
     expect(sent).toHaveLength(1);
-    const waiting = scheduler.list({ instanceId: INSTANCE_ID, status: "active" });
+    const waiting = (await scheduler.list({ instanceId: INSTANCE_ID, status: "active" }));
     expect(waiting.total).toBe(2);
     expect(waiting.schedules.map((row) => row.id).sort()).toEqual(
       [recurring.id, waiting.schedules.find((row) => row.recurrence === "once")?.id].sort(),
     );
     expect(
-      scheduler.list({ instanceId: INSTANCE_ID }).schedules.find((row) => row.id === recurring.id)
+      (await scheduler.list({ instanceId: INSTANCE_ID })).schedules.find((row) => row.id === recurring.id)
         ?.nextRunAt,
     ).toBe("2026-10-21T15:00:00.000Z");
 
     expect((await scheduler.tick()).dispatched).toBe(0);
     expect(sent).toHaveLength(1);
-    expect(scheduler.cancel(INSTANCE_ID, recurring.id).status).toBe("cancelled");
+    expect((await scheduler.cancel(INSTANCE_ID, recurring.id)).status).toBe("cancelled");
 
     now += 60_000;
     const third = await scheduler.tick();
     expect(third.dispatched).toBe(1);
     expect(sent).toHaveLength(2);
-    expect(scheduler.list({ instanceId: INSTANCE_ID, status: "active" }).total).toBe(0);
-    expect(scheduler.list({ instanceId: INSTANCE_ID, status: "cancelled" }).total).toBe(1);
+    expect((await scheduler.list({ instanceId: INSTANCE_ID, status: "active" })).total).toBe(0);
+    expect((await scheduler.list({ instanceId: INSTANCE_ID, status: "cancelled" })).total).toBe(1);
   });
 
   it("builds sqlite claims without row locks and postgres claims that skip locked rows", () => {
@@ -737,13 +723,13 @@ describe("scheduled sends", () => {
     process.env.WA_DATABASE_URL = "postgres://localhost/db";
     try {
       let now = Date.parse("2026-10-20T12:00:00Z");
-      const { scheduler, sent } = harness({ now: () => now });
-      scheduler.create({
+      const { scheduler, sent } = (await harness({ now: () => now }));
+      (await scheduler.create({
         instanceId: INSTANCE_ID,
         to: "5500000000001",
         scheduledAt: "2026-10-21T09:00:00-03:00",
         content: { type: "text", text: "still sqlite" },
-      });
+      }));
       now = Date.parse("2026-10-21T12:00:00Z");
       await scheduler.tick();
       expect(sent.map((row) => row.content)).toEqual([{ type: "text", text: "still sqlite" }]);
@@ -755,20 +741,20 @@ describe("scheduled sends", () => {
 
   it("claims sends that share a due time in creation order", async () => {
     let now = Date.parse("2026-10-20T12:00:00Z");
-    const { scheduler, sent } = harness({ now: () => now, rateLimit: 1 });
-    const first = scheduler.create({
+    const { scheduler, sent } = (await harness({ now: () => now, rateLimit: 1 }));
+    const first = (await scheduler.create({
       instanceId: INSTANCE_ID,
       to: "5500000000001",
       scheduledAt: "2026-10-21T09:00:00-03:00",
       content: { type: "text", text: "first" },
-    });
-    const second = scheduler.create({
+    }));
+    const second = (await scheduler.create({
       instanceId: INSTANCE_ID,
       to: "5500000000002",
       scheduledAt: "2026-10-21T09:00:00-03:00",
       content: { type: "text", text: "second" },
-    });
-    expect(scheduler.list({ instanceId: INSTANCE_ID }).schedules.map((row) => row.id)).toEqual([
+    }));
+    expect((await scheduler.list({ instanceId: INSTANCE_ID })).schedules.map((row) => row.id)).toEqual([
       first.id,
       second.id,
     ]);
@@ -785,18 +771,18 @@ describe("scheduled sends", () => {
 
   it("does not skip on-time rows that wait for the send rate limit", async () => {
     let now = Date.parse("2026-10-20T12:00:00Z");
-    const { scheduler, sent } = harness({
+    const { scheduler, sent } = (await harness({
       now: () => now,
       missedPolicy: "skip",
       rateLimit: 2,
-    });
+    }));
     for (let index = 0; index < 8; index++) {
-      scheduler.create({
+      (await scheduler.create({
         instanceId: INSTANCE_ID,
         to: `550000000000${index + 1}`,
         scheduledAt: "2026-10-21T09:00:00-03:00",
         content: { type: "text", text: `slot ${index}` },
-      });
+      }));
     }
     now = Date.parse("2026-10-21T12:00:00Z");
     for (let minute = 0; minute < 4; minute++) {
@@ -804,51 +790,51 @@ describe("scheduled sends", () => {
       now += 60_000;
     }
     expect(sent).toHaveLength(8);
-    expect(scheduler.list({ instanceId: INSTANCE_ID, status: "skipped" }).total).toBe(0);
-    expect(scheduler.list({ instanceId: INSTANCE_ID, status: "completed" }).total).toBe(8);
+    expect((await scheduler.list({ instanceId: INSTANCE_ID, status: "skipped" })).total).toBe(0);
+    expect((await scheduler.list({ instanceId: INSTANCE_ID, status: "completed" })).total).toBe(8);
   });
 
   it("skips an overdue backlog without waiting for send budget", async () => {
     let now = Date.parse("2026-10-20T12:00:00Z");
-    const { scheduler, sent } = harness({
+    const { scheduler, sent } = (await harness({
       now: () => now,
       missedPolicy: "skip",
       rateLimit: 1,
-    });
+    }));
     for (let index = 0; index < 4; index++) {
-      scheduler.create({
+      (await scheduler.create({
         instanceId: INSTANCE_ID,
         to: `550000000000${index}`,
         scheduledAt: "2026-10-21T09:00:00-03:00",
         content: { type: "text", text: `late ${index}` },
-      });
+      }));
     }
     now = Date.parse("2026-10-21T15:00:00Z");
     const tick = await scheduler.tick();
     expect(tick).toEqual({ dispatched: 0, skipped: 4 });
     expect(sent).toEqual([]);
-    expect(scheduler.list({ instanceId: INSTANCE_ID, status: "skipped" }).total).toBe(4);
+    expect((await scheduler.list({ instanceId: INSTANCE_ID, status: "skipped" })).total).toBe(4);
   });
 
   it("applies the missed policy again immediately before enqueue", async () => {
     let now = Date.parse("2026-10-20T12:00:00Z");
-    const { scheduler, sent, enqueue } = harness({
+    const { scheduler, sent, enqueue } = (await harness({
       now: () => now,
       missedPolicy: "skip",
       rateLimit: 10,
-    });
-    scheduler.create({
+    }));
+    (await scheduler.create({
       instanceId: INSTANCE_ID,
       to: "5500000000001",
       scheduledAt: "2026-10-21T09:00:00-03:00",
       content: { type: "text", text: "on time" },
-    });
-    scheduler.create({
+    }));
+    (await scheduler.create({
       instanceId: INSTANCE_ID,
       to: "5500000000002",
       scheduledAt: "2026-10-21T09:00:00-03:00",
       content: { type: "text", text: "becomes late" },
-    });
+    }));
     now = Date.parse("2026-10-21T12:00:30Z");
     enqueue.mockImplementation(async (_instanceId, to, content, channel) => {
       now = Date.parse("2026-10-21T12:10:00Z");
@@ -858,25 +844,25 @@ describe("scheduled sends", () => {
     const tick = await scheduler.tick();
     expect(tick).toEqual({ dispatched: 1, skipped: 1 });
     expect(sent).toHaveLength(1);
-    expect(scheduler.list({ instanceId: INSTANCE_ID, status: "skipped" }).total).toBe(1);
+    expect((await scheduler.list({ instanceId: INSTANCE_ID, status: "skipped" })).total).toBe(1);
   });
 
   it("retries an error that only mentions not found, and fails a permanent code", async () => {
     let now = Date.parse("2026-10-20T12:00:00Z");
-    const { scheduler, sent, resolveChannel } = harness({ now: () => now, missedPolicy: "skip" });
-    const created = scheduler.create({
+    const { scheduler, sent, resolveChannel } = (await harness({ now: () => now, missedPolicy: "skip" }));
+    const created = (await scheduler.create({
       instanceId: INSTANCE_ID,
       to: "5500000000001",
       scheduledAt: "2026-10-21T09:00:00-03:00",
       content: { type: "text", text: "retry me" },
-    });
+    }));
     now = Date.parse("2026-10-21T12:00:00Z");
     resolveChannel.mockImplementation(() => {
       throw new Error("contact not found");
     });
     await scheduler.tick();
     expect(sent).toEqual([]);
-    let listed = scheduler.list({ instanceId: INSTANCE_ID }).schedules[0];
+    let listed = (await scheduler.list({ instanceId: INSTANCE_ID })).schedules[0];
     expect(listed?.status).toBe("active");
     expect(listed?.attempts).toBe(1);
     expect(listed?.lastError).toMatch(/contact not found/);
@@ -888,7 +874,7 @@ describe("scheduled sends", () => {
       throw permanent;
     });
     await scheduler.tick();
-    listed = scheduler.list({ instanceId: INSTANCE_ID }).schedules[0];
+    listed = (await scheduler.list({ instanceId: INSTANCE_ID })).schedules[0];
     expect(listed?.id).toBe(created.id);
     expect(listed?.status).toBe("failed");
     expect(sent).toEqual([]);
@@ -896,27 +882,27 @@ describe("scheduled sends", () => {
 
   it("keeps queue acceptance pending and counts only completed sends", async () => {
     let now = Date.parse("2026-10-20T12:00:00Z");
-    const { scheduler, enqueue, getJobState } = harness({ now: () => now });
+    const { scheduler, enqueue, getJobState } = (await harness({ now: () => now }));
     getJobState.mockResolvedValue({ state: "pending" });
-    scheduler.create({
+    (await scheduler.create({
       instanceId: INSTANCE_ID,
       to: "5500000000001",
       scheduledAt: "2026-10-21T12:00:00Z",
       content: { type: "text", text: "pending" },
-    });
+    }));
     now = Date.parse("2026-10-21T12:00:00Z");
     await scheduler.tick();
-    expect(scheduler.list({ instanceId: INSTANCE_ID }).schedules[0]).toMatchObject({
+    expect((await scheduler.list({ instanceId: INSTANCE_ID })).schedules[0]).toMatchObject({
       status: "running",
       occurrenceCount: 0,
     });
     now += 60 * 60_000;
     await scheduler.tick();
-    expect(scheduler.list({ instanceId: INSTANCE_ID }).schedules[0]?.status).toBe("running");
+    expect((await scheduler.list({ instanceId: INSTANCE_ID })).schedules[0]?.status).toBe("running");
     getJobState.mockResolvedValue({ state: "completed" });
     await scheduler.tick();
     await scheduler.tick();
-    expect(scheduler.list({ instanceId: INSTANCE_ID }).schedules[0]).toMatchObject({
+    expect((await scheduler.list({ instanceId: INSTANCE_ID })).schedules[0]).toMatchObject({
       status: "completed",
       occurrenceCount: 1,
     });
@@ -927,21 +913,21 @@ describe("scheduled sends", () => {
     "does not count exhausted delivery retries for %s",
     async (recurrence) => {
       let now = Date.parse("2026-10-20T12:00:00Z");
-      const { scheduler, enqueue, getJobState } = harness({ now: () => now });
+      const { scheduler, enqueue, getJobState } = (await harness({ now: () => now }));
       getJobState.mockResolvedValue({ state: "pending" });
-      scheduler.create({
+      (await scheduler.create({
         instanceId: INSTANCE_ID,
         to: "5500000000001",
         recurrence,
         occurrenceLimit: 1,
         scheduledAt: "2026-10-21T12:00:00Z",
         content: { type: "text", text: "failure" },
-      });
+      }));
       now = Date.parse("2026-10-21T12:00:00Z");
       await scheduler.tick();
       getJobState.mockResolvedValue({ state: "failed", error: "adapter exhausted retries" });
       await scheduler.tick();
-      const listed = scheduler.list({ instanceId: INSTANCE_ID }).schedules[0];
+      const listed = (await scheduler.list({ instanceId: INSTANCE_ID })).schedules[0];
       expect(listed).toMatchObject({
         status: recurrence === "once" ? "failed" : "active",
         occurrenceCount: 0,
@@ -952,7 +938,7 @@ describe("scheduled sends", () => {
         now += 24 * 60 * 60_000;
         getJobState.mockResolvedValue({ state: "completed" });
         await scheduler.tick();
-        expect(scheduler.list({ instanceId: INSTANCE_ID }).schedules[0]).toMatchObject({
+        expect((await scheduler.list({ instanceId: INSTANCE_ID })).schedules[0]).toMatchObject({
           status: "completed",
           occurrenceCount: 1,
         });
@@ -964,24 +950,24 @@ describe("scheduled sends", () => {
     const dir = mkdtempSync(join(tmpdir(), "wamcp-reconcile-"));
     const path = join(dir, "schedules.db");
     let now = Date.parse("2026-10-20T12:00:00Z");
-    const original = harness({ now: () => now, path });
+    const original = (await harness({ now: () => now, path }));
     original.getJobState.mockResolvedValue({ state: "pending" });
-    original.scheduler.create({
+    (await original.scheduler.create({
       instanceId: INSTANCE_ID,
       to: "5500000000001",
       scheduledAt: "2026-10-21T12:00:00Z",
       content: { type: "text", text: "restart" },
-    });
+    }));
     now = Date.parse("2026-10-21T12:00:00Z");
     await original.scheduler.tick();
-    const persistedId = original.scheduler.list({ instanceId: INSTANCE_ID }).schedules[0]
+    const persistedId = (await original.scheduler.list({ instanceId: INSTANCE_ID })).schedules[0]
       ?.lastJobId;
     expect(original.enqueue.mock.calls[0]?.[4]).toBe(persistedId);
     original.sqlite.close();
-    const restarted = harness({ now: () => now, path });
+    const restarted = (await harness({ now: () => now, path }));
     now += 24 * 60 * 60_000;
     await restarted.scheduler.tick();
-    expect(restarted.scheduler.list({ instanceId: INSTANCE_ID }).schedules[0]).toMatchObject({
+    expect((await restarted.scheduler.list({ instanceId: INSTANCE_ID })).schedules[0]).toMatchObject({
       status: "completed",
       occurrenceCount: 1,
     });
@@ -993,22 +979,22 @@ describe("scheduled sends", () => {
 
   it("reconciles ambiguous enqueue errors without adding a duplicate job", async () => {
     let now = Date.parse("2026-10-20T12:00:00Z");
-    const { scheduler, enqueue, getJobState } = harness({ now: () => now });
-    scheduler.create({
+    const { scheduler, enqueue, getJobState } = (await harness({ now: () => now }));
+    (await scheduler.create({
       instanceId: INSTANCE_ID,
       to: "5500000000001",
       scheduledAt: "2026-10-21T12:00:00Z",
       content: { type: "text", text: "ambiguous" },
-    });
+    }));
     enqueue.mockRejectedValue(new Error("Redis connection closed after acceptance"));
     getJobState.mockResolvedValue({ state: "missing" });
     now = Date.parse("2026-10-21T12:00:00Z");
     await scheduler.tick();
     await scheduler.tick();
-    expect(scheduler.list({ instanceId: INSTANCE_ID }).schedules[0]?.status).toBe("running");
+    expect((await scheduler.list({ instanceId: INSTANCE_ID })).schedules[0]?.status).toBe("running");
     getJobState.mockResolvedValue({ state: "completed" });
     await scheduler.tick();
-    expect(scheduler.list({ instanceId: INSTANCE_ID }).schedules[0]).toMatchObject({
+    expect((await scheduler.list({ instanceId: INSTANCE_ID })).schedules[0]).toMatchObject({
       status: "completed",
       occurrenceCount: 1,
     });
@@ -1017,19 +1003,19 @@ describe("scheduled sends", () => {
 
   it("does not resend a lost Redis job after its lease expires", async () => {
     let now = Date.parse("2026-10-20T12:00:00Z");
-    const { scheduler, enqueue, getJobState } = harness({ now: () => now });
-    scheduler.create({
+    const { scheduler, enqueue, getJobState } = (await harness({ now: () => now }));
+    (await scheduler.create({
       instanceId: INSTANCE_ID,
       to: "5500000000001",
       scheduledAt: "2026-10-21T12:00:00Z",
       content: { type: "text", text: "missing" },
-    });
+    }));
     getJobState.mockResolvedValue({ state: "missing" });
     now = Date.parse("2026-10-21T12:00:00Z");
     await scheduler.tick();
     now += 60 * 60_000;
     await scheduler.tick();
-    expect(scheduler.list({ instanceId: INSTANCE_ID }).schedules[0]).toMatchObject({
+    expect((await scheduler.list({ instanceId: INSTANCE_ID })).schedules[0]).toMatchObject({
       status: "failed",
       occurrenceCount: 0,
     });
@@ -1038,14 +1024,14 @@ describe("scheduled sends", () => {
 
   it("reconciles a completed job only once across two scheduler processes", async () => {
     let now = Date.parse("2026-10-20T12:00:00Z");
-    const { scheduler, sqlite, enqueue, getJobState } = harness({ now: () => now });
+    const { scheduler, sqlite, enqueue, getJobState } = (await harness({ now: () => now }));
     getJobState.mockResolvedValue({ state: "pending" });
-    scheduler.create({
+    (await scheduler.create({
       instanceId: INSTANCE_ID,
       to: "5500000000001",
       scheduledAt: "2026-10-21T12:00:00Z",
       content: { type: "text", text: "race" },
-    });
+    }));
     now = Date.parse("2026-10-21T12:00:00Z");
     await scheduler.tick();
     const removeJob = vi.fn(async () => {});
@@ -1060,7 +1046,7 @@ describe("scheduled sends", () => {
     });
     getJobState.mockResolvedValue({ state: "completed" });
     await Promise.all([scheduler.tick(), other.tick()]);
-    expect(scheduler.list({ instanceId: INSTANCE_ID }).schedules[0]).toMatchObject({
+    expect((await scheduler.list({ instanceId: INSTANCE_ID })).schedules[0]).toMatchObject({
       status: "completed",
       occurrenceCount: 1,
     });
@@ -1071,13 +1057,13 @@ describe("scheduled sends", () => {
   it("waits for an in-flight tick before stop resolves", async () => {
     let now = Date.parse("2026-10-20T12:00:00Z");
     let release: (() => void) | undefined;
-    const { scheduler, enqueue } = harness({ now: () => now });
-    scheduler.create({
+    const { scheduler, enqueue } = (await harness({ now: () => now }));
+    (await scheduler.create({
       instanceId: INSTANCE_ID,
       to: "5500000000001",
       scheduledAt: "2026-10-21T09:00:00-03:00",
       content: { type: "text", text: "hold" },
-    });
+    }));
     enqueue.mockImplementation(
       () =>
         new Promise((resolve) => {
@@ -1093,16 +1079,16 @@ describe("scheduled sends", () => {
     });
     await Promise.resolve();
     expect(stopped).toBe(false);
-    release?.();
+    (await release?.());
     await stopping;
     await ticking;
     expect(stopped).toBe(true);
   });
 });
 
-function insertDue(sqlite: Database, id: string, nextRunAt: number, text: string): void {
+async function insertDue(sqlite: Database, id: string, nextRunAt: number, text: string): Promise<void> {
   const now = nextRunAt;
-  sqlite
+  (await sqlite
     .prepare(
       `INSERT INTO scheduled_messages (
         id, instance_id, recipient, message_type, payload_json, timezone, recurrence,
@@ -1118,7 +1104,7 @@ function insertDue(sqlite: Database, id: string, nextRunAt: number, text: string
       nextRunAt,
       now,
       now,
-    );
+    ));
 }
 
 describe("schedule tools", () => {
@@ -1149,10 +1135,10 @@ describe("schedule tools", () => {
         tools.set(name, handler);
       },
     } as unknown as McpServer;
-    const { scheduler } = harness({
+    const { scheduler } = (await harness({
       now: () => Date.parse("2026-10-20T12:00:00Z"),
       enabled: false,
-    });
+    }));
     registerScheduleTools(server, scheduler);
     expect([...tools.keys()]).toEqual([
       "wa_schedule_message",

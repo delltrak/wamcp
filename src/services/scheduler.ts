@@ -6,6 +6,7 @@
 
 import { randomUUID } from "node:crypto";
 import Database from "better-sqlite3";
+import type { ScheduleDatabase } from "./schedule-store.js";
 import type { OutboundJobState } from "./message-queue.js";
 import {
   DEFAULT_BAILEYS_RATE_LIMIT,
@@ -108,7 +109,7 @@ export interface TickResult {
 }
 
 export interface MessageSchedulerOptions {
-  sqlite: Database.Database;
+  sqlite: ScheduleDatabase;
   enqueue: ScheduleEnqueue;
   getJobState: (
     instanceId: string,
@@ -116,8 +117,8 @@ export interface MessageSchedulerOptions {
     channel: ChannelType,
   ) => Promise<OutboundJobState>;
   removeJob?: (instanceId: string, jobId: string, channel: ChannelType) => Promise<void>;
-  resolveChannel: (instanceId: string) => ChannelType;
-  instanceExists?: (instanceId: string) => void;
+  resolveChannel: (instanceId: string) => ChannelType | Promise<ChannelType>;
+  instanceExists?: (instanceId: string) => void | Promise<void>;
   now?: () => number;
   config?: SchedulerConfig;
   pollMs?: number;
@@ -135,8 +136,8 @@ export class MessageScheduler {
   private readonly enqueue: ScheduleEnqueue;
   private readonly getJobState: MessageSchedulerOptions["getJobState"];
   private readonly removeJob?: MessageSchedulerOptions["removeJob"];
-  private readonly resolveChannel: (instanceId: string) => ChannelType;
-  private readonly instanceExists?: (instanceId: string) => void;
+  private readonly resolveChannel: (instanceId: string) => ChannelType | Promise<ChannelType>;
+  private readonly instanceExists?: (instanceId: string) => void | Promise<void>;
   private readonly now: () => number;
   private readonly configOverride?: SchedulerConfig;
   private readonly pollMs: number;
@@ -185,36 +186,34 @@ export class MessageScheduler {
     if (pending) await pending;
   }
 
-  create(input: CreateScheduleInput): ScheduleView {
+  async create(input: CreateScheduleInput): Promise<ScheduleView> {
     this.assertEnabled();
-    this.instanceExists?.(input.instanceId);
+    await this.instanceExists?.(input.instanceId);
     const recipient = normalizeScheduledRecipient(input.to);
     assertScheduledContent(input.content);
     const now = this.now();
     const parsed = parseScheduleRequest(input, now);
     const maxActive = this.settings().maxActive;
-    if (this.store.countOccupying(input.instanceId) >= maxActive) {
-      throw new Error(
-        `Invalid schedule; this instance already has the maximum of ${maxActive} active schedules`,
-      );
-    }
     const id = `sched_${randomUUID()}`;
-    const stored = this.store.insert({
-      id,
-      instanceId: input.instanceId,
-      recipient,
-      messageType: input.content.type,
-      payloadJson: JSON.stringify(input.content),
-      timezone: parsed.timezone,
-      recurrence: parsed.recurrence,
-      scheduledAt: parsed.scheduledAt,
-      nextRunAt: parsed.nextRunAt,
-      weekdays: parsed.weekdays,
-      dayOfMonth: parsed.dayOfMonth,
-      endAt: parsed.endAt,
-      occurrenceLimit: parsed.occurrenceLimit,
-      now,
-    });
+    const stored = await this.store.insertWithinLimit(
+      {
+        id,
+        instanceId: input.instanceId,
+        recipient,
+        messageType: input.content.type,
+        payloadJson: JSON.stringify(input.content),
+        timezone: parsed.timezone,
+        recurrence: parsed.recurrence,
+        scheduledAt: parsed.scheduledAt,
+        nextRunAt: parsed.nextRunAt,
+        weekdays: parsed.weekdays,
+        dayOfMonth: parsed.dayOfMonth,
+        endAt: parsed.endAt,
+        occurrenceLimit: parsed.occurrenceLimit,
+        now,
+      },
+      maxActive,
+    );
     logger.info(
       { scheduleId: stored.id, instanceId: stored.instanceId, recurrence: stored.recurrence },
       "Scheduled send created",
@@ -222,12 +221,12 @@ export class MessageScheduler {
     return toView(stored);
   }
 
-  list(input: ListSchedulesInput): {
+  async list(input: ListSchedulesInput): Promise<{
     schedules: ScheduleView[];
     total: number;
     limit: number;
     offset: number;
-  } {
+  }> {
     const limit = input.limit ?? 25;
     const offset = input.offset ?? 0;
     if (!Number.isInteger(limit) || limit < 1 || limit > 100) {
@@ -236,7 +235,7 @@ export class MessageScheduler {
     if (!Number.isInteger(offset) || offset < 0) {
       throw new Error("Invalid offset; expected an integer greater than or equal to 0");
     }
-    const page = this.store.list(input.instanceId, input.status ?? null, limit, offset);
+    const page = await this.store.list(input.instanceId, input.status ?? null, limit, offset);
     return {
       schedules: page.rows.map(toView),
       total: page.total,
@@ -247,17 +246,17 @@ export class MessageScheduler {
 
   // Pause and cancel stay available while the worker is off so overdue rows
   // can be stopped before WA_SCHEDULER_ENABLED is turned back on.
-  pause(instanceId: string, id: string): ScheduleView {
-    return this.transition(instanceId, id, ["active"], "paused", "paused");
+  async pause(instanceId: string, id: string): Promise<ScheduleView> {
+    return await this.transition(instanceId, id, ["active"], "paused", "paused");
   }
 
-  resume(instanceId: string, id: string): ScheduleView {
+  async resume(instanceId: string, id: string): Promise<ScheduleView> {
     this.assertEnabled();
-    return this.transition(instanceId, id, ["paused"], "active", "resumed");
+    return await this.transition(instanceId, id, ["paused"], "active", "resumed");
   }
 
-  cancel(instanceId: string, id: string): ScheduleView {
-    return this.transition(
+  async cancel(instanceId: string, id: string): Promise<ScheduleView> {
+    return await this.transition(
       instanceId,
       id,
       ["active", "paused", "failed"],
@@ -320,7 +319,7 @@ export class MessageScheduler {
     }
     let dispatchStarted = false;
     try {
-      if (!this.hasDispatchBudget(job.instanceId)) {
+      if (!(await this.hasDispatchBudget(job.instanceId))) {
         await this.releaseClaim(job);
         logger.debug(
           { scheduleId: job.id, instanceId: job.instanceId },
@@ -334,13 +333,13 @@ export class MessageScheduler {
         await this.advanceWithoutSend(job, SKIPPED_REASON, "skipped");
         return "skipped";
       }
-      const channel = this.resolveChannel(job.instanceId);
+      const channel = await this.resolveChannel(job.instanceId);
       const content = parsePayload(job.payloadJson);
       const jobId = `${job.id}-${job.leaseToken}`;
       if (!(await this.store.setJobId(job.id, job.leaseToken, jobId))) return "skipped";
       job.lastJobId = jobId;
       dispatchStarted = true;
-      this.noteDispatch(job.instanceId);
+      await this.noteDispatch(job.instanceId);
       await this.enqueue(job.instanceId, job.recipient, content, channel, jobId);
       await this.reconcile(job);
       logger.info(
@@ -388,7 +387,7 @@ export class MessageScheduler {
       }
       return;
     }
-    const channel = this.resolveChannel(job.instanceId);
+    const channel = await this.resolveChannel(job.instanceId);
     const outcome = await this.getJobState(job.instanceId, job.lastJobId, channel);
     if (outcome.state === "pending") return;
     if (outcome.state === "missing") {
@@ -492,26 +491,26 @@ export class MessageScheduler {
     });
   }
 
-  private transition(
+  private async transition(
     instanceId: string,
     id: string,
     from: ScheduleStatus[],
     status: ScheduleStatus,
     action: string,
-  ): ScheduleView {
-    const current = this.require(instanceId, id);
+  ): Promise<ScheduleView> {
+    const current = await this.require(instanceId, id);
     if (!from.includes(current.status)) {
       throw new Error(`Scheduled send cannot be ${action} while ${current.status}`);
     }
-    const changed = this.store.setStatus(instanceId, id, from, status, this.now());
+    const changed = await this.store.setStatus(instanceId, id, from, status, this.now());
     if (!changed) {
       throw new Error(`Scheduled send cannot be ${action} while ${current.status}`);
     }
-    return toView(this.require(instanceId, id));
+    return toView(await this.require(instanceId, id));
   }
 
-  private require(instanceId: string, id: string): ScheduleRecord {
-    const row = this.store.get(instanceId, id);
+  private async require(instanceId: string, id: string): Promise<ScheduleRecord> {
+    const row = await this.store.get(instanceId, id);
     if (!row) throw new Error(`Unknown scheduled send '${id}'`);
     return row;
   }
@@ -534,8 +533,8 @@ export class MessageScheduler {
     return late && this.settings().missedPolicy === "skip";
   }
 
-  private hasDispatchBudget(instanceId: string): boolean {
-    const limit = this.limitFor(instanceId);
+  private async hasDispatchBudget(instanceId: string): Promise<boolean> {
+    const limit = await this.limitFor(instanceId);
     const now = this.now();
     const recent = (this.dispatchedAt.get(instanceId) ?? []).filter(
       (at) => now - at < SCHEDULER_RATE_WINDOW_MS,
@@ -544,7 +543,7 @@ export class MessageScheduler {
     return recent.length < limit;
   }
 
-  private noteDispatch(instanceId: string): void {
+  private async noteDispatch(instanceId: string): Promise<void> {
     const now = this.now();
     const recent = (this.dispatchedAt.get(instanceId) ?? []).filter(
       (at) => now - at < SCHEDULER_RATE_WINDOW_MS,
@@ -553,7 +552,7 @@ export class MessageScheduler {
     this.dispatchedAt.set(instanceId, recent);
   }
 
-  private limitFor(instanceId: string): number {
+  private async limitFor(instanceId: string): Promise<number> {
     if (this.rateLimitFor) {
       const limit = this.rateLimitFor(instanceId);
       if (!Number.isSafeInteger(limit) || limit < 1) {
@@ -561,7 +560,7 @@ export class MessageScheduler {
       }
       return limit;
     }
-    return outboundRateLimit(this.resolveChannel(instanceId));
+    return outboundRateLimit(await this.resolveChannel(instanceId));
   }
 
   private async releaseClaim(job: ScheduleRecord): Promise<void> {

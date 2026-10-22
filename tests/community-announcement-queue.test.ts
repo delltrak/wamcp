@@ -114,6 +114,18 @@ describe("community announcement queue", () => {
     expect(validate).toHaveBeenCalledTimes(2);
     expect(send).toHaveBeenCalledWith(AVISOS, content);
   });
+  it("awaits async quoted-message validation before enqueue and before delivery", async () => {
+    const { queue, send, validate } = fixture();
+    const content = { type: "text" as const, text: "Notice", quotedMessageId: "original" };
+    validate.mockRejectedValueOnce(new Error("missing quote"));
+    await expect(queue.enqueueCommunityAnnouncement("fixture", COMMUNITY, content)).rejects.toThrow("missing quote");
+    expect(mockQueueState.jobs).toHaveLength(0);
+    await queue.enqueueCommunityAnnouncement("fixture", COMMUNITY, content);
+    validate.mockRejectedValueOnce(new Error("expired quote"));
+    await expect(mockQueueState.workers[0]!.process({ data: mockQueueState.jobs[0]!.data })).rejects.toThrow("expired quote");
+    expect(send).not.toHaveBeenCalled();
+    await queue.close();
+  });
   it("does not enqueue when destination/permissions cannot be verified", async () => {
     const { queue, resolve } = fixture();
     resolve.mockRejectedValue(new Error("Only an Avisos group admin can send"));

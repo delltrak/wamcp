@@ -1,9 +1,9 @@
 import { and, eq, inArray } from "drizzle-orm";
-import type { BetterSQLite3Database } from "drizzle-orm/better-sqlite3";
+import type { AppDatabase } from "../db/async-session.js";
 import * as schema from "../db/schema.js";
 import { groupMemberLabels } from "../db/schema.js";
 
-export type GroupMemberLabelDatabase = BetterSQLite3Database<typeof schema>;
+export type GroupMemberLabelDatabase = AppDatabase<typeof schema>;
 
 export class GroupMemberLabelStore {
   constructor(
@@ -11,8 +11,8 @@ export class GroupMemberLabelStore {
     private readonly database: GroupMemberLabelDatabase,
   ) {}
 
-  getForGroup(groupJid: string) {
-    return this.database
+  async getForGroup(groupJid: string) {
+    return await this.database
       .select()
       .from(groupMemberLabels)
       .where(
@@ -24,16 +24,16 @@ export class GroupMemberLabelStore {
       .all();
   }
 
-  update(
+  async update(
     groupJid: string,
     participantJids: string[],
     memberLabel: string | null,
     timestamp: number,
-  ): boolean {
+  ): Promise<boolean> {
     const identities = [...new Set(participantJids.filter(Boolean))];
     if (identities.length === 0) return false;
 
-    const existing = this.database
+    const existing = await this.database
       .select()
       .from(groupMemberLabels)
       .where(
@@ -54,7 +54,7 @@ export class GroupMemberLabelStore {
     const now = Date.now();
 
     for (const participantJid of identities) {
-      this.database
+      await this.database
         .insert(groupMemberLabels)
         .values({
           instanceId: this.instanceId,

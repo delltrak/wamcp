@@ -72,7 +72,7 @@ describe("WA_EVENT_WEBHOOK_IGNORE_JIDS", () => {
       });
       expect(events[0]?.message.sender).toBe("111222333@lid");
       expect(
-        shouldSendEventWebhook(
+        await shouldSendEventWebhook(
           "message.received",
           events[0]!,
           destination({ WA_EVENT_WEBHOOK_IGNORE_JIDS: "@s.whatsapp.net" }),
@@ -93,7 +93,7 @@ describe("WA_EVENT_WEBHOOK_IGNORE_JIDS", () => {
       const enqueue = vi.fn((_: EventWebhookJob) => Promise.resolve());
       const unsubscribe = registerEventWebhookHandler(manager, config, enqueue);
       try {
-        for (const event of events) handler?.("message.received", instanceId, event);
+        for (const event of events) await handler?.("message.received", instanceId, event);
         await Promise.resolve();
         expect(enqueue).toHaveBeenCalledTimes(1);
         expect(enqueue.mock.calls[0]?.[0].payload).toMatchObject({ sender: "111222334@lid" });
@@ -105,7 +105,7 @@ describe("WA_EVENT_WEBHOOK_IGNORE_JIDS", () => {
     },
   );
 
-  it("stays unset by default and still forwards group traffic", () => {
+  it("stays unset by default and still forwards group traffic", async () => {
     const config = loadEventWebhookConfig({ WA_EVENT_WEBHOOK_URL: URL });
     expect(config.destinations[0]).not.toHaveProperty("ignoreJids");
     const group = message({
@@ -113,20 +113,22 @@ describe("WA_EVENT_WEBHOOK_IGNORE_JIDS", () => {
       isGroup: true,
       message: { ...message().message, sender: "5511999999999@s.whatsapp.net" },
     });
-    expect(shouldSendEventWebhook("message.received", group, config.destinations[0]!)).toBe(true);
+    expect(await shouldSendEventWebhook("message.received", group, config.destinations[0]!)).toBe(
+      true,
+    );
     expect(loadEventWebhookConfig({ WA_EVENT_WEBHOOK_IGNORE_JIDS: "   " }).destinations).toEqual(
       [],
     );
   });
 
-  it("drops newsletter chats for @newsletter and keeps direct chats", () => {
+  it("drops newsletter chats for @newsletter and keeps direct chats", async () => {
     const target = destination({ WA_EVENT_WEBHOOK_IGNORE_JIDS: "@newsletter" });
     const channel = message({ chatId: "120363000000000119@newsletter" });
-    expect(shouldSendEventWebhook("message.received", channel, target)).toBe(false);
-    expect(shouldSendEventWebhook("message.received", message(), target)).toBe(true);
+    expect(await shouldSendEventWebhook("message.received", channel, target)).toBe(false);
+    expect(await shouldSendEventWebhook("message.received", message(), target)).toBe(true);
   });
 
-  it("drops a prefix wildcard on the chat or the sender", () => {
+  it("drops a prefix wildcard on the chat or the sender", async () => {
     const target = destination({ WA_EVENT_WEBHOOK_IGNORE_JIDS: "5577*@s.whatsapp.net" });
     const byChat = message({
       chatId: "557712345678@s.whatsapp.net",
@@ -140,9 +142,9 @@ describe("WA_EVENT_WEBHOOK_IGNORE_JIDS", () => {
       chatId: "1557712345678@s.whatsapp.net",
       message: { ...message().message, sender: "1557712345678@s.whatsapp.net" },
     });
-    expect(shouldSendEventWebhook("message.received", byChat, target)).toBe(false);
-    expect(shouldSendEventWebhook("message.received", bySender, target)).toBe(false);
-    expect(shouldSendEventWebhook("message.received", other, target)).toBe(true);
+    expect(await shouldSendEventWebhook("message.received", byChat, target)).toBe(false);
+    expect(await shouldSendEventWebhook("message.received", bySender, target)).toBe(false);
+    expect(await shouldSendEventWebhook("message.received", other, target)).toBe(true);
     expect(() =>
       loadEventWebhookConfig({ WA_EVENT_WEBHOOK_IGNORE_JIDS: "5577*@evil.com" }),
     ).toThrow(/invalid JID wildcard/);
@@ -151,14 +153,14 @@ describe("WA_EVENT_WEBHOOK_IGNORE_JIDS", () => {
     ).toThrow(/invalid JID wildcard/);
   });
 
-  it("drops group chats for @g.us and keeps direct chats", () => {
+  it("drops group chats for @g.us and keeps direct chats", async () => {
     const target = destination({ WA_EVENT_WEBHOOK_IGNORE_JIDS: "@g.us" });
     const group = message({ chatId: "120363999000111@g.us", isGroup: true });
-    expect(shouldSendEventWebhook("message.received", group, target)).toBe(false);
-    expect(shouldSendEventWebhook("message.received", message(), target)).toBe(true);
+    expect(await shouldSendEventWebhook("message.received", group, target)).toBe(false);
+    expect(await shouldSendEventWebhook("message.received", message(), target)).toBe(true);
   });
 
-  it("drops an event when the exact sender or chat JID matches", () => {
+  it("drops an event when the exact sender or chat JID matches", async () => {
     const bySender = destination({
       WA_EVENT_WEBHOOK_IGNORE_JIDS: "628999@s.whatsapp.net",
     });
@@ -166,14 +168,14 @@ describe("WA_EVENT_WEBHOOK_IGNORE_JIDS", () => {
       chatId: "628111@s.whatsapp.net",
       message: { ...message().message, sender: "628999@s.whatsapp.net" },
     });
-    expect(shouldSendEventWebhook("message.received", payload, bySender)).toBe(false);
+    expect(await shouldSendEventWebhook("message.received", payload, bySender)).toBe(false);
 
     const byChat = destination({
       WA_EVENT_WEBHOOK_IGNORE_JIDS: "628111@s.whatsapp.net",
     });
-    expect(shouldSendEventWebhook("message.received", payload, byChat)).toBe(false);
+    expect(await shouldSendEventWebhook("message.received", payload, byChat)).toBe(false);
     expect(
-      shouldSendEventWebhook(
+      await shouldSendEventWebhook(
         "message.received",
         message({
           chatId: "628222@s.whatsapp.net",
@@ -184,7 +186,7 @@ describe("WA_EVENT_WEBHOOK_IGNORE_JIDS", () => {
     ).toBe(true);
   });
 
-  it("keeps a phone chat when @lid only matches a LID alias, and still matches an exact LID", () => {
+  it("keeps a phone chat when @lid only matches a LID alias, and still matches an exact LID", async () => {
     const payload = message({
       chatId: "628111@s.whatsapp.net",
       chatLid: "111222333@lid",
@@ -195,28 +197,28 @@ describe("WA_EVENT_WEBHOOK_IGNORE_JIDS", () => {
       },
     });
     expect(
-      shouldSendEventWebhook(
+      await shouldSendEventWebhook(
         "message.received",
         payload,
         destination({ WA_EVENT_WEBHOOK_IGNORE_JIDS: "@lid" }),
       ),
     ).toBe(true);
     expect(
-      shouldSendEventWebhook(
+      await shouldSendEventWebhook(
         "message.received",
         message({ chatId: "111222333@lid" }),
         destination({ WA_EVENT_WEBHOOK_IGNORE_JIDS: "@lid" }),
       ),
     ).toBe(false);
     expect(
-      shouldSendEventWebhook(
+      await shouldSendEventWebhook(
         "message.received",
         payload,
         destination({ WA_EVENT_WEBHOOK_IGNORE_JIDS: "111222333@lid" }),
       ),
     ).toBe(false);
     expect(
-      shouldSendEventWebhook(
+      await shouldSendEventWebhook(
         "message.received",
         payload,
         destination({ WA_EVENT_WEBHOOK_IGNORE_JIDS: "999@lid" }),
@@ -224,7 +226,7 @@ describe("WA_EVENT_WEBHOOK_IGNORE_JIDS", () => {
     ).toBe(true);
   });
 
-  it("stores a bare *@domain star as a chat-only address wildcard", () => {
+  it("stores a bare *@domain star as a chat-only address wildcard", async () => {
     expect(
       loadEventWebhookConfig({
         WA_EVENT_WEBHOOK_URL: URL,
@@ -243,14 +245,14 @@ describe("WA_EVENT_WEBHOOK_IGNORE_JIDS", () => {
       message: { ...message().message, sender: "111222333@lid" },
     });
     expect(
-      shouldSendEventWebhook(
+      await shouldSendEventWebhook(
         "message.received",
         lidGroup,
         destination({ WA_EVENT_WEBHOOK_IGNORE_JIDS: "*@lid" }),
       ),
     ).toBe(true);
     expect(
-      shouldSendEventWebhook(
+      await shouldSendEventWebhook(
         "message.received",
         message({
           chatId: "111222333@lid",
@@ -266,14 +268,14 @@ describe("WA_EVENT_WEBHOOK_IGNORE_JIDS", () => {
       message: { ...message().message, sender: "5511999999999@s.whatsapp.net" },
     });
     expect(
-      shouldSendEventWebhook(
+      await shouldSendEventWebhook(
         "message.received",
         phoneGroup,
         destination({ WA_EVENT_WEBHOOK_IGNORE_JIDS: "*@s.whatsapp.net" }),
       ),
     ).toBe(true);
     expect(
-      shouldSendEventWebhook(
+      await shouldSendEventWebhook(
         "message.received",
         message(),
         destination({ WA_EVENT_WEBHOOK_IGNORE_JIDS: "*@s.whatsapp.net" }),
@@ -281,32 +283,32 @@ describe("WA_EVENT_WEBHOOK_IGNORE_JIDS", () => {
     ).toBe(false);
   });
 
-  it("does not let @s.whatsapp.net hide a group message from a phone sender", () => {
+  it("does not let @s.whatsapp.net hide a group message from a phone sender", async () => {
     const target = destination({ WA_EVENT_WEBHOOK_IGNORE_JIDS: "@s.whatsapp.net" });
     const group = message({
       chatId: "120363999000111@g.us",
       isGroup: true,
       message: { ...message().message, sender: "5511999999999@s.whatsapp.net" },
     });
-    expect(shouldSendEventWebhook("message.received", group, target)).toBe(true);
-    expect(shouldSendEventWebhook("message.received", message(), target)).toBe(false);
+    expect(await shouldSendEventWebhook("message.received", group, target)).toBe(true);
+    expect(await shouldSendEventWebhook("message.received", message(), target)).toBe(false);
   });
 
-  it("matches exact and starred entries after lowercasing and stripping a device suffix", () => {
+  it("matches exact and starred entries after lowercasing and stripping a device suffix", async () => {
     const payload = message({
       chatId: "120363999000111@g.us",
       isGroup: true,
       message: { ...message().message, sender: "628999:14@s.whatsapp.net" },
     });
     expect(
-      shouldSendEventWebhook(
+      await shouldSendEventWebhook(
         "message.received",
         payload,
         destination({ WA_EVENT_WEBHOOK_IGNORE_JIDS: "628999@S.WhatsApp.Net" }),
       ),
     ).toBe(false);
     expect(
-      shouldSendEventWebhook(
+      await shouldSendEventWebhook(
         "message.received",
         message({
           chatId: "557712345678:3@s.whatsapp.net",
@@ -329,13 +331,15 @@ describe("WA_EVENT_WEBHOOK_IGNORE_JIDS", () => {
     ).toEqual(["@g.us", "@lid"]);
   });
 
-  it("matches a stored phone JID when the message only carries a LID", () => {
+  it("matches a stored phone JID when the message only carries a LID", async () => {
     const instanceId = "inst_lidmap01";
     const now = Date.now();
-    db.insert(instances)
+    await db
+      .insert(instances)
       .values({ id: instanceId, name: "lid map", createdAt: now, updatedAt: now })
       .run();
-    db.insert(contacts)
+    await db
+      .insert(contacts)
       .values({
         instanceId,
         jid: "5511888888888@s.whatsapp.net",
@@ -351,14 +355,14 @@ describe("WA_EVENT_WEBHOOK_IGNORE_JIDS", () => {
     });
     try {
       expect(
-        shouldSendEventWebhook(
+        await shouldSendEventWebhook(
           "message.received",
           lidOnly,
           destination({ WA_EVENT_WEBHOOK_IGNORE_JIDS: "5511888888888@s.whatsapp.net" }),
         ),
       ).toBe(false);
       expect(
-        shouldSendEventWebhook(
+        await shouldSendEventWebhook(
           "message.received",
           lidOnly,
           destination({ WA_EVENT_WEBHOOK_IGNORE_JIDS: "@s.whatsapp.net" }),
@@ -370,18 +374,18 @@ describe("WA_EVENT_WEBHOOK_IGNORE_JIDS", () => {
         message: { ...message().message, sender: "999888777@lid" },
       });
       expect(
-        shouldSendEventWebhook(
+        await shouldSendEventWebhook(
           "message.received",
           unmapped,
           destination({ WA_EVENT_WEBHOOK_IGNORE_JIDS: "5511888888888@s.whatsapp.net" }),
         ),
       ).toBe(true);
     } finally {
-      db.delete(instances).where(eq(instances.id, instanceId)).run();
+      await db.delete(instances).where(eq(instances.id, instanceId)).run();
     }
   });
 
-  it("forwards lifecycle events and events that carry no chat or sender JID", () => {
+  it("forwards lifecycle events and events that carry no chat or sender JID", async () => {
     const target = destination({ WA_EVENT_WEBHOOK_IGNORE_JIDS: "@g.us,@s.whatsapp.net,@lid" });
     const connected: ChannelEventPayload["instance.connected"] = {
       instanceId: "inst_1234abcd",
@@ -396,23 +400,23 @@ describe("WA_EVENT_WEBHOOK_IGNORE_JIDS", () => {
       WA_EVENT_WEBHOOK_EVENTS: "message.received,instance.connected",
       WA_EVENT_WEBHOOK_IGNORE_JIDS: "@g.us,@s.whatsapp.net,@lid",
     });
-    expect(shouldSendEventWebhook("instance.connected", connected, config.destinations[0]!)).toBe(
-      true,
-    );
+    expect(
+      await shouldSendEventWebhook("instance.connected", connected, config.destinations[0]!),
+    ).toBe(true);
     const label: ChannelEventPayload["label.updated"] = {
       instanceId: "inst_1234abcd",
       action: "edited",
       label: { id: "1", name: "Later", color: 1, deleted: false },
     };
     expect(
-      shouldSendEventWebhook("label.updated", label, {
+      await shouldSendEventWebhook("label.updated", label, {
         ...target,
         events: ["label.updated"],
       }),
     ).toBe(true);
   });
 
-  it("composes with the event allowlist and does not scan participant arrays", () => {
+  it("composes with the event allowlist and does not scan participant arrays", async () => {
     const target = destination({
       WA_EVENT_WEBHOOK_EVENTS: "message.received,group.participants_changed",
       WA_EVENT_WEBHOOK_IGNORE_JIDS: "@s.whatsapp.net",
@@ -423,11 +427,13 @@ describe("WA_EVENT_WEBHOOK_IGNORE_JIDS", () => {
       action: "add",
       participants: ["5511888888888@s.whatsapp.net"],
     };
-    expect(shouldSendEventWebhook("group.participants_changed", participants, target)).toBe(true);
+    expect(await shouldSendEventWebhook("group.participants_changed", participants, target)).toBe(
+      true,
+    );
     const direct = message();
-    expect(shouldSendEventWebhook("message.received", direct, target)).toBe(false);
+    expect(await shouldSendEventWebhook("message.received", direct, target)).toBe(false);
     expect(
-      shouldSendEventWebhook(
+      await shouldSendEventWebhook(
         "message.edited",
         {
           instanceId: "inst_1234abcd",
@@ -441,7 +447,7 @@ describe("WA_EVENT_WEBHOOK_IGNORE_JIDS", () => {
     ).toBe(false);
   });
 
-  it("unions a destination ignoreJids array with the global list", () => {
+  it("unions a destination ignoreJids array with the global list", async () => {
     const config = loadEventWebhookConfig({
       WA_EVENT_WEBHOOK_IGNORE_JIDS: "@g.us",
       WA_EVENT_WEBHOOKS: JSON.stringify([
@@ -457,7 +463,9 @@ describe("WA_EVENT_WEBHOOK_IGNORE_JIDS", () => {
       chatId: "5511777777777@s.whatsapp.net",
       message: { ...message().message, sender: "5511777777777@s.whatsapp.net" },
     });
-    expect(shouldSendEventWebhook("message.received", direct, config.destinations[0]!)).toBe(false);
+    expect(await shouldSendEventWebhook("message.received", direct, config.destinations[0]!)).toBe(
+      false,
+    );
   });
 
   it("rejects invalid wildcards and exact JIDs while skipping blank comma slots", () => {
@@ -502,12 +510,12 @@ describe("WA_EVENT_WEBHOOK_IGNORE_JIDS", () => {
     });
     const enqueue = vi.fn((_: EventWebhookJob) => Promise.resolve());
     const unsubscribe = registerEventWebhookHandler(instanceManager, config, enqueue);
-    handler?.(
+    await handler?.(
       "message.received",
       "inst_1234abcd",
       message({ chatId: "120363999000111@g.us", isGroup: true }),
     );
-    handler?.("message.received", "inst_1234abcd", message());
+    await handler?.("message.received", "inst_1234abcd", message());
     await Promise.resolve();
     expect(enqueue).toHaveBeenCalledTimes(1);
     expect(enqueue.mock.calls[0]?.[0].payload).toMatchObject({
@@ -520,7 +528,8 @@ describe("WA_EVENT_WEBHOOK_IGNORE_JIDS", () => {
   it("stores an ignored group message and still stores and forwards a direct chat", async () => {
     const instanceId = `ignore_jid_${randomUUID()}`;
     const now = Date.now();
-    db.insert(instances)
+    await db
+      .insert(instances)
       .values({
         id: instanceId,
         name: "Ignore JID fixture",
@@ -568,7 +577,7 @@ describe("WA_EVENT_WEBHOOK_IGNORE_JIDS", () => {
       await processEvents({
         "messages.upsert": { type: "notify", messages: [groupMessage, directMessage] },
       });
-      const stored = db
+      const stored = await db
         .select({ id: messages.id, content: messages.content })
         .from(messages)
         .where(eq(messages.instanceId, instanceId))
@@ -593,7 +602,7 @@ describe("WA_EVENT_WEBHOOK_IGNORE_JIDS", () => {
       });
       const enqueue = vi.fn((_: EventWebhookJob) => Promise.resolve());
       const unsubscribe = registerEventWebhookHandler(instanceManager, config, enqueue);
-      for (const event of received) handler?.("message.received", instanceId, event);
+      for (const event of received) await handler?.("message.received", instanceId, event);
       await Promise.resolve();
       expect(enqueue).toHaveBeenCalledTimes(1);
       expect(enqueue.mock.calls[0]?.[0].payload).toMatchObject({
@@ -602,7 +611,7 @@ describe("WA_EVENT_WEBHOOK_IGNORE_JIDS", () => {
       unsubscribe();
       await unsubscribe.flush();
     } finally {
-      db.delete(instances).where(eq(instances.id, instanceId)).run();
+      await db.delete(instances).where(eq(instances.id, instanceId)).run();
     }
   });
 

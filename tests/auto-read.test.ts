@@ -156,16 +156,16 @@ describe("automatic read receipts", () => {
 describe("BaileysAdapter.markRead", () => {
   let instanceId: string;
 
-  beforeEach(() => {
+  beforeEach(async () => {
     instanceId = `test_${randomUUID()}`;
     const now = Date.now();
-    db.insert(instances)
+    (await db.insert(instances)
       .values({ id: instanceId, name: "test", createdAt: now, updatedAt: now })
-      .run();
+      .run());
   });
 
-  afterEach(() => {
-    db.delete(instances).where(eq(instances.id, instanceId)).run();
+  afterEach(async () => {
+    (await db.delete(instances).where(eq(instances.id, instanceId)).run());
   });
 
   function connectedAdapter(): { adapter: BaileysAdapter; readMessages: ReturnType<typeof vi.fn> } {
@@ -177,7 +177,7 @@ describe("BaileysAdapter.markRead", () => {
 
   it("includes each group message participant and fromMe value from stored rows", async () => {
     const groupJid = "120363000000000000@g.us";
-    db.insert(messages)
+    (await db.insert(messages)
       .values([
         {
           id: "incoming-group",
@@ -200,7 +200,7 @@ describe("BaileysAdapter.markRead", () => {
           timestamp: 2,
         },
       ])
-      .run();
+      .run());
     const { adapter, readMessages } = connectedAdapter();
 
     await adapter.markRead(groupJid, ["incoming-group", "outgoing-group"]);
@@ -228,7 +228,7 @@ describe("BaileysAdapter.markRead", () => {
       const messageId = "incoming-status";
       const senderId = "5511888888888@s.whatsapp.net";
       const rawParticipant = "9000000000001@lid";
-      db.insert(messages)
+      (await db.insert(messages)
         .values({
           id: messageId,
           instanceId,
@@ -250,7 +250,7 @@ describe("BaileysAdapter.markRead", () => {
               })
             : null,
         })
-        .run();
+        .run());
       const { adapter, readMessages } = connectedAdapter();
 
       await adapter.markRead(chatId, [messageId]);
@@ -295,7 +295,7 @@ describe("BaileysAdapter.markRead", () => {
 
   it("uses stored group senders before the supplied participant fallback", async () => {
     const groupJid = "120363000000000000@g.us";
-    db.insert(messages)
+    (await db.insert(messages)
       .values([
         {
           id: "stored-group-one",
@@ -318,7 +318,7 @@ describe("BaileysAdapter.markRead", () => {
           timestamp: 2,
         },
       ])
-      .run();
+      .run());
     const { adapter, readMessages } = connectedAdapter();
 
     await adapter.markRead(

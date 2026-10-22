@@ -25,6 +25,7 @@ services:
       - WA_LOG_LEVEL=info
       - WA_MESSAGE_RETENTION_DAYS=30
       - WA_DATABASE_PATH=${WA_DATABASE_PATH:-data/whatsapp.db}
+      - WA_DATABASE_URL=${WA_DATABASE_URL:-}
       - WA_BAILEYS_HISTORY_SYNC_MAX_MESSAGES=${WA_BAILEYS_HISTORY_SYNC_MAX_MESSAGES:-100}
       - WA_BAILEYS_RATE_LIMIT=20
       - WA_PROXY_URL=${WA_PROXY_URL:-}
@@ -87,7 +88,11 @@ services:
     volumes:
       - ${WA_DATA_DIR:-wa-data}:/app/data
     depends_on:
-      - redis
+      redis:
+        condition: service_started
+      postgres:
+        condition: service_healthy
+        required: false
 
   redis:
     image: redis:7-alpine
@@ -99,6 +104,25 @@ services:
       - redis-data:/data
     command: redis-server --appendonly yes
 
+  # Opt-in only. `docker compose up` does not start Postgres or move the SQLite file.
+  postgres:
+    image: postgres:16-alpine
+    profiles: ["postgres"]
+    container_name: wa-mcp-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-wamcp}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-}
+      POSTGRES_DB: ${POSTGRES_DB:-wamcp}
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\""]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    volumes:
+      - wa-pg-data:/var/lib/postgresql/data
+
 volumes:
   wa-data:
   redis-data:
+  wa-pg-data:

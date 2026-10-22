@@ -54,8 +54,8 @@ export interface ChatwootRuntime {
     content: MessageContent,
     channel?: ChannelType,
   ): Promise<{ status: "queued"; jobId: string }>;
-  getInstanceChannel(id: string): ChannelType;
-  listInstanceIds(): string[];
+  getInstanceChannel(id: string): ChannelType | Promise<ChannelType>;
+  listInstanceIds(): string[] | Promise<string[]>;
 }
 
 export interface ChatwootDownloadedAttachment {
@@ -682,7 +682,7 @@ export class ChatwootService {
     if (decision.action === "ignore") {
       return { status: 200, body: { status: "ignored", reason: decision.reason } };
     }
-    const claimed = this.claimReply(this.config, decision.parsed);
+    const claimed = await this.claimReply(this.config, decision.parsed);
     if (claimed.action === "reject") {
       if (deliveryId && claimed.result.status >= 400) this.forgetDelivery(deliveryId);
       return claimed.result;
@@ -692,12 +692,13 @@ export class ChatwootService {
   }
 
   /** Synchronous gate. The Chatwoot message id is reserved before any await. */
-  private claimReply(
+  private async claimReply(
     config: EnabledChatwootConfig,
     parsed: ParsedChatwootWebhook,
-  ):
+  ): Promise<
     | { action: "reject"; result: ChatwootWebhookResult }
-    | { action: "accept"; destination: { instanceId: string; chatId: string } } {
+    | { action: "accept"; destination: { instanceId: string; chatId: string } }
+  > {
     if (parsed.privateNote || parsed.deleted || parsed.sourceId.startsWith("WAID:")) {
       return {
         action: "reject",
@@ -732,7 +733,7 @@ export class ChatwootService {
       };
     }
 
-    const destination = this.resolveDestination(config, parsed);
+    const destination = await this.resolveDestination(config, parsed);
     if (!destination) {
       this.forgetNumber(parsed.id);
       return {
@@ -743,7 +744,7 @@ export class ChatwootService {
         },
       };
     }
-    if (!this.runtime.listInstanceIds().includes(destination.instanceId)) {
+    if (!(await this.runtime.listInstanceIds()).includes(destination.instanceId)) {
       this.forgetNumber(parsed.id);
       return {
         action: "reject",
@@ -799,7 +800,7 @@ export class ChatwootService {
         );
         return;
       }
-      const channel = this.runtime.getInstanceChannel(destination.instanceId);
+      const channel = await this.runtime.getInstanceChannel(destination.instanceId);
       for (const content of built.contents) {
         await this.runtime.enqueueMessage(
           destination.instanceId,
@@ -857,14 +858,14 @@ export class ChatwootService {
     if (deliveryId) this.forgetDelivery(deliveryId);
   }
 
-  private resolveDestination(
+  private async resolveDestination(
     config: EnabledChatwootConfig,
     parsed: ParsedChatwootWebhook,
-  ): { instanceId: string; chatId: string } | null {
+  ): Promise<{ instanceId: string; chatId: string } | null> {
     const fromSource = parseChatwootSourceId(parsed.sourceChatId, config.instanceId);
     const chatId = fromSource.chatId;
     if (!chatId) return null;
-    const instanceId = [fromSource.instanceId, config.instanceId, this.onlyInstanceId()].find(
+    const instanceId = [fromSource.instanceId, config.instanceId, await this.onlyInstanceId()].find(
       (candidate): candidate is string => candidate !== undefined && isValidInstanceId(candidate),
     );
     if (!instanceId) return null;
@@ -872,8 +873,8 @@ export class ChatwootService {
     return { instanceId, chatId };
   }
 
-  private onlyInstanceId(): string | undefined {
-    const ids = this.runtime.listInstanceIds();
+  private async onlyInstanceId(): Promise<string | undefined> {
+    const ids = await this.runtime.listInstanceIds();
     return ids.length === 1 ? ids[0] : undefined;
   }
 

@@ -56,20 +56,20 @@ describe("scheduled message table upgrade", () => {
     expect(SCHEDULED_MESSAGES_INDEX_DDL).not.toMatch(/CREATE INDEX idx_scheduled_messages_due\b/);
   });
 
-  it("adds seq before creating the due index on a table from before seq", () => {
+  it("adds seq before creating the due index on a table from before seq", async () => {
     const early = new Database(":memory:");
     early.exec(LEGACY_DDL);
     expect(() => early.exec(SCHEDULED_MESSAGES_INDEX_DDL)).toThrow(/no such column: seq/);
     early.close();
 
     const sqlite = new Database(":memory:");
-    sqlite.exec(LEGACY_DDL);
+    (await sqlite.exec(LEGACY_DDL));
     createScheduledMessagesTable(sqlite);
-    const columns = sqlite.prepare(`PRAGMA table_info(scheduled_messages)`).all() as Array<{
+    const columns = (await sqlite.prepare(`PRAGMA table_info(scheduled_messages)`).all()) as Array<{
       name: string;
     }>;
     expect(columns.map((column) => column.name)).toContain("seq");
-    const indexes = sqlite.prepare(`PRAGMA index_list(scheduled_messages)`).all() as Array<{
+    const indexes = (await sqlite.prepare(`PRAGMA index_list(scheduled_messages)`).all()) as Array<{
       name: string;
     }>;
     const names = indexes.map((index) => index.name);
@@ -79,10 +79,10 @@ describe("scheduled message table upgrade", () => {
     expect(() => sqlite.exec(SCHEDULED_MESSAGES_UPGRADE_SQL)).toThrow(/duplicate column name: seq/);
     expect(() => createScheduledMessagesTable(sqlite)).not.toThrow();
 
-    sqlite.prepare(`INSERT INTO instances (id) VALUES ('inst-legacy')`).run();
+    (await sqlite.prepare(`INSERT INTO instances (id) VALUES ('inst-legacy')`).run());
     const store = new ScheduleStore(sqlite);
     const now = 1_800_000_000_000;
-    const stored = store.insert({
+    const stored = (await store.insert({
       id: "sched-legacy",
       instanceId: "inst-legacy",
       recipient: "5500000000001@s.whatsapp.net",
@@ -97,11 +97,11 @@ describe("scheduled message table upgrade", () => {
       endAt: null,
       occurrenceLimit: null,
       now,
-    });
+    }));
     expect(stored.nextRunAt).toBe(now);
-    const claimed = store.claimNext(now, now + 1_000, "lease-legacy");
+    const claimed = (await store.claimNext(now, now + 1_000, "lease-legacy"));
     expect(claimed?.id).toBe("sched-legacy");
-    expect(store.claimNext(now, now + 1_000, "lease-again")).toBeNull();
-    sqlite.close();
+    expect((await store.claimNext(now, now + 1_000, "lease-again"))).toBeNull();
+    (await sqlite.close());
   });
 });

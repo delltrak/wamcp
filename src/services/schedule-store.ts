@@ -2,8 +2,11 @@
 // WA MCP — SQLite persistence for scheduled sends
 // ============================================================
 
+import type { SqlDatabase } from "../db/client.js";
 import type Database from "better-sqlite3";
 import { createScheduledMessagesTable } from "../db/scheduled-messages.js";
+export type ScheduleDatabase = SqlDatabase | Database.Database;
+
 import type { Recurrence } from "./schedule-clock.js";
 
 export type ScheduleStatus =
@@ -35,7 +38,7 @@ export interface ScheduleRecord {
   updatedAt: number;
 }
 
-interface ScheduleRow {
+interface ScheduleRow extends Record<string, unknown> {
   id: string;
   instance_id: string;
   recipient: string;
@@ -95,17 +98,43 @@ export interface FinishScheduleUpdate {
 /** Sync result, or a promise from a Postgres store. The worker awaits these. */
 export type Awaitable<T> = T | Promise<T>;
 
+const nativeCreates = new WeakMap<object, Promise<unknown>>();
+
 export class ScheduleStore {
   constructor(
-    private readonly sqlite: Database.Database,
+    private readonly sqlite: ScheduleDatabase,
     private readonly dialect: ScheduleSqlDialect = "sqlite",
   ) {
-    createScheduledMessagesTable(sqlite);
+    if ("pragma" in sqlite) createScheduledMessagesTable(sqlite);
   }
 
-  insert(row: NewScheduleRow): ScheduleRecord {
+  async insertWithinLimit(row: NewScheduleRow, maxActive: number): Promise<ScheduleRecord> {
+    const insert = async () => {
+      if (this.dialect === "postgres") {
+        await this.sqlite
+          .prepare("SELECT id FROM instances WHERE id = ? FOR UPDATE")
+          .get(row.instanceId);
+      }
+      if ((await this.countOccupying(row.instanceId)) >= maxActive) {
+        throw new Error(
+          `Invalid schedule; this instance already has the maximum of ${maxActive} active schedules`,
+        );
+      }
+      return this.insert(row);
+    };
+    if (!("pragma" in this.sqlite)) {
+      return (await this.sqlite.transaction(insert)()) as ScheduleRecord;
+    }
+    // Native in-memory callers have no I/O between statements; serialize their async wrappers.
+    const previous = nativeCreates.get(this.sqlite) ?? Promise.resolve();
+    const next = previous.catch(() => undefined).then(insert);
+    nativeCreates.set(this.sqlite, next);
+    return next;
+  }
+
+  async insert(row: NewScheduleRow): Promise<ScheduleRecord> {
     const weekdaysJson = row.weekdays.length > 0 ? JSON.stringify(row.weekdays) : null;
-    this.sqlite
+    await this.sqlite
       .prepare(insertScheduleSql())
       .run(
         row.id,
@@ -125,42 +154,42 @@ export class ScheduleStore {
         row.now,
         nextScheduleSeq(),
       );
-    const stored = this.get(row.instanceId, row.id);
+    const stored = await this.get(row.instanceId, row.id);
     if (!stored) throw new Error("Invalid scheduled send; it could not be stored");
     return stored;
   }
 
-  get(instanceId: string, id: string): ScheduleRecord | null {
-    const row = this.sqlite
+  async get(instanceId: string, id: string): Promise<ScheduleRecord | null> {
+    const row = (await this.sqlite
       .prepare(`SELECT * FROM scheduled_messages WHERE instance_id = ? AND id = ?`)
-      .get(instanceId, id) as ScheduleRow | undefined;
+      .get(instanceId, id)) as ScheduleRow | undefined;
     return row ? mapRow(row) : null;
   }
 
-  list(
+  async list(
     instanceId: string,
     status: ScheduleStatus | null,
     limit: number,
     offset: number,
-  ): { rows: ScheduleRecord[]; total: number } {
+  ): Promise<{ rows: ScheduleRecord[]; total: number }> {
     const statusParams = status === null ? [] : [status];
-    const totalRow = this.sqlite
+    const totalRow = (await this.sqlite
       .prepare(listScheduleCountSql(status))
-      .get(instanceId, ...statusParams) as { total: number };
-    const rows = this.sqlite
+      .get(instanceId, ...statusParams)) as { total: number };
+    const rows = (await this.sqlite
       .prepare(listScheduleRowsSql(status))
-      .all(instanceId, ...statusParams, limit, offset) as ScheduleRow[];
+      .all(instanceId, ...statusParams, limit, offset)) as ScheduleRow[];
     return { rows: rows.map(mapRow), total: totalRow.total };
   }
 
   /** Active, paused, and running rows. Terminal rows do not occupy a slot. */
-  countOccupying(instanceId: string): number {
-    const row = this.sqlite
+  async countOccupying(instanceId: string): Promise<number> {
+    const row = (await this.sqlite
       .prepare(
         `SELECT COUNT(*) AS total FROM scheduled_messages
          WHERE instance_id = ? AND status IN ('active', 'paused', 'running')`,
       )
-      .get(instanceId) as { total: number };
+      .get(instanceId)) as { total: number };
     return row.total;
   }
 
@@ -168,41 +197,43 @@ export class ScheduleStore {
    * Move one due active row to running. Returns null when nothing is due.
    * `excludeInstanceIds` skips instances that already used their send budget this tick.
    */
-  claimNext(
+  async claimNext(
     now: number,
     leaseUntil: number,
     token: string,
     excludeInstanceIds: readonly string[] = [],
-  ): Awaitable<ScheduleRecord | null> {
+  ): Promise<ScheduleRecord | null> {
     const params: Array<string | number> = [token, leaseUntil, now, now];
     if (excludeInstanceIds.length > 0) params.push(...excludeInstanceIds);
-    const row = this.sqlite
+    const row = (await this.sqlite
       .prepare(claimNextScheduleSql(excludeInstanceIds.length, this.dialect))
-      .get(...params) as ScheduleRow | undefined;
+      .get(...params)) as ScheduleRow | undefined;
     return row ? mapRow(row) : null;
   }
 
   /** Put a claimed row back to active. `nextRunAt` is the due time to keep. */
-  release(
+  async release(
     id: string,
     leaseToken: string | null,
     now: number,
     nextRunAt: number,
-  ): Awaitable<boolean> {
-    const result = this.sqlite.prepare(releaseScheduleSql()).run(nextRunAt, now, id, leaseToken);
+  ): Promise<boolean> {
+    const result = await this.sqlite
+      .prepare(releaseScheduleSql())
+      .run(nextRunAt, now, id, leaseToken);
     return result.changes > 0;
   }
 
-  listRunning(): Awaitable<ScheduleRecord[]> {
-    const rows = this.sqlite
+  async listRunning(): Promise<ScheduleRecord[]> {
+    const rows = (await this.sqlite
       .prepare("SELECT * FROM scheduled_messages WHERE status = 'running'")
-      .all() as ScheduleRow[];
+      .all()) as ScheduleRow[];
     return rows.map(mapRow);
   }
 
   /** Persist the outbound identity before Redis can accept the job. */
-  setJobId(id: string, leaseToken: string | null, jobId: string): Awaitable<boolean> {
-    const result = this.sqlite
+  async setJobId(id: string, leaseToken: string | null, jobId: string): Promise<boolean> {
+    const result = await this.sqlite
       .prepare(
         "UPDATE scheduled_messages SET last_job_id = ? WHERE id = ? AND status = 'running' AND lease_token = ?",
       )
@@ -210,15 +241,15 @@ export class ScheduleStore {
     return result.changes > 0;
   }
 
-  setStatus(
+  async setStatus(
     instanceId: string,
     id: string,
     from: ScheduleStatus[],
     status: ScheduleStatus,
     now: number,
-  ): boolean {
+  ): Promise<boolean> {
     const placeholders = from.map(() => "?").join(", ");
-    const result = this.sqlite
+    const result = await this.sqlite
       .prepare(
         `UPDATE scheduled_messages
          SET status = ?, lease_token = NULL, lease_until = NULL, updated_at = ?
@@ -228,8 +259,8 @@ export class ScheduleStore {
     return result.changes > 0;
   }
 
-  finish(update: FinishScheduleUpdate): Awaitable<boolean> {
-    const result = this.sqlite
+  async finish(update: FinishScheduleUpdate): Promise<boolean> {
+    const result = await this.sqlite
       .prepare(finishScheduleSql())
       .run(
         update.status,
@@ -246,15 +277,15 @@ export class ScheduleStore {
     return result.changes > 0;
   }
 
-  retry(
+  async retry(
     id: string,
     leaseToken: string | null,
     nextRunAt: number,
     attempts: number,
     lastError: string,
     now: number,
-  ): Awaitable<boolean> {
-    const result = this.sqlite
+  ): Promise<boolean> {
+    const result = await this.sqlite
       .prepare(retryScheduleSql())
       .run(nextRunAt, attempts, lastError, now, id, leaseToken);
     return result.changes > 0;

@@ -1,4 +1,4 @@
-import { db } from "../db/client.js";
+import { sqlite } from "../db/client.js";
 import { CHANNEL_EVENTS, type ChannelEvent } from "../types/channel.types.js";
 import { createChildLogger } from "../utils/logger.js";
 
@@ -29,7 +29,7 @@ export interface InstanceWebhookRow {
   updatedAt: number;
 }
 
-interface RawInstanceWebhook {
+interface RawInstanceWebhook extends Record<string, unknown> {
   instance_id: string;
   url: string;
   auth_header: string | null;
@@ -79,12 +79,8 @@ function toRow(record: RawInstanceWebhook): InstanceWebhookRow {
   };
 }
 
-function sqlite() {
-  return db.$client;
-}
-
-export function listInstanceWebhooks(): InstanceWebhookRow[] {
-  const records = sqlite().prepare(INSTANCE_WEBHOOK_SQL.list).all() as RawInstanceWebhook[];
+export async function listInstanceWebhooks(): Promise<InstanceWebhookRow[]> {
+  const records = (await sqlite.prepare(INSTANCE_WEBHOOK_SQL.list).all()) as RawInstanceWebhook[];
   const rows: InstanceWebhookRow[] = [];
   for (const record of records) {
     try {
@@ -103,8 +99,10 @@ export class InvalidStoredInstanceWebhookError extends Error {
   }
 }
 
-export function getInstanceWebhook(instanceId: string): InstanceWebhookRow | undefined {
-  const record = sqlite().prepare(INSTANCE_WEBHOOK_SQL.get).get(instanceId) as
+export async function getInstanceWebhook(
+  instanceId: string,
+): Promise<InstanceWebhookRow | undefined> {
+  const record = (await sqlite.prepare(INSTANCE_WEBHOOK_SQL.get).get(instanceId)) as
     RawInstanceWebhook | undefined;
   if (!record) return undefined;
   try {
@@ -115,16 +113,16 @@ export function getInstanceWebhook(instanceId: string): InstanceWebhookRow | und
   }
 }
 
-export function upsertInstanceWebhook(row: InstanceWebhookRow): void {
+export async function upsertInstanceWebhook(row: InstanceWebhookRow): Promise<void> {
   const events = row.events === null ? null : JSON.stringify(row.events);
-  sqlite()
+  await sqlite
     .prepare(INSTANCE_WEBHOOK_SQL.upsert)
     .run(row.instanceId, row.url, row.authHeader, row.authValue, events, row.updatedAt);
   touchInstanceWebhookStorage();
 }
 
-export function deleteInstanceWebhook(instanceId: string): boolean {
-  const result = sqlite().prepare(INSTANCE_WEBHOOK_SQL.delete).run(instanceId);
+export async function deleteInstanceWebhook(instanceId: string): Promise<boolean> {
+  const result = await sqlite.prepare(INSTANCE_WEBHOOK_SQL.delete).run(instanceId);
   touchInstanceWebhookStorage();
   return result.changes > 0;
 }

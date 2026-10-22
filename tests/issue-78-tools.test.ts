@@ -153,9 +153,9 @@ describe("issue 78 messaging and group features", () => {
     process.env.WA_APP_STATE_WRITES_ENABLED = "true";
   });
 
-  afterEach(() => {
+  afterEach(async () => {
     for (const instanceId of activeInstanceIds) {
-      sqlite.prepare("DELETE FROM instances WHERE id = ?").run(instanceId);
+      (await sqlite.prepare("DELETE FROM instances WHERE id = ?").run(instanceId));
     }
     activeInstanceIds.clear();
     vi.restoreAllMocks();
@@ -163,14 +163,14 @@ describe("issue 78 messaging and group features", () => {
     else process.env.WA_APP_STATE_WRITES_ENABLED = initialAppStateWritesEnabled;
   });
 
-  function createFixture(extraSocket: Record<string, unknown> = {}) {
+  async function createFixture(extraSocket: Record<string, unknown> = {}) {
     const instanceId = `issue-78-${randomUUID()}`;
     activeInstanceIds.add(instanceId);
-    sqlite
+    (await sqlite
       .prepare(
         "INSERT INTO instances (id, name, channel, status, created_at, updated_at) VALUES (?, ?, 'baileys', 'connected', 1, 1)",
       )
-      .run(instanceId, "Issue 78 simulated instance");
+      .run(instanceId, "Issue 78 simulated instance"));
 
     let processEvents: ((events: Partial<BaileysEventMap>) => Promise<void> | void) | undefined;
     const socket = {
@@ -233,7 +233,7 @@ describe("issue 78 messaging and group features", () => {
     } as unknown as InstanceManager;
     const queue = {
       enqueueMessage: async (_id: string, to: string, content: MessageContent) =>
-        adapter.sendMessage(to, content),
+        (await adapter.sendMessage(to, content)),
     } as unknown as MessageQueue;
     registerMessagingTools(server, instanceManager, queue);
     registerGroupTools(server, instanceManager, queue);
@@ -258,7 +258,7 @@ describe("issue 78 messaging and group features", () => {
   }
 
   it("decrypts poll votes when the stored poll secret uses legacy base64", async () => {
-    const { instanceId, invoke, processEvents } = createFixture();
+    const { instanceId, invoke, processEvents } = (await createFixture());
     const secret = Buffer.alloc(32, 0x77);
     const pollMessageId = "stored-poll-78";
     const pollMessage: WAMessage = {
@@ -275,9 +275,9 @@ describe("issue 78 messaging and group features", () => {
     } as WAMessage;
     await processEvents({ "messages.upsert": { type: "notify", messages: [pollMessage] } });
 
-    const savedPoll = sqlite
+    const savedPoll = (await sqlite
       .prepare("SELECT raw_data FROM messages WHERE instance_id = ? AND id = ?")
-      .get(instanceId, pollMessageId) as { raw_data: string };
+      .get(instanceId, pollMessageId)) as { raw_data: string };
     expect(JSON.parse(savedPoll.raw_data, (key, value) => value)).toMatchObject({
       message: { messageContextInfo: expect.any(Object) },
     });
@@ -285,9 +285,9 @@ describe("issue 78 messaging and group features", () => {
       message: { messageContextInfo: { messageSecret: unknown } };
     };
     legacyPoll.message.messageContextInfo.messageSecret = secret.toString("base64");
-    sqlite
+    (await sqlite
       .prepare("UPDATE messages SET raw_data = ? WHERE instance_id = ? AND id = ?")
-      .run(JSON.stringify(legacyPoll), instanceId, pollMessageId);
+      .run(JSON.stringify(legacyPoll), instanceId, pollMessageId));
 
     const pollCreationMessageKey = {
       remoteJid: GROUP_ID,
@@ -318,14 +318,14 @@ describe("issue 78 messaging and group features", () => {
       { name: "Pizza", count: 0, voters: [] },
       { name: "Sushi", count: 1, voters: [VOTER] },
     ]);
-    const savedVotes = sqlite
+    const savedVotes = (await sqlite
       .prepare("SELECT raw_data FROM messages WHERE instance_id = ? AND id = ?")
-      .get(instanceId, pollMessageId) as { raw_data: string };
+      .get(instanceId, pollMessageId)) as { raw_data: string };
     expect(savedVotes.raw_data).toContain("pollUpdates");
   });
 
   it("decrypts history-fetched poll votes and retries votes that arrive before their poll", async () => {
-    const { instanceId, invoke, processEvents } = createFixture();
+    const { instanceId, invoke, processEvents } = (await createFixture());
     const secret = Buffer.alloc(32, 0x78);
     const pollMessageId = "history-poll-vote-78";
     const pollCreationMessageKey = {
@@ -388,14 +388,14 @@ describe("issue 78 messaging and group features", () => {
       { name: "Sushi", count: 1, voters: [VOTER] },
     ]);
     expect(
-      sqlite
+      (await sqlite
         .prepare("SELECT COUNT(*) AS count FROM pending_poll_votes WHERE instance_id = ?")
-        .get(instanceId),
+        .get(instanceId)),
     ).toMatchObject({ count: 0 });
   });
 
   it("sends single-select polls with their message secret stored", async () => {
-    const { instanceId, socket, invoke } = createFixture();
+    const { instanceId, socket, invoke } = (await createFixture());
     const response = await invoke("wa_send_poll", {
       to: GROUP_ID,
       question: "Lunch?",
@@ -406,9 +406,9 @@ describe("issue 78 messaging and group features", () => {
     expect(call?.[1]).toMatchObject({
       poll: { name: "Lunch?", values: ["A", "B"], selectableCount: 1 },
     });
-    const saved = sqlite
+    const saved = (await sqlite
       .prepare("SELECT raw_data FROM messages WHERE instance_id = ? AND id = ?")
-      .get(instanceId, sent.messageId) as { raw_data: string };
+      .get(instanceId, sent.messageId)) as { raw_data: string };
     expect(saved.raw_data).toContain("messageSecret");
   });
 
@@ -426,7 +426,7 @@ describe("issue 78 messaging and group features", () => {
       [SECOND_VOTER_LID, SECOND_VOTER],
     ]);
     const pnToLid = new Map([...lidToPn].map(([lid, pn]) => [pn, lid]));
-    const { instanceId, invoke, processEvents } = createFixture({
+    const { instanceId, invoke, processEvents } = (await createFixture({
       user: { id: ACCOUNT_ID, lid: ACCOUNT_LID },
       signalRepository: {
         lidMapping: {
@@ -435,7 +435,7 @@ describe("issue 78 messaging and group features", () => {
         },
       },
       sendMessage,
-    });
+    }));
 
     const sent = await invoke("wa_send_poll", {
       to: GROUP_ID,
@@ -444,9 +444,9 @@ describe("issue 78 messaging and group features", () => {
     });
     const sentResult = JSON.parse(sent.content[0]?.text ?? "{}") as { messageId: string };
     expect(sentResult.messageId).toBe(pollMessageId);
-    const storedPollRow = sqlite
+    const storedPollRow = (await sqlite
       .prepare("SELECT type, raw_data FROM messages WHERE instance_id = ? AND id = ?")
-      .get(instanceId, pollMessageId) as { type: string; raw_data: string };
+      .get(instanceId, pollMessageId)) as { type: string; raw_data: string };
     expect(storedPollRow.type).toBe("poll");
     const storedPoll = JSON.parse(storedPollRow.raw_data, BufferJSON.reviver) as WAMessage;
     const messageSecret = storedPoll.message?.messageContextInfo?.messageSecret;
@@ -567,7 +567,7 @@ describe("issue 78 messaging and group features", () => {
         messageId: pollMessageId,
       }),
     );
-    const { instanceId, invoke, processEvents } = createFixture({
+    const { instanceId, invoke, processEvents } = (await createFixture({
       user: { id: ACCOUNT_ID, lid: ACCOUNT_LID },
       signalRepository: {
         lidMapping: {
@@ -582,16 +582,16 @@ describe("issue 78 messaging and group features", () => {
         },
       },
       sendMessage,
-    });
+    }));
 
     await invoke("wa_send_poll", {
       to: GROUP_ID,
       question: "Retry?",
       options: ["Yes", "No"],
     });
-    const stored = sqlite
+    const stored = (await sqlite
       .prepare("SELECT raw_data FROM messages WHERE instance_id = ? AND id = ?")
-      .get(instanceId, pollMessageId) as { raw_data: string };
+      .get(instanceId, pollMessageId)) as { raw_data: string };
     const poll = JSON.parse(stored.raw_data, BufferJSON.reviver) as WAMessage;
     const messageSecret = poll.message?.messageContextInfo?.messageSecret;
     expect(messageSecret).toBeInstanceOf(Uint8Array);
@@ -619,9 +619,9 @@ describe("issue 78 messaging and group features", () => {
     } as WAMessage;
     await processEvents({ "messages.upsert": { type: "notify", messages: [voteMessage] } });
     expect(
-      sqlite
+      (await sqlite
         .prepare("SELECT COUNT(*) AS count FROM pending_poll_votes WHERE instance_id = ?")
-        .get(instanceId),
+        .get(instanceId)),
     ).toMatchObject({ count: 1 });
 
     voterMappingAvailable = true;
@@ -639,14 +639,14 @@ describe("issue 78 messaging and group features", () => {
       { name: "No", count: 0, voters: [] },
     ]);
     expect(
-      sqlite
+      (await sqlite
         .prepare("SELECT COUNT(*) AS count FROM pending_poll_votes WHERE instance_id = ?")
-        .get(instanceId),
+        .get(instanceId)),
     ).toMatchObject({ count: 0 });
   });
 
   it("sends view-once audio and live locations through normal message sends", async () => {
-    const { socket, invoke } = createFixture();
+    const { socket, invoke } = (await createFixture());
     const oggOpus = oggOpusFixture();
     await invoke("wa_send_view_once", {
       to: "5511999999999",
@@ -723,7 +723,7 @@ describe("issue 78 messaging and group features", () => {
   });
 
   it("uses detected MP3 and M4A MIME types for view-once audio", async () => {
-    const { socket, invoke } = createFixture();
+    const { socket, invoke } = (await createFixture());
     const mp3 = Buffer.from("ID3\x04\x00\x00\x00\x00\x00\x00MP3 fixture", "binary");
     await invoke("wa_send_view_once", {
       to: "5511999999999",
@@ -755,14 +755,14 @@ describe("issue 78 messaging and group features", () => {
   });
 
   it("rejects view-once audio with unknown or unsupported formats", async () => {
-    const { adapter } = createFixture();
+    const { adapter } = (await createFixture());
     await expect(
       adapter.sendViewOnce("5511999999999", Buffer.from("not audio").toString("base64"), "audio"),
     ).rejects.toThrow("Unsupported or unknown view-once audio format");
   });
 
   it("sends one or more contacts as vCards", async () => {
-    const { socket, invoke } = createFixture();
+    const { socket, invoke } = (await createFixture());
     await invoke("wa_send_contact", {
       to: GROUP_ID,
       contacts: [
@@ -781,7 +781,7 @@ describe("issue 78 messaging and group features", () => {
   });
 
   it("keeps edit, delete-for-everyone, and pin operations on message protocol calls", async () => {
-    const { instanceId, socket, invoke } = createFixture();
+    const { instanceId, socket, invoke } = (await createFixture());
     await invoke("wa_edit_message", {
       chatId: GROUP_ID,
       messageId: "editable-message",
@@ -792,11 +792,11 @@ describe("issue 78 messaging and group features", () => {
       edit: { remoteJid: GROUP_ID, id: "editable-message", fromMe: true },
     });
 
-    sqlite
+    (await sqlite
       .prepare(
         "INSERT INTO messages (id, instance_id, chat_id, sender_id, type, is_from_me, status, timestamp) VALUES (?, ?, ?, 'me', 'text', 1, 'sent', 1)",
       )
-      .run("deletable-message", instanceId, GROUP_ID);
+      .run("deletable-message", instanceId, GROUP_ID));
     await invoke("wa_delete_message", {
       chatId: GROUP_ID,
       messageId: "deletable-message",
@@ -821,7 +821,7 @@ describe("issue 78 messaging and group features", () => {
   });
 
   it("accepts invite links and exposes read-only group invite/request helpers", async () => {
-    const { adapter, socket, invoke } = createFixture();
+    const { adapter, socket, invoke } = (await createFixture());
     const created = await invoke("wa_create_group", {
       name: "Planning group",
       participants: [CONTACT_ID],
@@ -870,7 +870,7 @@ describe("issue 78 messaging and group features", () => {
   });
 
   it("sets announcement and locked group modes with their matching Baileys values", async () => {
-    const { adapter, socket } = createFixture();
+    const { adapter, socket } = (await createFixture());
     await adapter.modifyGroup(GROUP_ID, { action: "updateSettings", value: "announcement" });
     await adapter.modifyGroup(GROUP_ID, { action: "updateSettings", value: "locked" });
     expect(socket.groupSettingUpdate).toHaveBeenNthCalledWith(1, GROUP_ID, "announcement");
@@ -881,7 +881,7 @@ describe("issue 78 messaging and group features", () => {
   });
 
   it("covers participant roles and group metadata and picture changes", async () => {
-    const { socket, invoke } = createFixture();
+    const { socket, invoke } = (await createFixture());
     await invoke("wa_group_add_participants", { groupId: GROUP_ID, participants: [CONTACT_ID] });
     await invoke("wa_group_remove_participants", { groupId: GROUP_ID, participants: [CONTACT_ID] });
     await invoke("wa_group_promote", { groupId: GROUP_ID, participants: [CONTACT_ID] });
@@ -932,7 +932,7 @@ describe("issue 78 messaging and group features", () => {
   });
 
   it("keeps all new tools away from chatModify and appPatch", async () => {
-    const { adapter, socket, invoke } = createFixture();
+    const { adapter, socket, invoke } = (await createFixture());
     const poll = await adapter.sendMessage(GROUP_ID, {
       type: "poll",
       question: "New tools?",

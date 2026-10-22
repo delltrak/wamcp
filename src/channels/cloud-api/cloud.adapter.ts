@@ -242,11 +242,11 @@ export class CloudApiAdapter implements ChannelAdapter {
       this.displayPhoneNumber = phoneInfo.display_phone_number;
       logger.info({ instanceId: this.instanceId }, "Cloud API connected");
 
-      this.emit("connection.changed", {
+      await this.emit("connection.changed", {
         instanceId: this.instanceId,
         status: "open",
       });
-      this.emit("instance.connected", {
+      await this.emit("instance.connected", {
         instanceId: this.instanceId,
         phone: this.displayPhoneNumber,
         lid: null,
@@ -266,7 +266,7 @@ export class CloudApiAdapter implements ChannelAdapter {
     this.lastDisconnectAt = Date.now();
     logger.info({ instanceId: this.instanceId }, "Cloud API disconnected");
 
-    this.emit("instance.disconnected", {
+    await this.emit("instance.disconnected", {
       instanceId: this.instanceId,
       reason: "Disconnected",
       statusCode: null,
@@ -275,7 +275,7 @@ export class CloudApiAdapter implements ChannelAdapter {
       disconnectedAt: this.lastDisconnectAt,
     });
 
-    this.emit("connection.changed", {
+    await this.emit("connection.changed", {
       instanceId: this.instanceId,
       status: "close",
     });
@@ -1218,7 +1218,7 @@ export class CloudApiAdapter implements ChannelAdapter {
   async searchMessages(
     options: MessageSearchOptions,
   ): Promise<{ messages: Message[]; hasMore: boolean; nextOffset: number | null }> {
-    return searchStoredMessages(sqlite, this.instanceId, options);
+    return await searchStoredMessages(sqlite, this.instanceId, options);
   }
 
   async fetchMessageHistory(
@@ -1350,7 +1350,7 @@ export class CloudApiAdapter implements ChannelAdapter {
     maxBytes?: number,
     timeoutMs?: number,
   ): Promise<{ data: Buffer; mimeType: string }> {
-    const row = db
+    const row = await db
       .select({
         type: messagesTable.type,
         mediaUrl: messagesTable.mediaUrl,
@@ -1379,7 +1379,7 @@ export class CloudApiAdapter implements ChannelAdapter {
           eq(messagesTable.chatId, chatId),
         )
       : and(eq(messagesTable.instanceId, this.instanceId), eq(messagesTable.id, messageId));
-    const row = db
+    const row = await db
       .select({
         type: messagesTable.type,
         mediaUrl: messagesTable.mediaUrl,
@@ -1437,10 +1437,10 @@ export class CloudApiAdapter implements ChannelAdapter {
   }
 
   /** Emit an event to registered listeners. Public so the webhook handler can use it. */
-  emit<E extends ChannelEvent>(event: E, payload: ChannelEventPayload[E]): void {
+  async emit<E extends ChannelEvent>(event: E, payload: ChannelEventPayload[E]): Promise<void> {
     if (event === "message.received") {
       const messageEvent = payload as ChannelEventPayload["message.received"];
-      this.persistMediaMessage(messageEvent);
+      await this.persistMediaMessage(messageEvent);
       if (getAutoReadMode() === "on_receive") {
         scheduleIncomingMessageRead(
           this,
@@ -1456,7 +1456,7 @@ export class CloudApiAdapter implements ChannelAdapter {
     if (handlers) {
       for (const handler of handlers) {
         try {
-          handler(payload as ChannelEventPayload[ChannelEvent]);
+          await handler(payload as ChannelEventPayload[ChannelEvent]);
         } catch (err) {
           logger.error({ err, event }, "Error in event handler");
         }
@@ -1464,7 +1464,7 @@ export class CloudApiAdapter implements ChannelAdapter {
     }
   }
 
-  private persistMediaMessage(event: NormalizedMessageEvent): void {
+  private async persistMediaMessage(event: NormalizedMessageEvent): Promise<void> {
     if (!["image", "video", "audio", "document", "sticker"].includes(event.message.type)) return;
 
     try {
@@ -1472,7 +1472,8 @@ export class CloudApiAdapter implements ChannelAdapter {
         fileName: event.message.fileName ?? event.message.mediaFileName ?? null,
         size: event.message.size ?? event.message.mediaSize ?? null,
       });
-      db.insert(messagesTable)
+      await db
+        .insert(messagesTable)
         .values({
           id: event.message.id,
           instanceId: this.instanceId,

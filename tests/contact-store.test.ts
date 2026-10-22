@@ -15,13 +15,13 @@ describe("ContactStore", () => {
     directory = undefined;
   });
 
-  const createStore = (instanceId = "inst_fake_sync") => {
+  const createStore = async (instanceId = "inst_fake_sync") => {
     directory = mkdtempSync(join(tmpdir(), "wa-mcp-contact-store-"));
     const databasePath = join(directory, "contacts.db");
 
     const sqlite = new Database(databasePath);
     sqlite.pragma("foreign_keys = ON");
-    sqlite.exec(`
+    (await sqlite.exec(`
       CREATE TABLE instances (
         id TEXT PRIMARY KEY,
         name TEXT NOT NULL,
@@ -58,19 +58,19 @@ describe("ContactStore", () => {
         timestamp INTEGER NOT NULL,
         push_name TEXT
       );
-    `);
-    sqlite
+    `));
+    (await sqlite
       .prepare(
         "INSERT INTO instances (id, name, channel, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
       )
-      .run(instanceId, "Fake sync instance", "baileys", "disconnected", 1, 1);
+      .run(instanceId, "Fake sync instance", "baileys", "disconnected", 1, 1));
 
     return { sqlite, store: new ContactStore(instanceId, drizzle(sqlite, { schema })) };
   };
 
   it("keeps history-sync contacts available after reopening the database", async () => {
     const instanceId = "inst_fake_sync";
-    const { sqlite: firstSqlite, store: firstStore } = createStore();
+    const { sqlite: firstSqlite, store: firstStore } = (await createStore());
     const databasePath = join(directory!, "contacts.db");
 
     await firstStore.handleHistorySync({
@@ -103,7 +103,7 @@ describe("ContactStore", () => {
     restartedSqlite.pragma("foreign_keys = ON");
     const restartedStore = new ContactStore(instanceId, drizzle(restartedSqlite, { schema }));
 
-    expect(restartedStore.getContacts("15555550123")).toEqual([
+    expect((await restartedStore.getContacts("15555550123"))).toEqual([
       {
         jid: "15555550123@s.whatsapp.net",
         name: "Example Contact",
@@ -114,22 +114,22 @@ describe("ContactStore", () => {
         isBlocked: false,
       },
     ]);
-    expect(restartedStore.getContacts()).toHaveLength(3);
+    expect((await restartedStore.getContacts())).toHaveLength(3);
 
     restartedSqlite.close();
   });
 
   it("updates an LID-only contact when its phone mapping arrives", async () => {
-    const { sqlite, store } = createStore();
+    const { sqlite, store } = (await createStore());
     const lid = "123456789012345@lid";
     const pn = "15555550123@s.whatsapp.net";
 
     await store.upsertContacts([{ id: lid, name: "LID Contact" }]);
-    expect(store.getContacts("15555550123")).toEqual([]);
+    expect((await store.getContacts("15555550123"))).toEqual([]);
 
-    store.updateLidMapping(lid, pn);
+    (await store.updateLidMapping(lid, pn));
 
-    expect(store.getContacts("15555550123")).toEqual([
+    expect((await store.getContacts("15555550123"))).toEqual([
       {
         jid: lid,
         name: "LID Contact",
@@ -141,11 +141,11 @@ describe("ContactStore", () => {
       },
     ]);
 
-    sqlite.close();
+    (await sqlite.close());
   });
 
   it("resolves a LID to its phone number before persisting", async () => {
-    const { sqlite, store } = createStore();
+    const { sqlite, store } = (await createStore());
     const lid = "123456789012345@lid";
     const pn = "15555550123@s.whatsapp.net";
     const resolvePn = async (value: string) => (value === lid ? pn : null);
@@ -153,24 +153,24 @@ describe("ContactStore", () => {
     await store.upsertContacts([{ id: lid, name: "Resolved Contact" }], resolvePn);
 
     expect(
-      sqlite
+      (await sqlite
         .prepare("SELECT jid, phone, lid FROM contacts WHERE instance_id = ?")
-        .get("inst_fake_sync"),
+        .get("inst_fake_sync")),
     ).toEqual({ jid: pn, phone: "15555550123", lid });
-    expect(store.getContacts("15555550123")).toHaveLength(1);
+    expect((await store.getContacts("15555550123"))).toHaveLength(1);
 
-    sqlite.close();
+    (await sqlite.close());
   });
 
   it("keeps saved names above later notify and push names", async () => {
-    const { sqlite, store } = createStore();
+    const { sqlite, store } = (await createStore());
     const jid = "15555550126@s.whatsapp.net";
 
     await store.upsertContacts([{ id: jid, notify: "Initial profile" }]);
     await store.upsertContacts([{ id: jid, name: "Initial profile" }]);
     await store.upsertContacts([{ id: jid, notify: "Updated profile" }]);
 
-    expect(store.getContacts()).toEqual([
+    expect((await store.getContacts())).toEqual([
       {
         jid,
         name: "Initial profile",
@@ -182,11 +182,11 @@ describe("ContactStore", () => {
       },
     ]);
 
-    sqlite.close();
+    (await sqlite.close());
   });
 
   it("recovers individual contacts and names from locally stored chats and messages", async () => {
-    const { sqlite, store } = createStore();
+    const { sqlite, store } = (await createStore());
     const directJid = "15555550127@s.whatsapp.net";
     const groupJid = "120363000000000000@g.us";
     const groupSender = "15555550128@s.whatsapp.net";
@@ -236,8 +236,8 @@ describe("ContactStore", () => {
       chats: { candidates: 1, contactsAdded: 1 },
       messages: { candidates: 4, contactsAdded: 3 },
     });
-    expect(store.getContactCount()).toBe(4);
-    expect(store.getContacts()).toEqual(
+    expect((await store.getContactCount())).toBe(4);
+    expect((await store.getContacts())).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
           jid: directJid,
@@ -253,15 +253,15 @@ describe("ContactStore", () => {
         }),
       ]),
     );
-    expect(store.getContacts().map((contact) => contact.jid)).not.toEqual(
+    expect((await store.getContacts()).map((contact) => contact.jid)).not.toEqual(
       expect.arrayContaining([groupJid, "status@broadcast", "12345@newsletter"]),
     );
 
-    sqlite.close();
+    (await sqlite.close());
   });
 
   it("deduplicates recovered message contacts and keeps the latest non-empty push name", async () => {
-    const { sqlite, store } = createStore();
+    const { sqlite, store } = (await createStore());
     const jid = "15555550131@s.whatsapp.net";
     const insertMessage = sqlite.prepare(
       "INSERT INTO messages (id, instance_id, chat_id, sender_id, is_from_me, timestamp, push_name) VALUES (?, ?, ?, ?, ?, ?, ?)",
@@ -273,7 +273,7 @@ describe("ContactStore", () => {
     const recovery = await store.recoverFromLocalData();
 
     expect(recovery.messages).toEqual({ candidates: 1, contactsAdded: 1 });
-    expect(store.getContacts()).toEqual([
+    expect((await store.getContacts())).toEqual([
       {
         jid,
         name: "Latest name",
@@ -285,11 +285,11 @@ describe("ContactStore", () => {
       },
     ]);
 
-    sqlite.close();
+    (await sqlite.close());
   });
 
   it("finds a contact by LID and keeps the saved name separate from the push name", async () => {
-    const { sqlite, store } = createStore();
+    const { sqlite, store } = (await createStore());
     await store.upsertContacts([
       {
         id: "15555550199@s.whatsapp.net",
@@ -300,7 +300,7 @@ describe("ContactStore", () => {
       },
     ]);
 
-    expect(store.findByIdentities(["155500000000099@lid"])).toEqual({
+    expect((await store.findByIdentities(["155500000000099@lid"]))).toEqual({
       truncated: false,
       contacts: [
         {
@@ -312,17 +312,17 @@ describe("ContactStore", () => {
         },
       ],
     });
-    expect(store.findByIdentities(["15555550199"])).toEqual({
+    expect((await store.findByIdentities(["15555550199"]))).toEqual({
       truncated: false,
       contacts: [expect.objectContaining({ name: "Saved Name", notifyName: "Push Name" })],
     });
-    expect(store.findByIdentities([])).toEqual({ contacts: [], truncated: false });
+    expect((await store.findByIdentities([]))).toEqual({ contacts: [], truncated: false });
 
-    sqlite.close();
+    (await sqlite.close());
   });
 
   it("reports when an identity lookup is cut off at 5000 keys", async () => {
-    const { sqlite, store } = createStore();
+    const { sqlite, store } = (await createStore());
     await store.upsertContacts([
       {
         id: "15555551000@s.whatsapp.net",
@@ -339,10 +339,10 @@ describe("ContactStore", () => {
     keys[0] = "15555551000@s.whatsapp.net";
     keys.push("15555559999@s.whatsapp.net");
 
-    const lookup = store.findByIdentities(keys);
+    const lookup = (await store.findByIdentities(keys));
 
     expect(lookup.truncated).toBe(true);
     expect(lookup.contacts.map((contact) => contact.jid)).toEqual(["15555551000@s.whatsapp.net"]);
-    sqlite.close();
+    (await sqlite.close());
   });
 });

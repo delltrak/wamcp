@@ -1023,6 +1023,8 @@ export class BaileysAdapter implements ChannelAdapter {
   private connectInFlight: Promise<void> | null = null;
   private watchdogTimer: ReturnType<typeof setTimeout> | null = null;
   private saveCreds: (() => Promise<void>) | null = null;
+  private credsSaveTimer: ReturnType<typeof setTimeout> | null = null;
+  private credsSaveAttempt = 0;
   private authMeId: string | undefined;
   private authMeLid: string | undefined;
 
@@ -1666,7 +1668,7 @@ export class BaileysAdapter implements ChannelAdapter {
   ): Promise<{ jid: string; lastMessages: MinimalMessage[] }> {
     const requestedJid = jidNormalizedUser(this.normalizeJid(chatId));
     const chatAliases = await this.getChatJidAliases(requestedJid);
-    const rows = db
+    const rows = await db
       .select({
         id: messagesTable.id,
         chatId: messagesTable.chatId,
@@ -1725,10 +1727,10 @@ export class BaileysAdapter implements ChannelAdapter {
     return jid && isValidStatusRecipient(jid) ? jid : null;
   }
 
-  private resolveStatusAudience(
+  private async resolveStatusAudience(
     sock: WASocket,
     requestedJids?: string[],
-  ): { statusJidList: string[]; omittedRecipientCount: number; warning?: string } {
+  ): Promise<{ statusJidList: string[]; omittedRecipientCount: number; warning?: string }> {
     const recipients: string[] = [];
     const seen = new Set<string>();
     const addRecipient = (input: string, explicit: boolean): void => {
@@ -1750,7 +1752,7 @@ export class BaileysAdapter implements ChannelAdapter {
     if (ownJid) addRecipient(ownJid, false);
 
     const audienceJids =
-      requestedJids ?? this.contactStore.getContacts().map((contact) => contact.jid);
+      requestedJids ?? (await this.contactStore.getContacts()).map((contact) => contact.jid);
     for (const jid of audienceJids) addRecipient(jid, requestedJids !== undefined);
 
     if (recipients.length === 0) {
@@ -1856,8 +1858,8 @@ export class BaileysAdapter implements ChannelAdapter {
     ].join("\n");
   }
 
-  private getQuotedMessage(remoteJid: string, messageId: string): WAMessage {
-    const row = db
+  private async getQuotedMessage(remoteJid: string, messageId: string): Promise<WAMessage> {
+    const row = await db
       .select({
         id: messagesTable.id,
         chatId: messagesTable.chatId,
@@ -1933,15 +1935,15 @@ export class BaileysAdapter implements ChannelAdapter {
     };
   }
 
-  private resolveMessageKey(
+  private async resolveMessageKey(
     remoteJid: string,
     messageId: string,
     fallbackFromMe = false,
     storedRow?: StoredMessageKeyRow | null,
-  ): WAMessageKey {
+  ): Promise<WAMessageKey> {
     const row =
       storedRow === undefined
-        ? db
+        ? await db
             .select({
               id: messagesTable.id,
               chatId: messagesTable.chatId,
@@ -2012,8 +2014,8 @@ export class BaileysAdapter implements ChannelAdapter {
     }
   }
 
-  validateQuotedMessage(to: string, messageId: string): void {
-    this.getQuotedMessage(this.normalizeJid(to), messageId);
+  async validateQuotedMessage(to: string, messageId: string): Promise<void> {
+    await this.getQuotedMessage(this.normalizeJid(to), messageId);
   }
 
   private getMeJid(): string {
@@ -2111,7 +2113,7 @@ export class BaileysAdapter implements ChannelAdapter {
     // Logout/disconnect may arrive while auth or version lookup is awaiting.
     // Do not start a replacement connection with credentials from that attempt.
     if (this.reconnectSuspended) return;
-    const requestFullHistory = !this.hasStoredMessages();
+    const requestFullHistory = !(await this.hasStoredMessages());
     const proxyAgents = this.openProxyAgents();
 
     let sock: WASocket;
@@ -2155,7 +2157,7 @@ export class BaileysAdapter implements ChannelAdapter {
           if (remoteJids.size > 0) {
             conditions.push(inArray(messagesTable.chatId, [...remoteJids]));
           }
-          const row = db
+          const row = await db
             .select({ rawData: messagesTable.rawData })
             .from(messagesTable)
             .where(and(...conditions))
@@ -2202,20 +2204,21 @@ export class BaileysAdapter implements ChannelAdapter {
     this.sock = sock;
     this.lastPresenceUpdateAt.clear();
     this.presenceSubscriptions.clear();
-    this.bindEvents(sock);
-    if (this.sock !== sock) return;
-    this.emit("connection.changed", {
+    const connecting = this.emit("connection.changed", {
       instanceId: this.instanceId,
       status: "connecting",
     });
+    this.bindEvents(sock, connecting);
+    await connecting;
   }
 
   async disconnect(): Promise<void> {
+    this.clearCredsSaveTimer();
     this.reconnectSuspended = true;
     this.clearReconnectTimer();
     this.clearHealthWatchdog();
     this.clearEventBufferStallWatchdog();
-    this.clearAuthChallenges(Date.now());
+    await this.clearAuthChallenges(Date.now());
     this.resetActivityPresence();
     this.pendingCalls.clear();
     const sock = this.sock;
@@ -2299,26 +2302,28 @@ export class BaileysAdapter implements ChannelAdapter {
     );
   }
 
-  private emitAuthChallengeGenerated(method: InstanceAuthMethod): void {
+  private async emitAuthChallengeGenerated(method: InstanceAuthMethod): Promise<void> {
     const existing = this.pendingAuthChallenges.get(method);
     const generatedAt = Date.now();
-    if (existing) this.expireAuthChallenge(method, existing.generatedAt, generatedAt);
+    if (existing) await this.expireAuthChallenge(method, existing.generatedAt, generatedAt);
 
     const expiresAt = generatedAt + AUTH_CHALLENGE_TTL_MS;
     const timer = setTimeout(() => {
-      this.expireAuthChallenge(method, generatedAt, Date.now());
+      void this.expireAuthChallenge(method, generatedAt, Date.now()).catch((err: unknown) => {
+        logger.error({ err, instanceId: this.instanceId }, "Failed to expire auth challenge");
+      });
     }, AUTH_CHALLENGE_TTL_MS);
     this.pendingAuthChallenges.set(method, { generatedAt, expiresAt, timer });
 
     if (method === "pairing_code") {
-      this.emit("instance.pairing_code_generated", {
+      await this.emit("instance.pairing_code_generated", {
         instanceId: this.instanceId,
         method,
         generatedAt,
         expiresAt,
       });
     } else {
-      this.emit("instance.qr_generated", {
+      await this.emit("instance.qr_generated", {
         instanceId: this.instanceId,
         method,
         generatedAt,
@@ -2327,11 +2332,11 @@ export class BaileysAdapter implements ChannelAdapter {
     }
   }
 
-  private expireAuthChallenge(
+  private async expireAuthChallenge(
     method: InstanceAuthMethod,
     generatedAt: number,
     expiredAt: number,
-  ): void {
+  ): Promise<void> {
     const pending = this.pendingAuthChallenges.get(method);
     if (!pending || pending.generatedAt !== generatedAt) return;
 
@@ -2339,7 +2344,7 @@ export class BaileysAdapter implements ChannelAdapter {
     this.pendingAuthChallenges.delete(method);
     if (method === "pairing_code") {
       this.pairingCodeValue = null;
-      this.emit("instance.pairing_expired", {
+      await this.emit("instance.pairing_expired", {
         instanceId: this.instanceId,
         method,
         generatedAt,
@@ -2347,7 +2352,7 @@ export class BaileysAdapter implements ChannelAdapter {
       });
     } else {
       this.qrCode = null;
-      this.emit("instance.qr_expired", {
+      await this.emit("instance.qr_expired", {
         instanceId: this.instanceId,
         method,
         generatedAt,
@@ -2356,13 +2361,13 @@ export class BaileysAdapter implements ChannelAdapter {
     }
   }
 
-  private clearAuthChallenges(expiredAt?: number): void {
+  private async clearAuthChallenges(expiredAt?: number): Promise<void> {
     for (const [method, pending] of this.pendingAuthChallenges) {
       if (expiredAt === undefined) {
         clearTimeout(pending.timer);
         this.pendingAuthChallenges.delete(method);
       } else {
-        this.expireAuthChallenge(method, pending.generatedAt, expiredAt);
+        await this.expireAuthChallenge(method, pending.generatedAt, expiredAt);
       }
     }
   }
@@ -2391,7 +2396,7 @@ export class BaileysAdapter implements ChannelAdapter {
       const code = await sock.requestPairingCode(phone);
       if (this.sock !== sock || this.status !== "qr_pending") return null;
       const pairingCode = code ?? null;
-      if (pairingCode) this.emitAuthChallengeGenerated("pairing_code");
+      if (pairingCode) await this.emitAuthChallengeGenerated("pairing_code");
       this.pairingCodeValue = pairingCode;
       return this.pairingCodeValue;
     }
@@ -2427,7 +2432,7 @@ export class BaileysAdapter implements ChannelAdapter {
       case "text":
         msg = { text: content.text };
         if (content.quotedMessageId) {
-          opts.quoted = this.getQuotedMessage(jid, content.quotedMessageId);
+          opts.quoted = await this.getQuotedMessage(jid, content.quotedMessageId);
         }
         break;
       case "image":
@@ -2436,7 +2441,7 @@ export class BaileysAdapter implements ChannelAdapter {
           caption: content.caption,
         };
         if (content.quotedMessageId) {
-          opts.quoted = this.getQuotedMessage(jid, content.quotedMessageId);
+          opts.quoted = await this.getQuotedMessage(jid, content.quotedMessageId);
         }
         break;
       case "video":
@@ -2447,13 +2452,13 @@ export class BaileysAdapter implements ChannelAdapter {
           ...(content.ptv ? { ptv: true } : {}),
         };
         if (content.quotedMessageId) {
-          opts.quoted = this.getQuotedMessage(jid, content.quotedMessageId);
+          opts.quoted = await this.getQuotedMessage(jid, content.quotedMessageId);
         }
         break;
       case "sticker":
         msg = { sticker: this.resolveMedia(content.sticker) };
         if (content.quotedMessageId) {
-          opts.quoted = this.getQuotedMessage(jid, content.quotedMessageId);
+          opts.quoted = await this.getQuotedMessage(jid, content.quotedMessageId);
         }
         break;
       case "audio":
@@ -2504,7 +2509,7 @@ export class BaileysAdapter implements ChannelAdapter {
           };
         }
         if (content.quotedMessageId) {
-          opts.quoted = this.getQuotedMessage(jid, content.quotedMessageId);
+          opts.quoted = await this.getQuotedMessage(jid, content.quotedMessageId);
         }
         break;
       case "document":
@@ -2648,7 +2653,7 @@ export class BaileysAdapter implements ChannelAdapter {
     text: string,
   ): Promise<MessageResponse> {
     const groupJid = normalizeGroupJid(groupId);
-    const row = db
+    const row = await db
       .select({ senderId: messagesTable.senderId, isFromMe: messagesTable.isFromMe })
       .from(messagesTable)
       .where(
@@ -2693,12 +2698,12 @@ export class BaileysAdapter implements ChannelAdapter {
     };
     const sendOptions: MiscMessageGenerationOptions = {};
     if (options.quotedMessageId) {
-      sendOptions.quoted = this.getQuotedMessage(jid, options.quotedMessageId);
+      sendOptions.quoted = await this.getQuotedMessage(jid, options.quotedMessageId);
     }
 
     const result = await this.sendMessageWithActivity(sock, jid, { event }, sendOptions);
     if (result) {
-      this.persistSourceMessage(result);
+      await this.persistSourceMessage(result);
       if (result.key.id) await this.retryPendingEventResponses(result.key.id);
     }
     return {
@@ -2711,7 +2716,7 @@ export class BaileysAdapter implements ChannelAdapter {
   async getEventResponses(chatId: string, eventMessageId: string): Promise<EventResponse[]> {
     const jid = jidNormalizedUser(this.normalizeJid(chatId));
     const chatAliases = new Set([jid, await this.resolveJidToPn(jid)]);
-    const eventMessage = db
+    const eventMessage = await db
       .select({ chatId: messagesTable.chatId, rawData: messagesTable.rawData })
       .from(messagesTable)
       .where(
@@ -2749,7 +2754,7 @@ export class BaileysAdapter implements ChannelAdapter {
     // Retry by event ID so stored rows under either LID or PN chat aliases are included.
     await this.retryPendingEventResponses(eventMessageId);
 
-    const rows = db
+    const rows = await db
       .select()
       .from(eventResponsesTable)
       .where(
@@ -2759,13 +2764,16 @@ export class BaileysAdapter implements ChannelAdapter {
           inArray(eventResponsesTable.chatId, [...chatAliases]),
         ),
       )
-      .orderBy(asc(eventResponsesTable.timestamp), asc(eventResponsesTable.responder))
+      .orderBy(
+        sql`${eventResponsesTable.timestamp} ASC NULLS FIRST`,
+        asc(eventResponsesTable.responder),
+      )
       .all();
 
     return Promise.all(
       rows.map(async (row) => {
         const participant = await this.resolveJidToPn(row.responder);
-        const contact = db
+        const contact = await db
           .select({ phone: contactsTable.phone })
           .from(contactsTable)
           .where(
@@ -2798,7 +2806,7 @@ export class BaileysAdapter implements ChannelAdapter {
 
   async getPollResults(chatId: string, pollMessageId: string): Promise<PollResults> {
     const requestedChat = jidNormalizedUser(this.normalizeJid(chatId));
-    let row = db
+    let row = await db
       .select({
         chatId: messagesTable.chatId,
         type: messagesTable.type,
@@ -2818,7 +2826,7 @@ export class BaileysAdapter implements ChannelAdapter {
     }
 
     await this.retryPendingPollVotes(pollMessageId);
-    row = db
+    row = await db
       .select({
         chatId: messagesTable.chatId,
         type: messagesTable.type,
@@ -2881,7 +2889,7 @@ export class BaileysAdapter implements ChannelAdapter {
     this.requireAppStateWritesEnabled();
     const sock = this.getSock();
     const chatAliases = await this.getChatJidAliases(chatId);
-    const stored = db
+    const stored = await db
       .select({ chatId: messagesTable.chatId, rawData: messagesTable.rawData })
       .from(messagesTable)
       .where(
@@ -2906,7 +2914,8 @@ export class BaileysAdapter implements ChannelAdapter {
     }
     const starMessageKey = { ...key, id: messageId, fromMe: key.fromMe };
     await this.safeChatModify(sock, { star: { messages: [starMessageKey], star } }, key.remoteJid);
-    db.update(messagesTable)
+    await db
+      .update(messagesTable)
       .set({ starred: star ? 1 : 0 })
       .where(
         and(
@@ -2931,7 +2940,7 @@ export class BaileysAdapter implements ChannelAdapter {
       },
     };
     const details = extractMessageDetails(outgoing);
-    this.persistMessage(
+    await this.persistMessage(
       {
         instanceId: this.instanceId,
         chatId: outgoing.key.remoteJid ?? jid,
@@ -2957,15 +2966,16 @@ export class BaileysAdapter implements ChannelAdapter {
     if (details.type === "poll") await this.retryPendingPollVotes(outgoingId);
   }
 
-  private persistReceipt(
+  private async persistReceipt(
     chatId: string,
     messageId: string,
     participant: string,
     status: MessageReceipt["status"],
     timestamp: number,
-  ): void {
+  ): Promise<void> {
     if (!chatId || !messageId || !participant) return;
-    db.insert(messageReceiptsTable)
+    await db
+      .insert(messageReceiptsTable)
       .values({
         instanceId: this.instanceId,
         chatId,
@@ -2998,14 +3008,14 @@ export class BaileysAdapter implements ChannelAdapter {
     const jid = this.normalizeJid(chatId);
     await this.sendMessageWithActivity(sock, jid, {
       text: newText,
-      edit: this.resolveMessageKey(jid, msgId, true),
+      edit: await this.resolveMessageKey(jid, msgId, true),
     } as AnyMessageContent);
   }
 
   async deleteMessage(chatId: string, msgId: string, requestedJids?: string[]): Promise<void> {
     const sock = this.getSock();
     const jid = this.normalizeJid(chatId);
-    const storedMessage = db
+    const storedMessage = await db
       .select({ chatId: messagesTable.chatId, isFromMe: messagesTable.isFromMe })
       .from(messagesTable)
       .where(and(eq(messagesTable.instanceId, this.instanceId), eq(messagesTable.id, msgId)))
@@ -3015,31 +3025,31 @@ export class BaileysAdapter implements ChannelAdapter {
         `Cannot revoke message '${msgId}': the stored message is not an outgoing message in chat '${jid}'.`,
       );
     }
-    const messageKey = this.resolveMessageKey(jid, msgId, true);
+    const messageKey = await this.resolveMessageKey(jid, msgId, true);
 
     if (jid === STATUS_BROADCAST_JID) {
       const storedJids =
-        requestedJids === undefined ? this.getStoredStatusAudience(msgId) : undefined;
+        requestedJids === undefined ? await this.getStoredStatusAudience(msgId) : undefined;
       const statusJidList =
         requestedJids !== undefined
-          ? this.resolveStatusAudience(sock, requestedJids).statusJidList
+          ? (await this.resolveStatusAudience(sock, requestedJids)).statusJidList
           : storedJids !== undefined
             ? this.reuseStoredStatusAudience(sock, storedJids)
-            : this.resolveStatusAudience(sock).statusJidList;
+            : (await this.resolveStatusAudience(sock)).statusJidList;
       await this.sendMessageWithActivity(sock, jid, { delete: messageKey }, { statusJidList });
     } else {
       await this.sendMessageWithActivity(sock, jid, {
         delete: messageKey,
       });
     }
-    this.updateMessageStatus(msgId, "revoked", jid, 1);
+    await this.updateMessageStatus(msgId, "revoked", jid, 1);
   }
 
   async forwardMessage(to: string, msgId: string, fromChat: string): Promise<MessageResponse> {
     const sock = this.getSock();
     const toJid = this.normalizeJid(to);
     const fromJid = this.normalizeJid(fromChat);
-    const row = db
+    const row = await db
       .select({
         id: messagesTable.id,
         chatId: messagesTable.chatId,
@@ -3077,7 +3087,7 @@ export class BaileysAdapter implements ChannelAdapter {
     }
 
     const hasStoredFullOriginal = sourceMessage !== undefined;
-    const sourceKey = this.resolveMessageKey(fromJid, msgId, false, row);
+    const sourceKey = await this.resolveMessageKey(fromJid, msgId, false, row);
     if (!hasForwardableContent(sourceMessage ?? ({} as WAMessage), hasStoredFullOriginal)) {
       if (row.type === "text" && typeof row.content === "string" && row.content.trim()) {
         sourceMessage = {
@@ -3119,7 +3129,7 @@ export class BaileysAdapter implements ChannelAdapter {
     const sock = this.getSock();
     const jid = this.normalizeJid(chatId);
     await this.sendMessageWithActivity(sock, jid, {
-      react: { text: emoji, key: this.resolveMessageKey(jid, msgId) },
+      react: { text: emoji, key: await this.resolveMessageKey(jid, msgId) },
     });
   }
 
@@ -3127,7 +3137,7 @@ export class BaileysAdapter implements ChannelAdapter {
     const sock = this.getSock();
     const jid = this.normalizeJid(chatId);
     const pinMsg = {
-      pin: this.resolveMessageKey(jid, msgId, true),
+      pin: await this.resolveMessageKey(jid, msgId, true),
       type: pin ? 1 : 0,
       time: pin ? 604800 : undefined,
     };
@@ -3330,7 +3340,7 @@ export class BaileysAdapter implements ChannelAdapter {
 
   async getMessageReceipts(chatId: string, messageId: string): Promise<MessageReceipt[]> {
     const jid = this.normalizeJid(chatId);
-    return db
+    return (await db
       .select({
         participant: messageReceiptsTable.participant,
         status: messageReceiptsTable.status,
@@ -3345,29 +3355,30 @@ export class BaileysAdapter implements ChannelAdapter {
         ),
       )
       .orderBy(asc(messageReceiptsTable.participant))
-      .all() as MessageReceipt[];
+      .all()) as MessageReceipt[];
   }
 
   async getStatusViewers(messageId: string): Promise<string[]> {
-    return db
-      .selectDistinct({ participant: messageReceiptsTable.participant })
-      .from(messageReceiptsTable)
-      .where(
-        and(
-          eq(messageReceiptsTable.instanceId, this.instanceId),
-          eq(messageReceiptsTable.chatId, STATUS_BROADCAST_JID),
-          eq(messageReceiptsTable.messageId, messageId),
-          inArray(messageReceiptsTable.status, ["read", "played"]),
-        ),
-      )
-      .orderBy(asc(messageReceiptsTable.participant))
-      .all()
-      .map((row) => row.participant);
+    return (
+      await db
+        .selectDistinct({ participant: messageReceiptsTable.participant })
+        .from(messageReceiptsTable)
+        .where(
+          and(
+            eq(messageReceiptsTable.instanceId, this.instanceId),
+            eq(messageReceiptsTable.chatId, STATUS_BROADCAST_JID),
+            eq(messageReceiptsTable.messageId, messageId),
+            inArray(messageReceiptsTable.status, ["read", "played"]),
+          ),
+        )
+        .orderBy(asc(messageReceiptsTable.participant))
+        .all()
+    ).map((row) => row.participant);
   }
 
   async getMessageReactions(chatId: string, messageId: string): Promise<MessageReaction[]> {
     const jid = this.normalizeJid(chatId);
-    return db
+    return await db
       .select({
         participant: messageReactionsTable.participant,
         emoji: messageReactionsTable.emoji,
@@ -3394,44 +3405,48 @@ export class BaileysAdapter implements ChannelAdapter {
     const sock = this.getSock();
     const jid = this.normalizeJid(chatId);
     const chatAliases = await this.getChatJidAliases(jid);
-    const keys = [...new Set(messageIds)].flatMap((id) => {
-      const storedMessage = db
-        .select({
-          id: messagesTable.id,
-          chatId: messagesTable.chatId,
-          senderId: messagesTable.senderId,
-          isFromMe: messagesTable.isFromMe,
-          rawData: messagesTable.rawData,
-        })
-        .from(messagesTable)
-        .where(
-          and(
-            eq(messagesTable.instanceId, this.instanceId),
-            inArray(messagesTable.chatId, chatAliases),
-            eq(messagesTable.id, id),
-          ),
-        )
-        .get();
-      const messageKey = this.resolveMessageKey(jid, id, false, storedMessage ?? null);
-      if (!jid.endsWith("@g.us") || messageKey.participant || messageKey.fromMe) {
-        return [messageKey];
-      }
+    const keys = (
+      await Promise.all(
+        [...new Set(messageIds)].map(async (id) => {
+          const storedMessage = await db
+            .select({
+              id: messagesTable.id,
+              chatId: messagesTable.chatId,
+              senderId: messagesTable.senderId,
+              isFromMe: messagesTable.isFromMe,
+              rawData: messagesTable.rawData,
+            })
+            .from(messagesTable)
+            .where(
+              and(
+                eq(messagesTable.instanceId, this.instanceId),
+                inArray(messagesTable.chatId, chatAliases),
+                eq(messagesTable.id, id),
+              ),
+            )
+            .get();
+          const messageKey = await this.resolveMessageKey(jid, id, false, storedMessage ?? null);
+          if (!jid.endsWith("@g.us") || messageKey.participant || messageKey.fromMe) {
+            return [messageKey];
+          }
 
-      if (!participant) {
-        logger.warn(
-          { instanceId: this.instanceId, messageId: id },
-          "Skipping group read receipt because the message participant is unavailable",
-        );
-        return [];
-      }
+          if (!participant) {
+            logger.warn(
+              { instanceId: this.instanceId, messageId: id },
+              "Skipping group read receipt because the message participant is unavailable",
+            );
+            return [];
+          }
 
-      return [
-        {
-          ...messageKey,
-          participant,
-        },
-      ];
-    });
+          return [
+            {
+              ...messageKey,
+              participant,
+            },
+          ];
+        }),
+      )
+    ).flat();
 
     if (keys.length === 0) return;
     await sock.readMessages(keys);
@@ -3450,7 +3465,7 @@ export class BaileysAdapter implements ChannelAdapter {
     const batches = new Map<string, { jid: string; participant?: string; messageIds: string[] }>();
 
     for (const id of [...new Set(messageIds)]) {
-      const storedMessage = db
+      const storedMessage = await db
         .select({
           chatId: messagesTable.chatId,
           senderId: messagesTable.senderId,
@@ -3516,7 +3531,7 @@ export class BaileysAdapter implements ChannelAdapter {
     const requested = chatId ? this.normalizeJid(chatId) : undefined;
     if (requested) assertPlayedReceiptChat(requested);
     const aliases = requested ? await this.getChatJidAliases(requested) : undefined;
-    const rows = db
+    const rows = await db
       .select({
         chatId: messagesTable.chatId,
         senderId: messagesTable.senderId,
@@ -3666,8 +3681,9 @@ export class BaileysAdapter implements ChannelAdapter {
     return this.normalizeJid(sock.user.id);
   }
 
-  private persistLabel(label: BusinessLabel): void {
-    db.insert(labelsTable)
+  private async persistLabel(label: BusinessLabel): Promise<void> {
+    await db
+      .insert(labelsTable)
       .values({
         instanceId: this.instanceId,
         id: label.id,
@@ -3690,13 +3706,13 @@ export class BaileysAdapter implements ChannelAdapter {
       .run();
   }
 
-  private persistLabelAssociation(
+  private async persistLabelAssociation(
     labelId: string,
     type: "chat" | "message",
     chatId: string,
     messageId: string | undefined,
     add: boolean,
-  ): void {
+  ): Promise<void> {
     const associationMessageId = type === "message" ? (messageId ?? "") : "";
     const where = and(
       eq(labelAssociationsTable.instanceId, this.instanceId),
@@ -3706,10 +3722,11 @@ export class BaileysAdapter implements ChannelAdapter {
       eq(labelAssociationsTable.messageId, associationMessageId),
     );
     if (!add) {
-      db.delete(labelAssociationsTable).where(where).run();
+      await db.delete(labelAssociationsTable).where(where).run();
       return;
     }
-    db.insert(labelAssociationsTable)
+    await db
+      .insert(labelAssociationsTable)
       .values({
         instanceId: this.instanceId,
         labelId,
@@ -3722,40 +3739,46 @@ export class BaileysAdapter implements ChannelAdapter {
       .run();
   }
 
-  private getLabelsFor(type: "chat" | "message", chatId: string, messageId = ""): BusinessLabel[] {
+  private async getLabelsFor(
+    type: "chat" | "message",
+    chatId: string,
+    messageId = "",
+  ): Promise<BusinessLabel[]> {
     const filters = [
       eq(labelAssociationsTable.instanceId, this.instanceId),
       eq(labelAssociationsTable.type, type),
       eq(labelAssociationsTable.chatId, chatId),
     ];
     if (type === "message") filters.push(eq(labelAssociationsTable.messageId, messageId));
-    const ids = db
-      .select({ labelId: labelAssociationsTable.labelId })
-      .from(labelAssociationsTable)
-      .where(and(...filters))
-      .all()
-      .map((row) => row.labelId);
+    const ids = (
+      await db
+        .select({ labelId: labelAssociationsTable.labelId })
+        .from(labelAssociationsTable)
+        .where(and(...filters))
+        .all()
+    ).map((row) => row.labelId);
     if (ids.length === 0) return [];
 
-    return db
-      .select()
-      .from(labelsTable)
-      .where(
-        and(
-          eq(labelsTable.instanceId, this.instanceId),
-          eq(labelsTable.deleted, 0),
-          inArray(labelsTable.id, ids),
-        ),
-      )
-      .orderBy(asc(labelsTable.name))
-      .all()
-      .map((row) => ({
-        id: row.id,
-        name: row.name,
-        color: row.color,
-        deleted: row.deleted === 1,
-        ...(row.predefinedId ? { predefinedId: row.predefinedId } : {}),
-      }));
+    return (
+      await db
+        .select()
+        .from(labelsTable)
+        .where(
+          and(
+            eq(labelsTable.instanceId, this.instanceId),
+            eq(labelsTable.deleted, 0),
+            inArray(labelsTable.id, ids),
+          ),
+        )
+        .orderBy(asc(labelsTable.name))
+        .all()
+    ).map((row) => ({
+      id: row.id,
+      name: row.name,
+      color: row.color,
+      deleted: row.deleted === 1,
+      ...(row.predefinedId ? { predefinedId: row.predefinedId } : {}),
+    }));
   }
 
   async listLabels(includeDeleted = false): Promise<BusinessLabel[]> {
@@ -3763,19 +3786,20 @@ export class BaileysAdapter implements ChannelAdapter {
     await this.requireBusinessLabelSupport(sock, []);
     const filters = [eq(labelsTable.instanceId, this.instanceId)];
     if (!includeDeleted) filters.push(eq(labelsTable.deleted, 0));
-    return db
-      .select()
-      .from(labelsTable)
-      .where(and(...filters))
-      .orderBy(asc(labelsTable.name))
-      .all()
-      .map((row) => ({
-        id: row.id,
-        name: row.name,
-        color: row.color,
-        deleted: row.deleted === 1,
-        ...(row.predefinedId ? { predefinedId: row.predefinedId } : {}),
-      }));
+    return (
+      await db
+        .select()
+        .from(labelsTable)
+        .where(and(...filters))
+        .orderBy(asc(labelsTable.name))
+        .all()
+    ).map((row) => ({
+      id: row.id,
+      name: row.name,
+      color: row.color,
+      deleted: row.deleted === 1,
+      ...(row.predefinedId ? { predefinedId: row.predefinedId } : {}),
+    }));
   }
 
   async createLabel(name: string, color: number): Promise<BusinessLabel> {
@@ -3796,7 +3820,7 @@ export class BaileysAdapter implements ChannelAdapter {
     } catch (error) {
       throw labelOperationError(error);
     }
-    this.persistLabel(label);
+    await this.persistLabel(label);
     return label;
   }
 
@@ -3812,13 +3836,13 @@ export class BaileysAdapter implements ChannelAdapter {
     } catch (error) {
       throw labelOperationError(error);
     }
-    const existing = db
+    const existing = await db
       .select()
       .from(labelsTable)
       .where(and(eq(labelsTable.instanceId, this.instanceId), eq(labelsTable.id, id)))
       .get();
     if (existing) {
-      this.persistLabel({
+      await this.persistLabel({
         id,
         name: update.name ?? existing.name,
         color: update.color ?? existing.color,
@@ -3840,12 +3864,12 @@ export class BaileysAdapter implements ChannelAdapter {
     } catch (error) {
       throw labelOperationError(error);
     }
-    const existing = db
+    const existing = await db
       .select()
       .from(labelsTable)
       .where(and(eq(labelsTable.instanceId, this.instanceId), eq(labelsTable.id, id)))
       .get();
-    this.persistLabel({
+    await this.persistLabel({
       id,
       name: existing?.name ?? id,
       color: existing?.color ?? 0,
@@ -3869,7 +3893,7 @@ export class BaileysAdapter implements ChannelAdapter {
     } catch (error) {
       throw labelOperationError(error);
     }
-    this.persistLabelAssociation(labelId, "chat", jid, undefined, add);
+    await this.persistLabelAssociation(labelId, "chat", jid, undefined, add);
   }
 
   async setMessageLabel(
@@ -3894,7 +3918,7 @@ export class BaileysAdapter implements ChannelAdapter {
     } catch (error) {
       throw labelOperationError(error);
     }
-    this.persistLabelAssociation(labelId, "message", jid, messageId, add);
+    await this.persistLabelAssociation(labelId, "message", jid, messageId, add);
   }
 
   async createQuickReply(input: { shortcut: string; message: string }): Promise<void> {
@@ -4133,7 +4157,7 @@ export class BaileysAdapter implements ChannelAdapter {
     const sock = this.getSock();
     const jid = normalizeGroupJid(groupId);
     const meta = await sock.groupMetadata(jid);
-    return this.normalizeGroupMetadata(meta);
+    return await this.normalizeGroupMetadata(meta);
   }
 
   async exportGroupParticipants(groupJid: string): Promise<GroupParticipantsExport> {
@@ -4169,7 +4193,7 @@ export class BaileysAdapter implements ChannelAdapter {
         };
       }),
     );
-    const stored = this.contactStore.findByIdentities(
+    const stored = await this.contactStore.findByIdentities(
       resolved.flatMap((participant) => [
         ...participant.identities,
         ...(participant.phone ? [participant.phone] : []),
@@ -4218,7 +4242,7 @@ export class BaileysAdapter implements ChannelAdapter {
     const participantJids = [sock.user?.id, sock.user?.lid]
       .filter((participant): participant is string => !!participant)
       .map((participant) => jidNormalizedUser(participant));
-    this.processGroupMemberLabelUpdate({
+    await this.processGroupMemberLabelUpdate({
       groupId: jid,
       participant: participantJids[0],
       participantAlt: participantJids[1],
@@ -4227,13 +4251,13 @@ export class BaileysAdapter implements ChannelAdapter {
     });
   }
 
-  private processGroupMemberLabelUpdate(update: {
+  private async processGroupMemberLabelUpdate(update: {
     groupId: string;
     participant?: string | null;
     participantAlt?: string | null;
     label?: string | null;
     messageTimestamp?: number;
-  }): void {
+  }): Promise<void> {
     const participantJids = [...new Set([update.participant, update.participantAlt])]
       .filter((participant): participant is string => !!participant)
       .map((participant) => jidNormalizedUser(participant));
@@ -4246,7 +4270,7 @@ export class BaileysAdapter implements ChannelAdapter {
         ? rawTimestamp
         : Math.floor(Date.now() / 1000);
     const groupId = normalizeGroupJid(update.groupId);
-    const changed = this.groupMemberLabelStore.update(
+    const changed = await this.groupMemberLabelStore.update(
       groupId,
       participantJids,
       memberLabel,
@@ -4262,11 +4286,11 @@ export class BaileysAdapter implements ChannelAdapter {
       action: memberLabel === null ? "removed" : "set",
       timestamp,
     };
-    this.emit("group.member_label_changed", event);
+    await this.emit("group.member_label_changed", event);
   }
 
   private async normalizeGroupMetadata(meta: BaileysGroupMetadata): Promise<GroupMetadata> {
-    const memberLabels = this.groupMemberLabelStore.getForGroup(meta.id);
+    const memberLabels = await this.groupMemberLabelStore.getForGroup(meta.id);
     const memberLabelsByJid = new Map(
       memberLabels.map((row) => [jidNormalizedUser(row.participantJid), row]),
     );
@@ -4397,17 +4421,17 @@ export class BaileysAdapter implements ChannelAdapter {
     return true;
   }
 
-  private emitGroupJoined(event: {
+  private async emitGroupJoined(event: {
     groupId: string;
     subject: string | null;
     description: string | null;
     memberCount: number;
     author: string | null;
-  }): void {
+  }): Promise<void> {
     // #141: require a member list that already includes this account. Never copy that roster.
     if (!event.groupId.endsWith("@g.us") || event.memberCount < 1) return;
     if (!this.rememberMembership(`group:${event.groupId}`)) return;
-    this.emit("group.joined", {
+    await this.emit("group.joined", {
       instanceId: this.instanceId,
       groupId: event.groupId,
       chatId: event.groupId,
@@ -4419,13 +4443,13 @@ export class BaileysAdapter implements ChannelAdapter {
     });
   }
 
-  private emitNewsletterMembership(
+  private async emitNewsletterMembership(
     kind: "joined" | "left",
     newsletterId: string,
     name: string | null,
     description: string | null,
     role: string | null,
-  ): void {
+  ): Promise<void> {
     if (!newsletterId.endsWith("@newsletter")) return;
     if (!this.rememberMembership(`newsletter:${kind}:${newsletterId}`)) return;
     const payload = {
@@ -4436,7 +4460,7 @@ export class BaileysAdapter implements ChannelAdapter {
       description,
       role,
     };
-    this.emit(kind === "joined" ? "newsletter.joined" : "newsletter.left", {
+    await this.emit(kind === "joined" ? "newsletter.joined" : "newsletter.left", {
       ...payload,
       timestamp: Math.floor(Date.now() / 1000),
     });
@@ -4450,7 +4474,7 @@ export class BaileysAdapter implements ChannelAdapter {
       // #141: an empty roster, or a roster we cannot match to this account, is not a join.
       if (roster.length === 0 || own.size === 0) continue;
       if (!(await this.participantListIncludesSelf(roster))) continue;
-      this.emitGroupJoined({
+      await this.emitGroupJoined({
         groupId: group.id,
         subject: group.subject ?? null,
         description: group.desc ?? null,
@@ -4465,15 +4489,15 @@ export class BaileysAdapter implements ChannelAdapter {
   ): Promise<void> {
     const kind = newsletterMembershipAction(update.action);
     if (!kind || !update.id || !(await this.accountOwnsJid(update.user))) return;
-    this.emitNewsletterMembership(kind, update.id, null, null, update.new_role || null);
+    await this.emitNewsletterMembership(kind, update.id, null, null, update.new_role || null);
   }
 
-  private handleNewsletterSettingsUpdate(
+  private async handleNewsletterSettingsUpdate(
     update: BaileysEventMap["newsletter-settings.update"],
-  ): void {
+  ): Promise<void> {
     const mute = newsletterMuteState(update.update);
     if (!mute || !update.id?.endsWith("@newsletter")) return;
-    this.emit("newsletter.mute", {
+    await this.emit("newsletter.mute", {
       instanceId: this.instanceId,
       newsletterId: update.id,
       chatId: update.id,
@@ -4482,13 +4506,13 @@ export class BaileysAdapter implements ChannelAdapter {
     });
   }
 
-  private emitNewsletterMessages(
+  private async emitNewsletterMessages(
     events: NormalizedMessageEvent[],
     upsertType: string,
     appendWatermark: number | null,
     appendNow: number,
     preexistingAppendNewsletterKeys: ReadonlySet<string>,
-  ): void {
+  ): Promise<void> {
     for (const event of events) {
       if (!event.chatId.endsWith("@newsletter") || !event.message.id) continue;
       // Newsletter server IDs are scoped to a channel, not the account.
@@ -4502,11 +4526,11 @@ export class BaileysAdapter implements ChannelAdapter {
           timestampMs <= appendNow + APPEND_NOTIFY_CLOCK_SKEW_MS;
         if (!fresh) continue;
       }
-      if (!this.messageDedup.markProcessed(this.instanceId, dedupKey)) {
+      if (!(await this.messageDedup.markProcessed(this.instanceId, dedupKey))) {
         continue;
       }
       const serverId = /^\d+$/.test(event.message.id) ? event.message.id : null;
-      this.emit("newsletter.message", {
+      await this.emit("newsletter.message", {
         instanceId: this.instanceId,
         newsletterId: event.chatId,
         chatId: event.chatId,
@@ -4603,7 +4627,7 @@ export class BaileysAdapter implements ChannelAdapter {
   async getGroupInviteInfo(inviteCode: string): Promise<GroupMetadata> {
     const sock = this.getSock();
     const metadata = await sock.groupGetInviteInfo(normalizeGroupInviteCode(inviteCode));
-    return this.normalizeGroupMetadata(metadata);
+    return await this.normalizeGroupMetadata(metadata);
   }
 
   async joinGroup(inviteCode: string): Promise<string> {
@@ -5016,7 +5040,7 @@ export class BaileysAdapter implements ChannelAdapter {
     this.requireGroupWritesEnabled();
     const sock = this.getSock();
     const community = await sock.communityCreate(subject, description);
-    return community ? this.normalizeGroupMetadata(community) : null;
+    return community ? await this.normalizeGroupMetadata(community) : null;
   }
 
   async listCommunities(): Promise<Record<string, GroupMetadata>> {
@@ -5278,7 +5302,7 @@ export class BaileysAdapter implements ChannelAdapter {
   async sendStatus(content: StatusContent): Promise<StatusSendResult> {
     const sock = this.getSock();
     const statusJid = STATUS_BROADCAST_JID;
-    const audience = this.resolveStatusAudience(sock, content.statusJidList);
+    const audience = await this.resolveStatusAudience(sock, content.statusJidList);
     const messageOptions: MiscMessageGenerationOptions = {
       statusJidList: audience.statusJidList,
       broadcast: true,
@@ -5331,7 +5355,7 @@ export class BaileysAdapter implements ChannelAdapter {
     }
 
     if (!messageId) throw new Error("Baileys did not return a status message ID");
-    this.persistStatusAudience(messageId, audience.statusJidList);
+    await this.persistStatusAudience(messageId, audience.statusJidList);
 
     return {
       messageId,
@@ -5347,14 +5371,14 @@ export class BaileysAdapter implements ChannelAdapter {
     this.requireGroupWritesEnabled();
     const sock = this.getSock();
     await sock.newsletterFollow(jid);
-    this.emitNewsletterMembership("joined", jid, null, null, "subscriber");
+    await this.emitNewsletterMembership("joined", jid, null, null, "subscriber");
   }
 
   async newsletterUnfollow(jid: string): Promise<void> {
     this.requireGroupWritesEnabled();
     const sock = this.getSock();
     await sock.newsletterUnfollow(jid);
-    this.emitNewsletterMembership("left", jid, null, null, null);
+    await this.emitNewsletterMembership("left", jid, null, null, null);
   }
 
   async newsletterSend(jid: string, text: string): Promise<MessageResponse> {
@@ -5367,7 +5391,7 @@ export class BaileysAdapter implements ChannelAdapter {
     this.requireGroupWritesEnabled();
     const sock = this.getSock();
     const created = await sock.newsletterCreate(name, description);
-    this.emitNewsletterMembership(
+    await this.emitNewsletterMembership(
       "joined",
       created.id,
       created.name ?? name,
@@ -5563,20 +5587,20 @@ export class BaileysAdapter implements ChannelAdapter {
   // ---- Data access ----
 
   async getContacts(search?: string): Promise<Contact[]> {
-    for (const lid of this.contactStore.getUnresolvedLids()) {
+    for (const lid of await this.contactStore.getUnresolvedLids()) {
       const pn = await this.resolvePn(lid);
-      if (pn !== lid) this.contactStore.updateLidMapping(lid, pn);
+      if (pn !== lid) await this.contactStore.updateLidMapping(lid, pn);
     }
-    return this.contactStore.getContacts(search);
+    return await this.contactStore.getContacts(search);
   }
 
   async resyncContacts(): Promise<ContactResyncResult> {
     const sock = this.getSock();
-    const contactsBefore = this.contactStore.getContactCount();
+    const contactsBefore = await this.contactStore.getContactCount();
     const collections: ContactResyncResult["sources"]["appState"]["collections"] = [];
 
     for (const collection of ALL_WA_PATCH_NAMES) {
-      const before = this.contactStore.getContactCount();
+      const before = await this.contactStore.getContactCount();
       let errorMessage: string | undefined;
       try {
         // false preserves incremental existing-session behavior and avoids initial-sync handling.
@@ -5592,7 +5616,7 @@ export class BaileysAdapter implements ChannelAdapter {
       collections.push({
         collection,
         success: errorMessage === undefined,
-        contactsAdded: Math.max(0, this.contactStore.getContactCount() - before),
+        contactsAdded: Math.max(0, (await this.contactStore.getContactCount()) - before),
         ...(errorMessage ? { error: errorMessage } : {}),
       });
     }
@@ -5606,7 +5630,7 @@ export class BaileysAdapter implements ChannelAdapter {
       }
     };
     const localStore = await this.contactStore.recoverFromLocalData(resolveLidToPn);
-    const contactsAfter = this.contactStore.getContactCount();
+    const contactsAfter = await this.contactStore.getContactCount();
 
     return {
       contactsBefore,
@@ -5627,13 +5651,13 @@ export class BaileysAdapter implements ChannelAdapter {
   }
 
   async getChats(): Promise<Chat[]> {
-    const rows = db
+    const rows = await db
       .select()
       .from(chatsTable)
       .where(eq(chatsTable.instanceId, this.instanceId))
-      .orderBy(desc(chatsTable.lastMessageAt), desc(chatsTable.updatedAt))
+      .orderBy(sql`${chatsTable.lastMessageAt} DESC NULLS LAST`, desc(chatsTable.updatedAt))
       .all();
-    const labelRows = db
+    const labelRows = await db
       .select()
       .from(labelsTable)
       .where(and(eq(labelsTable.instanceId, this.instanceId), eq(labelsTable.deleted, 0)))
@@ -5650,7 +5674,7 @@ export class BaileysAdapter implements ChannelAdapter {
         } satisfies BusinessLabel,
       ]),
     );
-    const associationRows = db
+    const associationRows = await db
       .select({ chatId: labelAssociationsTable.chatId, labelId: labelAssociationsTable.labelId })
       .from(labelAssociationsTable)
       .where(
@@ -5685,7 +5709,7 @@ export class BaileysAdapter implements ChannelAdapter {
 
   async getMessages(chatId: string, limit = 50): Promise<Message[]> {
     const jid = this.normalizeJid(chatId);
-    const rows = db
+    const rows = await db
       .select()
       .from(messagesTable)
       .where(and(eq(messagesTable.instanceId, this.instanceId), eq(messagesTable.chatId, jid)))
@@ -5693,69 +5717,73 @@ export class BaileysAdapter implements ChannelAdapter {
       .limit(limit)
       .all();
 
-    return rows.map((r) => {
-      let details: ReturnType<typeof extractMessageDetails> | undefined;
-      let raw: WAMessage | undefined;
-      if (r.rawData) {
-        try {
-          raw = JSON.parse(r.rawData, BufferJSON.reviver) as WAMessage;
-          details = extractMessageDetails(raw);
-        } catch {
-          // The normalized fields remain available if raw data is malformed.
+    return Promise.all(
+      rows.map(async (r) => {
+        let details: ReturnType<typeof extractMessageDetails> | undefined;
+        let raw: WAMessage | undefined;
+        if (r.rawData) {
+          try {
+            raw = JSON.parse(r.rawData, BufferJSON.reviver) as WAMessage;
+            details = extractMessageDetails(raw);
+          } catch {
+            // The normalized fields remain available if raw data is malformed.
+          }
         }
-      }
-      const labels = this.getLabelsFor("message", r.chatId, r.id);
-      return {
-        id: r.id,
-        chatId: r.chatId,
-        senderId: r.senderId,
-        // Re-normalizing stored raw messages also repairs rows written while an
-        // earlier build persisted unsupported content with type "unknown".
-        type: details?.type ?? (r.type as Message["type"]),
-        content: r.content,
-        mediaUrl: r.mediaUrl,
-        ...(r.mediaMimetype || details?.mediaMimetype
-          ? { mediaMimetype: r.mediaMimetype ?? details?.mediaMimetype }
-          : {}),
-        ...(r.mediaMimetype || details?.mediaMimetype
-          ? { mimeType: r.mediaMimetype ?? details?.mediaMimetype }
-          : {}),
-        ...(details?.mediaFileName
-          ? { mediaFileName: details.mediaFileName, fileName: details.mediaFileName }
-          : {}),
-        ...(details?.mediaSize ? { mediaSize: details.mediaSize, size: details.mediaSize } : {}),
-        ...(details?.mediaCaption
-          ? { mediaCaption: details.mediaCaption, caption: details.mediaCaption }
-          : {}),
-        ...(details?.buttons ? { buttons: details.buttons } : {}),
-        ...(details?.rawType ? { rawType: details.rawType } : {}),
-        quotedMessageId: r.quotedId,
-        isFromMe: r.isFromMe === 1,
-        isForwarded: r.isForwarded === 1,
-        status: r.status as Message["status"],
-        timestamp: r.timestamp,
-        ...(raw && isViewOnceMessage(raw) ? { viewOnce: true } : {}),
-        ...(raw && isEphemeralMessage(raw) ? { ephemeral: true } : {}),
-        ...(!raw?.message || typeof raw.message !== "object" || Array.isArray(raw.message)
-          ? { historySharingBlocked: true }
-          : {}),
-        ...(r.pushName ? { pushName: r.pushName } : {}),
-        starred: r.starred === 1,
-        ...(labels.length ? { labels } : {}),
-      };
-    });
+        const labels = await this.getLabelsFor("message", r.chatId, r.id);
+        return {
+          id: r.id,
+          chatId: r.chatId,
+          senderId: r.senderId,
+          // Re-normalizing stored raw messages also repairs rows written while an
+          // earlier build persisted unsupported content with type "unknown".
+          type: details?.type ?? (r.type as Message["type"]),
+          content: r.content,
+          mediaUrl: r.mediaUrl,
+          ...(r.mediaMimetype || details?.mediaMimetype
+            ? { mediaMimetype: r.mediaMimetype ?? details?.mediaMimetype }
+            : {}),
+          ...(r.mediaMimetype || details?.mediaMimetype
+            ? { mimeType: r.mediaMimetype ?? details?.mediaMimetype }
+            : {}),
+          ...(details?.mediaFileName
+            ? { mediaFileName: details.mediaFileName, fileName: details.mediaFileName }
+            : {}),
+          ...(details?.mediaSize ? { mediaSize: details.mediaSize, size: details.mediaSize } : {}),
+          ...(details?.mediaCaption
+            ? { mediaCaption: details.mediaCaption, caption: details.mediaCaption }
+            : {}),
+          ...(details?.buttons ? { buttons: details.buttons } : {}),
+          ...(details?.rawType ? { rawType: details.rawType } : {}),
+          quotedMessageId: r.quotedId,
+          isFromMe: r.isFromMe === 1,
+          isForwarded: r.isForwarded === 1,
+          status: r.status as Message["status"],
+          timestamp: r.timestamp,
+          ...(raw && isViewOnceMessage(raw) ? { viewOnce: true } : {}),
+          ...(raw && isEphemeralMessage(raw) ? { ephemeral: true } : {}),
+          ...(!raw?.message || typeof raw.message !== "object" || Array.isArray(raw.message)
+            ? { historySharingBlocked: true }
+            : {}),
+          ...(r.pushName ? { pushName: r.pushName } : {}),
+          starred: r.starred === 1,
+          ...(labels.length ? { labels } : {}),
+        };
+      }),
+    );
   }
 
   async searchMessages(
     options: MessageSearchOptions,
   ): Promise<{ messages: Message[]; hasMore: boolean; nextOffset: number | null }> {
-    const result = searchStoredMessages(sqlite, this.instanceId, options);
+    const result = await searchStoredMessages(sqlite, this.instanceId, options);
     return {
       ...result,
-      messages: result.messages.map((message) => {
-        const labels = this.getLabelsFor("message", message.chatId, message.id);
-        return labels.length ? { ...message, labels } : message;
-      }),
+      messages: await Promise.all(
+        result.messages.map(async (message) => {
+          const labels = await this.getLabelsFor("message", message.chatId, message.id);
+          return labels.length ? { ...message, labels } : message;
+        }),
+      ),
     };
   }
 
@@ -5778,7 +5806,7 @@ export class BaileysAdapter implements ChannelAdapter {
         "Another on-demand message history fetch is already in progress for this instance",
       );
     }
-    const oldest = db
+    const oldest = await db
       .select({
         id: messagesTable.id,
         chatId: messagesTable.chatId,
@@ -5803,7 +5831,7 @@ export class BaileysAdapter implements ChannelAdapter {
         // The normalized database fields below are enough to construct an anchor key.
       }
     }
-    const oldestKey = this.resolveMessageKey(jid, oldest.id, false, oldest);
+    const oldestKey = await this.resolveMessageKey(jid, oldest.id, false, oldest);
     const connectedUserId = sock.user?.id;
     if (jid.endsWith("@g.us") && oldestKey.fromMe && !oldestKey.participant && connectedUserId) {
       oldestKey.participant = connectedUserId;
@@ -5853,16 +5881,16 @@ export class BaileysAdapter implements ChannelAdapter {
     return resultPromise;
   }
 
-  private hasStoredMessages(): boolean {
-    return !!sqlite
+  private async hasStoredMessages(): Promise<boolean> {
+    return !!(await sqlite
       .prepare("SELECT 1 FROM messages WHERE instance_id = ? LIMIT 1")
-      .get(this.instanceId);
+      .get(this.instanceId));
   }
 
-  private hasStoredMessagesForChat(chatId: string): boolean {
-    return !!sqlite
+  private async hasStoredMessagesForChat(chatId: string): Promise<boolean> {
+    return !!(await sqlite
       .prepare("SELECT 1 FROM messages WHERE instance_id = ? AND chat_id = ? LIMIT 1")
-      .get(this.instanceId, chatId);
+      .get(this.instanceId, chatId));
   }
 
   private scheduleAutomaticHistoryRecovery(chatId: string): void {
@@ -5932,7 +5960,7 @@ export class BaileysAdapter implements ChannelAdapter {
     waiter.reject(error);
   }
 
-  private persistSourceMessage(source: WAMessage): boolean {
+  private async persistSourceMessage(source: WAMessage): Promise<boolean> {
     if (!source.key.id || !source.key.remoteJid) return false;
     normalizeLidInMessage(source);
     const unwrappedContent = unwrapMessageContent(source.message, { unwrapProtocolEdits: false });
@@ -5958,7 +5986,7 @@ export class BaileysAdapter implements ChannelAdapter {
         isFromMe: source.key.fromMe ?? false,
       },
     };
-    return this.persistMessage(normalized, source);
+    return await this.persistMessage(normalized, source);
   }
 
   async downloadMessageAudio(
@@ -5966,7 +5994,7 @@ export class BaileysAdapter implements ChannelAdapter {
     maxBytes?: number,
     timeoutMs?: number,
   ): Promise<{ data: Buffer; mimeType: string }> {
-    const row = db
+    const row = await db
       .select({
         type: messagesTable.type,
         rawData: messagesTable.rawData,
@@ -6035,7 +6063,7 @@ export class BaileysAdapter implements ChannelAdapter {
           eq(messagesTable.chatId, chatId),
         )
       : and(eq(messagesTable.instanceId, this.instanceId), eq(messagesTable.id, messageId));
-    const row = db
+    const row = await db
       .select({
         type: messagesTable.type,
         rawData: messagesTable.rawData,
@@ -6122,13 +6150,13 @@ export class BaileysAdapter implements ChannelAdapter {
 
   // ---- Message Persistence ----
 
-  private persistMessage(
+  private async persistMessage(
     event: NormalizedMessageEvent,
     source?: WAMessage,
     persistFullMessage = false,
-  ): boolean {
+  ): Promise<boolean> {
     try {
-      const existed = db
+      const existed = await db
         .select({ id: messagesTable.id })
         .from(messagesTable)
         .where(
@@ -6156,7 +6184,8 @@ export class BaileysAdapter implements ChannelAdapter {
         : needsRawData
           ? serializeIncomingMessage(source)
           : null;
-      db.insert(messagesTable)
+      await db
+        .insert(messagesTable)
         .values({
           id: message.id,
           instanceId,
@@ -6199,9 +6228,11 @@ export class BaileysAdapter implements ChannelAdapter {
     }
   }
 
-  private attachMessageLabels(event: NormalizedMessageEvent): NormalizedMessageEvent {
-    const chatLabels = this.getLabelsFor("chat", event.chatId);
-    const messageLabels = this.getLabelsFor("message", event.chatId, event.message.id);
+  private async attachMessageLabels(
+    event: NormalizedMessageEvent,
+  ): Promise<NormalizedMessageEvent> {
+    const chatLabels = await this.getLabelsFor("chat", event.chatId);
+    const messageLabels = await this.getLabelsFor("message", event.chatId, event.message.id);
     return {
       ...event,
       ...(chatLabels.length ? { chatLabels } : {}),
@@ -6269,7 +6300,7 @@ export class BaileysAdapter implements ChannelAdapter {
 
   private async getStoredEventMessage(key: WAMessageKey): Promise<WAMessage | null> {
     if (!key.id) return null;
-    const row = db
+    const row = await db
       .select({
         chatId: messagesTable.chatId,
         type: messagesTable.type,
@@ -6512,7 +6543,7 @@ export class BaileysAdapter implements ChannelAdapter {
     };
   }
 
-  private persistResolvedEventResponse(
+  private async persistResolvedEventResponse(
     response: {
       eventMessageId: string;
       chatId: string;
@@ -6524,8 +6555,8 @@ export class BaileysAdapter implements ChannelAdapter {
       rawData: string | null;
     },
     emitEvent = true,
-  ): void {
-    const previous = db
+  ): Promise<void> {
+    const previous = await db
       .select()
       .from(eventResponsesTable)
       .where(
@@ -6558,7 +6589,8 @@ export class BaileysAdapter implements ChannelAdapter {
       previous.responseMessageId !== response.responseMessageId ||
       previous.extraGuestCount !== response.extraGuestCount;
 
-    db.insert(eventResponsesTable)
+    await db
+      .insert(eventResponsesTable)
       .values({
         instanceId: this.instanceId,
         eventMessageId: response.eventMessageId,
@@ -6588,7 +6620,7 @@ export class BaileysAdapter implements ChannelAdapter {
       .run();
 
     if (!emitEvent || !changed) return;
-    this.emit("event.response", {
+    await this.emit("event.response", {
       instanceId: this.instanceId,
       chatId: response.chatId,
       eventMessageId: response.eventMessageId,
@@ -6622,7 +6654,7 @@ export class BaileysAdapter implements ChannelAdapter {
       const timestampValue =
         eventResponse.senderTimestampMs ?? responseMessage?.timestampMs ?? entry.timestampMs;
       const timestamp = this.timestampValueToMilliseconds(timestampValue);
-      this.persistResolvedEventResponse({
+      await this.persistResolvedEventResponse({
         eventMessageId,
         chatId,
         responder,
@@ -6661,7 +6693,7 @@ export class BaileysAdapter implements ChannelAdapter {
     const rawData = serializeIncomingMessage(message);
     const decrypted = await this.decryptStoredEventResponse(encrypted, message.key);
     if (decrypted.status === "decrypted") {
-      this.persistResolvedEventResponse({
+      await this.persistResolvedEventResponse({
         ...decrypted.value,
         responseMessageId: message.key.id ?? null,
         rawData,
@@ -6669,7 +6701,7 @@ export class BaileysAdapter implements ChannelAdapter {
       return;
     }
 
-    this.persistResolvedEventResponse(
+    await this.persistResolvedEventResponse(
       {
         eventMessageId: eventKey.id,
         chatId,
@@ -6690,7 +6722,7 @@ export class BaileysAdapter implements ChannelAdapter {
       eq(eventResponsesTable.response, "UNKNOWN"),
     ];
     if (eventMessageId) conditions.push(eq(eventResponsesTable.eventMessageId, eventMessageId));
-    const pending = db
+    const pending = await db
       .select()
       .from(eventResponsesTable)
       .where(and(...conditions))
@@ -6718,7 +6750,7 @@ export class BaileysAdapter implements ChannelAdapter {
           if (!responder) continue;
           const chatFromKey = responseKey ? await this.canonicalEventChatJid(responseKey) : "";
           const chatId = chatFromKey || (await this.resolveJidToPn(row.chatId));
-          this.persistResolvedEventResponse({
+          await this.persistResolvedEventResponse({
             eventMessageId: row.eventMessageId,
             chatId,
             responder,
@@ -6735,7 +6767,8 @@ export class BaileysAdapter implements ChannelAdapter {
             rawData: row.rawData,
           });
           if (row.responder !== responder) {
-            db.delete(eventResponsesTable)
+            await db
+              .delete(eventResponsesTable)
               .where(
                 and(
                   eq(eventResponsesTable.instanceId, this.instanceId),
@@ -6756,13 +6789,14 @@ export class BaileysAdapter implements ChannelAdapter {
         if (!encrypted) continue;
         const decrypted = await this.decryptStoredEventResponse(encrypted, message.key);
         if (decrypted.status !== "decrypted") continue;
-        this.persistResolvedEventResponse({
+        await this.persistResolvedEventResponse({
           ...decrypted.value,
           responseMessageId: message.key.id ?? row.responseMessageId,
           rawData: row.rawData,
         });
         if (row.responder !== decrypted.value.responder) {
-          db.delete(eventResponsesTable)
+          await db
+            .delete(eventResponsesTable)
             .where(
               and(
                 eq(eventResponsesTable.instanceId, this.instanceId),
@@ -6824,7 +6858,7 @@ export class BaileysAdapter implements ChannelAdapter {
       proto.Message.IEncEventResponseMessage | undefined;
     if (!encrypted?.eventCreationMessageKey?.id) return details("unrecognized_response");
 
-    const event = db
+    const event = await db
       .select({ type: messagesTable.type, rawData: messagesTable.rawData })
       .from(messagesTable)
       .where(
@@ -6871,14 +6905,17 @@ export class BaileysAdapter implements ChannelAdapter {
     };
   }
 
-  private persistChats(chats: Array<{ id?: string | null; name?: string | null }>): void {
+  private async persistChats(
+    chats: Array<{ id?: string | null; name?: string | null }>,
+  ): Promise<void> {
     for (const chat of chats) {
       const jid = chat.id?.trim();
       if (!jid) continue;
 
       const name = chat.name?.trim() || null;
       const isGroup = jid.endsWith("@g.us") ? 1 : 0;
-      db.insert(chatsTable)
+      await db
+        .insert(chatsTable)
         .values({
           instanceId: this.instanceId,
           jid,
@@ -6898,18 +6935,18 @@ export class BaileysAdapter implements ChannelAdapter {
     }
   }
 
-  private persistMessageEdit(
+  private async persistMessageEdit(
     chatId: string,
     messageId: string,
     content: NonNullable<WAMessage["message"]>,
-  ): void {
+  ): Promise<void> {
     if (!chatId || !messageId) return;
     const filter = and(
       eq(messagesTable.instanceId, this.instanceId),
       eq(messagesTable.chatId, chatId),
       eq(messagesTable.id, messageId),
     );
-    const row = db
+    const row = await db
       .select({ rawData: messagesTable.rawData })
       .from(messagesTable)
       .where(filter)
@@ -6932,7 +6969,8 @@ export class BaileysAdapter implements ChannelAdapter {
       message: replacement,
     };
     const details = extractMessageDetails(updated);
-    db.update(messagesTable)
+    await db
+      .update(messagesTable)
       .set({
         type: details.type,
         content: details.content,
@@ -6942,12 +6980,12 @@ export class BaileysAdapter implements ChannelAdapter {
       .run();
   }
 
-  private updateMessageStatus(
+  private async updateMessageStatus(
     messageId: string,
     status: MessageDeliveryStatus,
     chatId?: string,
     isFromMe?: number,
-  ): void {
+  ): Promise<void> {
     try {
       const filters = [
         eq(messagesTable.instanceId, this.instanceId),
@@ -6957,7 +6995,8 @@ export class BaileysAdapter implements ChannelAdapter {
       if (chatId !== undefined) filters.push(eq(messagesTable.chatId, chatId));
       if (isFromMe !== undefined) filters.push(eq(messagesTable.isFromMe, isFromMe));
 
-      db.update(messagesTable)
+      await db
+        .update(messagesTable)
         .set({ status })
         .where(and(...filters))
         .run();
@@ -6966,9 +7005,12 @@ export class BaileysAdapter implements ChannelAdapter {
     }
   }
 
-  private persistDecryptedPollUpdates(pollKey: WAMessageKey, updates: proto.IPollUpdate[]): void {
+  private async persistDecryptedPollUpdates(
+    pollKey: WAMessageKey,
+    updates: proto.IPollUpdate[],
+  ): Promise<void> {
     if (!pollKey.id) return;
-    const row = db
+    const row = await db
       .select({
         chatId: messagesTable.chatId,
         type: messagesTable.type,
@@ -6982,7 +7024,8 @@ export class BaileysAdapter implements ChannelAdapter {
     try {
       const poll = JSON.parse(row.rawData, BufferJSON.reviver) as WAMessage;
       for (const update of updates) updateMessageWithPollUpdate(poll, update);
-      db.update(messagesTable)
+      await db
+        .update(messagesTable)
         .set({ rawData: serializeWAMessage(poll) })
         .where(
           and(
@@ -7010,7 +7053,7 @@ export class BaileysAdapter implements ChannelAdapter {
     const voteMessageId = typeof message.key.id === "string" ? message.key.id : undefined;
     if (!pollKey || !pollMessageId || !voteMessageId || !encryptedVote) return false;
 
-    const row = db
+    const row = await db
       .select({
         chatId: messagesTable.chatId,
         type: messagesTable.type,
@@ -7023,7 +7066,7 @@ export class BaileysAdapter implements ChannelAdapter {
       )
       .get();
     if (!row || row.type !== "poll" || !row.rawData) {
-      this.queuePendingPollVote(pollMessageId, voteMessageId, message);
+      await this.queuePendingPollVote(pollMessageId, voteMessageId, message);
       return false;
     }
 
@@ -7031,7 +7074,7 @@ export class BaileysAdapter implements ChannelAdapter {
     try {
       poll = JSON.parse(row.rawData, BufferJSON.reviver) as WAMessage;
     } catch {
-      this.queuePendingPollVote(pollMessageId, voteMessageId, message);
+      await this.queuePendingPollVote(pollMessageId, voteMessageId, message);
       logger.warn(
         { instanceId: this.instanceId, pollMessageId, voteMessageId, attempts: 0 },
         "Unable to read stored poll data for vote decryption",
@@ -7041,7 +7084,7 @@ export class BaileysAdapter implements ChannelAdapter {
 
     const pollSecret = normalizeStoredMessageSecret(poll);
     if (!pollSecret) {
-      this.queuePendingPollVote(pollMessageId, voteMessageId, message);
+      await this.queuePendingPollVote(pollMessageId, voteMessageId, message);
       return false;
     }
 
@@ -7075,7 +7118,7 @@ export class BaileysAdapter implements ChannelAdapter {
     }
 
     if (!decryptedVote) {
-      this.queuePendingPollVote(pollMessageId, voteMessageId, message);
+      await this.queuePendingPollVote(pollMessageId, voteMessageId, message);
       logger.warn(
         {
           instanceId: this.instanceId,
@@ -7093,7 +7136,7 @@ export class BaileysAdapter implements ChannelAdapter {
       voterCandidates.find((candidate) => candidate.endsWith("@s.whatsapp.net")) ??
       (voterCandidates[0] ? await this.resolveJidToPn(voterCandidates[0]) : "");
     const voteKey = this.canonicalPollVoteKey(message.key, voterJid);
-    this.persistDecryptedPollUpdates(pollKey, [
+    await this.persistDecryptedPollUpdates(pollKey, [
       {
         pollUpdateMessageKey: voteKey,
         vote: decryptedVote,
@@ -7102,7 +7145,8 @@ export class BaileysAdapter implements ChannelAdapter {
           : {}),
       },
     ]);
-    db.delete(pendingPollVotesTable)
+    await db
+      .delete(pendingPollVotesTable)
       .where(
         and(
           eq(pendingPollVotesTable.instanceId, this.instanceId),
@@ -7204,15 +7248,16 @@ export class BaileysAdapter implements ChannelAdapter {
     return { ...key, remoteJidAlt: voterJid };
   }
 
-  private queuePendingPollVote(
+  private async queuePendingPollVote(
     pollMessageId: string,
     voteMessageId: string,
     message: WAMessage,
-  ): void {
+  ): Promise<void> {
     const rawData = serializeWAMessage(message);
     if (!rawData) return;
 
-    db.insert(pendingPollVotesTable)
+    await db
+      .insert(pendingPollVotesTable)
       .values({
         instanceId: this.instanceId,
         pollMessageId,
@@ -7235,7 +7280,7 @@ export class BaileysAdapter implements ChannelAdapter {
   }
 
   private async retryPendingPollVotes(pollMessageId: string): Promise<void> {
-    const pending = db
+    const pending = await db
       .select()
       .from(pendingPollVotesTable)
       .where(
@@ -7262,9 +7307,10 @@ export class BaileysAdapter implements ChannelAdapter {
     }
   }
 
-  private persistStatusAudience(messageId: string, recipientJids: string[]): void {
+  private async persistStatusAudience(messageId: string, recipientJids: string[]): Promise<void> {
     try {
-      db.insert(statusAudiencesTable)
+      await db
+        .insert(statusAudiencesTable)
         .values({
           instanceId: this.instanceId,
           messageId,
@@ -7284,9 +7330,9 @@ export class BaileysAdapter implements ChannelAdapter {
     }
   }
 
-  private getStoredStatusAudience(messageId: string): string[] | undefined {
+  private async getStoredStatusAudience(messageId: string): Promise<string[] | undefined> {
     try {
-      const row = db
+      const row = await db
         .select({ recipientJids: statusAudiencesTable.recipientJids })
         .from(statusAudiencesTable)
         .where(
@@ -7332,12 +7378,15 @@ export class BaileysAdapter implements ChannelAdapter {
 
   // ---- Private event helpers ----
 
-  private emit<E extends ChannelEvent>(event: E, payload: ChannelEventPayload[E]): void {
+  private async emit<E extends ChannelEvent>(
+    event: E,
+    payload: ChannelEventPayload[E],
+  ): Promise<void> {
     const handlers = this.listeners.get(event);
     if (handlers) {
       for (const handler of handlers) {
         try {
-          handler(payload as ChannelEventPayload[ChannelEvent]);
+          await handler(payload as ChannelEventPayload[ChannelEvent]);
         } catch (err) {
           logger.error({ err, event }, "Error in event handler");
         }
@@ -7345,14 +7394,18 @@ export class BaileysAdapter implements ChannelAdapter {
     }
   }
 
-  private persistInstanceLifecycle(fields: {
+  private async persistInstanceLifecycle(fields: {
     status: "connected" | "disconnected";
     updatedAt: number;
     lastConnected?: number;
     lastDisconnected?: number;
-  }): void {
+  }): Promise<void> {
     try {
-      db.update(instancesTable).set(fields).where(eq(instancesTable.id, this.instanceId)).run();
+      await db
+        .update(instancesTable)
+        .set(fields)
+        .where(eq(instancesTable.id, this.instanceId))
+        .run();
     } catch (error) {
       logger.error(
         { err: error, instanceId: this.instanceId, status: fields.status },
@@ -7361,188 +7414,202 @@ export class BaileysAdapter implements ChannelAdapter {
     }
   }
 
-  private bindEvents(sock: WASocket): void {
-    sock.ev.on("connection.update", (update) => {
-      if (this.sock !== null && this.sock !== sock) return;
-      if (
-        update.connection === "close" &&
-        this.sock !== sock &&
-        this.retainedClosedSocket !== null
-      ) {
-        this.handleReplacedSocketClose(sock, update.lastDisconnect);
-        return;
-      }
-
-      const { connection, lastDisconnect, qr } = update;
-
-      if (qr) {
-        this.emitAuthChallengeGenerated("qr");
-        this.qrCode = qr;
-        this.status = "qr_pending";
-
-        if (this.pairingPhone && sock) {
-          // Evolution API pattern: call requestPairingCode inside the QR event, with a small delay
-          const pairingPhone = this.pairingPhone;
-          setTimeout(async () => {
-            try {
-              if (this.sock !== sock || this.status !== "qr_pending") {
-                this.pairingCodeResolver?.(null);
-                this.pairingCodeResolver = null;
-                return;
-              }
-              const code = await sock.requestPairingCode(pairingPhone);
-              if (this.sock !== sock || this.status !== "qr_pending") return;
-              const pairingCode = code ?? null;
-              if (pairingCode) this.emitAuthChallengeGenerated("pairing_code");
-              this.pairingCodeValue = pairingCode;
-              if (this.pairingCodeResolver) {
-                this.pairingCodeResolver(this.pairingCodeValue);
-                this.pairingCodeResolver = null;
-              }
-              logger.info({ instanceId: this.instanceId }, "Pairing code generated");
-            } catch (err) {
-              logger.error({ instanceId: this.instanceId, err }, "Failed to generate pairing code");
-              if (this.pairingCodeResolver) {
-                this.pairingCodeResolver(null);
-                this.pairingCodeResolver = null;
-              }
-            }
-          }, 1000);
+  private bindEvents(sock: WASocket, initialUpdate: Promise<void> = Promise.resolve()): void {
+    let connectionUpdates: Promise<void> = initialUpdate;
+    const processConnectionUpdate = async (update: BaileysEventMap["connection.update"]) => {
+      try {
+        if (this.sock !== null && this.sock !== sock) return;
+        if (
+          update.connection === "close" &&
+          this.sock !== sock &&
+          this.retainedClosedSocket !== null
+        ) {
+          await this.handleReplacedSocketClose(sock, update.lastDisconnect);
+          return;
         }
-      }
 
-      if (connection === "open") {
-        if (this.sock === null) this.sock = sock;
-        this.retainedClosedSocket = null;
-        this.groupEventSnapshots.clear();
-        const connectedAt = Date.now();
-        const wasPairing = this.pendingAuthChallenges.size > 0;
-        this.appendNotifyWatermarkMs = this.getAppendNotifyWatermark(connectedAt);
-        this.status = "connected";
-        const persistedDisconnect = db
-          .select({ lastDisconnected: instancesTable.lastDisconnected })
-          .from(instancesTable)
-          .where(eq(instancesTable.id, this.instanceId))
-          .get()?.lastDisconnected;
-        const offlineSince = this.disconnectedAtMs ?? persistedDisconnect ?? null;
-        const offlineDurationMs =
-          offlineSince !== null ? Math.max(0, Date.now() - offlineSince) : undefined;
-        this.connectedAtMs = connectedAt;
-        this.disconnectedAtMs = null;
-        this.qrCode = null;
-        this.pairingPhone = null;
-        this.pairingCodeValue = null;
-        this.pairingCodeResolver = null;
-        this.clearAuthChallenges();
-        this.disconnectEventEmittedSinceOpen = false;
-        this.terminalDisconnectEventEmittedSinceOpen = false;
-        this.clearReconnectTimer();
-        this.consecutiveHealthProbeFailures = 0;
-        this.resetHealthWatchdog(sock);
-        if (this.presenceMode === "on_activity") {
-          void this.setGlobalPresence(sock, "unavailable").catch((error: unknown) => {
-            this.logGlobalPresenceFailure(error);
-          });
-        } else if (this.markOnlineOnConnect) {
-          this.noteExplicitPresence("available");
+        const { connection, lastDisconnect, qr } = update;
+
+        if (qr) {
+          await this.emitAuthChallengeGenerated("qr");
+          this.qrCode = qr;
+          this.status = "qr_pending";
+
+          if (this.pairingPhone && sock) {
+            // Evolution API pattern: call requestPairingCode inside the QR event, with a small delay
+            const pairingPhone = this.pairingPhone;
+            setTimeout(async () => {
+              try {
+                if (this.sock !== sock || this.status !== "qr_pending") {
+                  this.pairingCodeResolver?.(null);
+                  this.pairingCodeResolver = null;
+                  return;
+                }
+                const code = await sock.requestPairingCode(pairingPhone);
+                if (this.sock !== sock || this.status !== "qr_pending") return;
+                const pairingCode = code ?? null;
+                if (pairingCode) await this.emitAuthChallengeGenerated("pairing_code");
+                this.pairingCodeValue = pairingCode;
+                if (this.pairingCodeResolver) {
+                  this.pairingCodeResolver(this.pairingCodeValue);
+                  this.pairingCodeResolver = null;
+                }
+                logger.info({ instanceId: this.instanceId }, "Pairing code generated");
+              } catch (err) {
+                logger.error(
+                  { instanceId: this.instanceId, err },
+                  "Failed to generate pairing code",
+                );
+                if (this.pairingCodeResolver) {
+                  this.pairingCodeResolver(null);
+                  this.pairingCodeResolver = null;
+                }
+              }
+            }, 1000);
+          }
         }
-        const user = sock.user as { lid?: string; name?: string } | undefined;
-        // Persist before emitting so a fast reconnect records this open even when a later
-        // connection.changed dedupe would treat the previous outage as still open.
-        this.persistInstanceLifecycle({
-          status: "connected",
-          lastConnected: connectedAt,
-          updatedAt: connectedAt,
-        });
-        this.emit("instance.connected", {
-          instanceId: this.instanceId,
-          phone: this.ownPhoneJid(sock),
-          lid: this.ownLid(user),
-          pushName: typeof user?.name === "string" ? user.name : null,
-          connectedAt,
-          wasPairing,
-        });
-        logger.info({ instanceId: this.instanceId, offlineDurationMs }, "Connected to WhatsApp");
-      }
 
-      if (connection === "close") {
-        this.releaseProxyAgents();
-        this.clearHealthWatchdog();
-        this.clearEventBufferStallWatchdog();
-        this.resetActivityPresence();
-        this.appendNotifyWatermarkMs = null;
-        this.status = "disconnected";
-        const boom = (lastDisconnect?.error as Boom)?.output;
-        const statusCode = typeof boom?.statusCode === "number" ? boom.statusCode : undefined;
-        const reason = disconnectReasonName(statusCode);
-        const loggedOut = statusCode === DisconnectReason.loggedOut;
-        const closedAt = Date.now();
-        const priorDisconnectedAt = this.disconnectedAtMs;
-        const recordOutage = this.connectedAtMs !== null;
-        const connectedDurationMs =
-          this.connectedAtMs !== null ? Math.max(0, closedAt - this.connectedAtMs) : undefined;
-        this.connectedAtMs = null;
-        if (this.disconnectedAtMs === null) this.disconnectedAtMs = closedAt;
-        this.persistInstanceLifecycle({
-          status: "disconnected",
-          updatedAt: closedAt,
-          ...(recordOutage ? { lastDisconnected: closedAt } : {}),
-        });
-        this.lastDisconnectReason = reason;
-        this.lastDisconnectStatusCode = statusCode ?? null;
-        this.clearAuthChallenges(closedAt);
-        logger.warn(
-          {
-            instanceId: this.instanceId,
-            reason,
-            statusCode,
-            connectedDurationMs,
-          },
-          "Baileys connection closed",
-        );
-
-        this.retainedClosedSocket = sock;
-        this.sock = null;
-        let reconnectInMs: number | null = null;
-        if (loggedOut) {
-          this.reconnectSuspended = true;
-          logger.info({ instanceId: this.instanceId }, "Logged out, clearing auth");
-          clearAuthState(this.instanceId);
+        if (connection === "open") {
+          if (this.reconnectSuspended || this.sock !== sock) return;
+          this.retainedClosedSocket = null;
+          this.groupEventSnapshots.clear();
+          const connectedAt = Date.now();
+          const wasPairing = this.pendingAuthChallenges.size > 0;
+          this.status = "connected";
+          this.appendNotifyWatermarkMs = await this.readAppendNotifyWatermark(connectedAt);
+          const persistedDisconnect = await this.readPersistedDisconnect();
+          if (this.reconnectSuspended || this.sock !== sock) return;
+          const offlineSince = this.disconnectedAtMs ?? persistedDisconnect ?? null;
+          const offlineDurationMs =
+            offlineSince !== null ? Math.max(0, Date.now() - offlineSince) : undefined;
+          this.connectedAtMs = connectedAt;
+          this.disconnectedAtMs = null;
+          this.qrCode = null;
+          this.pairingPhone = null;
+          this.pairingCodeValue = null;
+          this.pairingCodeResolver = null;
+          await this.clearAuthChallenges();
+          this.disconnectEventEmittedSinceOpen = false;
+          this.terminalDisconnectEventEmittedSinceOpen = false;
           this.clearReconnectTimer();
-        } else if (this.autoReconnect && !this.reconnectSuspended) {
-          reconnectInMs = this.scheduleReconnect();
-        }
-
-        const shouldEmitDisconnected =
-          !this.disconnectEventEmittedSinceOpen ||
-          (loggedOut && !this.terminalDisconnectEventEmittedSinceOpen);
-        if (shouldEmitDisconnected) {
-          this.emit("instance.disconnected", {
-            instanceId: this.instanceId,
-            reason,
-            statusCode: statusCode ?? null,
-            loggedOut,
-            willReconnect: reconnectInMs !== null,
-            ...(reconnectInMs !== null ? { reconnectInMs } : {}),
-            disconnectedAt: closedAt,
-            ...(priorDisconnectedAt !== null
-              ? { offlineSinceMs: Math.max(0, closedAt - priorDisconnectedAt) }
-              : {}),
+          this.consecutiveHealthProbeFailures = 0;
+          this.resetHealthWatchdog(sock);
+          if (this.presenceMode === "on_activity") {
+            void this.setGlobalPresence(sock, "unavailable").catch((error: unknown) => {
+              this.logGlobalPresenceFailure(error);
+            });
+          }
+          if (this.presenceMode !== "on_activity" && this.markOnlineOnConnect)
+            this.noteExplicitPresence("available");
+          const user = sock.user as { lid?: string; name?: string } | undefined;
+          // Persist before emitting so a fast reconnect records this open even when a later
+          // connection.changed dedupe would treat the previous outage as still open.
+          await this.persistInstanceLifecycle({
+            status: "connected",
+            lastConnected: connectedAt,
+            updatedAt: connectedAt,
           });
-          this.disconnectEventEmittedSinceOpen = true;
-          if (loggedOut) this.terminalDisconnectEventEmittedSinceOpen = true;
+          await this.emit("instance.connected", {
+            instanceId: this.instanceId,
+            phone: this.ownPhoneJid(sock),
+            lid: this.ownLid(user),
+            pushName: typeof user?.name === "string" ? user.name : null,
+            connectedAt,
+            wasPairing,
+          });
+          logger.info({ instanceId: this.instanceId, offlineDurationMs }, "Connected to WhatsApp");
         }
-      }
 
-      const normalized = normalizeConnectionUpdate(this.instanceId, update);
-      if (normalized) {
-        this.emit("connection.changed", normalized);
+        if (connection === "close") {
+          this.releaseProxyAgents();
+          this.clearHealthWatchdog();
+          this.clearEventBufferStallWatchdog();
+          this.resetActivityPresence();
+          this.appendNotifyWatermarkMs = null;
+          this.status = "disconnected";
+          const boom = (lastDisconnect?.error as Boom)?.output;
+          const statusCode = typeof boom?.statusCode === "number" ? boom.statusCode : undefined;
+          const reason = disconnectReasonName(statusCode);
+          const loggedOut = statusCode === DisconnectReason.loggedOut;
+          const closedAt = Date.now();
+          const priorDisconnectedAt = this.disconnectedAtMs;
+          const recordOutage = this.connectedAtMs !== null;
+          const connectedDurationMs =
+            this.connectedAtMs !== null ? Math.max(0, closedAt - this.connectedAtMs) : undefined;
+          this.connectedAtMs = null;
+          if (this.disconnectedAtMs === null) this.disconnectedAtMs = closedAt;
+          await this.persistInstanceLifecycle({
+            status: "disconnected",
+            updatedAt: closedAt,
+            ...(recordOutage ? { lastDisconnected: closedAt } : {}),
+          });
+          this.lastDisconnectReason = reason;
+          this.lastDisconnectStatusCode = statusCode ?? null;
+          await this.clearAuthChallenges(closedAt);
+          logger.warn(
+            {
+              instanceId: this.instanceId,
+              reason,
+              statusCode,
+              connectedDurationMs,
+            },
+            "Baileys connection closed",
+          );
+
+          this.retainedClosedSocket = sock;
+          this.sock = null;
+          let reconnectInMs: number | null = null;
+          if (loggedOut) {
+            this.reconnectSuspended = true;
+            logger.info({ instanceId: this.instanceId }, "Logged out, clearing auth");
+            await clearAuthState(this.instanceId);
+            this.clearReconnectTimer();
+          } else if (this.autoReconnect && !this.reconnectSuspended) {
+            reconnectInMs = this.scheduleReconnect();
+          }
+
+          const shouldEmitDisconnected =
+            !this.disconnectEventEmittedSinceOpen ||
+            (loggedOut && !this.terminalDisconnectEventEmittedSinceOpen);
+          if (shouldEmitDisconnected) {
+            await this.emit("instance.disconnected", {
+              instanceId: this.instanceId,
+              reason,
+              statusCode: statusCode ?? null,
+              loggedOut,
+              willReconnect: reconnectInMs !== null,
+              ...(reconnectInMs !== null ? { reconnectInMs } : {}),
+              disconnectedAt: closedAt,
+              ...(priorDisconnectedAt !== null
+                ? { offlineSinceMs: Math.max(0, closedAt - priorDisconnectedAt) }
+                : {}),
+            });
+            this.disconnectEventEmittedSinceOpen = true;
+            if (loggedOut) this.terminalDisconnectEventEmittedSinceOpen = true;
+          }
+        }
+
+        const normalized = normalizeConnectionUpdate(this.instanceId, update);
+        if (normalized) {
+          await this.emit("connection.changed", normalized);
+        }
+      } catch (err) {
+        logger.error({ err, instanceId: this.instanceId }, "Failed to process connection update");
       }
+    };
+    sock.ev.on("connection.update", (update) => {
+      // Keep lifecycle writes and notifications in socket order across database awaits.
+      connectionUpdates = connectionUpdates.then(() => processConnectionUpdate(update));
+      return connectionUpdates;
     });
 
     // creds.update is not buffered — use ev.on directly
     sock.ev.on("creds.update", async () => {
-      await this.saveCreds?.();
+      try {
+        await this.persistCreds();
+      } catch (err) {
+        this.scheduleCredsSave(err);
+      }
     });
 
     const resolveLidToPn: ContactPnResolver = async (lid) => {
@@ -7568,7 +7635,7 @@ export class BaileysAdapter implements ChannelAdapter {
       // --- LID Mapping (v7+): store LID <-> PN mappings ---
       if (events["lid-mapping.update"]) {
         const mapping = events["lid-mapping.update"];
-        this.contactStore.updateLidMapping(mapping.lid, mapping.pn);
+        await this.contactStore.updateLidMapping(mapping.lid, mapping.pn);
         await this.retryPendingEventResponses();
         logger.info(
           { instanceId: this.instanceId, lid: mapping.lid, pn: mapping.pn },
@@ -7578,7 +7645,7 @@ export class BaileysAdapter implements ChannelAdapter {
 
       // --- Chats: extract phonebook names from chat metadata ---
       if (events["chats.upsert"]) {
-        this.persistChats(events["chats.upsert"]);
+        await this.persistChats(events["chats.upsert"]);
         const namedChats = events["chats.upsert"].filter(
           (ch): ch is typeof ch & { id: string; name: string } =>
             !!ch.id && !!ch.name && isContactEligibleChatNameJid(ch.id),
@@ -7593,7 +7660,7 @@ export class BaileysAdapter implements ChannelAdapter {
       }
 
       if (events["chats.update"]) {
-        this.persistChats(events["chats.update"]);
+        await this.persistChats(events["chats.update"]);
         const namedChats = events["chats.update"].filter(
           (ch): ch is typeof ch & { id: string; name: string } =>
             !!ch.id && !!ch.name && isContactEligibleChatNameJid(ch.id),
@@ -7620,7 +7687,7 @@ export class BaileysAdapter implements ChannelAdapter {
       if (events["contacts.update"]) {
         await persistContacts(events["contacts.update"]);
         const normalized = normalizeContactsUpdate(this.instanceId, events["contacts.update"]);
-        for (const event of normalized) this.emit("contact.updated", event);
+        for (const event of normalized) await this.emit("contact.updated", event);
       }
 
       // --- History sync: contacts arrive here during first sync ---
@@ -7633,9 +7700,10 @@ export class BaileysAdapter implements ChannelAdapter {
           peerDataRequestSessionId,
         } = events["messaging-history.set"];
         for (const message of messages) {
-          if (message.key.id) this.messageDedup.markProcessed(this.instanceId, message.key.id);
+          if (message.key.id)
+            await this.messageDedup.markProcessed(this.instanceId, message.key.id);
         }
-        this.persistChats(chats);
+        await this.persistChats(chats);
         const contactCount = contacts.filter((contact) => contact.id).length;
         const chatContactCount = chats.filter(
           (chat) =>
@@ -7667,7 +7735,7 @@ export class BaileysAdapter implements ChannelAdapter {
         if (sessionMatchesWaiter && waiter) waiter.receivedMatchingHistorySet = true;
 
         for (const message of messages) {
-          const inserted = this.persistSourceMessage(message);
+          const inserted = await this.persistSourceMessage(message);
           const content = unwrapMessageContent(message.message, {
             unwrapProtocolEdits: false,
           });
@@ -7721,7 +7789,7 @@ export class BaileysAdapter implements ChannelAdapter {
         const appendNow = Date.now();
         const appendWatermark =
           data.type === "append"
-            ? (this.appendNotifyWatermarkMs ?? this.getAppendNotifyWatermark(appendNow))
+            ? (this.appendNotifyWatermarkMs ?? (await this.getAppendNotifyWatermark(appendNow)))
             : null;
         const preexistingAppendMessageIds = new Set<string>();
         const preexistingAppendNewsletterKeys = new Set<string>();
@@ -7731,7 +7799,7 @@ export class BaileysAdapter implements ChannelAdapter {
             const messageId = message.key.id;
             if (!messageId || checkedMessageIds.has(messageId)) continue;
             checkedMessageIds.add(messageId);
-            const existing = db
+            const existing = await db
               .select({ id: messagesTable.id, chatId: messagesTable.chatId })
               .from(messagesTable)
               .where(
@@ -7761,7 +7829,7 @@ export class BaileysAdapter implements ChannelAdapter {
               proto.Message.ProtocolMessage.Type.GROUP_MEMBER_LABEL_CHANGE &&
             msg.key.remoteJid?.endsWith("@g.us")
           ) {
-            this.processGroupMemberLabelUpdate({
+            await this.processGroupMemberLabelUpdate({
               groupId: msg.key.remoteJid,
               participant: msg.key.participant,
               participantAlt: msg.key.participantAlt,
@@ -7789,13 +7857,13 @@ export class BaileysAdapter implements ChannelAdapter {
               protocolMessage.editedMessage &&
               typeof protocolMessage.editedMessage === "object"
             ) {
-              this.persistMessageEdit(
+              await this.persistMessageEdit(
                 editEvent.chatId,
                 editEvent.messageId,
                 protocolMessage.editedMessage as NonNullable<WAMessage["message"]>,
               );
             }
-            this.emit("message.edited", editEvent);
+            await this.emit("message.edited", editEvent);
             continue;
           }
 
@@ -7807,7 +7875,7 @@ export class BaileysAdapter implements ChannelAdapter {
           if (msg.key.id && msg.key.remoteJid && !protocolMessage) {
             const details = extractMessageDetails(msg);
             const chatId = getChatJid(msg);
-            const needsHistoryRecovery = !this.hasStoredMessagesForChat(chatId);
+            const needsHistoryRecovery = !(await this.hasStoredMessagesForChat(chatId));
             const normalized: NormalizedMessageEvent = {
               instanceId: this.instanceId,
               chatId,
@@ -7825,7 +7893,7 @@ export class BaileysAdapter implements ChannelAdapter {
                 isFromMe: msg.key.fromMe ?? false,
               },
             };
-            this.persistMessage(normalized, msg);
+            await this.persistMessage(normalized, msg);
             if (needsHistoryRecovery) automaticHistoryRecoveryCandidates.add(chatId);
             if (details.type === "poll") await this.retryPendingPollVotes(msg.key.id);
           }
@@ -7847,7 +7915,7 @@ export class BaileysAdapter implements ChannelAdapter {
         }
 
         const normalizedEvents = normalizeMessagesUpsert(this.instanceId, data);
-        this.emitNewsletterMessages(
+        await this.emitNewsletterMessages(
           normalizedEvents,
           data.type,
           appendWatermark,
@@ -7878,12 +7946,12 @@ export class BaileysAdapter implements ChannelAdapter {
 
             if (appendEmitted >= this.appendNotifyMaxPerBatch) {
               // A capped message is deliberately skipped, including on redelivery.
-              this.messageDedup.markProcessed(this.instanceId, messageId);
+              await this.messageDedup.markProcessed(this.instanceId, messageId);
               continue;
             }
 
-            if (!this.messageDedup.markProcessed(this.instanceId, messageId)) continue;
-            this.emit("message.received", this.attachMessageLabels(event));
+            if (!(await this.messageDedup.markProcessed(this.instanceId, messageId))) continue;
+            await this.emit("message.received", await this.attachMessageLabels(event));
             const sourceMessage = appendMessagesById.get(messageId);
             if (sourceMessage) emittedAppendMessages.push(sourceMessage);
             appendEmitted++;
@@ -7904,10 +7972,10 @@ export class BaileysAdapter implements ChannelAdapter {
           let notifyEmitted = 0;
           for (const event of normalizedEvents) {
             const messageId = event.message.id;
-            if (!messageId || !this.messageDedup.markProcessed(this.instanceId, messageId))
+            if (!messageId || !(await this.messageDedup.markProcessed(this.instanceId, messageId)))
               continue;
 
-            this.emit("message.received", this.attachMessageLabels(event));
+            await this.emit("message.received", await this.attachMessageLabels(event));
             notifyEmitted++;
           }
           logger.info(
@@ -7935,10 +8003,14 @@ export class BaileysAdapter implements ChannelAdapter {
           const chatId = update.key.remoteJid;
           const receipt = typeof status === "number" ? receiptStatus[status] : undefined;
           if (messageId && chatId && update.update.message?.editedMessage?.message) {
-            this.persistMessageEdit(chatId, messageId, update.update.message.editedMessage.message);
+            await this.persistMessageEdit(
+              chatId,
+              messageId,
+              update.update.message.editedMessage.message,
+            );
           }
           if (receipt && messageId && chatId) {
-            this.persistReceipt(
+            await this.persistReceipt(
               chatId,
               messageId,
               update.key.participant ?? chatId,
@@ -7947,7 +8019,8 @@ export class BaileysAdapter implements ChannelAdapter {
             );
           }
           if (update.key.id && update.key.remoteJid && typeof update.update.starred === "boolean") {
-            db.update(messagesTable)
+            await db
+              .update(messagesTable)
               .set({ starred: update.update.starred ? 1 : 0 })
               .where(
                 and(
@@ -7962,13 +8035,13 @@ export class BaileysAdapter implements ChannelAdapter {
             await this.persistEventResponses(update.key, update.update.eventResponses);
           }
           if (update.key.id && update.update.pollUpdates) {
-            this.persistDecryptedPollUpdates(update.key, update.update.pollUpdates);
+            await this.persistDecryptedPollUpdates(update.key, update.update.pollUpdates);
           }
         }
         const normalized = normalizeMessagesUpdate(this.instanceId, events["messages.update"]);
         for (const event of normalized) {
-          this.updateMessageStatus(event.messageId, event.status, event.chatId);
-          this.emit("message.updated", event);
+          await this.updateMessageStatus(event.messageId, event.status, event.chatId);
+          await this.emit("message.updated", event);
         }
       }
 
@@ -7984,7 +8057,7 @@ export class BaileysAdapter implements ChannelAdapter {
                 ? "read"
                 : "delivered";
           if (update.key.remoteJid && update.key.id && receipt.userJid && readTimestamp != null) {
-            this.persistReceipt(
+            await this.persistReceipt(
               update.key.remoteJid,
               update.key.id,
               receipt.userJid,
@@ -7999,12 +8072,13 @@ export class BaileysAdapter implements ChannelAdapter {
         const normalized = normalizeMessagesDelete(this.instanceId, events["messages.delete"]);
         for (const event of normalized) {
           if (event.chatId && event.messageId)
-            this.updateMessageStatus(event.messageId, "revoked", event.chatId);
-          this.emit("message.deleted", event);
+            await this.updateMessageStatus(event.messageId, "revoked", event.chatId);
+          await this.emit("message.deleted", event);
         }
         const deleted = events["messages.delete"];
         if ("all" in deleted && deleted.all && deleted.jid) {
-          db.update(messagesTable)
+          await db
+            .update(messagesTable)
             .set({ status: "revoked" })
             .where(
               and(
@@ -8024,7 +8098,8 @@ export class BaileysAdapter implements ChannelAdapter {
           const participant = reactionKey ? await this.canonicalReactionAuthorJid(reactionKey) : "";
           if (!chatId || !messageId || !participant) continue;
           if (!reaction.reaction?.text) {
-            db.delete(messageReactionsTable)
+            await db
+              .delete(messageReactionsTable)
               .where(
                 and(
                   eq(messageReactionsTable.instanceId, this.instanceId),
@@ -8035,7 +8110,8 @@ export class BaileysAdapter implements ChannelAdapter {
               )
               .run();
           } else {
-            db.insert(messageReactionsTable)
+            await db
+              .insert(messageReactionsTable)
               .values({
                 instanceId: this.instanceId,
                 chatId,
@@ -8072,13 +8148,13 @@ export class BaileysAdapter implements ChannelAdapter {
             normalized[index]!.reactedBy = await this.canonicalReactionAuthorJid(reactionKey);
           }
         }
-        for (const event of normalized) this.emit("message.reaction", event);
+        for (const event of normalized) await this.emit("message.reaction", event);
       }
 
       // --- Presence ---
       if (events["presence.update"]) {
         const normalized = normalizePresenceUpdate(this.instanceId, events["presence.update"]);
-        for (const event of normalized) this.emit("presence.updated", event);
+        for (const event of normalized) await this.emit("presence.updated", event);
       }
 
       // --- Groups ---
@@ -8103,12 +8179,12 @@ export class BaileysAdapter implements ChannelAdapter {
           if (this.groupEventSnapshots.size > 10000) {
             this.groupEventSnapshots.delete(this.groupEventSnapshots.keys().next().value!);
           }
-          this.emit("group.updated", event);
+          await this.emit("group.updated", event);
         }
       }
       if (events["group.join-request"]) {
         const request = events["group.join-request"];
-        this.emit("group.join_request", {
+        await this.emit("group.join_request", {
           instanceId: this.instanceId,
           groupId: request.id,
           participant: request.participant,
@@ -8124,12 +8200,12 @@ export class BaileysAdapter implements ChannelAdapter {
       if (events["group-participants.update"]) {
         const update = events["group-participants.update"];
         const event = normalizeGroupParticipantsUpdate(this.instanceId, update);
-        this.emit("group.participants_changed", event);
+        await this.emit("group.participants_changed", event);
         if (
           event.action === "add" &&
           (await this.participantListIncludesSelf(update.participants))
         ) {
-          this.emitGroupJoined({
+          await this.emitGroupJoined({
             groupId: event.groupId,
             subject: null,
             description: null,
@@ -8140,7 +8216,7 @@ export class BaileysAdapter implements ChannelAdapter {
       }
 
       if (events["group.member-tag.update"]) {
-        this.processGroupMemberLabelUpdate(events["group.member-tag.update"]);
+        await this.processGroupMemberLabelUpdate(events["group.member-tag.update"]);
       }
 
       // --- Calls ---
@@ -8150,7 +8226,7 @@ export class BaileysAdapter implements ChannelAdapter {
           if (event.status === "offer" && event.callId && event.callerId) {
             this.pendingCalls.set(event.callId, { from: event.callerId, isVideo: event.isVideo });
           }
-          this.emit("call.received", event);
+          await this.emit("call.received", event);
 
           if (
             event.status === "offer" &&
@@ -8184,8 +8260,8 @@ export class BaileysAdapter implements ChannelAdapter {
           deleted: label.deleted,
           ...(label.predefinedId ? { predefinedId: label.predefinedId } : {}),
         };
-        this.persistLabel(normalizedLabel);
-        this.emit("label.updated", {
+        await this.persistLabel(normalizedLabel);
+        await this.emit("label.updated", {
           instanceId: this.instanceId,
           action: "edited",
           label: normalizedLabel,
@@ -8197,14 +8273,14 @@ export class BaileysAdapter implements ChannelAdapter {
         const associationType = association.type === "label_jid" ? "chat" : "message";
         const chatId = association.chatId;
         const messageId = association.type === "label_message" ? association.messageId : undefined;
-        this.persistLabelAssociation(
+        await this.persistLabelAssociation(
           association.labelId,
           associationType,
           chatId,
           messageId,
           type === "add",
         );
-        const storedLabel = db
+        const storedLabel = await db
           .select()
           .from(labelsTable)
           .where(
@@ -8234,9 +8310,9 @@ export class BaileysAdapter implements ChannelAdapter {
             ...(messageId ? { messageId } : {}),
           },
         };
-        this.emit("label.updated", labelEvent);
+        await this.emit("label.updated", labelEvent);
         if (labelEvent.association) {
-          this.emit("label.association", {
+          await this.emit("label.association", {
             instanceId: this.instanceId,
             labelId: label.id,
             labeled: type === "add",
@@ -8254,31 +8330,37 @@ export class BaileysAdapter implements ChannelAdapter {
       }
 
       if (events["newsletter-settings.update"]) {
-        this.handleNewsletterSettingsUpdate(events["newsletter-settings.update"]);
+        await this.handleNewsletterSettingsUpdate(events["newsletter-settings.update"]);
       }
     };
 
-    sock.ev.process((events) => {
-      if (
-        events["messages.upsert"] ||
-        events["messages.update"] ||
-        events["message-receipt.update"] ||
-        events["presence.update"]
-      ) {
-        this.noteInboundApplicationActivity(sock);
-      }
-      const processing = processEvents(events);
-      const tracked = processing.catch((error: unknown) => {
+    sock.ev.process(async (events) => {
+      try {
+        if (
+          events["messages.upsert"] ||
+          events["messages.update"] ||
+          events["message-receipt.update"] ||
+          events["presence.update"]
+        ) {
+          this.noteInboundApplicationActivity(sock);
+        }
+        const processing = processEvents(events).catch((error: unknown) => {
+          logger.error(
+            { instanceId: this.instanceId, error },
+            "Buffered Baileys event processing failed",
+          );
+        });
+        this.pendingSocketEventProcessing = Promise.all([
+          this.pendingSocketEventProcessing.catch(() => undefined),
+          processing,
+        ]).then(() => undefined);
+        await processing;
+      } catch (error) {
         logger.error(
           { instanceId: this.instanceId, error },
           "Buffered Baileys event processing failed",
         );
-      });
-      this.pendingSocketEventProcessing = Promise.all([
-        this.pendingSocketEventProcessing,
-        tracked,
-      ]).then(() => undefined);
-      return processing;
+      }
     });
   }
 
@@ -8287,10 +8369,10 @@ export class BaileysAdapter implements ChannelAdapter {
     return typeof statusCode === "number" ? statusCode : undefined;
   }
 
-  private handleReplacedSocketClose(
+  private async handleReplacedSocketClose(
     sock: WASocket,
     lastDisconnect: { error?: Error } | undefined,
-  ): void {
+  ): Promise<void> {
     if (this.sock !== null || this.retainedClosedSocket !== sock) return;
     const statusCode = this.disconnectStatusCode(lastDisconnect);
     if (statusCode !== DisconnectReason.loggedOut) return;
@@ -8298,18 +8380,18 @@ export class BaileysAdapter implements ChannelAdapter {
     const closedAt = Date.now();
     this.reconnectSuspended = true;
     logger.info({ instanceId: this.instanceId }, "Logged out, clearing auth");
-    clearAuthState(this.instanceId);
+    await clearAuthState(this.instanceId);
     this.clearReconnectTimer();
     this.status = "disconnected";
     const reason = disconnectReasonName(statusCode);
     this.lastDisconnectReason = reason;
     this.lastDisconnectStatusCode = statusCode;
-    this.clearAuthChallenges(closedAt);
+    await this.clearAuthChallenges(closedAt);
     if (this.terminalDisconnectEventEmittedSinceOpen) return;
 
     const priorDisconnectedAt = this.disconnectedAtMs;
     if (this.disconnectedAtMs === null) this.disconnectedAtMs = closedAt;
-    this.emit("instance.disconnected", {
+    await this.emit("instance.disconnected", {
       instanceId: this.instanceId,
       reason,
       statusCode,
@@ -8372,6 +8454,64 @@ export class BaileysAdapter implements ChannelAdapter {
       void this.runScheduledReconnect();
     }, delay);
     return delay;
+  }
+
+  private async persistCreds(): Promise<void> {
+    await this.saveCreds?.();
+    this.clearCredsSaveTimer();
+  }
+
+  private clearCredsSaveTimer(): void {
+    if (this.credsSaveTimer) {
+      clearTimeout(this.credsSaveTimer);
+      this.credsSaveTimer = null;
+    }
+    this.credsSaveAttempt = 0;
+  }
+
+  private scheduleCredsSave(err: unknown): void {
+    logger.error({ err, instanceId: this.instanceId }, "Failed to save credentials");
+    if (this.credsSaveTimer) return;
+    const delay = Math.min(
+      RECONNECT_INITIAL_DELAY_MS * Math.pow(2, this.credsSaveAttempt),
+      RECONNECT_MAX_DELAY_MS,
+    );
+    this.credsSaveAttempt += 1;
+    this.credsSaveTimer = setTimeout(() => {
+      this.credsSaveTimer = null;
+      void this.persistCreds().catch((error: unknown) => {
+        this.scheduleCredsSave(error);
+      });
+    }, delay);
+  }
+
+  private async readAppendNotifyWatermark(connectedAt: number): Promise<number> {
+    try {
+      return await this.getAppendNotifyWatermark(connectedAt);
+    } catch (err) {
+      logger.error(
+        { err, instanceId: this.instanceId },
+        "Failed to read append notification watermark",
+      );
+      return connectedAt;
+    }
+  }
+
+  private async readPersistedDisconnect(): Promise<number | null> {
+    try {
+      return (
+        (
+          await db
+            .select({ lastDisconnected: instancesTable.lastDisconnected })
+            .from(instancesTable)
+            .where(eq(instancesTable.id, this.instanceId))
+            .get()
+        )?.lastDisconnected ?? null
+      );
+    } catch (err) {
+      logger.error({ err, instanceId: this.instanceId }, "Failed to read last disconnect time");
+      return null;
+    }
   }
 
   private emitReconnectBackoffExhausted(delayMs: number): void {
@@ -8631,8 +8771,8 @@ export class BaileysAdapter implements ChannelAdapter {
     this.resetHealthWatchdog(sock);
   }
 
-  private getAppendNotifyWatermark(now: number): number {
-    const instance = db
+  private async getAppendNotifyWatermark(now: number): Promise<number> {
+    const instance = await db
       .select({
         lastConnected: instancesTable.lastConnected,
         lastDisconnected: instancesTable.lastDisconnected,
@@ -8640,7 +8780,7 @@ export class BaileysAdapter implements ChannelAdapter {
       .from(instancesTable)
       .where(eq(instancesTable.id, this.instanceId))
       .get();
-    const lastMessage = db
+    const lastMessage = await db
       .select({ timestamp: messagesTable.timestamp })
       .from(messagesTable)
       .where(and(eq(messagesTable.instanceId, this.instanceId), eq(messagesTable.isFromMe, 0)))

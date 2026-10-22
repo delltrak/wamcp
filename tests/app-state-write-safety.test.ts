@@ -30,13 +30,13 @@ interface AdapterOptions {
   onResync?: (observer: AppStateResyncLogObserver) => void;
 }
 
-function makeConnectedAdapter(options: AdapterOptions = {}) {
+async function makeConnectedAdapter(options: AdapterOptions = {}) {
   const instanceId = `app_state_${randomUUID()}`;
   createdInstances.add(instanceId);
   const now = Date.now();
-  db.insert(instances)
+  (await db.insert(instances)
     .values({ id: instanceId, name: "test", createdAt: now, updatedAt: now })
-    .run();
+    .run());
 
   const versionState =
     options.version === null
@@ -88,11 +88,11 @@ function makeConnectedAdapter(options: AdapterOptions = {}) {
   return { adapter, instanceId, socket, observer, chatModify, resyncAppState, keys, versionState };
 }
 
-function insertMessage(
+async function insertMessage(
   instanceId: string,
   input: { id: string; chatId: string; timestamp: number; rawData: string | null },
-): void {
-  db.insert(messages)
+): Promise<void> {
+  (await db.insert(messages)
     .values({
       id: input.id,
       instanceId,
@@ -104,7 +104,7 @@ function insertMessage(
       timestamp: input.timestamp,
       rawData: input.rawData,
     })
-    .run();
+    .run());
 }
 
 function rawMessage(key: WAMessageKey, timestamp: number): string {
@@ -169,7 +169,7 @@ describe("safe app-state writes", () => {
 
   it("refuses a patch when the current app-state key ID is missing", async () => {
     process.env.WA_APP_STATE_WRITES_ENABLED = "true";
-    const { adapter, chatModify, resyncAppState } = makeConnectedAdapter({ appStateKeyId: null });
+    const { adapter, chatModify, resyncAppState } = (await makeConnectedAdapter({ appStateKeyId: null }));
 
     await expect(adapter.modifyChat(PN_JID, { action: "pin" })).rejects.toMatchObject({
       code: "app_state_not_synced",
@@ -181,7 +181,7 @@ describe("safe app-state writes", () => {
 
   it("refuses a patch when the current app-state key is not retrievable", async () => {
     process.env.WA_APP_STATE_WRITES_ENABLED = "true";
-    const { adapter, chatModify } = makeConnectedAdapter({ keyPresent: false });
+    const { adapter, chatModify } = (await makeConnectedAdapter({ keyPresent: false }));
 
     await expect(adapter.modifyChat(PN_JID, { action: "pin" })).rejects.toBeInstanceOf(
       AppStateNotSyncedError,
@@ -194,7 +194,7 @@ describe("safe app-state writes", () => {
     { label: "zero version", version: 0 },
   ])("refuses a patch with a $label", async ({ version }) => {
     process.env.WA_APP_STATE_WRITES_ENABLED = "true";
-    const { adapter, chatModify } = makeConnectedAdapter({ version });
+    const { adapter, chatModify } = (await makeConnectedAdapter({ version }));
 
     await expect(adapter.modifyChat(PN_JID, { action: "pin" })).rejects.toMatchObject({
       code: "app_state_not_synced",
@@ -204,7 +204,7 @@ describe("safe app-state writes", () => {
 
   it("refuses a patch when the stored collection hash is not 128 bytes", async () => {
     process.env.WA_APP_STATE_WRITES_ENABLED = "true";
-    const { adapter, chatModify } = makeConnectedAdapter({ hashLength: 64 });
+    const { adapter, chatModify } = (await makeConnectedAdapter({ hashLength: 64 }));
 
     await expect(adapter.modifyChat(PN_JID, { action: "pin" })).rejects.toMatchObject({
       code: "app_state_not_synced",
@@ -218,9 +218,9 @@ describe("safe app-state writes", () => {
     "LTHash verification failed, skipping remaining patches",
   ])("refuses a patch when resync reports '%s'", async (logMessage) => {
     process.env.WA_APP_STATE_WRITES_ENABLED = "true";
-    const { adapter, chatModify } = makeConnectedAdapter({
+    const { adapter, chatModify } = (await makeConnectedAdapter({
       onResync: (observer) => observer.observe([{ name: "regular_low" }, logMessage]),
-    });
+    }));
 
     await expect(adapter.modifyChat(PN_JID, { action: "pin" })).rejects.toMatchObject({
       code: "app_state_not_synced",
@@ -231,7 +231,7 @@ describe("safe app-state writes", () => {
 
   it("refuses a patch when resync throws", async () => {
     process.env.WA_APP_STATE_WRITES_ENABLED = "true";
-    const { adapter, chatModify, socket } = makeConnectedAdapter();
+    const { adapter, chatModify, socket } = (await makeConnectedAdapter());
     (socket.resyncAppState as ReturnType<typeof vi.fn>).mockRejectedValueOnce(
       new Error("test transport failure"),
     );
@@ -245,7 +245,7 @@ describe("safe app-state writes", () => {
 
   it("patches an in-sync collection and resyncs after success", async () => {
     process.env.WA_APP_STATE_WRITES_ENABLED = "true";
-    const { adapter, chatModify, resyncAppState, keys } = makeConnectedAdapter();
+    const { adapter, chatModify, resyncAppState, keys } = (await makeConnectedAdapter());
 
     await adapter.modifyChat(PN_JID, { action: "pin" });
 
@@ -258,7 +258,7 @@ describe("safe app-state writes", () => {
     process.env.WA_APP_STATE_WRITES_ENABLED = "true";
     let resyncCount = 0;
     let observedLogger: pino.Logger | undefined;
-    const { adapter, socket, observer, chatModify, versionState } = makeConnectedAdapter({
+    const { adapter, socket, observer, chatModify, versionState } = (await makeConnectedAdapter({
       onResync: () => {
         resyncCount += 1;
         if (resyncCount === 2) {
@@ -268,7 +268,7 @@ describe("safe app-state writes", () => {
           );
         }
       },
-    });
+    }));
     observedLogger = observeAppStateResyncLogs(pino({ level: "silent" }), observer);
     const patchDispatch = vi.fn();
     chatModify.mockImplementation(async () => {
@@ -289,7 +289,7 @@ describe("safe app-state writes", () => {
 
   it("aborts patch encoding when Baileys internal resync leaves an invalid version", async () => {
     process.env.WA_APP_STATE_WRITES_ENABLED = "true";
-    const { adapter, socket, chatModify, keys, versionState } = makeConnectedAdapter();
+    const { adapter, socket, chatModify, keys, versionState } = (await makeConnectedAdapter());
     const patchDispatch = vi.fn();
     chatModify.mockImplementation(async () => {
       await socket.resyncAppState(["regular_low"], false);
@@ -313,7 +313,7 @@ describe("safe app-state writes", () => {
     process.env.WA_APP_STATE_WRITES_ENABLED = "true";
     process.env.WA_APP_STATE_MIN_INTERVAL_MS = "1500";
     vi.useFakeTimers();
-    const { adapter, socket, versionState } = makeConnectedAdapter();
+    const { adapter, socket, versionState } = (await makeConnectedAdapter());
     let inFlight = 0;
     let maxInFlight = 0;
     const starts: number[] = [];
@@ -345,7 +345,7 @@ describe("chat patch payloads", () => {
   });
 
   it("uses a minimal raw-key range, seconds timestamps, and the raw PN/LID address", async () => {
-    const { adapter, instanceId, chatModify } = makeConnectedAdapter();
+    const { adapter, instanceId, chatModify } = (await makeConnectedAdapter());
     for (let index = 0; index < 5; index += 1) {
       const id = `unread-${index}`;
       const timestampSeconds = 1_700_000_100 - index;
@@ -356,12 +356,12 @@ describe("chat patch payloads", () => {
         fromMe: false,
         participant: "1999991111@lid",
       };
-      insertMessage(instanceId, {
+      (await insertMessage(instanceId, {
         id,
         chatId: PN_JID,
         timestamp: timestampSeconds * 1000,
         rawData: rawMessage(key, timestampSeconds),
-      });
+      }));
     }
 
     await adapter.markChatUnread(PN_JID);
@@ -386,7 +386,7 @@ describe("chat patch payloads", () => {
   });
 
   it("normalizes database and raw message timestamps to Unix seconds", async () => {
-    const { adapter, instanceId, chatModify } = makeConnectedAdapter();
+    const { adapter, instanceId, chatModify } = (await makeConnectedAdapter());
     const secondKey: WAMessageKey = {
       remoteJid: LID_JID,
       remoteJidAlt: PN_JID,
@@ -399,18 +399,18 @@ describe("chat patch payloads", () => {
       id: "unread-milliseconds-raw",
       fromMe: false,
     };
-    insertMessage(instanceId, {
+    (await insertMessage(instanceId, {
       id: secondKey.id!,
       chatId: PN_JID,
       timestamp: 1_700_000_124,
       rawData: rawMessage(secondKey, 1_700_000_124_000),
-    });
-    insertMessage(instanceId, {
+    }));
+    (await insertMessage(instanceId, {
       id: thirdKey.id!,
       chatId: PN_JID,
       timestamp: 0,
       rawData: rawMessage(thirdKey, 1_700_000_123_000),
-    });
+    }));
 
     await adapter.markChatUnread(PN_JID);
 
@@ -427,13 +427,13 @@ describe("chat patch payloads", () => {
   });
 
   it("skips invalid rows and refuses mark-unread when no valid raw key remains", async () => {
-    const { adapter, instanceId, chatModify } = makeConnectedAdapter();
-    insertMessage(instanceId, {
+    const { adapter, instanceId, chatModify } = (await makeConnectedAdapter());
+    (await insertMessage(instanceId, {
       id: "unread-no-key",
       chatId: PN_JID,
       timestamp: 1_700_000_100_000,
       rawData: null,
-    });
+    }));
 
     await expect(adapter.markChatUnread(PN_JID)).rejects.toThrow(
       "no valid stored message key and timestamp",
@@ -442,7 +442,7 @@ describe("chat patch payloads", () => {
   });
 
   it("uses the raw message key and raw address for star/unstar", async () => {
-    const { adapter, instanceId, chatModify } = makeConnectedAdapter();
+    const { adapter, instanceId, chatModify } = (await makeConnectedAdapter());
     const key: WAMessageKey = {
       remoteJid: LID_JID,
       remoteJidAlt: PN_JID,
@@ -450,12 +450,12 @@ describe("chat patch payloads", () => {
       fromMe: false,
       participant: "1999991111@lid",
     };
-    insertMessage(instanceId, {
+    (await insertMessage(instanceId, {
       id: key.id!,
       chatId: PN_JID,
       timestamp: 1_700_000_100_000,
       rawData: rawMessage(key, 1_700_000_100),
-    });
+    }));
 
     await adapter.starMessage(PN_JID, key.id!, true);
 
@@ -467,13 +467,13 @@ describe("chat patch payloads", () => {
   });
 
   it("refuses to star a message when its stored raw key is unavailable", async () => {
-    const { adapter, instanceId, chatModify } = makeConnectedAdapter();
-    insertMessage(instanceId, {
+    const { adapter, instanceId, chatModify } = (await makeConnectedAdapter());
+    (await insertMessage(instanceId, {
       id: "star-without-key",
       chatId: PN_JID,
       timestamp: 1_700_000_100_000,
       rawData: null,
-    });
+    }));
 
     await expect(adapter.starMessage(PN_JID, "star-without-key", true)).rejects.toThrow(
       "stored raw message key is unavailable",
@@ -482,7 +482,7 @@ describe("chat patch payloads", () => {
   });
 
   it("uses stored raw key fields without a participant for one-to-one read receipts", async () => {
-    const { adapter, instanceId, socket } = makeConnectedAdapter();
+    const { adapter, instanceId, socket } = await makeConnectedAdapter();
     const key: WAMessageKey = {
       remoteJid: LID_JID,
       remoteJidAlt: PN_JID,
@@ -490,12 +490,12 @@ describe("chat patch payloads", () => {
       fromMe: false,
       participant: "1999991111@lid",
     };
-    insertMessage(instanceId, {
+    (await insertMessage(instanceId, {
       id: key.id!,
       chatId: PN_JID,
       timestamp: 1_700_000_100_000,
       rawData: rawMessage(key, 1_700_000_100),
-    });
+    }));
 
     await adapter.markRead(PN_JID, [key.id!]);
 
@@ -521,7 +521,7 @@ describe("chat patch payloads", () => {
 describe("group write opt-in", () => {
   it("allows group IQ operations with the group flag while app-state patches stay blocked", async () => {
     process.env.WA_GROUP_WRITES_ENABLED = "true";
-    const { adapter, socket, chatModify } = makeConnectedAdapter();
+    const { adapter, socket, chatModify } = (await makeConnectedAdapter());
 
     await expect(adapter.createGroup("A test group", [PN_JID])).resolves.toMatchObject({
       groupId: "120363000000000000@g.us",
@@ -534,7 +534,7 @@ describe("group write opt-in", () => {
   });
 
   it("keeps both write gates disabled by default", async () => {
-    const { adapter } = makeConnectedAdapter();
+    const { adapter } = (await makeConnectedAdapter());
 
     await expect(adapter.modifyChat(PN_JID, { action: "pin" })).rejects.toThrow(
       "WA_APP_STATE_WRITES_ENABLED=true",
@@ -545,9 +545,9 @@ describe("group write opt-in", () => {
   });
 });
 
-afterEach(() => {
+afterEach(async () => {
   for (const instanceId of createdInstances) {
-    db.delete(instances).where(eq(instances.id, instanceId)).run();
+    (await db.delete(instances).where(eq(instances.id, instanceId)).run());
   }
   createdInstances.clear();
 });

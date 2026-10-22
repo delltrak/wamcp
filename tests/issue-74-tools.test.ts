@@ -234,7 +234,7 @@ function registerTools(adapter: BaileysAdapter | CloudApiAdapter) {
   } as unknown as InstanceManager;
   const messageQueue = {
     enqueueMessage: async (_instanceId: string, to: string, content: unknown) =>
-      adapter.sendMessage(to, content as Parameters<BaileysAdapter["sendMessage"]>[1]),
+      (await adapter.sendMessage(to, content as Parameters<BaileysAdapter["sendMessage"]>[1])),
   } as unknown as MessageQueue;
 
   registerChatTools(server, instanceManager, messageQueue);
@@ -276,210 +276,210 @@ const GATED_WRITE_CASES = [
   {
     toolName: "wa_newsletter_follow",
     params: { jid: NEWSLETTER_JID },
-    run: (adapter: BaileysAdapter) => adapter.newsletterFollow(NEWSLETTER_JID),
+    run: async (adapter: BaileysAdapter) => (await adapter.newsletterFollow(NEWSLETTER_JID)),
     socketMethod: "newsletterFollow",
   },
   {
     toolName: "wa_newsletter_unfollow",
     params: { jid: NEWSLETTER_JID },
-    run: (adapter: BaileysAdapter) => adapter.newsletterUnfollow(NEWSLETTER_JID),
+    run: async (adapter: BaileysAdapter) => (await adapter.newsletterUnfollow(NEWSLETTER_JID)),
     socketMethod: "newsletterUnfollow",
   },
   {
     toolName: "wa_set_disappearing_messages",
     params: { chatId: CONTACT_JID, duration: 86400 },
-    run: (adapter: BaileysAdapter) => adapter.setDisappearingMessages(CONTACT_JID, 86400),
+    run: async (adapter: BaileysAdapter) => (await adapter.setDisappearingMessages(CONTACT_JID, 86400)),
     socketMethod: "sendMessage",
   },
   {
     toolName: "wa_group_update_picture",
     params: { groupId: GROUP_JID, image: "aW1hZ2U=" },
-    run: (adapter: BaileysAdapter) => adapter.updateGroupPicture(GROUP_JID, "aW1hZ2U="),
+    run: async (adapter: BaileysAdapter) => (await adapter.updateGroupPicture(GROUP_JID, "aW1hZ2U=")),
     socketMethod: "updateProfilePicture",
   },
   {
     toolName: "wa_group_remove_picture",
     params: { groupId: GROUP_JID },
-    run: (adapter: BaileysAdapter) => adapter.removeGroupPicture(GROUP_JID),
+    run: async (adapter: BaileysAdapter) => (await adapter.removeGroupPicture(GROUP_JID)),
     socketMethod: "removeProfilePicture",
   },
   {
     toolName: "wa_create_group",
     params: { name: "Group", participants: [CONTACT_JID] },
-    run: (adapter: BaileysAdapter) => adapter.createGroup("Group", [CONTACT_JID]),
+    run: async (adapter: BaileysAdapter) => (await adapter.createGroup("Group", [CONTACT_JID])),
     socketMethod: "groupCreate",
   },
   {
     toolName: "wa_group_add_participants",
     params: { groupId: GROUP_JID, participants: [CONTACT_JID] },
-    run: (adapter: BaileysAdapter) => adapter.modifyParticipants(GROUP_JID, [CONTACT_JID], "add"),
+    run: async (adapter: BaileysAdapter) => (await adapter.modifyParticipants(GROUP_JID, [CONTACT_JID], "add")),
     socketMethod: "groupParticipantsUpdate",
   },
   {
     toolName: "wa_group_remove_participants",
     params: { groupId: GROUP_JID, participants: [CONTACT_JID] },
-    run: (adapter: BaileysAdapter) =>
-      adapter.modifyParticipants(GROUP_JID, [CONTACT_JID], "remove"),
+    run: async (adapter: BaileysAdapter) =>
+      (await adapter.modifyParticipants(GROUP_JID, [CONTACT_JID], "remove")),
     socketMethod: "groupParticipantsUpdate",
   },
   {
     toolName: "wa_group_promote",
     params: { groupId: GROUP_JID, participants: [CONTACT_JID] },
-    run: (adapter: BaileysAdapter) =>
-      adapter.modifyParticipants(GROUP_JID, [CONTACT_JID], "promote"),
+    run: async (adapter: BaileysAdapter) =>
+      (await adapter.modifyParticipants(GROUP_JID, [CONTACT_JID], "promote")),
     socketMethod: "groupParticipantsUpdate",
   },
   {
     toolName: "wa_group_demote",
     params: { groupId: GROUP_JID, participants: [CONTACT_JID] },
-    run: (adapter: BaileysAdapter) =>
-      adapter.modifyParticipants(GROUP_JID, [CONTACT_JID], "demote"),
+    run: async (adapter: BaileysAdapter) =>
+      (await adapter.modifyParticipants(GROUP_JID, [CONTACT_JID], "demote")),
     socketMethod: "groupParticipantsUpdate",
   },
   {
     toolName: "wa_group_update_subject",
     params: { groupId: GROUP_JID, subject: "Updated group" },
-    run: (adapter: BaileysAdapter) =>
-      adapter.modifyGroup(GROUP_JID, { action: "updateSubject", value: "Updated group" }),
+    run: async (adapter: BaileysAdapter) =>
+      (await adapter.modifyGroup(GROUP_JID, { action: "updateSubject", value: "Updated group" })),
     socketMethod: "groupUpdateSubject",
   },
   {
     toolName: "wa_group_update_description",
     params: { groupId: GROUP_JID, description: "Updated description" },
-    run: (adapter: BaileysAdapter) =>
-      adapter.modifyGroup(GROUP_JID, {
+    run: async (adapter: BaileysAdapter) =>
+      (await adapter.modifyGroup(GROUP_JID, {
         action: "updateDescription",
         value: "Updated description",
-      }),
+      })),
     socketMethod: "groupUpdateDescription",
   },
   {
     toolName: "wa_group_update_settings",
     params: { groupId: GROUP_JID, announce: true, locked: true },
-    run: (adapter: BaileysAdapter) =>
-      adapter.modifyGroup(GROUP_JID, { action: "updateSettings", value: "announcement" }),
+    run: async (adapter: BaileysAdapter) =>
+      (await adapter.modifyGroup(GROUP_JID, { action: "updateSettings", value: "announcement" })),
     socketMethod: "groupSettingUpdate",
   },
   {
     toolName: "wa_group_leave",
     params: { groupId: GROUP_JID },
-    run: (adapter: BaileysAdapter) => adapter.modifyGroup(GROUP_JID, { action: "leave" }),
+    run: async (adapter: BaileysAdapter) => (await adapter.modifyGroup(GROUP_JID, { action: "leave" })),
     socketMethod: "groupLeave",
   },
   {
     toolName: "wa_group_revoke_invite",
     params: { groupId: GROUP_JID },
-    run: (adapter: BaileysAdapter) => adapter.modifyGroup(GROUP_JID, { action: "revokeInvite" }),
+    run: async (adapter: BaileysAdapter) => (await adapter.modifyGroup(GROUP_JID, { action: "revokeInvite" })),
     socketMethod: "groupRevokeInvite",
   },
   {
     toolName: "wa_group_join",
     params: { inviteCode: "AbCdEfGh" },
-    run: (adapter: BaileysAdapter) => adapter.joinGroup("AbCdEfGh"),
+    run: async (adapter: BaileysAdapter) => (await adapter.joinGroup("AbCdEfGh")),
     socketMethod: "groupAcceptInvite",
   },
   {
     toolName: "wa_group_toggle_ephemeral",
     params: { groupId: GROUP_JID, duration: 86400 },
-    run: (adapter: BaileysAdapter) =>
-      adapter.modifyGroup(GROUP_JID, { action: "toggleEphemeral", value: 86400 }),
+    run: async (adapter: BaileysAdapter) =>
+      (await adapter.modifyGroup(GROUP_JID, { action: "toggleEphemeral", value: 86400 })),
     socketMethod: "sendMessage",
   },
   {
     toolName: "wa_group_handle_request",
     params: { groupId: GROUP_JID, participantId: CONTACT_JID, action: "approve" },
-    run: (adapter: BaileysAdapter) => adapter.handleJoinRequest(GROUP_JID, CONTACT_JID, "approve"),
+    run: async (adapter: BaileysAdapter) => (await adapter.handleJoinRequest(GROUP_JID, CONTACT_JID, "approve")),
     socketMethod: "groupRequestParticipantsUpdate",
   },
   {
     toolName: "wa_group_handle_request",
     params: { groupId: GROUP_JID, participantId: CONTACT_JID, action: "reject" },
-    run: (adapter: BaileysAdapter) => adapter.handleJoinRequest(GROUP_JID, CONTACT_JID, "reject"),
+    run: async (adapter: BaileysAdapter) => (await adapter.handleJoinRequest(GROUP_JID, CONTACT_JID, "reject")),
     socketMethod: "groupRequestParticipantsUpdate",
   },
   {
     toolName: "wa_create_community",
     params: { name: "Community", description: "About" },
-    run: (adapter: BaileysAdapter) => adapter.createCommunity("Community", "About"),
+    run: async (adapter: BaileysAdapter) => (await adapter.createCommunity("Community", "About")),
     socketMethod: "communityCreate",
   },
   {
     toolName: "wa_community_link_group",
     params: { groupId: GROUP_JID, communityId: COMMUNITY_JID },
-    run: (adapter: BaileysAdapter) => adapter.linkGroupToCommunity(GROUP_JID, COMMUNITY_JID),
+    run: async (adapter: BaileysAdapter) => (await adapter.linkGroupToCommunity(GROUP_JID, COMMUNITY_JID)),
     socketMethod: "communityLinkGroup",
   },
   {
     toolName: "wa_community_unlink_group",
     params: { groupId: GROUP_JID, communityId: COMMUNITY_JID },
-    run: (adapter: BaileysAdapter) => adapter.unlinkGroupFromCommunity(GROUP_JID, COMMUNITY_JID),
+    run: async (adapter: BaileysAdapter) => (await adapter.unlinkGroupFromCommunity(GROUP_JID, COMMUNITY_JID)),
     socketMethod: "communityUnlinkGroup",
   },
   {
     toolName: "wa_leave_community",
     params: { communityId: COMMUNITY_JID },
-    run: (adapter: BaileysAdapter) => adapter.leaveCommunity(COMMUNITY_JID),
+    run: async (adapter: BaileysAdapter) => (await adapter.leaveCommunity(COMMUNITY_JID)),
     socketMethod: "communityLeave",
   },
   {
     toolName: "wa_create_newsletter",
     params: { name: "Channel", description: "Bio" },
-    run: (adapter: BaileysAdapter) => adapter.createNewsletter("Channel", "Bio"),
+    run: async (adapter: BaileysAdapter) => (await adapter.createNewsletter("Channel", "Bio")),
     socketMethod: "newsletterCreate",
   },
   {
     toolName: "wa_newsletter_update_name",
     params: { jid: NEWSLETTER_JID, name: "Updated" },
-    run: (adapter: BaileysAdapter) => adapter.updateNewsletterName(NEWSLETTER_JID, "Updated"),
+    run: async (adapter: BaileysAdapter) => (await adapter.updateNewsletterName(NEWSLETTER_JID, "Updated")),
     socketMethod: "newsletterUpdateName",
   },
   {
     toolName: "wa_newsletter_update_description",
     params: { jid: NEWSLETTER_JID, description: "Updated description" },
-    run: (adapter: BaileysAdapter) =>
-      adapter.updateNewsletterDescription(NEWSLETTER_JID, "Updated description"),
+    run: async (adapter: BaileysAdapter) =>
+      (await adapter.updateNewsletterDescription(NEWSLETTER_JID, "Updated description")),
     socketMethod: "newsletterUpdateDescription",
   },
   {
     toolName: "wa_newsletter_update_picture",
     params: { jid: NEWSLETTER_JID, image: "aW1hZ2U=" },
-    run: (adapter: BaileysAdapter) => adapter.updateNewsletterPicture(NEWSLETTER_JID, "aW1hZ2U="),
+    run: async (adapter: BaileysAdapter) => (await adapter.updateNewsletterPicture(NEWSLETTER_JID, "aW1hZ2U=")),
     socketMethod: "newsletterUpdatePicture",
   },
   {
     toolName: "wa_newsletter_react",
     params: { jid: NEWSLETTER_JID, serverId: "102", reaction: "👍" },
-    run: (adapter: BaileysAdapter) => adapter.reactToNewsletterMessage(NEWSLETTER_JID, "102", "👍"),
+    run: async (adapter: BaileysAdapter) => (await adapter.reactToNewsletterMessage(NEWSLETTER_JID, "102", "👍")),
     socketMethod: "newsletterReactMessage",
   },
   {
     toolName: "wa_create_catalog_product",
     params: CATALOG_PRODUCT_INPUT,
-    run: (adapter: BaileysAdapter) => adapter.createProduct(CATALOG_PRODUCT_INPUT),
+    run: async (adapter: BaileysAdapter) => (await adapter.createProduct(CATALOG_PRODUCT_INPUT)),
     socketMethod: "productCreate",
   },
   {
     toolName: "wa_update_catalog_product",
     params: { productId: "product-1", ...CATALOG_PRODUCT_INPUT },
-    run: (adapter: BaileysAdapter) => adapter.updateProduct("product-1", CATALOG_PRODUCT_INPUT),
+    run: async (adapter: BaileysAdapter) => (await adapter.updateProduct("product-1", CATALOG_PRODUCT_INPUT)),
     socketMethod: "productUpdate",
   },
   {
     toolName: "wa_delete_catalog_products",
     params: { productIds: ["product-1"] },
-    run: (adapter: BaileysAdapter) => adapter.deleteProducts(["product-1"]),
+    run: async (adapter: BaileysAdapter) => (await adapter.deleteProducts(["product-1"])),
     socketMethod: "productDelete",
   },
   {
     toolName: "wa_group_join_approval_mode",
     params: { groupId: GROUP_JID, mode: "on" },
-    run: (adapter: BaileysAdapter) => adapter.setGroupJoinApprovalMode(GROUP_JID, "on"),
+    run: async (adapter: BaileysAdapter) => (await adapter.setGroupJoinApprovalMode(GROUP_JID, "on")),
     socketMethod: "groupJoinApprovalMode",
   },
   {
     toolName: "wa_group_member_add_mode",
     params: { groupId: GROUP_JID, mode: "admin_add" },
-    run: (adapter: BaileysAdapter) => adapter.setGroupMemberAddMode(GROUP_JID, "admin_add"),
+    run: async (adapter: BaileysAdapter) => (await adapter.setGroupMemberAddMode(GROUP_JID, "admin_add")),
     socketMethod: "groupMemberAddMode",
   },
 ] as const;

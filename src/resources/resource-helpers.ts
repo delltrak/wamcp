@@ -27,8 +27,8 @@ export function perInstanceTemplate(
   mimeType = "application/json",
 ): ResourceTemplate {
   return new ResourceTemplate(buildUri("{id}"), {
-    list: () => ({
-      resources: instanceManager.getAllInstances().map((inst) => ({
+    list: async () => ({
+      resources: (await instanceManager.getAllInstances()).map((inst) => ({
         uri: buildUri(inst.id),
         name: buildName(inst.name),
         mimeType,

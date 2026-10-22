@@ -62,7 +62,7 @@ describe("Baileys markOnlineOnConnect configuration", () => {
     vi.useRealTimers();
     vi.unstubAllEnvs();
     if (activeInstanceId) {
-      sqlite.prepare("DELETE FROM instances WHERE id = ?").run(activeInstanceId);
+      (await sqlite.prepare("DELETE FROM instances WHERE id = ?").run(activeInstanceId));
       activeInstanceId = undefined;
     }
   });
@@ -270,7 +270,6 @@ describe("Baileys markOnlineOnConnect configuration", () => {
       });
     });
 
-    const timersBeforeActivity = vi.getTimerCount();
     const first = adapter.sendMessage("5500000000001", { type: "text", text: "first" });
     for (let index = 0; index < 10 && !resolveAvailable; index += 1) {
       await Promise.resolve();
@@ -281,7 +280,11 @@ describe("Baileys markOnlineOnConnect configuration", () => {
     await Promise.all([first, second]);
 
     expect(socket.sendPresenceUpdate).toHaveBeenCalledTimes(2);
-    expect(vi.getTimerCount()).toBe(timersBeforeActivity + 1);
+    await vi.advanceTimersByTimeAsync(29_999);
+    expect(socket.sendPresenceUpdate).toHaveBeenCalledTimes(2);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(socket.sendPresenceUpdate).toHaveBeenCalledTimes(3);
+    expect(socket.sendPresenceUpdate).toHaveBeenNthCalledWith(3, "unavailable");
     await adapter.disconnect();
   });
 
@@ -411,13 +414,13 @@ describe("Baileys markOnlineOnConnect configuration", () => {
     await adapter.sendMessage("5500000000001", { type: "text", text: "hello" });
     const onConnectionUpdate = getConnectionUpdateHandler();
 
-    onConnectionUpdate({ connection: "close" });
+    await onConnectionUpdate({ connection: "close" });
     await vi.advanceTimersByTimeAsync(2000);
     expect(socket.sendPresenceUpdate).toHaveBeenCalledTimes(2);
 
-    onConnectionUpdate({ connection: "open" });
-    await Promise.resolve();
-    await Promise.resolve();
+    await adapter.connect();
+    await getConnectionUpdateHandler()({ connection: "open" });
+    for (let index = 0; index < 10; index += 1) await Promise.resolve();
     expect(socket.sendPresenceUpdate).toHaveBeenNthCalledWith(3, "unavailable");
     await adapter.disconnect();
   });
@@ -446,11 +449,11 @@ describe("Baileys markOnlineOnConnect configuration", () => {
   it("restores legacy stored message secrets for Baileys retries", async () => {
     const instanceId = `stored-message-${randomUUID()}`;
     activeInstanceId = instanceId;
-    sqlite
+    (await sqlite
       .prepare(
         "INSERT INTO instances (id, name, channel, status, created_at, updated_at) VALUES (?, ?, 'baileys', 'connected', 1, 1)",
       )
-      .run(instanceId, "Stored message test");
+      .run(instanceId, "Stored message test"));
 
     const messageSecret = Buffer.alloc(32, 0x42);
     const outgoing = {
@@ -477,9 +480,9 @@ describe("Baileys markOnlineOnConnect configuration", () => {
         messageContextInfo: { messageSecret: messageSecret.toString("base64") },
       },
     });
-    sqlite
+    (await sqlite
       .prepare("UPDATE messages SET raw_data = ? WHERE instance_id = ? AND id = ?")
-      .run(legacyRawData, instanceId, "sent-event");
+      .run(legacyRawData, instanceId, "sent-event"));
 
     const options = mocks.makeWASocket.mock.calls.at(-1)?.[0] as {
       getMessage: (key: {
@@ -517,13 +520,13 @@ describe("Baileys markOnlineOnConnect configuration", () => {
   async function connectOpenAdapter(seedStoredMessage = false): Promise<BaileysAdapter> {
     const instanceId = `presence-${randomUUID()}`;
     activeInstanceId = instanceId;
-    sqlite
+    (await sqlite
       .prepare(
         "INSERT INTO instances (id, name, channel, status, created_at, updated_at) VALUES (?, ?, 'baileys', 'connected', 1, 1)",
       )
-      .run(instanceId, "Presence test");
+      .run(instanceId, "Presence test"));
     if (seedStoredMessage) {
-      sqlite
+      (await sqlite
         .prepare(
           `INSERT INTO messages
            (id, instance_id, chat_id, sender_id, type, timestamp)
@@ -534,19 +537,18 @@ describe("Baileys markOnlineOnConnect configuration", () => {
           instanceId,
           "5500000000001@s.whatsapp.net",
           "5500000000002@s.whatsapp.net",
-        );
+        ));
     }
     const adapter = new BaileysAdapter(instanceId);
     activeAdapter = adapter;
     await adapter.connect();
-    getConnectionUpdateHandler()({ connection: "open" });
-    await Promise.resolve();
-    await Promise.resolve();
+    await getConnectionUpdateHandler()({ connection: "open" });
+    for (let index = 0; index < 10; index += 1) await Promise.resolve();
     return adapter;
   }
 
   function getConnectionUpdateHandler(): (update: { connection: "open" | "close" }) => void {
-    const handler = socket.ev.on.mock.calls.find(
+    const handler = socket.ev.on.mock.calls.findLast(
       ([event]) => event === "connection.update",
     )?.[1] as ((update: { connection: "open" | "close" }) => void) | undefined;
     if (!handler) throw new Error("Connection update listener was not registered");

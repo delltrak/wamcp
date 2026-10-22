@@ -70,7 +70,7 @@ export interface QuickReplyInput {
 // Typed event handler
 export type ChannelEventHandler<E extends ChannelEvent = ChannelEvent> = (
   payload: ChannelEventPayload[E],
-) => void;
+) => void | Promise<void>;
 
 export interface ChannelAdapter {
   // ---- Lifecycle ----
@@ -94,7 +94,7 @@ export interface ChannelAdapter {
   getEventResponses(chatId: string, eventMessageId: string): Promise<EventResponse[]>;
   getPollResults(chatId: string, pollMessageId: string): Promise<PollResults>;
   starMessage(chatId: string, messageId: string, star: boolean): Promise<void>;
-  validateQuotedMessage?(to: string, messageId: string): void;
+  validateQuotedMessage?(to: string, messageId: string): void | Promise<void>;
   editMessage(chatId: string, msgId: string, newText: string): Promise<void>;
   deleteMessage(chatId: string, msgId: string, statusJidList?: string[]): Promise<void>;
   forwardMessage(to: string, msgId: string, fromChat: string): Promise<MessageResponse>;

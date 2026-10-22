@@ -74,9 +74,9 @@ describe("issue 80 feature completion", () => {
     mocks.getUrlInfo.mockResolvedValue(undefined);
   });
 
-  afterEach(() => {
+  afterEach(async () => {
     for (const instanceId of activeInstanceIds) {
-      sqlite.prepare("DELETE FROM instances WHERE id = ?").run(instanceId);
+      await sqlite.prepare("DELETE FROM instances WHERE id = ?").run(instanceId);
     }
     activeInstanceIds.clear();
     vi.restoreAllMocks();
@@ -86,10 +86,10 @@ describe("issue 80 feature completion", () => {
     else process.env.WA_APP_STATE_WRITES_ENABLED = initialAppStateWritesEnabled;
   });
 
-  function createFixture(extraSocket: Record<string, unknown> = {}) {
+  async function createFixture(extraSocket: Record<string, unknown> = {}) {
     const instanceId = `issue-80-${randomUUID()}`;
     activeInstanceIds.add(instanceId);
-    sqlite
+    await sqlite
       .prepare(
         "INSERT INTO instances (id, name, channel, status, created_at, updated_at) VALUES (?, ?, 'baileys', 'connected', 1, 1)",
       )
@@ -150,12 +150,13 @@ describe("issue 80 feature completion", () => {
       getInstanceChannel: () => "baileys",
     } as unknown as InstanceManager;
     const queue = {
-      enqueueMessage: vi.fn(async (_id: string, to: string, content: MessageContent) =>
-        adapter.sendMessage(to, content),
+      enqueueMessage: vi.fn(
+        async (_id: string, to: string, content: MessageContent) =>
+          await adapter.sendMessage(to, content),
       ),
       enqueueMediaAlbum: vi.fn(
         async (_id: string, to: string, images: Array<{ image: string; caption?: string }>) =>
-          adapter.sendMediaAlbum(to, images),
+          await adapter.sendMediaAlbum(to, images),
       ),
     } as unknown as MessageQueue;
     registerMessagingTools(server, instanceManager, queue);
@@ -183,7 +184,7 @@ describe("issue 80 feature completion", () => {
   }
 
   it("subscribes per chat, throttles presence, sends native @all and supports send-time mentions", async () => {
-    const { adapter, socket, queue, invoke } = createFixture();
+    const { adapter, socket, queue, invoke } = await createFixture();
     await invoke("wa_send_presence", { chatId: CONTACT_ID, status: "typing" });
     await invoke("wa_send_presence", { chatId: CONTACT_ID, status: "paused" });
     await invoke("wa_send_presence", { chatId: GROUP_ID, status: "recording" });
@@ -281,7 +282,7 @@ describe("issue 80 feature completion", () => {
   });
 
   it("falls back to participant mentions when native @all is unavailable", async () => {
-    const { adapter, socket, invoke } = createFixture();
+    const { adapter, socket, invoke } = await createFixture();
     vi.spyOn(adapter, "supportsNativeGroupMentionAll").mockResolvedValue(false);
     const all = await invoke("wa_send_group_mention_all", { groupId: GROUP_ID, text: "Update" });
     expect(all.isError).not.toBe(true);
@@ -310,7 +311,7 @@ describe("issue 80 feature completion", () => {
   });
 
   it("uses readable Baileys fallbacks and native Cloud API buttons and lists", async () => {
-    const { adapter, socket, invoke } = createFixture();
+    const { adapter, socket, invoke } = await createFixture();
     await invoke("wa_send_buttons", {
       to: CONTACT_ID,
       text: "Choose",
@@ -364,7 +365,7 @@ describe("issue 80 feature completion", () => {
   });
 
   it("generates preview metadata and thumbnails for custom link previews", async () => {
-    const { adapter, socket } = createFixture();
+    const { adapter, socket } = await createFixture();
     mocks.getUrlInfo.mockResolvedValue({
       "canonical-url": "https://example.test/article",
       "matched-text": "https://example.test/article",
@@ -398,7 +399,7 @@ describe("issue 80 feature completion", () => {
 
   it("stores group receipts, status viewers, reactions and reaction removals", async () => {
     const lid = "7700000000000@lid";
-    const { adapter, processEvents } = createFixture({
+    const { adapter, processEvents } = await createFixture({
       signalRepository: {
         lidMapping: {
           getPNForLID: vi.fn(async (value: string) =>
@@ -536,7 +537,7 @@ describe("issue 80 feature completion", () => {
   });
 
   it("limits mark-read batches and debounces per-chat presence updates", async () => {
-    const { adapter, socket } = createFixture();
+    const { adapter, socket } = await createFixture();
     await expect(
       adapter.markRead(
         CONTACT_ID,
@@ -562,7 +563,7 @@ describe("issue 80 feature completion", () => {
   });
 
   it("caps unique presence subscriptions per adapter", async () => {
-    const { adapter, socket } = createFixture();
+    const { adapter, socket } = await createFixture();
     for (let index = 0; index < 100; index += 1) {
       await adapter.subscribePresence(`${String(index).padStart(13, "0")}@s.whatsapp.net`);
     }
@@ -573,7 +574,7 @@ describe("issue 80 feature completion", () => {
   });
 
   it("queues album sends and rejects an album larger than the bounded tool limit", async () => {
-    const { adapter, queue, socket, invoke } = createFixture();
+    const { adapter, queue, socket, invoke } = await createFixture();
     const images = [
       { image: Buffer.from("one").toString("base64") },
       { image: Buffer.from("two").toString("base64") },
@@ -591,7 +592,7 @@ describe("issue 80 feature completion", () => {
   });
 
   it("validates album media before sending the parent message", async () => {
-    const { adapter, socket } = createFixture();
+    const { adapter, socket } = await createFixture();
     await expect(
       adapter.sendMediaAlbum(CONTACT_ID, [
         { image: "https://127.0.0.1/private-image" },
@@ -602,7 +603,7 @@ describe("issue 80 feature completion", () => {
   });
 
   it("sends albums and private replies using regular message sends", async () => {
-    const { adapter, socket, instanceId } = createFixture();
+    const { adapter, socket, instanceId } = await createFixture();
     const album = await adapter.sendMediaAlbum(CONTACT_ID, [
       { image: Buffer.from("one").toString("base64"), caption: "One" },
       { image: Buffer.from("two").toString("base64") },
@@ -615,15 +616,13 @@ describe("issue 80 feature completion", () => {
       caption: "One",
       albumParentKey: expect.any(Object),
     });
-    const albumRows = sqlite
-      .prepare(
-        "SELECT type, raw_data AS rawData FROM messages WHERE instance_id = ? ORDER BY rowid",
-      )
-      .all(instanceId) as Array<{ type: string; rawData: string | null }>;
+    const albumRows = (await sqlite
+      .prepare("SELECT type, raw_data FROM messages WHERE instance_id = ? ORDER BY rowid")
+      .all(instanceId)) as Array<{ type: string; raw_data: string | null }>;
     expect(albumRows.map((row) => row.type)).toEqual(["album", "image", "image"]);
-    expect(albumRows[0]?.rawData).toContain('"albumMessage"');
+    expect(albumRows[0]?.raw_data).toContain('"albumMessage"');
 
-    sqlite
+    await sqlite
       .prepare(
         "INSERT INTO messages (id, instance_id, chat_id, sender_id, type, is_from_me, status, timestamp) VALUES (?, ?, ?, ?, 'text', 0, 'received', 1)",
       )
@@ -636,7 +635,7 @@ describe("issue 80 feature completion", () => {
 
   it("keeps automatic call rejection disabled when its setting is unset", async () => {
     vi.stubEnv("WA_AUTO_REJECT_CALLS", undefined);
-    const defaultFixture = createFixture();
+    const defaultFixture = await createFixture();
     await defaultFixture.processEvents({
       call: [
         {
@@ -656,7 +655,7 @@ describe("issue 80 feature completion", () => {
 
   it("auto-rejects direct call offers only when enabled and keeps call details in webhooks", async () => {
     vi.stubEnv("WA_AUTO_REJECT_CALLS", "true");
-    const { adapter, socket, processEvents } = createFixture();
+    const { adapter, socket, processEvents } = await createFixture();
     const emitted: ChannelEventPayload["call.received"][] = [];
     adapter.on("call.received", (event) => emitted.push(event));
     await processEvents({
@@ -795,7 +794,7 @@ describe("issue 80 feature completion", () => {
   it("keeps group join approval and request changes gated with the flag unset", async () => {
     vi.stubEnv("WA_APP_STATE_WRITES_ENABLED", undefined);
     vi.stubEnv("WA_GROUP_WRITES_ENABLED", undefined);
-    const { adapter, socket } = createFixture();
+    const { adapter, socket } = await createFixture();
     await expect(adapter.setGroupJoinApprovalMode(GROUP_ID, "on")).rejects.toThrow(
       "WhatsApp group, community, and Channel writes are disabled",
     );

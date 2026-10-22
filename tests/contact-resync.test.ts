@@ -180,7 +180,7 @@ describe("wa_resync_contacts", () => {
       expect(socket.resyncAppState).toHaveBeenCalledWith([collection], false);
     }
     expect(saveCreds).not.toHaveBeenCalled();
-    expect(contactStore.getContacts()).toEqual([
+    expect((await contactStore.getContacts())).toEqual([
       expect.objectContaining({
         jid,
         name: "Saved app-state name",

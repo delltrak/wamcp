@@ -42,9 +42,9 @@ export interface InstanceWebhookInput {
   events?: readonly string[];
 }
 
-function requireInstance(instanceId: string): void {
+async function requireInstance(instanceId: string): Promise<void> {
   if (!isValidInstanceId(instanceId)) throw new Error("Invalid instance ID");
-  const row = db
+  const row = await db
     .select({ id: instances.id })
     .from(instances)
     .where(eq(instances.id, instanceId))
@@ -78,8 +78,10 @@ function viewFromStored(
 }
 
 /** Replace the stored webhook for one instance. The auth value is not returned. */
-export function setInstanceWebhook(input: InstanceWebhookInput): InstanceWebhookConfigured {
-  requireInstance(input.instanceId);
+export async function setInstanceWebhook(
+  input: InstanceWebhookInput,
+): Promise<InstanceWebhookConfigured> {
+  await requireInstance(input.instanceId);
   const url = normalizeInstanceWebhookUrl(input.url.trim(), eventWebhookAllowsHttp());
   assertInstanceWebhookHostAllowed(url);
   instanceWebhookHeaders(input.authHeader, input.authValue);
@@ -94,7 +96,7 @@ export function setInstanceWebhook(input: InstanceWebhookInput): InstanceWebhook
   const updatedAt = Date.now();
   const authHeader = input.authHeader ?? null;
   const authValue = input.authValue ?? null;
-  upsertInstanceWebhook({
+  await upsertInstanceWebhook({
     instanceId: input.instanceId,
     url,
     authHeader,
@@ -106,10 +108,10 @@ export function setInstanceWebhook(input: InstanceWebhookInput): InstanceWebhook
 }
 
 /** Read the stored webhook. The auth value is never included. */
-export function readInstanceWebhook(instanceId: string): InstanceWebhookState {
-  requireInstance(instanceId);
+export async function readInstanceWebhook(instanceId: string): Promise<InstanceWebhookState> {
+  await requireInstance(instanceId);
   try {
-    const row = getInstanceWebhook(instanceId);
+    const row = await getInstanceWebhook(instanceId);
     if (!row) return { configured: false };
     const allowHttp = eventWebhookAllowsHttp();
     try {
@@ -127,7 +129,7 @@ export function readInstanceWebhook(instanceId: string): InstanceWebhookState {
 }
 
 /** Remove the stored webhook. The instance then uses the global destinations. */
-export function removeInstanceWebhook(instanceId: string): { deleted: boolean } {
-  requireInstance(instanceId);
-  return { deleted: deleteInstanceWebhook(instanceId) };
+export async function removeInstanceWebhook(instanceId: string): Promise<{ deleted: boolean }> {
+  await requireInstance(instanceId);
+  return { deleted: await deleteInstanceWebhook(instanceId) };
 }

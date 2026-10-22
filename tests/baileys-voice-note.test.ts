@@ -9,13 +9,13 @@ import { eq } from "drizzle-orm";
 describe("Baileys voice-note payload", () => {
   let instanceId: string;
 
-  beforeEach(() => {
+  beforeEach(async () => {
     instanceId = `voice_note_${randomUUID()}`;
     const now = Date.now();
-    db.insert(instances)
+    (await db.insert(instances)
       .values({ id: instanceId, name: "voice note test", createdAt: now, updatedAt: now })
-      .run();
-    db.insert(messages)
+      .run());
+    (await db.insert(messages)
       .values({
         id: "quoted-message",
         instanceId,
@@ -27,11 +27,11 @@ describe("Baileys voice-note payload", () => {
         status: "received",
         timestamp: now,
       })
-      .run();
+      .run());
   });
 
-  afterEach(() => {
-    db.delete(instances).where(eq(instances.id, instanceId)).run();
+  afterEach(async () => {
+    (await db.delete(instances).where(eq(instances.id, instanceId)).run());
   });
 
   it("sends audio as PTT with the required OGG/Opus MIME type and quoted message", async () => {

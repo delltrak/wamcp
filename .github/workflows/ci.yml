@@ -56,3 +56,38 @@ jobs:
 
       - name: Build
         run: npm run build
+
+  postgres:
+    name: Postgres storage
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: wamcp
+          POSTGRES_PASSWORD: wamcp
+          POSTGRES_DB: wamcp
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U wamcp -d wamcp"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      WA_DATABASE_URL: postgres://wamcp:wamcp@localhost:5432/wamcp
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup Node.js 24.x
+        uses: actions/setup-node@v7
+        with:
+          node-version: 24.x
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Test
+        run: npm test

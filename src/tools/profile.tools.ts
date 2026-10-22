@@ -118,7 +118,7 @@ export function registerProfileTools(
       const log = createRequestLogger("wa_get_profile_picture", params.instanceId);
       const start = Date.now();
       try {
-        if (instanceManager.getInstanceChannel(params.instanceId) === "cloud") {
+        if ((await instanceManager.getInstanceChannel(params.instanceId)) === "cloud") {
           throw new Error(
             "Contact and group profile-picture lookup is not supported on Cloud API; use a Baileys instance",
           );

@@ -10,8 +10,8 @@ import {
 } from "./auto-reply-cooldown-sql.js";
 
 export interface AutoReplyCooldownStore {
-  load(instanceId: string, contactKey: string): number | undefined;
-  save(instanceId: string, contactKey: string, lastReplyAt: number): void;
+  load(instanceId: string, contactKey: string): number | undefined | Promise<number | undefined>;
+  save(instanceId: string, contactKey: string, lastReplyAt: number): void | Promise<void>;
 }
 
 /** Read the snake_case column. Unquoted aliases are not stable across SQLite and Postgres. */
@@ -25,11 +25,12 @@ const readCooldown = sqlite.prepare(AUTO_REPLY_COOLDOWN_SELECT_SQL);
 const writeCooldown = sqlite.prepare(AUTO_REPLY_COOLDOWN_UPSERT_SQL);
 
 export const sqliteAutoReplyCooldownStore: AutoReplyCooldownStore = {
-  load(instanceId: string, contactKey: string): number | undefined {
-    const row = readCooldown.get(instanceId, contactKey) as Record<string, unknown> | undefined;
+  async load(instanceId: string, contactKey: string): Promise<number | undefined> {
+    const row = (await readCooldown.get(instanceId, contactKey)) as
+      Record<string, unknown> | undefined;
     return cooldownTimestamp(row);
   },
-  save(instanceId: string, contactKey: string, lastReplyAt: number): void {
-    writeCooldown.run(instanceId, contactKey, lastReplyAt);
+  async save(instanceId: string, contactKey: string, lastReplyAt: number): Promise<void> {
+    await writeCooldown.run(instanceId, contactKey, lastReplyAt);
   },
 };

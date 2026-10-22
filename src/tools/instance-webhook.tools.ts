@@ -33,8 +33,8 @@ export function registerInstanceWebhookTools(
       const log = createRequestLogger("wa_set_instance_webhook", params.instanceId);
       const start = Date.now();
       try {
-        const webhook = setInstanceWebhook(params);
-        eventWebhook?.sync();
+        const webhook = await setInstanceWebhook(params);
+        await eventWebhook?.sync();
         log.info(
           {
             duration: Date.now() - start,
@@ -61,7 +61,7 @@ export function registerInstanceWebhookTools(
       const log = createRequestLogger("wa_get_instance_webhook", params.instanceId);
       const start = Date.now();
       try {
-        const webhook = readInstanceWebhook(params.instanceId);
+        const webhook = await readInstanceWebhook(params.instanceId);
         log.info(
           {
             duration: Date.now() - start,
@@ -88,8 +88,8 @@ export function registerInstanceWebhookTools(
       const log = createRequestLogger("wa_delete_instance_webhook", params.instanceId);
       const start = Date.now();
       try {
-        const result = removeInstanceWebhook(params.instanceId);
-        eventWebhook?.sync();
+        const result = await removeInstanceWebhook(params.instanceId);
+        await eventWebhook?.sync();
         log.info(
           { duration: Date.now() - start, deleted: result.deleted },
           "Instance webhook removed",

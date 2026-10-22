@@ -54,15 +54,15 @@ function normalizeMessageForInstance(
   return event;
 }
 
-function insertSyntheticInstance(instanceId: string): void {
-  sqlite
+async function insertSyntheticInstance(instanceId: string): Promise<void> {
+  (await sqlite
     .prepare(
       "INSERT INTO instances (id, name, channel, status, created_at, updated_at) VALUES (?, ?, 'baileys', 'disconnected', 1700000000, 1700000000)",
     )
-    .run(instanceId, "Synthetic Baileys fixture");
+    .run(instanceId, "Synthetic Baileys fixture"));
 }
 
-function insertSyntheticMessage(
+async function insertSyntheticMessage(
   instanceId: string,
   id: string,
   values: {
@@ -72,8 +72,8 @@ function insertSyntheticMessage(
     mediaMimetype: string | null;
     rawData: string | null;
   },
-): void {
-  sqlite
+): Promise<void> {
+  (await sqlite
     .prepare(
       `INSERT INTO messages (
         id, instance_id, chat_id, sender_id, type, content, media_url, media_mimetype,
@@ -90,17 +90,20 @@ function insertSyntheticMessage(
       values.mediaUrl,
       values.mediaMimetype,
       values.rawData,
-    );
+    ));
 }
 
-function persistNormalizedMessage(
+async function persistNormalizedMessage(
   adapter: BaileysAdapter,
   event: NormalizedMessageEvent,
   source: WAMessage,
-): void {
-  (
+): Promise<void> {
+  await (
     adapter as unknown as {
-      persistMessage: (normalized: NormalizedMessageEvent, source: WAMessage) => void;
+      persistMessage: (
+        normalized: NormalizedMessageEvent,
+        source: WAMessage,
+      ) => Promise<void>;
     }
   ).persistMessage(event, source);
 }
@@ -555,7 +558,7 @@ describe("Baileys business and interactive message normalization", () => {
         },
         messageId,
       );
-      insertSyntheticInstance(instanceId);
+      (await insertSyntheticInstance(instanceId));
 
       try {
         const adapter = new BaileysAdapter(instanceId);
@@ -576,12 +579,12 @@ describe("Baileys business and interactive message normalization", () => {
         );
         expect(received).not.toHaveBeenCalled();
         expect(
-          sqlite
+          (await sqlite
             .prepare("SELECT id FROM messages WHERE instance_id = ? AND id = ?")
-            .get(instanceId, messageId),
+            .get(instanceId, messageId)),
         ).toBeUndefined();
       } finally {
-        sqlite.prepare("DELETE FROM instances WHERE id = ?").run(instanceId);
+        (await sqlite.prepare("DELETE FROM instances WHERE id = ?").run(instanceId));
       }
     },
   );
@@ -682,14 +685,14 @@ describe("Baileys business and interactive message normalization", () => {
   it("upgrades a legacy text row from wrapped audio so audio downloads accept it", async () => {
     const instanceId = `synthetic-audio-replay-${randomUUID()}`;
     const messageId = `SYNTHETIC-AUDIO-REPLAY-${randomUUID()}`;
-    insertSyntheticInstance(instanceId);
-    insertSyntheticMessage(instanceId, messageId, {
+    (await insertSyntheticInstance(instanceId));
+    (await insertSyntheticMessage(instanceId, messageId, {
       type: "text",
       content: "Legacy parser content",
       mediaUrl: null,
       mediaMimetype: null,
       rawData: null,
-    });
+    }));
 
     try {
       const adapter = new BaileysAdapter(instanceId);
@@ -706,13 +709,17 @@ describe("Baileys business and interactive message normalization", () => {
         },
         messageId,
       );
-      persistNormalizedMessage(adapter, normalizeMessageForInstance(instanceId, source), source);
+      await persistNormalizedMessage(
+        adapter,
+        normalizeMessageForInstance(instanceId, source),
+        source,
+      );
 
-      const stored = sqlite
+      const stored = (await sqlite
         .prepare(
           "SELECT type, media_url, media_mimetype, raw_data FROM messages WHERE instance_id = ? AND id = ?",
         )
-        .get(instanceId, messageId) as
+        .get(instanceId, messageId)) as
         | {
             type: string;
             media_url: string | null;
@@ -738,14 +745,14 @@ describe("Baileys business and interactive message normalization", () => {
       });
       expect(downloadMediaMessageMock).toHaveBeenCalledOnce();
     } finally {
-      sqlite.prepare("DELETE FROM instances WHERE id = ?").run(instanceId);
+      (await sqlite.prepare("DELETE FROM instances WHERE id = ?").run(instanceId));
     }
   });
 
   it("stops a received media stream as soon as it exceeds the download limit", async () => {
     const instanceId = `synthetic-media-limit-${randomUUID()}`;
     const messageId = `SYNTHETIC-MEDIA-LIMIT-${randomUUID()}`;
-    insertSyntheticInstance(instanceId);
+    (await insertSyntheticInstance(instanceId));
     const source = messageWith(
       {
         imageMessage: {
@@ -755,13 +762,13 @@ describe("Baileys business and interactive message normalization", () => {
       },
       messageId,
     );
-    insertSyntheticMessage(instanceId, messageId, {
+    (await insertSyntheticMessage(instanceId, messageId, {
       type: "image",
       content: null,
       mediaUrl: "https://example.com/synthetic-image.jpg",
       mediaMimetype: "image/jpeg",
       rawData: JSON.stringify(source),
-    });
+    }));
 
     try {
       const adapter = new BaileysAdapter(instanceId);
@@ -777,21 +784,21 @@ describe("Baileys business and interactive message normalization", () => {
       );
       expect(stream.destroyed).toBe(true);
     } finally {
-      sqlite.prepare("DELETE FROM instances WHERE id = ?").run(instanceId);
+      (await sqlite.prepare("DELETE FROM instances WHERE id = ?").run(instanceId));
     }
   });
 
-  it("refreshes media parsed from a wrapped business header on conflict", () => {
+  it("refreshes media parsed from a wrapped business header on conflict", async () => {
     const instanceId = `synthetic-header-replay-${randomUUID()}`;
     const messageId = `SYNTHETIC-HEADER-REPLAY-${randomUUID()}`;
-    insertSyntheticInstance(instanceId);
-    insertSyntheticMessage(instanceId, messageId, {
+    (await insertSyntheticInstance(instanceId));
+    (await insertSyntheticMessage(instanceId, messageId, {
       type: "text",
       content: "Legacy parser content",
       mediaUrl: null,
       mediaMimetype: null,
       rawData: null,
-    });
+    }));
 
     try {
       const adapter = new BaileysAdapter(instanceId);
@@ -814,24 +821,28 @@ describe("Baileys business and interactive message normalization", () => {
         },
         messageId,
       );
-      persistNormalizedMessage(adapter, normalizeMessageForInstance(instanceId, source), source);
+      await persistNormalizedMessage(
+        adapter,
+        normalizeMessageForInstance(instanceId, source),
+        source,
+      );
 
-      const stored = sqlite
+      const stored = (await sqlite
         .prepare(
           "SELECT type, media_url, media_mimetype FROM messages WHERE instance_id = ? AND id = ?",
         )
-        .get(instanceId, messageId);
+        .get(instanceId, messageId));
       expect(stored).toMatchObject({
         type: "image",
         media_url: "https://example.com/synthetic-business-header.jpg",
         media_mimetype: "image/jpeg",
       });
     } finally {
-      sqlite.prepare("DELETE FROM instances WHERE id = ?").run(instanceId);
+      (await sqlite.prepare("DELETE FROM instances WHERE id = ?").run(instanceId));
     }
   });
 
-  it("preserves existing media fields when a replay has no media", () => {
+  it("preserves existing media fields when a replay has no media", async () => {
     const instanceId = `synthetic-no-media-replay-${randomUUID()}`;
     const messageId = `SYNTHETIC-NO-MEDIA-REPLAY-${randomUUID()}`;
     const existingRawData = JSON.stringify({
@@ -839,25 +850,29 @@ describe("Baileys business and interactive message normalization", () => {
       message: { audioMessage: { url: "https://example.com/existing-audio.ogg" } },
       messageTimestamp: 1_700_000_000,
     });
-    insertSyntheticInstance(instanceId);
-    insertSyntheticMessage(instanceId, messageId, {
+    (await insertSyntheticInstance(instanceId));
+    (await insertSyntheticMessage(instanceId, messageId, {
       type: "audio",
       content: null,
       mediaUrl: "https://example.com/existing-audio.ogg",
       mediaMimetype: "audio/ogg",
       rawData: existingRawData,
-    });
+    }));
 
     try {
       const adapter = new BaileysAdapter(instanceId);
       const source = messageWith({ conversation: "Synthetic text-only replay" }, messageId);
-      persistNormalizedMessage(adapter, normalizeMessageForInstance(instanceId, source), source);
+      await persistNormalizedMessage(
+        adapter,
+        normalizeMessageForInstance(instanceId, source),
+        source,
+      );
 
-      const stored = sqlite
+      const stored = (await sqlite
         .prepare(
           "SELECT type, content, media_url, media_mimetype, raw_data FROM messages WHERE instance_id = ? AND id = ?",
         )
-        .get(instanceId, messageId);
+        .get(instanceId, messageId));
       expect(stored).toMatchObject({
         type: "audio",
         content: "Synthetic text-only replay",
@@ -866,7 +881,7 @@ describe("Baileys business and interactive message normalization", () => {
         raw_data: existingRawData,
       });
     } finally {
-      sqlite.prepare("DELETE FROM instances WHERE id = ?").run(instanceId);
+      (await sqlite.prepare("DELETE FROM instances WHERE id = ?").run(instanceId));
     }
   });
 
@@ -901,11 +916,11 @@ describe("Baileys business and interactive message normalization", () => {
       id,
     );
 
-    sqlite
+    (await sqlite
       .prepare(
         "INSERT INTO instances (id, name, channel, status, created_at, updated_at) VALUES (?, ?, 'baileys', 'disconnected', 1700000000, 1700000000)",
       )
-      .run(instanceId, "Synthetic business fixture");
+      .run(instanceId, "Synthetic business fixture"));
 
     try {
       const adapter = new BaileysAdapter(instanceId);
@@ -914,9 +929,12 @@ describe("Baileys business and interactive message normalization", () => {
         messages: [message],
       } as Parameters<typeof normalizeMessagesUpsert>[1])[0];
       if (!event) throw new Error("Synthetic message did not normalize");
-      (
+      await (
         adapter as unknown as {
-          persistMessage: (normalized: NormalizedMessageEvent, source: WAMessage) => void;
+          persistMessage: (
+            normalized: NormalizedMessageEvent,
+            source: WAMessage,
+          ) => Promise<void>;
         }
       ).persistMessage(event, message);
 
@@ -929,17 +947,20 @@ describe("Baileys business and interactive message normalization", () => {
         messages: [unknownMessage],
       } as Parameters<typeof normalizeMessagesUpsert>[1])[0];
       if (!unknownEvent) throw new Error("Synthetic unknown message did not normalize");
-      (
+      await (
         adapter as unknown as {
-          persistMessage: (normalized: NormalizedMessageEvent, source: WAMessage) => void;
+          persistMessage: (
+            normalized: NormalizedMessageEvent,
+            source: WAMessage,
+          ) => Promise<void>;
         }
       ).persistMessage(unknownEvent, unknownMessage);
 
       // Simulate a row persisted by the already-pushed build, which stored
       // unsupported content using the temporary "unknown" type value.
-      sqlite
+      (await sqlite
         .prepare("UPDATE messages SET type = ? WHERE instance_id = ? AND id = ?")
-        .run("unknown", instanceId, unknownMessage.key.id);
+        .run("unknown", instanceId, unknownMessage.key.id));
 
       const stored = await adapter.getMessages(SYNTHETIC_JID, 10);
       const found = stored.find((item) => item.id === id);
@@ -962,7 +983,7 @@ describe("Baileys business and interactive message normalization", () => {
         rawType: "futureBusinessMessage",
       });
     } finally {
-      sqlite.prepare("DELETE FROM instances WHERE id = ?").run(instanceId);
+      (await sqlite.prepare("DELETE FROM instances WHERE id = ?").run(instanceId));
     }
   });
 });

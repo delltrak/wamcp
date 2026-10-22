@@ -2,8 +2,11 @@ import { db } from "../db/client.js";
 import { groupHistorySends } from "../db/schema.js";
 
 /** Record a stub message id. Returns false when that id was already claimed. */
-export function claimGroupHistoryStub(instanceId: string, messageId: string): boolean {
-  const result = db
+export async function claimGroupHistoryStub(
+  instanceId: string,
+  messageId: string,
+): Promise<boolean> {
+  const result = await db
     .insert(groupHistorySends)
     .values({
       instanceId,

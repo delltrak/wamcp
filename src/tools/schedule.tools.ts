@@ -39,7 +39,7 @@ Returns the stored schedule. The WhatsApp send happens later and returns { statu
       const log = createRequestLogger("wa_schedule_message", params.instanceId);
       const start = Date.now();
       try {
-        const schedule = scheduler.create({
+        const schedule = await scheduler.create({
           instanceId: params.instanceId,
           to: params.to,
           scheduledAt: params.scheduledAt,
@@ -70,7 +70,7 @@ ${GATE}`,
       const log = createRequestLogger("wa_list_scheduled", params.instanceId);
       const start = Date.now();
       try {
-        const page = scheduler.list({
+        const page = await scheduler.list({
           instanceId: params.instanceId,
           status: params.status,
           limit: params.limit,
@@ -93,7 +93,7 @@ ${GATE}`,
     async (params) => {
       const log = createRequestLogger("wa_pause_scheduled", params.instanceId);
       try {
-        const schedule = scheduler.pause(params.instanceId, params.scheduleId);
+        const schedule = await scheduler.pause(params.instanceId, params.scheduleId);
         log.info({ scheduleId: schedule.id }, "Schedule paused");
         return toolSuccess(schedule);
       } catch (err) {
@@ -111,7 +111,7 @@ ${GATE}`,
     async (params) => {
       const log = createRequestLogger("wa_resume_scheduled", params.instanceId);
       try {
-        const schedule = scheduler.resume(params.instanceId, params.scheduleId);
+        const schedule = await scheduler.resume(params.instanceId, params.scheduleId);
         log.info({ scheduleId: schedule.id }, "Schedule resumed");
         return toolSuccess(schedule);
       } catch (err) {
@@ -129,7 +129,7 @@ ${GATE}`,
     async (params) => {
       const log = createRequestLogger("wa_cancel_scheduled", params.instanceId);
       try {
-        const schedule = scheduler.cancel(params.instanceId, params.scheduleId);
+        const schedule = await scheduler.cancel(params.instanceId, params.scheduleId);
         log.info({ scheduleId: schedule.id }, "Schedule cancelled");
         return toolSuccess(schedule);
       } catch (err) {

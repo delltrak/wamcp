@@ -13,7 +13,7 @@ const journal = JSON.parse(readFileSync(join(folder, "meta/_journal.json"), "utf
 };
 
 describe("scheduled migration after the integrated feature chain", () => {
-  it("upgrades 0006 and creates fresh SQLite without losing webhooks, cooldowns or history", () => {
+  it("upgrades 0006 and creates fresh SQLite without losing webhooks, cooldowns or history", async () => {
     const legacyFolder = mkdtempSync(join(tmpdir(), "wamcp-schedule-migrations-"));
     const sqlite = new Database(":memory:");
     const fresh = new Database(":memory:");
@@ -29,24 +29,24 @@ describe("scheduled migration after the integrated feature chain", () => {
         copyFileSync(join(folder, `${entry.tag}.sql`), join(legacyFolder, `${entry.tag}.sql`));
       const db = drizzle(sqlite);
       migrate(db, { migrationsFolder: legacyFolder });
-      sqlite.exec(`INSERT INTO instances (id, name, created_at, updated_at) VALUES ('fixture', 'fixture', 1, 1);
+      (await sqlite.exec(`INSERT INTO instances (id, name, created_at, updated_at) VALUES ('fixture', 'fixture', 1, 1);
         INSERT INTO instance_webhooks (instance_id, url, updated_at) VALUES ('fixture', 'https://example.invalid', 1);
         INSERT INTO auto_reply_cooldowns VALUES ('fixture', '111@s.whatsapp.net', 123);
-        INSERT INTO group_history_sends VALUES ('fixture', 'stub', 456);`);
+        INSERT INTO group_history_sends VALUES ('fixture', 'stub', 456);`));
       migrate(db, { migrationsFolder: folder });
       migrate(db, { migrationsFolder: folder });
-      expect(sqlite.prepare("SELECT last_reply_at FROM auto_reply_cooldowns").get()).toEqual({
+      expect((await sqlite.prepare("SELECT last_reply_at FROM auto_reply_cooldowns").get())).toEqual({
         last_reply_at: 123,
       });
-      expect(sqlite.prepare("SELECT url FROM instance_webhooks").get()).toEqual({
+      expect((await sqlite.prepare("SELECT url FROM instance_webhooks").get())).toEqual({
         url: "https://example.invalid",
       });
-      expect(sqlite.prepare("SELECT count(*) AS n FROM group_history_sends").get()).toEqual({
+      expect((await sqlite.prepare("SELECT count(*) AS n FROM group_history_sends").get())).toEqual({
         n: 1,
       });
       const store = new ScheduleStore(sqlite);
       const now = 1_800_000_000_000;
-      store.insert({
+      (await store.insert({
         id: "schedule",
         instanceId: "fixture",
         recipient: "111@s.whatsapp.net",
@@ -61,27 +61,27 @@ describe("scheduled migration after the integrated feature chain", () => {
         endAt: null,
         occurrenceLimit: 1,
         now,
-      });
-      expect(store.claimNext(now, now + 60_000, "lease")).toMatchObject({
+      }));
+      expect((await store.claimNext(now, now + 60_000, "lease"))).toMatchObject({
         id: "schedule",
         status: "running",
         scheduledAt: now,
       });
-      sqlite.exec("DELETE FROM instances WHERE id = 'fixture'");
+      (await sqlite.exec("DELETE FROM instances WHERE id = 'fixture'"));
       for (const table of [
         "scheduled_messages",
         "group_history_sends",
         "instance_webhooks",
         "auto_reply_cooldowns",
       ]) {
-        expect(sqlite.prepare(`SELECT count(*) AS n FROM ${table}`).get()).toEqual({ n: 0 });
+        expect((await sqlite.prepare(`SELECT count(*) AS n FROM ${table}`).get())).toEqual({ n: 0 });
       }
       migrate(drizzle(fresh), { migrationsFolder: folder });
       expect(
         fresh.prepare("SELECT name FROM sqlite_master WHERE name = 'scheduled_messages'").get(),
       ).toEqual({ name: "scheduled_messages" });
     } finally {
-      sqlite.close();
+      (await sqlite.close());
       fresh.close();
       rmSync(legacyFolder, { recursive: true, force: true });
     }

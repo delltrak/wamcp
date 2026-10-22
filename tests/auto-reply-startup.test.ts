@@ -36,7 +36,7 @@ vi.mock("../src/services/instance-manager.js", () => ({
     }
   },
 }));
-vi.mock("../src/db/client.js", () => ({ sqlite: {} }));
+vi.mock("../src/db/client.js", () => ({ sqlite: {}, databaseDriver: "sqlite" }));
 vi.mock("../src/services/scheduler.js", () => ({
   MessageScheduler: class {
     start = state.schedulerStarted;
@@ -84,6 +84,7 @@ it("answers an eligible message emitted while reconnecting existing instances at
   await import("../src/index.js");
   await vi.waitFor(() => expect(state.connected).toHaveBeenCalledTimes(1));
   expect(state.schedulerStarted).toHaveBeenCalledTimes(1);
+  await vi.waitFor(() => expect(state.enqueue).toHaveBeenCalledTimes(1));
   expect(state.enqueue).toHaveBeenCalledExactlyOnceWith(
     "startup",
     "5511999999999@s.whatsapp.net",
