@@ -1,3 +1,4 @@
+import { InstanceNotFoundError, InstanceNotInitializedError } from "../utils/instance-errors.js";
 // ============================================================
 // WA MCP — Instance Manager (Core Orchestrator)
 // ============================================================
@@ -206,7 +207,7 @@ export class InstanceManager {
   getAdapter(id: string): ChannelAdapter {
     const managed = this.adapters.get(id);
     if (!managed) {
-      throw new Error(`Instance ${id} not found or not initialized`);
+      throw new InstanceNotInitializedError(id);
     }
     return managed.adapter;
   }
@@ -244,7 +245,7 @@ export class InstanceManager {
       })
       .from(instances);
     const rows = id ? select.where(eq(instances.id, id)).all() : select.all();
-    if (id && rows.length === 0) throw new Error(`Instance ${id} not found`);
+    if (id && rows.length === 0) throw new InstanceNotFoundError(id);
 
     return rows.map((row) => {
       const managed = this.adapters.get(row.id);
@@ -273,7 +274,7 @@ export class InstanceManager {
   private getInstanceFromDb(id: string): InstanceEntity {
     const row = db.select().from(instances).where(eq(instances.id, id)).get();
     if (!row) {
-      throw new Error(`Instance ${id} not found`);
+      throw new InstanceNotFoundError(id);
     }
     return row as InstanceEntity;
   }
