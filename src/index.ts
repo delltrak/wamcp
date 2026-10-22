@@ -24,6 +24,7 @@ import { installShutdownHandlers, SHUTDOWN_TIMEOUT_MS } from "./utils/shutdown.j
 import { logger } from "./utils/logger.js";
 import { getAutoReadMode } from "./services/auto-read.js";
 import { loadPresencePulseConfig, PresencePulseScheduler } from "./services/presence-pulse.js";
+import { loadAutoMarkPlayedConfig } from "./services/auto-mark-played.js";
 import { bootEventWebhook, type EventWebhookStatus } from "./services/event-webhook-config.js";
 import { buildHealthBody } from "./server/health.js";
 
@@ -70,6 +71,7 @@ function checkApiKey(req: IncomingMessage, res: ServerResponse): boolean {
 
 async function initServices() {
   const presencePulseConfig = loadPresencePulseConfig();
+  loadAutoMarkPlayedConfig();
   getAutoReadMode();
 
   // Initialize services
