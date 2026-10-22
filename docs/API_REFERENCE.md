@@ -3298,7 +3298,7 @@ All tool errors return a standard MCP error response:
 
 | Failure                 | Behavior                                                             | Recovery                                                              |
 | ----------------------- | -------------------------------------------------------------------- | --------------------------------------------------------------------- |
-| Instance disconnect     | Auto-reconnect with exponential backoff (1s to 30s max, 10 attempts) | `wa_restart_instance` to retry, or `wa_connect_instance` for fresh QR |
+| Instance disconnect     | Auto-reconnect with exponential backoff (1s to 30s), then every 30s until connected, logged out, or `disconnect()` | Health check retries disconnected instances every 5 min and recovers a `connecting` status older than 2 min with no live socket |
 | Redis down              | Outbound queue stalls, inbound events dropped                        | Server retries Redis connection every 5s, resumes automatically       |
 | SQLite locked           | Write operations retry 3x with 100ms delay                           | Extremely rare with WAL mode. Restart server if persistent.           |
 | Cloud API token expired | All Cloud instance operations fail with 401                          | Call `wa_set_cloud_credentials` with new token                        |

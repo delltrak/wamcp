@@ -590,7 +590,12 @@ Baileys emits `instance.connected` and `instance.disconnected`; Cloud API emits
 them after successful credential verification and on an explicit disconnect.
 The pairing and QR events are Baileys-only. Disconnect events are coalesced to
 the first close after a connection opens, with a terminal `loggedOut` event
-allowed after a reconnecting close.
+allowed after a reconnecting close. When the exponential reconnect schedule
+reaches its cap, one more `instance.disconnected` event is emitted for that
+same outage with `willReconnect: true` and `reconnectInMs` set to 30000.
+Retries continue at that interval until the socket opens, `disconnect()` is
+called, or the session logs out. A session that never paired stops after 10
+attempts.
 
 ```json
 {
@@ -852,8 +857,15 @@ the configured interval. Successful probes and inbound message, receipt, or pres
 as healthy; raw websocket frames do not. Two consecutive failed probes end the socket and let automatic
 reconnect handle the connection. If Baileys' event buffer stays active longer than
 `WA_BAILEYS_EVENT_BUFFER_STALL_MS`, the watchdog flushes it to release held events; if it remains
-active at the next check, the socket ends and follows the normal reconnect flow. Connection close
-and reconnect logs include the disconnect reason, status code, and offline duration.
+active at the next check, the socket ends and follows the normal reconnect flow. A non-logout
+close drops the dead socket immediately. Reconnect delays grow from 1s to 30s and then stay at 30s
+until the connection opens, `disconnect()` is called, or WhatsApp logs the session out (a session
+that never paired stops after 10 attempts). The stored
+status remains `disconnected` while no socket is live, and `connecting` only while one is. The
+maintenance health check still retries disconnected instances that have connected before, and it
+also recovers a `connecting` status older than 2 minutes when the adapter has no live socket and the
+instance connected before.
+Connection close and reconnect logs include the disconnect reason, status code, and offline duration.
 
 `wa_send_sticker` accepts PNG, JPG, GIF, and WebP URLs or base64. PNG/JPG and GIF inputs are
 converted to 512x512 WebP with transparent padding. Static stickers are limited to 100 KB and
@@ -939,6 +951,7 @@ uses the account's own JID and known individual contacts.
 See [Audio transcription](docs/audio-transcription.md) for tool examples and event behavior.
 See [Text-to-speech voice notes](docs/tts.md) for setup, voice selection, model options, and cost notes.
 See [Baileys presence](docs/baileys-presence.md) for online status configuration.
+See [Passkey pairing and ARM images](docs/passkey-and-arm.md) for what Baileys rc14 cannot do yet and how the image is published.
 
 ---
 
@@ -954,6 +967,12 @@ Services:
 
 - **wa-mcp** — The MCP server on port `3000`
 - **redis** — BullMQ backend with AOF persistence
+
+The GitHub Container Registry image is one manifest list for `linux/amd64` and `linux/arm64`.
+Branch, version, and `sha-*` tags are unchanged: a pull on either machine selects its platform.
+The image build loads the `better-sqlite3` musl prebuild and runs `ffmpeg` on each platform.
+Database path, Baileys auth files, and the `wa-data` volume are unchanged. Details and the passkey
+finding are in [Passkey pairing and ARM images](docs/passkey-and-arm.md).
 
 ### Health Check
 

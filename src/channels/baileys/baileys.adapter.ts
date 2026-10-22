@@ -934,6 +934,10 @@ export class BaileysAdapter implements ChannelAdapter {
   private pairingCodeResolver: ((code: string | null) => void) | null = null;
   private reconnectAttempt = 0;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  private retainedClosedSocket: WASocket | null = null;
+  private reconnectSuspended = false;
+  private reconnectBackoffExhaustedNotified = false;
+  private connectInFlight: Promise<void> | null = null;
   private watchdogTimer: ReturnType<typeof setTimeout> | null = null;
   private saveCreds: (() => Promise<void>) | null = null;
   private authMeId: string | undefined;
@@ -1767,19 +1771,65 @@ export class BaileysAdapter implements ChannelAdapter {
   // ---- Lifecycle ----
 
   async connect(): Promise<void> {
-    if (this.sock) {
+    // The reconnect timer, the health check, and tool calls can all call connect();
+    // share one in-flight attempt so they never open two sockets at once.
+    if (this.connectInFlight) return this.connectInFlight;
+    const attempt = this.connectOnce();
+    this.connectInFlight = attempt;
+    try {
+      await attempt;
+    } finally {
+      if (this.connectInFlight === attempt) this.connectInFlight = null;
+    }
+  }
+
+  private async connectOnce(): Promise<void> {
+    if (this.sock && this.status !== "disconnected") {
+      this.cancelReconnectTimer();
       logger.warn({ instanceId: this.instanceId }, "Already connected or connecting");
       return;
     }
 
+    if (this.sock) {
+      const stale = this.sock;
+      this.sock = null;
+      this.retainedClosedSocket = null;
+      try {
+        stale.end(undefined);
+      } catch (error) {
+        logger.warn(
+          { err: error, instanceId: this.instanceId },
+          "Failed to end stale Baileys socket",
+        );
+      }
+    }
+
+    this.cancelReconnectTimer();
+    this.reconnectSuspended = false;
     this.status = "connecting";
 
+    try {
+      await this.openSocket();
+    } catch (error) {
+      if (!this.sock) this.status = "disconnected";
+      if (this.autoReconnect && !this.sock && !this.reconnectSuspended && !this.reconnectTimer) {
+        this.scheduleReconnect();
+      }
+      throw error;
+    }
+  }
+
+  private async openSocket(): Promise<void> {
     const { state, saveCreds } = await useSqliteAuthState(this.instanceId);
+    if (this.reconnectSuspended) return;
     this.saveCreds = saveCreds;
     this.authMeId = state.creds.me?.id;
     this.authMeLid = state.creds.me?.lid;
 
     const { version } = await getWaVersion();
+    // Logout/disconnect may arrive while auth or version lookup is awaiting.
+    // Do not start a replacement connection with credentials from that attempt.
+    if (this.reconnectSuspended) return;
     const requestFullHistory = !this.hasStoredMessages();
 
     const sock = makeWASocket({
@@ -1831,31 +1881,54 @@ export class BaileysAdapter implements ChannelAdapter {
       },
     });
 
+    if (this.reconnectSuspended) {
+      try {
+        sock.end(undefined);
+      } catch (error) {
+        logger.warn(
+          { err: error, instanceId: this.instanceId },
+          "Failed to end Baileys socket after disconnect",
+        );
+      }
+      return;
+    }
+
     this.resetActivityPresence();
+    this.retainedClosedSocket = null;
     this.sock = sock;
     this.lastPresenceUpdateAt.clear();
     this.presenceSubscriptions.clear();
     this.bindEvents(sock);
+    if (this.sock !== sock) return;
+    this.emit("connection.changed", {
+      instanceId: this.instanceId,
+      status: "connecting",
+    });
   }
 
   async disconnect(): Promise<void> {
+    this.reconnectSuspended = true;
     this.clearReconnectTimer();
     this.clearHealthWatchdog();
     this.clearEventBufferStallWatchdog();
     this.clearAuthChallenges(Date.now());
     this.resetActivityPresence();
     this.pendingCalls.clear();
-    if (this.sock) {
-      this.sock.end(undefined);
-      this.sock = null;
-    }
+    const sock = this.sock;
+    this.sock = null;
+    this.retainedClosedSocket = null;
     this.automaticHistoryRecoveryQueue.clear();
     this.finishHistoryFetch(true);
     this.status = "disconnected";
+    if (sock) sock.end(undefined);
   }
 
   getStatus(): ConnectionStatus {
     return this.status;
+  }
+
+  hasLiveSocket(): boolean {
+    return this.sock !== null && this.status !== "disconnected";
   }
 
   getLifecycleStatus(): InstanceRuntimeStatus {
@@ -5990,8 +6063,34 @@ export class BaileysAdapter implements ChannelAdapter {
     }
   }
 
+  private persistInstanceLifecycle(fields: {
+    status: "connected" | "disconnected";
+    updatedAt: number;
+    lastConnected?: number;
+    lastDisconnected?: number;
+  }): void {
+    try {
+      db.update(instancesTable).set(fields).where(eq(instancesTable.id, this.instanceId)).run();
+    } catch (error) {
+      logger.error(
+        { err: error, instanceId: this.instanceId, status: fields.status },
+        "Failed to persist instance connection lifecycle",
+      );
+    }
+  }
+
   private bindEvents(sock: WASocket): void {
     sock.ev.on("connection.update", (update) => {
+      if (this.sock !== null && this.sock !== sock) return;
+      if (
+        update.connection === "close" &&
+        this.sock !== sock &&
+        this.retainedClosedSocket !== null
+      ) {
+        this.handleReplacedSocketClose(sock, update.lastDisconnect);
+        return;
+      }
+
       const { connection, lastDisconnect, qr } = update;
 
       if (qr) {
@@ -6031,6 +6130,8 @@ export class BaileysAdapter implements ChannelAdapter {
       }
 
       if (connection === "open") {
+        if (this.sock === null) this.sock = sock;
+        this.retainedClosedSocket = null;
         const connectedAt = Date.now();
         const wasPairing = this.pendingAuthChallenges.size > 0;
         this.appendNotifyWatermarkMs = this.getAppendNotifyWatermark(connectedAt);
@@ -6052,7 +6153,7 @@ export class BaileysAdapter implements ChannelAdapter {
         this.clearAuthChallenges();
         this.disconnectEventEmittedSinceOpen = false;
         this.terminalDisconnectEventEmittedSinceOpen = false;
-        this.reconnectAttempt = 0;
+        this.clearReconnectTimer();
         this.consecutiveHealthProbeFailures = 0;
         this.resetHealthWatchdog(sock);
         if (this.presenceMode === "on_activity") {
@@ -6061,6 +6162,13 @@ export class BaileysAdapter implements ChannelAdapter {
           });
         }
         const user = sock.user as { lid?: string; name?: string } | undefined;
+        // Persist before emitting so a fast reconnect records this open even when a later
+        // connection.changed dedupe would treat the previous outage as still open.
+        this.persistInstanceLifecycle({
+          status: "connected",
+          lastConnected: connectedAt,
+          updatedAt: connectedAt,
+        });
         this.emit("instance.connected", {
           instanceId: this.instanceId,
           phone: this.ownPhoneJid(sock),
@@ -6084,10 +6192,16 @@ export class BaileysAdapter implements ChannelAdapter {
         const loggedOut = statusCode === DisconnectReason.loggedOut;
         const closedAt = Date.now();
         const priorDisconnectedAt = this.disconnectedAtMs;
+        const recordOutage = this.connectedAtMs !== null;
         const connectedDurationMs =
           this.connectedAtMs !== null ? Math.max(0, closedAt - this.connectedAtMs) : undefined;
         this.connectedAtMs = null;
         if (this.disconnectedAtMs === null) this.disconnectedAtMs = closedAt;
+        this.persistInstanceLifecycle({
+          status: "disconnected",
+          updatedAt: closedAt,
+          ...(recordOutage ? { lastDisconnected: closedAt } : {}),
+        });
         this.lastDisconnectReason = reason;
         this.lastDisconnectStatusCode = statusCode ?? null;
         this.clearAuthChallenges(closedAt);
@@ -6101,12 +6215,15 @@ export class BaileysAdapter implements ChannelAdapter {
           "Baileys connection closed",
         );
 
+        this.retainedClosedSocket = sock;
+        this.sock = null;
         let reconnectInMs: number | null = null;
         if (loggedOut) {
+          this.reconnectSuspended = true;
           logger.info({ instanceId: this.instanceId }, "Logged out, clearing auth");
           clearAuthState(this.instanceId);
-          this.sock = null;
-        } else if (this.autoReconnect) {
+          this.clearReconnectTimer();
+        } else if (this.autoReconnect && !this.reconnectSuspended) {
           reconnectInMs = this.scheduleReconnect();
         }
 
@@ -6773,28 +6890,74 @@ export class BaileysAdapter implements ChannelAdapter {
     });
   }
 
+  private disconnectStatusCode(lastDisconnect: { error?: Error } | undefined): number | undefined {
+    const statusCode = (lastDisconnect?.error as Boom | undefined)?.output?.statusCode;
+    return typeof statusCode === "number" ? statusCode : undefined;
+  }
+
+  private handleReplacedSocketClose(
+    sock: WASocket,
+    lastDisconnect: { error?: Error } | undefined,
+  ): void {
+    if (this.sock !== null || this.retainedClosedSocket !== sock) return;
+    const statusCode = this.disconnectStatusCode(lastDisconnect);
+    if (statusCode !== DisconnectReason.loggedOut) return;
+
+    const closedAt = Date.now();
+    this.reconnectSuspended = true;
+    logger.info({ instanceId: this.instanceId }, "Logged out, clearing auth");
+    clearAuthState(this.instanceId);
+    this.clearReconnectTimer();
+    this.status = "disconnected";
+    const reason = disconnectReasonName(statusCode);
+    this.lastDisconnectReason = reason;
+    this.lastDisconnectStatusCode = statusCode;
+    this.clearAuthChallenges(closedAt);
+    if (this.terminalDisconnectEventEmittedSinceOpen) return;
+
+    const priorDisconnectedAt = this.disconnectedAtMs;
+    if (this.disconnectedAtMs === null) this.disconnectedAtMs = closedAt;
+    this.emit("instance.disconnected", {
+      instanceId: this.instanceId,
+      reason,
+      statusCode,
+      loggedOut: true,
+      willReconnect: false,
+      disconnectedAt: closedAt,
+      ...(priorDisconnectedAt !== null
+        ? { offlineSinceMs: Math.max(0, closedAt - priorDisconnectedAt) }
+        : {}),
+    });
+    this.disconnectEventEmittedSinceOpen = true;
+    this.terminalDisconnectEventEmittedSinceOpen = true;
+  }
+
   private scheduleReconnect(): number | null {
-    if (this.reconnectAttempt >= RECONNECT_MAX_ATTEMPTS) {
+    if (this.reconnectSuspended) return null;
+    this.cancelReconnectTimer();
+
+    const exhausted = this.reconnectAttempt >= RECONNECT_MAX_ATTEMPTS;
+    if (exhausted && !this.authMeId) {
+      // An unpaired session (abandoned QR or pairing code) keeps the bounded retry.
       logger.error(
         {
           instanceId: this.instanceId,
           attempts: this.reconnectAttempt,
           reason: this.lastDisconnectReason,
           statusCode: this.lastDisconnectStatusCode,
-          offlineDurationMs:
-            this.disconnectedAtMs !== null
-              ? Math.max(0, Date.now() - this.disconnectedAtMs)
-              : undefined,
         },
-        "Max reconnect attempts reached",
+        "Max reconnect attempts reached for an unpaired session",
       );
       return null;
     }
+    const delay = exhausted
+      ? RECONNECT_MAX_DELAY_MS
+      : Math.min(
+          RECONNECT_INITIAL_DELAY_MS * Math.pow(2, this.reconnectAttempt),
+          RECONNECT_MAX_DELAY_MS,
+        );
 
-    const delay = Math.min(
-      RECONNECT_INITIAL_DELAY_MS * Math.pow(2, this.reconnectAttempt),
-      RECONNECT_MAX_DELAY_MS,
-    );
+    if (exhausted) this.emitReconnectBackoffExhausted(delay);
 
     this.reconnectAttempt++;
     logger.info(
@@ -6812,24 +6975,64 @@ export class BaileysAdapter implements ChannelAdapter {
       "Scheduling reconnect",
     );
 
-    this.reconnectTimer = setTimeout(async () => {
-      try {
-        this.sock = null;
-        await this.connect();
-      } catch (err) {
-        logger.error({ err, instanceId: this.instanceId }, "Reconnect failed");
-        this.scheduleReconnect();
-      }
+    this.reconnectTimer = setTimeout(() => {
+      this.reconnectTimer = null;
+      void this.runScheduledReconnect();
     }, delay);
     return delay;
   }
 
-  private clearReconnectTimer(): void {
+  private emitReconnectBackoffExhausted(delayMs: number): void {
+    if (this.reconnectBackoffExhaustedNotified) return;
+    this.reconnectBackoffExhaustedNotified = true;
+    const disconnectedAt = Date.now();
+    const offlineSinceMs =
+      this.disconnectedAtMs !== null
+        ? Math.max(0, disconnectedAt - this.disconnectedAtMs)
+        : undefined;
+    logger.error(
+      {
+        instanceId: this.instanceId,
+        attempts: this.reconnectAttempt,
+        delayMs,
+        reason: this.lastDisconnectReason,
+        statusCode: this.lastDisconnectStatusCode,
+        offlineDurationMs: offlineSinceMs,
+      },
+      "Reconnect backoff exhausted; continuing at max delay",
+    );
+    this.emit("instance.disconnected", {
+      instanceId: this.instanceId,
+      reason: this.lastDisconnectReason ?? "unknown",
+      statusCode: this.lastDisconnectStatusCode,
+      loggedOut: false,
+      willReconnect: true,
+      reconnectInMs: delayMs,
+      disconnectedAt,
+      ...(offlineSinceMs !== undefined ? { offlineSinceMs } : {}),
+    });
+  }
+
+  private async runScheduledReconnect(): Promise<void> {
+    if (this.reconnectSuspended || this.sock) return;
+    try {
+      await this.connect();
+    } catch (error) {
+      logger.error({ err: error, instanceId: this.instanceId }, "Reconnect failed");
+    }
+  }
+
+  private cancelReconnectTimer(): void {
     if (this.reconnectTimer) {
       clearTimeout(this.reconnectTimer);
       this.reconnectTimer = null;
     }
+  }
+
+  private clearReconnectTimer(): void {
+    this.cancelReconnectTimer();
     this.reconnectAttempt = 0;
+    this.reconnectBackoffExhaustedNotified = false;
   }
 
   private clearHealthWatchdog(): void {
