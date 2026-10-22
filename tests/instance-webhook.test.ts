@@ -291,6 +291,49 @@ describe("per-instance event webhooks", () => {
     expect(deliver).not.toHaveBeenCalled();
   });
 
+  it("routes routine Grok events only to the configured instance with its standalone HMAC", async () => {
+    setInstanceWebhook({ instanceId: INSTANCE_A, url: INSTANCE_URL, events: ["newsletter.mute"] });
+    const config = loadEventWebhookConfig({
+      WA_EVENT_WEBHOOK_PRESET: "grok-bot",
+      WA_EVENT_WEBHOOK_SECRET: GLOBAL_HMAC,
+      WA_WEBHOOK_DEBOUNCE_MS: "10",
+    });
+    const { manager, handler } = captureHandler();
+    const jobs: Parameters<typeof processEventWebhookJob>[0][] = [];
+    const unsubscribe = registerEventWebhookHandler(
+      manager,
+      config,
+      async (job) => {
+        jobs.push(job);
+      },
+      undefined,
+      (instanceId) => destinationsForInstance(config, instanceId),
+    );
+    for (const instanceId of [INSTANCE_A, INSTANCE_B]) {
+      handler()?.("newsletter.mute", instanceId, {
+        instanceId,
+        newsletterId: "123@newsletter",
+        chatId: "123@newsletter",
+        mute: "on",
+        timestamp: 1700000200,
+      });
+    }
+    await unsubscribe.flush();
+    unsubscribe();
+    expect(jobs).toHaveLength(1);
+    expect(jobs[0]?.payload).toMatchObject({
+      event: "newsletter.mute",
+      instanceId: INSTANCE_A,
+      text: "Canal silenciado",
+    });
+    expect(jobs[0]?.payload).not.toHaveProperty("messages");
+    const service = new EventWebhookService(config);
+    const deliver = vi.fn<Parameters<typeof processEventWebhookJob>[3]>(async () => undefined);
+    await processEventWebhookJob(jobs[0]!, service.destinationMap(), 1000, deliver);
+    expect(deliver.mock.calls[0]?.[0].secret).toBe(GLOBAL_HMAC);
+    expect(getEventWebhookStatus({}, config).droppedEvents).toEqual([]);
+  });
+
   it("defaults merge to false and rejects an invalid flag", () => {
     expect(loadEventWebhookConfig({}).instanceMergeGlobal).toBe(false);
     expect(globalConfig().instanceMergeGlobal).toBe(false);
