@@ -32,7 +32,7 @@ docker compose up      # wa-mcp + redis
 
 **CI (`.github/workflows/ci.yml`) runs all five in order: `lint` → `format:check` → `tsc --noEmit` → `test` → `build`, on Node 24.x and 26.x.** Run `npm run format` before committing — formatting-only CI failures have happened before (commit `7fa86fa`).
 
-Runtime requires **Redis** (BullMQ) even in dev. SQLite lives at `data/whatsapp.db` (gitignored, created on first import of `src/db/client.ts`).
+Runtime requires **Redis** (BullMQ) even in dev. SQLite defaults to `data/whatsapp.db` (gitignored, created on first import of `src/db/client.ts`); `WA_DATABASE_URL` selects PostgreSQL instead. OAuth remains in its separate SQLite file.
 
 ## Architecture
 
@@ -52,7 +52,7 @@ channels/           ChannelAdapter interface → BaileysAdapter | CloudApiAdapte
 
 ### InstanceManager is the hub
 
-`src/services/instance-manager.ts` owns an in-memory `Map<instanceId, {adapter, channel}>` and mirrors lifecycle state into the SQLite `instances` table. Two wiring details that are easy to miss:
+`src/services/instance-manager.ts` owns an in-memory `Map<instanceId, {adapter, channel}>` and mirrors lifecycle state into the selected database’s `instances` table. Two wiring details that are easy to miss:
 
 - `setMessageQueue(mq)` is bidirectional — it also calls `mq.setAdapterResolver(...)` so queue workers can resolve adapters. Without this, every queued send throws "Adapter resolver not set".
 - `bindAdapterEvents()` subscribes to all 12 channel events, writes `status`/`lastConnected`/`lastDisconnected` on `connection.changed`, then fans out to handlers registered via `onAnyEvent()`. `notifications/events.ts` is the only consumer today.
@@ -79,7 +79,7 @@ Everything that is not a "send a message" call (edit, delete, react, presence, g
 - `sock.ev.process()` handles the buffered event batch; `connection.update` and `creds.update` are bound with `ev.on` because they are not buffered.
 - Auth state is database-backed (`baileys.auth.ts`, `auth_keys` table) — a drop-in replacement for `useMultiFileAuthState`. Logout (`DisconnectReason.loggedOut`) clears it.
 - LID (v7): contacts can arrive as `<id>@lid`. `resolvePn()` maps LID→phone via `sock.signalRepository.lidMapping`; `normalizeLidInMessage()` swaps `remoteJid`/`remoteJidAlt` when LID is primary. The contact cache is keyed by phone JID whenever one is known.
-- Contacts accumulate in an **in-memory** `contactCache` (from `contacts.upsert`, `chats.upsert`, `messaging-history.set`, and incoming `pushName`) and are only flushed to SQLite inside `getContacts()`. So `wa_search_contact` is what materializes them — a fresh instance returns nothing until that runs.
+- Contacts accumulate in an **in-memory** `contactCache` (from `contacts.upsert`, `chats.upsert`, `messaging-history.set`, and incoming `pushName`) and are only flushed to the selected database inside `getContacts()`. So `wa_search_contact` is what materializes them — a fresh instance returns nothing until that runs.
 - `getMessages()` reads the local `messages` table, not WhatsApp. Persistence happens in the `messages.upsert` branch of `bindEvents`.
 - Reconnect is exponential backoff (1s → 30s). After 10 attempts a paired session keeps retrying every 30s until the socket opens, `disconnect()` runs, or the session logs out; an unpaired session stops. Concurrent `connect()` calls share one attempt. A non-logout close clears the dead socket. `MaintenanceService` retries `disconnected` instances every 5 min if they have a `lastConnected`, and recovers a `connecting` row older than 2 min with no live socket (also only with a `lastConnected`).
 
