@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- The Docker runtime stage now runs `ffmpeg -version` on every architecture the image build
+  targets, next to the existing `better-sqlite3` prebuild check. Published tags stay a single
+  `linux/amd64` + `linux/arm64` manifest list.
+
 ### Added
 
 - Added Baileys instance lifecycle webhooks for connection, disconnect, pairing-code, and QR events,
