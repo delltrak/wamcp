@@ -36,7 +36,7 @@
 
 **WA MCP** is a WhatsApp MCP server built with TypeScript that gives AI agents full access to WhatsApp through the [Model Context Protocol](https://modelcontextprotocol.io). It supports both **Baileys** (WhatsApp Web) and **Meta Cloud API** as dual-channel backends, deployable with **Docker** in a single command.
 
-Your agent connects once and auto-discovers **158 tools**, **10 resources**, and **22 real-time events** — zero configuration, zero REST wrappers, zero glue code. Three instance webhook tools are added when `WA_INSTANCE_WEBHOOK_TOOLS_ENABLED=true`.
+Your agent connects once and auto-discovers **163 tools**, **10 resources**, and **22 real-time events** — zero configuration, zero REST wrappers, zero glue code. Three instance webhook tools are added when `WA_INSTANCE_WEBHOOK_TOOLS_ENABLED=true`.
 
 ```
 Your AI Agent ←→ MCP Protocol ←→ WA MCP ←→ WhatsApp
@@ -82,7 +82,7 @@ from google.adk.tools.mcp_tool import McpToolset
 
 tools = McpToolset(url="http://localhost:3000/mcp")
 
-# Agent auto-discovers 158 WhatsApp tools
+# Agent auto-discovers 163 WhatsApp tools
 # wa_create_instance, wa_send_text, wa_send_image, ...
 ```
 
@@ -137,6 +137,7 @@ Add to your `claude_desktop_config.json`:
 | 👥  | **Groups**             | List groups, inspect participants, manage membership and settings, invite links, and group pictures. |
 | 👤  | **Contacts & Profile** | Number check, block/unblock, business profiles, privacy, status updates.                                  |
 | 📡  | **Real-time events**   | 15 notification types via SSE: messages, typing, groups, calls, connection status.                       |
+| ⏰  | **Scheduled sends**    | One-shot, daily, weekly, and monthly messages in SQLite. Off until `WA_SCHEDULER_ENABLED=true`.          |
 | ⚡  | **Rate limiting**      | BullMQ queues prevent WhatsApp bans (20 msg/min Baileys, 80 msg/min Cloud).                               |
 | 🔁  | **Auto-reconnect**     | Automatic reconnection with exponential backoff.                                                          |
 | 🗃️  | **Persistent**         | SQLite storage for sessions, messages, contacts, and groups. Set `WA_DATABASE_URL` to use Postgres instead. |
@@ -149,7 +150,7 @@ Add to your `claude_desktop_config.json`:
 
 ## 🛠️ Tools
 
-WA MCP exposes **158 tools** across 16 domains. All tools use the `wa_` prefix.
+WA MCP exposes **163 tools** across 17 domains. All tools use the `wa_` prefix.
 `WA_INSTANCE_WEBHOOK_TOOLS_ENABLED=true` adds the three #142 instance webhook tools.
 
 <details>
@@ -209,6 +210,30 @@ WA MCP exposes **158 tools** across 16 domains. All tools use the `wa_` prefix.
 | `wa_get_message_reactions` | List locally observed reactions (Baileys) |
 | `wa_mark_read`         | Mark messages as read   |
 | `wa_mark_played`       | Mark stored incoming audio, voice, or video as played (Baileys; always available) |
+
+</details>
+
+<details>
+<summary>⏰ <strong>Scheduled sends</strong> (5 tools)</summary>
+
+| Tool                   | Description                                                                 |
+| ---------------------- | --------------------------------------------------------------------------- |
+| `wa_schedule_message` | Store a one-shot or daily/weekly/monthly send. Default timezone `America/Bahia` |
+| `wa_list_scheduled`   | List schedules for an instance                                              |
+| `wa_pause_scheduled`  | Pause an active schedule                                                    |
+| `wa_resume_scheduled` | Resume a paused schedule                                                    |
+| `wa_cancel_scheduled` | Cancel a schedule so it is not sent                                         |
+
+Schedules are stored in the existing SQLite file (`WA_DATABASE_PATH`, default `data/whatsapp.db`). The database path and Docker volume do not change. `WA_SCHEDULER_ENABLED=false` by default: create and resume refuse, the worker does not run, and nothing is queued. Pause and cancel still work, so overdue rows can be stopped before the worker is turned on. Listing still works. When the gate is on, a due send is handed to the same per-instance BullMQ limiter as `wa_send_text` (`WA_BAILEYS_RATE_LIMIT` / `WA_CLOUD_RATE_LIMIT`). A catch-up backlog is not enqueued faster than that per-minute limit. Rows that do not fit stay active. If they were on time when held, their due time moves to that moment so the wait is not later treated as a missed run. Rows that were already late still follow the missed-run policy.
+
+`scheduledAt` is an RFC3339 instant at most one year ahead. The recipient is a phone number (stored as `<digits>@s.whatsapp.net`) or a group JID. `status@broadcast` and `@newsletter` are rejected. Daily, weekly, and monthly repeats use that instant's wall clock in the schedule timezone. The timezone is an IANA name (`America/Bahia` when omitted) and is stored in canonical form (`america/bahia` becomes `America/Bahia`). Names that resolve to UTC are stored as `UTC`, including `UTC`, `GMT`, `UCT`, `Zulu`, `Etc/UTC`, and `Etc/GMT`. Numeric offsets such as `+03:00`, abbreviations such as `EST`, and `Etc/*` zones that do not resolve to UTC (such as `Etc/GMT+3`) are rejected. Sends that share a due time are claimed in due time, then creation time, then insertion order. The first weekly or monthly run is the first matching weekday or day of month at or after `scheduledAt`, not `scheduledAt` itself when that civil day does not match. Weekly `weekdays` are `0` (Sunday) through `6` (Saturday). Monthly `dayOfMonth` uses the last day of a short month. Each instance can hold `WA_SCHEDULER_MAX_ACTIVE` schedules that are active, paused, or running (default 100). Recurring rows stay in that count until they are cancelled or finish. Text is supported, as are image, video, audio, document, and sticker inputs (HTTPS or base64, same rules as immediate sends).
+
+**Missed runs.** A due time less than 2 minutes old is on time and is sent, including after a short restart. Older than that, `WA_SCHEDULER_MISSED_POLICY` applies:
+
+- `skip` (default): do not send the missed occurrence. A one-shot becomes `skipped`. A recurring schedule moves to the next future slot. If none remains, it is `completed`.
+- `send`: enqueue the missed occurrence once, then move a recurring schedule to the next slot after now. Downtime does not produce one message per missed day.
+
+A row stays `running` while its outbound job is waiting, sending, or retrying. Only a completed queue job increases `occurrenceCount`; terminal failure marks a one-shot `failed` or advances a recurring schedule without consuming its success limit. The job identity is persisted before enqueueing and reconciled after restart. An ambiguous enqueue response is never submitted again: if no job can be found after the lease expires, the occurrence fails conservatively. Errors before enqueueing retry up to 5 times, 30 seconds apart. The ordinary queue's provider retries still apply, so exactly-once delivery is not guaranteed across provider timeouts. Real-account validation remains pending.
 
 </details>
 
@@ -850,12 +875,21 @@ Both backends implement the same `ChannelAdapter` interface. Your agent doesn't 
 
 ## ⚙️ Configuration
 
-Copy `.env.example` to `.env` and configure:
+Copy `.env.example` to `.env` and configure. Leave the new HTTP auth settings unset to keep the current URLs and the existing API key behavior. Remote MCP OAuth is documented in [docs/mcp-oauth.md](docs/mcp-oauth.md).
 
 | Variable                    | Default                  | Description                              |
 | --------------------------- | ------------------------ | ---------------------------------------- |
 | `WA_TRANSPORT`              | `http`                   | `http` (Streamable HTTP) or `stdio`      |
-| `WA_MCP_API_KEY`            | —                        | Bearer token auth. Unset = no auth (dev) |
+| `WA_MCP_API_KEY`            | —                        | Bearer token or `x-api-key`. Unset = no API key |
+| `WA_BASIC_AUTH`             | —                        | Comma-separated `user:password` accounts, or a `$scrypt$` verifier. Unset = no Basic Auth |
+| `WA_BASE_PATH`              | —                        | Prefix for `/mcp`, `/health`, webhooks, dashboard, and OAuth routes, for example `/wamcp` |
+| `WA_MCP_OAUTH_ENABLED`      | `false`                  | Embed an OAuth 2.1 authorization server for the MCP endpoint |
+| `WA_MCP_OAUTH_ISSUER_URL`   | —                        | Public HTTPS issuer. Required when OAuth is enabled; its path must match `WA_BASE_PATH` |
+| `WA_MCP_OAUTH_RESOURCE_URL` | issuer origin + base path + `/mcp` | Canonical MCP resource URL checked on every token |
+| `WA_MCP_OAUTH_DB_PATH`      | `data/oauth.db`          | SQLite file for OAuth clients and token hashes. Separate from the WhatsApp database. Mode 0600. Back up the sibling `oauth.db.mac` key with it; losing the key signs every session out. Existing parent directories are not chmodded |
+| `WA_MCP_OAUTH_DCR`          | `open`                   | `open` or `disabled`. `disabled` turns off dynamic client registration |
+| `WA_MCP_OAUTH_REDIRECT_HOST_ALLOWLIST` | —           | Comma-separated redirect hostnames or reverse-DNS native schemes. Unset allows every valid redirect |
+| `WA_TRUST_PROXY`            | —                        | CIDR list. `X-Forwarded-For` is honored only when the socket peer matches. Unset uses the socket address |
 | `WA_DASHBOARD_ENABLED`      | `false`                  | Serve `GET /dashboard`. Requires `WA_TRANSPORT=http` and `WA_DASHBOARD_USERS` |
 | `WA_DASHBOARD_USERS`        | —                        | Required when the dashboard is enabled. Comma-separated `user:password` entries |
 | `WA_MCP_PORT`               | `3000`                   | HTTP server port                         |
@@ -865,6 +899,9 @@ Copy `.env.example` to `.env` and configure:
 | `WA_DATABASE_URL`           | empty                    | Optional `postgres://` or `postgresql://` URL. Empty keeps SQLite at `WA_DATABASE_PATH` |
 | `WA_BAILEYS_HISTORY_SYNC_MAX_MESSAGES` | `100` | Maximum messages requested per chat by automatic and on-demand history fetches (1–10000) |
 | `WA_DATA_DIR`               | `wa-data` in Compose     | Optional absolute host directory mounted at `/app/data`; unset preserves the existing named volume |
+| `WA_SCHEDULER_ENABLED`      | `false`                  | Allow scheduled sends. While false, nothing is queued. Pause and cancel still work |
+| `WA_SCHEDULER_MISSED_POLICY` | `skip`                  | `skip` drops occurrences missed during downtime; `send` queues that occurrence once on resume |
+| `WA_SCHEDULER_MAX_ACTIVE`   | `100`                    | Maximum active, paused, and running schedules per instance |
 | `WA_BAILEYS_RATE_LIMIT`     | `20`                     | Messages/min per Baileys instance        |
 | `WA_PROXY_URL` | — | Optional Baileys outbound proxy URL (`socks5`, `socks5h`, `http`, or `https`) with an explicit port. Unset or empty keeps a direct connection |
 | `WA_CLOUD_RATE_LIMIT`       | `80`                     | Messages/min per Cloud API instance      |
@@ -1071,7 +1108,10 @@ when intentionally overriding a leftover WAL file, for example:
 
 Leave `WA_DATABASE_URL` empty to keep using SQLite at `WA_DATABASE_PATH`. Setting a
 `postgres://` or `postgresql://` URL stores instances, messages, contacts, groups, and the Baileys
-auth keys in that database. The SQLite file is not opened, moved, or migrated on startup.
+auth keys in that database, including instance webhooks, auto-reply cooldowns, group-history
+deduplication, and scheduled sends. The main SQLite file is not opened, moved, or migrated on startup.
+OAuth authorization data remains in its separate local SQLite `oauth.db`; `WA_DATABASE_URL` and
+the copy command do not move it. Keep that file on persistent storage when OAuth is enabled.
 
 `npm run db:migrate` applies the SQLite Drizzle migrations when the URL is empty, and applies the
 Postgres schema when it is set. Postgres records that baseline in `schema_migrations`. The files in
@@ -1405,7 +1445,7 @@ The page shows connection health, each instance's state, last connect and discon
 
 The only write action is `POST /dashboard/api/instances/{instanceId}/pairing` for an existing Baileys instance that has never registered. The dashboard does not create instances. An instance whose stored credentials are already registered, whose credential record does not say `registered: false`, or whose state is `connected`, is left untouched: the dashboard does not connect it, request a pairing code, or load a QR. Pairing requires `Content-Type: application/json` even when the body is empty, and the server rejects a cross-site `Sec-Fetch-Site` or an `Origin` that does not match `Host`. Port 80 matches an `http` origin with no port, and port 443 matches `https` the same way. When nginx proxies the page, set `proxy_set_header Host $host;`. The default `$proxy_host` is the upstream address, so the browser origin does not match and pairing returns 403. `X-Forwarded-Proto` is not trusted. The scheme is compared only when the socket to this process is TLS; a TLS terminator that speaks plain HTTP to the process skips that check. It also does not send messages, log out, delete, or restart instances. `WA_DATABASE_PATH`, the Baileys auth keys, and the Compose volume stay where they are.
 
-**HTTP routing integration.** This branch serves the dashboard at `/dashboard` and uses the socket address for login limits. Integration with [#137](https://github.com/delltrak/wamcp/pull/137) must mount the handler at `basePath + "/dashboard"` through the shared listener and use its trusted-proxy client address while retaining IPv6 `/64` login buckets.
+**HTTP routing.** The shared listener serves the dashboard at `WA_BASE_PATH + "/dashboard"`. Login limits use the trusted-proxy address rules from `WA_TRUST_PROXY`, including IPv6 `/64` buckets; without that setting, forwarded addresses are ignored. Dashboard credentials and pairing CSRF checks remain independent of MCP OAuth. The Chatwoot webhook also follows `WA_BASE_PATH`.
 
 ---
 
@@ -1474,7 +1514,7 @@ src/
 ├── constants.ts                 # Defaults and limits
 ├── server/mcp.ts                # MCP server setup
 ├── server/dashboard.ts          # Optional operations dashboard
-├── tools/                       # 🔧 158 MCP tools (16 files)
+├── tools/                       # 🔧 163 MCP tools (17 files)
 ├── resources/                   # 📖 10 MCP resources (8 files)
 ├── notifications/events.ts      # 📡 15 documented event types
 ├── channels/

@@ -27,6 +27,8 @@ import { registerTtsTools } from "../tools/tts.tools.js";
 import { registerSearchTools } from "../tools/search.tools.js";
 import { registerLabelTools } from "../tools/label.tools.js";
 import { registerEventTools } from "../tools/event.tools.js";
+import { registerScheduleTools } from "../tools/schedule.tools.js";
+import type { MessageScheduler } from "../services/scheduler.js";
 
 // Resources
 import { registerInstancesResource } from "../resources/instances.resource.js";
@@ -44,6 +46,7 @@ import { registerEventNotifications } from "../notifications/events.js";
 export function createMcpServer(
   instanceManager: InstanceManager,
   messageQueue: MessageQueue,
+  scheduler: MessageScheduler,
   eventWebhook?: EventWebhookService,
 ): { server: McpServer; dispose: () => void; close: () => Promise<void> } {
   const server = new McpServer(
@@ -75,6 +78,7 @@ export function createMcpServer(
   registerSearchTools(server, instanceManager);
   registerLabelTools(server, instanceManager);
   registerEventTools(server, instanceManager);
+  registerScheduleTools(server, scheduler);
 
   // Register resources
   registerInstancesResource(server, instanceManager, messageQueue);

@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import type { InstanceManager } from "../src/services/instance-manager.js";
 import type { MessageQueue } from "../src/services/message-queue.js";
 import { McpHttpSessionManager } from "../src/server/http-session.js";
+import { createIdleScheduler } from "../src/services/scheduler.js";
 
 describe("MCP HTTP sessions", () => {
   let httpServer: Server | undefined;
@@ -29,7 +30,7 @@ describe("MCP HTTP sessions", () => {
       },
     } as unknown as InstanceManager;
     const messageQueue = {} as MessageQueue;
-    sessionManager = new McpHttpSessionManager(instanceManager, messageQueue);
+    sessionManager = new McpHttpSessionManager(instanceManager, messageQueue, createIdleScheduler());
 
     httpServer = createServer((req, res) => {
       void sessionManager!.handleRequest(req, res).catch((error: unknown) => {
@@ -161,7 +162,11 @@ describe("MCP HTTP sessions", () => {
         return () => eventSubscribers!.delete(handler);
       },
     } as unknown as InstanceManager;
-    sessionManager = new McpHttpSessionManager(instanceManager, {} as MessageQueue);
+    sessionManager = new McpHttpSessionManager(
+      instanceManager,
+      {} as MessageQueue,
+      createIdleScheduler(),
+    );
 
     httpServer = createServer((req, res) => {
       void sessionManager!.handleRequest(req, res).catch((error: unknown) => {

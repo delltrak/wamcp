@@ -1015,7 +1015,7 @@ describe("auto-reply cooldown table", () => {
         () => now,
         sqliteAutoReplyCooldownStore,
       );
-      first.handle(instanceId, incoming({}, now));
+      await first.handle(instanceId, incoming({}, now));
 await new Promise<void>((resolve) => setImmediate(resolve));
       await Promise.resolve();
       expect(firstSend).toHaveBeenCalledTimes(1);
@@ -1028,7 +1028,7 @@ await new Promise<void>((resolve) => setImmediate(resolve));
         () => now + 60_000,
         sqliteAutoReplyCooldownStore,
       );
-      second.handle(instanceId, incoming({ message: { id: "restart" } }, now + 60_000));
+      await second.handle(instanceId, incoming({ message: { id: "restart" } }, now + 60_000));
 await new Promise<void>((resolve) => setImmediate(resolve));
       expect(secondSend).not.toHaveBeenCalled();
     } finally {

@@ -228,7 +228,7 @@ describe("BaileysAdapter.markRead", () => {
       const messageId = "incoming-status";
       const senderId = "5511888888888@s.whatsapp.net";
       const rawParticipant = "9000000000001@lid";
-      db.insert(messages)
+      (await db.insert(messages)
         .values({
           id: messageId,
           instanceId,
@@ -250,7 +250,7 @@ describe("BaileysAdapter.markRead", () => {
               })
             : null,
         })
-        .run();
+        .run());
       const { adapter, readMessages } = connectedAdapter();
 
       await adapter.markRead(chatId, [messageId]);

@@ -418,7 +418,8 @@ describe("Baileys markOnlineOnConnect configuration", () => {
     await vi.advanceTimersByTimeAsync(2000);
     expect(socket.sendPresenceUpdate).toHaveBeenCalledTimes(2);
 
-    await onConnectionUpdate({ connection: "open" });
+    await adapter.connect();
+    await getConnectionUpdateHandler()({ connection: "open" });
     for (let index = 0; index < 10; index += 1) await Promise.resolve();
     expect(socket.sendPresenceUpdate).toHaveBeenNthCalledWith(3, "unavailable");
     await adapter.disconnect();
@@ -547,7 +548,7 @@ describe("Baileys markOnlineOnConnect configuration", () => {
   }
 
   function getConnectionUpdateHandler(): (update: { connection: "open" | "close" }) => void {
-    const handler = socket.ev.on.mock.calls.find(
+    const handler = socket.ev.on.mock.calls.findLast(
       ([event]) => event === "connection.update",
     )?.[1] as ((update: { connection: "open" | "close" }) => void) | undefined;
     if (!handler) throw new Error("Connection update listener was not registered");

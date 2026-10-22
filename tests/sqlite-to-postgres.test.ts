@@ -84,6 +84,10 @@ async function buildSqlite(options?: {
        ) VALUES ('msg-1', ?, '15550001111@s.whatsapp.net', '15550001111@s.whatsapp.net', 'text', ?, 1, 0, 'sent', ?)`,
     )
     .run(instanceId, options?.content ?? "kept", now);
+  source.prepare("INSERT INTO instance_webhooks (instance_id, url, updated_at) VALUES (?, 'https://example.test/hook', ?)").run(instanceId, now);
+  source.prepare("INSERT INTO auto_reply_cooldowns (instance_id, contact_key, last_reply_at) VALUES (?, 'contact', ?)").run(instanceId, now);
+  source.prepare("INSERT INTO group_history_sends (instance_id, message_id, sent_at) VALUES (?, 'history', ?)").run(instanceId, now);
+  source.prepare("INSERT INTO scheduled_messages (id, instance_id, recipient, message_type, payload_json, timezone, recurrence, scheduled_at, next_run_at, status, created_at, updated_at) VALUES ('schedule', ?, 'contact', 'text', '{}', 'UTC', 'once', ?, ?, 'active', ?, ?)").run(instanceId, now, now, now, now);
   if (options?.extraColumn) {
     source.exec("ALTER TABLE messages ADD COLUMN extra_future TEXT");
     source
@@ -126,6 +130,7 @@ describe.skipIf(!postgresEnabled)("SQLite to Postgres migration", () => {
       });
       expect(copied.tables.auth_keys).toBe(2);
       expect(copied.tables.messages).toBe(1);
+      for (const table of ["instance_webhooks", "auto_reply_cooldowns", "group_history_sends", "scheduled_messages"]) expect(copied.tables[table]).toBe(1);
       expect(copied.skipped).toEqual([]);
 
       const sourceAfter = new Database(source.path, { readonly: true });

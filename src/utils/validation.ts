@@ -42,6 +42,40 @@ export function isValidJidOrPhone(input: string): boolean {
   return isValidJid(input) || PHONE_RE.test(input.replace(/[^0-9]/g, ""));
 }
 
+const SCHEDULE_GROUP_JID_RE = /^\d{5,30}(?:-\d{5,30})?@g\.us$/;
+
+/**
+ * Recipient stored on a scheduled send. Phone numbers become `<digits>@s.whatsapp.net`.
+ * Group JIDs are kept. Free text, status broadcasts, and newsletters are rejected.
+ */
+export function normalizeScheduledRecipient(input: string): string {
+  const value = input.trim();
+  if (value === "") {
+    throw new Error("Invalid recipient; expected a phone number or WhatsApp JID");
+  }
+  const lower = value.toLowerCase();
+  if (
+    lower === STATUS_BROADCAST_JID ||
+    lower.endsWith("@broadcast") ||
+    lower.endsWith("@newsletter")
+  ) {
+    throw new Error("Invalid recipient; status broadcasts and newsletters cannot be scheduled");
+  }
+  if (value.includes("@")) {
+    if (INDIVIDUAL_JID_RE.test(value)) return value;
+    if (SCHEDULE_GROUP_JID_RE.test(value)) return value;
+    throw new Error("Invalid recipient; expected a phone number or WhatsApp JID");
+  }
+  if (!PHONE_INPUT_RE.test(value)) {
+    throw new Error("Invalid recipient; expected a phone number or WhatsApp JID");
+  }
+  const digits = value.replace(/[^0-9]/g, "");
+  if (!PHONE_RE.test(digits)) {
+    throw new Error("Invalid recipient; expected a phone number or WhatsApp JID");
+  }
+  return `${digits}@s.whatsapp.net`;
+}
+
 /**
  * Validate a status recipient. Status broadcasts accept individual PN, hosted,
  * and LID JIDs (Baileys resolves LID devices); groups, newsletters, and

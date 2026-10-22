@@ -636,10 +636,20 @@ export class AutoReplyService {
     this.gate = new AutoReplyGate(config, store);
   }
 
-  handle(instanceId: string, event: NormalizedMessageEvent, contact?: AutoReplyContact): void {
+  handle(
+    instanceId: string,
+    event: NormalizedMessageEvent,
+    contact?: AutoReplyContact,
+  ): Promise<void> {
     if (!this.resolveContact || contact) {
-      void this.dispatch(instanceId, event, contact ?? contactFromEvent(event));
-      return;
+      return this.dispatch(instanceId, event, contact ?? contactFromEvent(event)).catch(
+        (error: unknown) => {
+          logger.warn(
+            { err: error instanceof Error ? error.message : String(error), instanceId },
+            "Auto-reply failed",
+          );
+        },
+      );
     }
     const resolveContact = this.resolveContact;
     const previous = this.tails.get(instanceId) ?? Promise.resolve();
@@ -648,7 +658,7 @@ export class AutoReplyService {
       .then(async () => {
         if (!resolveContact) return;
         const resolved = await resolveContact(instanceId, event);
-        void this.dispatch(instanceId, event, resolved);
+        await this.dispatch(instanceId, event, resolved);
       })
       .catch((error: unknown) => {
         logger.warn(
@@ -657,6 +667,7 @@ export class AutoReplyService {
         );
       });
     this.tails.set(instanceId, next);
+    return next;
   }
 
   private async dispatch(

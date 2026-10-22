@@ -92,17 +92,17 @@ interface Fixture {
   dispatch: (events: Partial<BaileysEventMap>) => Promise<void>;
 }
 
-function createFixture(): Fixture {
+async function createFixture(): Promise<Fixture> {
   const instanceId = `webhook_events_${randomUUID()}`;
   const now = Date.now();
-  db.insert(instances)
+  (await db.insert(instances)
     .values({
       id: instanceId,
       name: "Webhook events fixture",
       createdAt: now,
       updatedAt: now,
     })
-    .run();
+    .run());
 
   let processEvents: ((events: Partial<BaileysEventMap>) => Promise<void> | void) | undefined;
   const socket = {
@@ -156,17 +156,17 @@ function collect<E extends ChannelEvent>(
 
 const createdInstances = new Set<string>();
 
-afterEach(() => {
+afterEach(async () => {
   vi.unstubAllEnvs();
   vi.restoreAllMocks();
   for (const instanceId of createdInstances) {
-    db.delete(instances).where(eq(instances.id, instanceId)).run();
+    (await db.delete(instances).where(eq(instances.id, instanceId)).run());
   }
   createdInstances.clear();
 });
 
-function useFixture(): Fixture {
-  const fixture = createFixture();
+async function useFixture(): Promise<Fixture> {
+  const fixture = (await createFixture());
   createdInstances.add(fixture.instanceId);
   return fixture;
 }
@@ -192,7 +192,7 @@ describe("newsletter membership helpers", () => {
 });
 
 describe("optional webhook event selection", () => {
-  it("keeps the new events out of the default filter and accepts them when listed", () => {
+  it("keeps the new events out of the default filter and accepts them when listed", async () => {
     const defaults = loadEventWebhookConfig({});
     expect(defaults.events).toEqual(["message.received"]);
     for (const event of OPTIONAL_EVENTS) {
@@ -204,16 +204,16 @@ describe("optional webhook event selection", () => {
     });
     expect(selected.events).toEqual([...OPTIONAL_EVENTS]);
 
-    const routine = getEventWebhookStatus({
+    const routine = (await getEventWebhookStatus({
       WA_EVENT_WEBHOOK_URL: "https://hooks.example.test/receive",
       WA_EVENT_WEBHOOK_PRESET: "grok-bot",
       WA_EVENT_WEBHOOK_EVENTS: "message.received,newsletter.joined,call.received",
-    });
+    }));
     expect(routine.droppedEvents).toEqual(["call.received"]);
     expect(routine.eventCount).toBe(2);
   });
 
-  it("normalizes the new event payloads and applies ignore-from-me only when selected", () => {
+  it("normalizes the new event payloads and applies ignore-from-me only when selected", async () => {
     const joined = normalizeEventWebhookPayload("group.joined", "inst_1234abcd", {
       instanceId: "inst_1234abcd",
       groupId: GROUP_ID,
@@ -355,18 +355,18 @@ describe("optional webhook event selection", () => {
       events: [...OPTIONAL_EVENTS],
       ignoreFromMe: true,
     };
-    expect(shouldSendEventWebhook("newsletter.message", newsletterMessage(), selected)).toBe(true);
-    expect(shouldSendEventWebhook("newsletter.message", newsletterMessage(true), selected)).toBe(
+    expect((await shouldSendEventWebhook("newsletter.message", newsletterMessage(), selected))).toBe(true);
+    expect((await shouldSendEventWebhook("newsletter.message", newsletterMessage(true), selected))).toBe(
       false,
     );
     expect(
-      shouldSendEventWebhook("newsletter.message", newsletterMessage(true), {
+      (await shouldSendEventWebhook("newsletter.message", newsletterMessage(true), {
         ...selected,
         ignoreFromMe: false,
-      }),
+      })),
     ).toBe(true);
     expect(
-      shouldSendEventWebhook(
+      (await shouldSendEventWebhook(
         "group.joined",
         {
           instanceId: "inst_1234abcd",
@@ -378,10 +378,10 @@ describe("optional webhook event selection", () => {
           author: null,
         },
         loadEventWebhookConfig({}),
-      ),
+      )),
     ).toBe(false);
     expect(
-      shouldSendEventWebhook(
+      (await shouldSendEventWebhook(
         "newsletter.joined",
         {
           instanceId: "inst_1234abcd",
@@ -396,10 +396,10 @@ describe("optional webhook event selection", () => {
           ignoreFromMe: true,
           preset: "grok-bot",
         },
-      ),
+      )),
     ).toBe(true);
     expect(
-      shouldSendEventWebhook(
+      (await shouldSendEventWebhook(
         "newsletter.joined",
         {
           instanceId: "inst_1234abcd",
@@ -414,13 +414,13 @@ describe("optional webhook event selection", () => {
           ignoreFromMe: true,
           preset: "grok-bot",
         },
-      ),
+      )),
     ).toBe(false);
   });
 });
 
 describe("webhook delivery of optional events", () => {
-  it("enqueues a documented payload only when the event is listed", () => {
+  it("enqueues a documented payload only when the event is listed", async () => {
     let eventHandler:
       | ((
           event: "newsletter.mute" | "group.joined",
@@ -441,7 +441,7 @@ describe("webhook delivery of optional events", () => {
       WA_EVENT_WEBHOOK_PRESET: "grok-bot",
     });
     const unsubscribe = registerEventWebhookHandler(instanceManager, listed, enqueue);
-    eventHandler?.("group.joined", "inst_1234abcd", {
+    (await eventHandler?.("group.joined", "inst_1234abcd", {
       instanceId: "inst_1234abcd",
       groupId: GROUP_ID,
       chatId: GROUP_ID,
@@ -449,14 +449,14 @@ describe("webhook delivery of optional events", () => {
       description: null,
       memberCount: 12,
       author: null,
-    });
-    eventHandler?.("newsletter.mute", "inst_1234abcd", {
+    }));
+    (await eventHandler?.("newsletter.mute", "inst_1234abcd", {
       instanceId: "inst_1234abcd",
       newsletterId: NEWSLETTER_ID,
       chatId: NEWSLETTER_ID,
       mute: "on",
       timestamp: 1_700_000_200,
-    });
+    }));
     expect(enqueue).toHaveBeenCalledOnce();
     const delivered = enqueue.mock.calls[0]?.[0].payload;
     expect(delivered).toMatchObject({
@@ -530,7 +530,7 @@ describe("webhook delivery of optional events", () => {
 
 describe("Baileys optional webhook events", () => {
   it("emits label.association without dropping label.updated", async () => {
-    const { adapter, dispatch } = useFixture();
+    const { adapter, dispatch } = (await useFixture());
     const updated = collect(adapter, "label.updated");
     const associated = collect(adapter, "label.association");
 
@@ -558,7 +558,7 @@ describe("Baileys optional webhook events", () => {
   });
 
   it("emits group.joined only when this account is in a non-empty roster", async () => {
-    const { adapter, dispatch, socket } = useFixture();
+    const { adapter, dispatch, socket } = (await useFixture());
     const joined = collect(adapter, "group.joined");
 
     await dispatch({
@@ -587,7 +587,7 @@ describe("Baileys optional webhook events", () => {
   });
 
   it("emits group.joined for an add of this account and not for someone else", async () => {
-    const { adapter, dispatch } = useFixture();
+    const { adapter, dispatch } = (await useFixture());
     const changed = collect(adapter, "group.participants_changed");
     const joined = collect(adapter, "group.joined");
 
@@ -624,7 +624,7 @@ describe("Baileys optional webhook events", () => {
   });
 
   it("emits newsletter membership for this account and ignores promote or other users", async () => {
-    const { adapter, dispatch } = useFixture();
+    const { adapter, dispatch } = (await useFixture());
     const joined = collect(adapter, "newsletter.joined");
     const left = collect(adapter, "newsletter.left");
 
@@ -676,7 +676,7 @@ describe("Baileys optional webhook events", () => {
   });
 
   it("emits newsletter.mute only when the settings update carries a mute flag", async () => {
-    const { adapter, dispatch } = useFixture();
+    const { adapter, dispatch } = (await useFixture());
     const muted = collect(adapter, "newsletter.mute");
 
     await dispatch({
@@ -704,7 +704,7 @@ describe("Baileys optional webhook events", () => {
   });
 
   it("emits newsletter.message for fresh posts without stealing message.received", async () => {
-    const { adapter, dispatch } = useFixture();
+    const { adapter, dispatch } = (await useFixture());
     const posts = collect(adapter, "newsletter.message");
     const received = collect(adapter, "message.received");
     const now = Date.now();
@@ -746,7 +746,7 @@ describe("Baileys optional webhook events", () => {
   it.each(["notify", "append"] as const)(
     "deduplicates %s newsletter posts by channel and message ID",
     async (type) => {
-      const { instanceId, adapter, dispatch } = useFixture();
+      const { instanceId, adapter, dispatch } = (await useFixture());
       const posts = collect(adapter, "newsletter.message");
       const manager = new InstanceManager();
       (
@@ -802,7 +802,7 @@ describe("Baileys optional webhook events", () => {
   );
 
   it("skips recent stored newsletter history on append after upgrading", async () => {
-    const { adapter, dispatch } = useFixture();
+    const { adapter, dispatch } = (await useFixture());
     const posts = collect(adapter, "newsletter.message");
     const stored = textMessage("stored-post", NEWSLETTER_ID);
     await dispatch({
@@ -826,7 +826,7 @@ describe("Baileys optional webhook events", () => {
   });
 
   it("does not emit newsletter.message from history sync", async () => {
-    const { adapter, dispatch } = useFixture();
+    const { adapter, dispatch } = (await useFixture());
     const posts = collect(adapter, "newsletter.message");
 
     await dispatch({
@@ -846,7 +846,7 @@ describe("Baileys optional webhook events", () => {
 
   it("does not emit group.joined for a local invite or a group this account creates", async () => {
     vi.stubEnv("WA_GROUP_WRITES_ENABLED", "true");
-    const { adapter, socket } = useFixture();
+    const { adapter, socket } = (await useFixture());
     const joined = collect(adapter, "group.joined");
     socket.groupCreate = vi.fn(async () => ({ id: "120363000000000130@g.us" }));
 
@@ -857,7 +857,7 @@ describe("Baileys optional webhook events", () => {
   });
 
   it("treats phone mute and follow as best-effort on rc14", async () => {
-    const { adapter, dispatch } = useFixture();
+    const { adapter, dispatch } = (await useFixture());
     const muted = collect(adapter, "newsletter.mute");
     const joined = collect(adapter, "newsletter.joined");
 
@@ -889,7 +889,7 @@ describe("Baileys optional webhook events", () => {
 
   it("emits local follow, unfollow, create, and a later roster join once across a protocol echo", async () => {
     vi.stubEnv("WA_GROUP_WRITES_ENABLED", "true");
-    const { adapter, socket, dispatch } = useFixture();
+    const { adapter, socket, dispatch } = (await useFixture());
     const joined = collect(adapter, "newsletter.joined");
     const left = collect(adapter, "newsletter.left");
     const groups = collect(adapter, "group.joined");
@@ -924,7 +924,7 @@ describe("Baileys optional webhook events", () => {
   });
 
   it("does not emit membership when group writes are disabled", async () => {
-    const { adapter } = useFixture();
+    const { adapter } = (await useFixture());
     const joined = collect(adapter, "newsletter.joined");
 
     await expect(adapter.newsletterFollow(NEWSLETTER_ID)).rejects.toThrow(/disabled/);

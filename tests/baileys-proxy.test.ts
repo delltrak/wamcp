@@ -651,7 +651,7 @@ describe("BaileysAdapter proxy wiring", () => {
     }
     vi.unstubAllEnvs();
     if (activeInstanceId) {
-      sqlite.prepare("DELETE FROM instances WHERE id = ?").run(activeInstanceId);
+      (await sqlite.prepare("DELETE FROM instances WHERE id = ?").run(activeInstanceId));
       activeInstanceId = undefined;
     }
   });
@@ -723,10 +723,10 @@ describe("BaileysAdapter proxy wiring", () => {
         connection: string;
         lastDisconnect?: { error: Error };
       }) => Promise<void>;
-      const closing = handler({
+      const closing = (await handler({
         connection: "close",
         lastDisconnect: { error: new Error("proxy reconnect fixture") },
-      });
+      }));
       await vi.waitFor(
         () => {
           expect(mocks.makeWASocket.mock.calls.length).toBe(opened + 1);
@@ -752,12 +752,12 @@ describe("BaileysAdapter proxy wiring", () => {
     expect(destroyedDispatchers.size).toBe(3);
   }, 20_000);
 
-  it("handles connection close synchronously", async () => {
+  it("finishes connection close without waiting for proxy I/O", async () => {
     vi.stubEnv("WA_PROXY_URL", proxyUrl("socks5", 1080));
     await connectAdapter();
     const handler = socket.ev.on.mock.calls.find((call) => call[0] === "connection.update")?.[1] as
       ((update: { connection: string; lastDisconnect?: { error: Error } }) => unknown) | undefined;
-    const result = handler?.({
+    const result = await handler?.({
       connection: "close",
       lastDisconnect: { error: new Error("synchronous close") },
     });
@@ -875,11 +875,11 @@ describe("BaileysAdapter proxy wiring", () => {
   it("downloads media through the proxy dispatcher and leaves direct downloads unchanged", async () => {
     const instanceId = `proxy-download-${randomUUID()}`;
     activeInstanceId = instanceId;
-    sqlite
+    (await sqlite
       .prepare(
         "INSERT INTO instances (id, name, channel, status, created_at, updated_at) VALUES (?, ?, 'baileys', 'disconnected', 1700000000, 1700000000)",
       )
-      .run(instanceId, "Proxy fixture");
+      .run(instanceId, "Proxy fixture"));
     const messageId = `PROXY-MEDIA-${randomUUID()}`;
     const source = {
       key: { id: messageId, remoteJid: CHAT, fromMe: false },
@@ -888,7 +888,7 @@ describe("BaileysAdapter proxy wiring", () => {
       },
       messageTimestamp: 1_700_000_000,
     } as WAMessage;
-    sqlite
+    (await sqlite
       .prepare(
         `INSERT INTO messages (
           id, instance_id, chat_id, sender_id, type, content, media_url, media_mimetype,
@@ -902,7 +902,7 @@ describe("BaileysAdapter proxy wiring", () => {
         CHAT,
         "https://mmg.whatsapp.net/image.jpg",
         JSON.stringify(source),
-      );
+      ));
 
     const audioId = `PROXY-AUDIO-${randomUUID()}`;
     const audio = {
@@ -912,7 +912,7 @@ describe("BaileysAdapter proxy wiring", () => {
       },
       messageTimestamp: 1_700_000_000,
     } as WAMessage;
-    sqlite
+    (await sqlite
       .prepare(
         `INSERT INTO messages (
           id, instance_id, chat_id, sender_id, type, content, media_url, media_mimetype,
@@ -926,7 +926,7 @@ describe("BaileysAdapter proxy wiring", () => {
         CHAT,
         "https://mmg.whatsapp.net/audio.ogg",
         JSON.stringify(audio),
-      );
+      ));
 
     vi.stubEnv("WA_PROXY_URL", proxyUrl("socks5", 1080));
     const adapter = await connectAdapter(instanceId);

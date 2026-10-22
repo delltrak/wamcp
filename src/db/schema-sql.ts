@@ -6,6 +6,11 @@
 // table or column must update SCHEMA_SQL in this file in the same change.
 // ============================================================
 
+import {
+  SCHEDULED_MESSAGES_TABLE_DDL,
+  SCHEDULED_MESSAGES_INDEX_DDL,
+  SCHEDULED_MESSAGES_UPGRADE_SQL,
+} from "./scheduled-messages.js";
 import { AUTO_REPLY_COOLDOWNS_TABLE_SQL } from "./auto-reply-cooldown-sql.js";
 import { INSTANCE_WEBHOOKS_SCHEMA_SQL } from "./instance-webhooks-schema.js";
 import type { DatabaseDriverName } from "./config.js";
@@ -33,6 +38,8 @@ export const SCHEMA_SQL = `
       last_disconnect_status_code INTEGER
     );
 
+    ${SCHEDULED_MESSAGES_TABLE_DDL}
+    ${SCHEDULED_MESSAGES_INDEX_DDL}
     ${AUTO_REPLY_COOLDOWNS_TABLE_SQL};
     ${INSTANCE_WEBHOOKS_SCHEMA_SQL};
     CREATE TABLE IF NOT EXISTS group_history_sends (
@@ -240,6 +247,7 @@ export const SCHEMA_SQL = `
 `;
 
 const ADDITIVE_COLUMNS_BEFORE_SCHEMA = [
+  SCHEDULED_MESSAGES_UPGRADE_SQL,
   `ALTER TABLE contacts ADD COLUMN lid TEXT`,
   `ALTER TABLE contacts ADD COLUMN name_source TEXT`,
   `ALTER TABLE messages ADD COLUMN push_name TEXT`,

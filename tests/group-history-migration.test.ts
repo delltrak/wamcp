@@ -59,8 +59,8 @@ describe("group history migration after webhooks and auto-reply", () => {
   });
 
   it("keeps migration indexes, timestamps, and cumulative snapshots in sequence", () => {
-    expect(journal.entries.map((entry) => entry.idx)).toEqual([0, 1, 2, 3, 4, 5, 6]);
-    expect(journal.entries.at(-1)?.tag).toBe("0006_group_history_sends");
+    expect(journal.entries.slice(0, 7).map((entry) => entry.idx)).toEqual([0, 1, 2, 3, 4, 5, 6]);
+    expect(journal.entries[6]?.tag).toBe("0006_group_history_sends");
     for (let index = 1; index < journal.entries.length; index++) {
       expect(journal.entries[index]!.when).toBeGreaterThan(journal.entries[index - 1]!.when);
     }

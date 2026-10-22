@@ -23,6 +23,7 @@
    - [WhatsApp Events](#212-whatsapp-events-2-tools)
    - [Business, Communities, and Catalog](#213-business-communities-and-catalog-16-tools)
    - [Community administration](#214-community-administration-16-tools)
+   - [Scheduled sends](#215-scheduled-sends-5-tools)
 3. [Resources Reference](#3-resources-reference)
 4. [Notifications Reference](#4-notifications-reference)
 5. [Error Handling](#5-error-handling)
@@ -43,13 +44,22 @@ WA MCP is an MCP (Model Context Protocol) server that exposes WhatsApp capabilit
 
 ### Authentication
 
-All requests require an API key in the `Authorization` header:
+HTTP authentication is optional. With `WA_MCP_API_KEY`, `WA_BASIC_AUTH`, and `WA_MCP_OAUTH_ENABLED` unset, `/mcp` accepts unauthenticated requests and the paths stay `/mcp`, `/health`, and `/cloud-webhook`.
+
+`WA_MCP_API_KEY` accepts either header:
 
 ```
 Authorization: Bearer wamcp_sk_your_key
+X-Api-Key: wamcp_sk_your_key
 ```
 
-The key is configured via the `WA_API_KEY` environment variable on the server.
+`WA_BASIC_AUTH` adds one or more accounts (`alice:replace-me,bob:replace-me`). A password may be a `$scrypt$salt$hash` verifier. Each account can call the MCP endpoint with HTTP Basic authentication. Health and the Cloud API webhook stay on their own checks: health is unauthenticated, and the webhook keeps Meta's signature verification.
+
+`WA_MCP_OAUTH_ENABLED=true` embeds an OAuth 2.1 authorization server for the MCP endpoint: authorization code with PKCE S256, protected-resource and authorization-server metadata, and dynamic client registration. The browser sign-in page uses the same `WA_BASIC_AUTH` accounts. Access tokens last 15 minutes and are opaque; only their hashes are stored. Refreshing a token revokes the previous access token. Removing or rotating a Basic Auth user invalidates that user's tokens. `POST /oauth/revoke` revokes one token, or every token for a user when the caller is that user or presents `WA_MCP_API_KEY`. `WA_MCP_OAUTH_DCR=disabled` turns registration off, and `WA_MCP_OAUTH_REDIRECT_HOST_ALLOWLIST` limits redirect hosts and reverse-DNS native schemes such as `com.example.app`. `WA_TRUST_PROXY` is an optional comma-separated CIDR list; `X-Forwarded-For` is ignored unless the socket peer is in that list. Back up `oauth.db.mac` with the OAuth database. See `docs/mcp-oauth.md`.
+
+`WA_BASE_PATH` prefixes the HTTP routes. `/wamcp` serves the MCP endpoint at `/wamcp/mcp`. OAuth discovery uses the path-inserted well-known URLs required by the MCP authorization specification, not `/wamcp/.well-known/...`.
+
+`GET /health` remains public so process probes do not need these credentials.
 
 ### Operations dashboard
 
@@ -140,12 +150,27 @@ Tools marked **Baileys only** are not available on Cloud API instances.
   real-number check has been performed for this change.
 - **Real WhatsApp checks** -- Run real integration tests only with a throwaway number. Automated
   tests use mocked sockets and do not connect to WhatsApp.
+- **Scheduled sends** -- `WA_SCHEDULER_ENABLED=false` by default. `wa_schedule_message` and
+  `wa_resume_scheduled` refuse until it is `true`, and the worker does not claim or enqueue
+  anything. `wa_pause_scheduled` and `wa_cancel_scheduled` work while the gate is false, so overdue
+  rows can be stopped before it is turned on. `wa_list_scheduled` still reads rows.
+  Schedules persist in the existing SQLite database (`scheduled_messages`). The timezone is an IANA
+  name; the default is `America/Bahia`. It is stored in canonical form. Names that resolve to `UTC`
+  are stored as `UTC`, including `UTC`, `GMT`, `UCT`, `Zulu`, `Etc/UTC`, and `Etc/GMT`. Numeric
+  offsets, abbreviations such as `EST`, and `Etc/*` zones that do not resolve to `UTC` are rejected.
+  `WA_SCHEDULER_MISSED_POLICY` is `skip` or `send` (default `skip`). A due time
+  within 2 minutes is sent. Older than that, `skip` drops the occurrence and waits for the next
+  future slot (a one-shot becomes `skipped`); `send` queues that one occurrence and then advances
+  a recurring schedule to the next slot after now. A catch-up backlog is not enqueued faster than
+  the instance outbound rate limit. Time spent waiting for that limit is not a missed run. `WA_SCHEDULER_MAX_ACTIVE` (default 100) caps active, paused,
+  and running rows per instance. `scheduledAt` must be within 1 year. A claimed row is reconciled against its persisted queue job;
+  ambiguous or missing outcomes are not sent again. Due sends go through the existing outbound rate limiter.
 
 ---
 
 ## 2. Tools Reference
 
-WA MCP exposes **158 tools** grouped by domain. All tools return MCP-standard responses.
+WA MCP exposes **163 tools** grouped by domain. All tools return MCP-standard responses.
 `WA_INSTANCE_WEBHOOK_TOOLS_ENABLED=true` adds three #142 instance webhook tools.
 
 ### Success Response Format
@@ -3051,6 +3076,118 @@ for limits, events, safe retry behavior, live validation, and examples.
 
 There is no community-deactivation tool: leaving is not deactivation. This version does not expose
 arbitrary visibility/non-admin subgroup-creation protocol switches.
+
+---
+
+### 2.15 Scheduled sends (5 tools)
+
+Store a message and let the worker queue it later. The worker polls every 5 seconds and only runs
+when `WA_SCHEDULER_ENABLED=true`. Each due message calls the same outbound queue as an immediate
+send, so `WA_BAILEYS_RATE_LIMIT` and `WA_CLOUD_RATE_LIMIT` still apply. Rows are created in the
+existing SQLite file; the database path is unchanged.
+
+`scheduledAt` is RFC3339 with valid calendar components (for example, February 30 is rejected), must be in the future, and must be at most 1 year ahead. `to` is a phone
+number or a group JID. Phone numbers are stored as `<digits>@s.whatsapp.net`. `status@broadcast`
+and `@newsletter` are rejected. `timezone` is an IANA name such as `America/Bahia` (the default)
+and is stored in canonical form. Names that resolve to `UTC` are stored as `UTC`, including `UTC`,
+`GMT`, `UCT`, `Zulu`, `Etc/UTC`, and `Etc/GMT`. Numeric offsets (`+03:00`), abbreviations such as
+`EST`, and `Etc/*` zones that do not resolve to `UTC` (such as `Etc/GMT+3`) are rejected. `once` sends a single time. `daily`,
+`weekly`, and `monthly` repeat that instant's wall clock in the schedule timezone. The first weekly
+or monthly run is the first matching weekday or day of month at or after `scheduledAt`. Weekly
+`weekdays` use `0` for Sunday through `6` for Saturday. Monthly `dayOfMonth` is clamped to the last
+day of a short month. Optional `endAt` (RFC3339) and `occurrenceLimit` stop the series. Each
+instance can hold `WA_SCHEDULER_MAX_ACTIVE` schedules in `active`, `paused`, or `running` (default
+100). Recurring rows stay in that count and can still be cancelled. Supported `content.type` values
+are `text`, `image`, `video`, `audio`, `document`, and `sticker`.
+
+A due backlog is enqueued at most as fast as `WA_BAILEYS_RATE_LIMIT` or `WA_CLOUD_RATE_LIMIT`
+(messages per minute for that instance). Rows past that budget stay `active` and are claimed again
+on a later tick. A row that was on time when the limiter held it gets `nextRunAt` moved to that
+moment, so the wait is not a missed run. A row that was already late on first claim still follows
+the missed-run policy, including a second check immediately before enqueue. `skip` does not wait on
+the send budget: rows that are already overdue are dropped up to 50 per tick.
+
+Missed-run policy (`WA_SCHEDULER_MISSED_POLICY`, default `skip`):
+
+| Situation | `skip` | `send` |
+| --------- | ------ | ------ |
+| Due time is at most 2 minutes ago | Send | Send |
+| Due time is older than 2 minutes | Do not send. One-shot becomes `skipped`. Recurring moves to the next future slot | Enqueue that occurrence once, then move a recurring schedule to the next slot after now |
+| Process died after the row was claimed | Reconcile the persisted outbound job. Pending jobs remain `running`; completed jobs count once; failed or missing jobs advance/fail without resending | Same |
+| Gate is false | Nothing is claimed or queued. Pause and cancel still work | Nothing is claimed or queued. Pause and cancel still work |
+
+`occurrenceCount` increases only after BullMQ reports `completed`, which means the adapter send
+resolved successfully, not that a recipient read or received it. Pending/retrying jobs remain
+`running` even past the claim lease. Terminal failure leaves the count unchanged (one-shot
+`failed`, recurring advances to the next future slot). A running occurrence cannot be paused or
+cancelled after dispatch; pause/cancel apply to the documented states below.
+
+The outbound job identity is persisted before enqueueing. Ambiguous enqueue errors are reconciled
+without submitting another message. A missing job is given until lease expiry, then the occurrence
+fails conservatively. Redis read errors leave the row unchanged for a later tick. Errors before
+enqueueing retry up to 5 times, 30 seconds apart. Queue/provider retries retain their usual
+at-least-once behavior; exactly-once delivery across provider timeouts is not guaranteed.
+Scheduled terminal jobs are retained in Redis until SQLite records the result, then removed.
+A crash between that commit and cleanup may leave an orphan terminal job requiring Redis cleanup.
+Runtime storage is SQLite; the optional Postgres tests validate SQL compatibility only.
+Real-account scheduled delivery remains unverified.
+
+#### `wa_schedule_message`
+
+| Parameter         | Type   | Required | Description |
+| ----------------- | ------ | -------- | ----------- |
+| `instanceId`      | string | Yes      | Instance to send from |
+| `to`              | string | Yes      | Phone number or group JID. Not `status@broadcast` or `@newsletter` |
+| `scheduledAt`     | string | Yes      | RFC3339 instant, in the future and at most 1 year ahead |
+| `timezone`        | string | No       | IANA name such as `America/Bahia`. `UTC`, `GMT`, `UCT`, `Zulu`, `Etc/UTC`, and `Etc/GMT` are stored as `UTC`. Not `+03:00`, `EST`, or `Etc/GMT+3` |
+| `recurrence`      | string | No       | `once` (default), `daily`, `weekly`, or `monthly` |
+| `weekdays`        | number[] | No    | Weekly only. Unique values `0`–`6` |
+| `dayOfMonth`      | number | No       | Monthly only. `1`–`31` |
+| `endAt`           | string | No       | RFC3339 instant after which nothing else is sent |
+| `occurrenceLimit` | number | No       | Stop after this many successful sends |
+| `content`         | object | Yes      | `{ type: "text", text }` or an image, video, audio, document, or sticker payload |
+
+**Channel support:** Both. The eventual send uses the instance channel.
+
+**Response:** the stored schedule, including `id`, `status: "active"`, `scheduledAt`, and `nextRunAt`.
+
+#### `wa_list_scheduled`
+
+| Parameter    | Type   | Required | Description |
+| ------------ | ------ | -------- | ----------- |
+| `instanceId` | string | Yes      | Instance to list |
+| `status`     | string | No       | `active`, `paused`, `running`, `completed`, `cancelled`, `failed`, or `skipped` |
+| `limit`      | number | No       | 1–100, default 25 |
+| `offset`     | number | No       | Default 0 |
+
+Listing does not require the scheduler gate.
+
+#### `wa_pause_scheduled`
+
+| Parameter    | Type   | Required | Description |
+| ------------ | ------ | -------- | ----------- |
+| `instanceId` | string | Yes      | Owning instance |
+| `scheduleId` | string | Yes      | Schedule id |
+
+Only an `active` schedule can be paused. Paused rows are not sent. Pause works while `WA_SCHEDULER_ENABLED` is false.
+
+#### `wa_resume_scheduled`
+
+| Parameter    | Type   | Required | Description |
+| ------------ | ------ | -------- | ----------- |
+| `instanceId` | string | Yes      | Owning instance |
+| `scheduleId` | string | Yes      | Schedule id |
+
+Only a `paused` schedule can be resumed. If it is already due, the next tick applies the missed-run policy.
+
+#### `wa_cancel_scheduled`
+
+| Parameter    | Type   | Required | Description |
+| ------------ | ------ | -------- | ----------- |
+| `instanceId` | string | Yes      | Owning instance |
+| `scheduleId` | string | Yes      | Schedule id |
+
+Cancels an `active`, `paused`, or `failed` schedule. A cancelled row is never sent. Cancel works while `WA_SCHEDULER_ENABLED` is false.
 
 ---
 

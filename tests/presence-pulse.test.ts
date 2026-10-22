@@ -805,8 +805,8 @@ describe("InstanceManager presence pulse targets", () => {
     const manager = new InstanceManager();
     const baileys = await manager.createInstance("pulse baileys", "baileys");
     const cloud = await manager.createInstance("pulse cloud", "cloud");
-    manager.ensureAdapter(baileys.id);
-    manager.ensureAdapter(cloud.id);
+    (await manager.ensureAdapter(baileys.id));
+    (await manager.ensureAdapter(cloud.id));
 
     try {
       expect(manager.listBaileysAdapters().map((entry) => entry.instanceId)).toEqual([baileys.id]);

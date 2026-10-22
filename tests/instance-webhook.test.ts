@@ -399,8 +399,8 @@ describe("per-instance event webhooks", () => {
     await vi.waitFor(() => expect(enqueue).toHaveBeenCalledTimes(2));
 
     expect(enqueue.mock.calls.map((call) => call[0].destinationId).sort()).toEqual([
-      `instance:${INSTANCE_A}`,
       "default",
+      `instance:${INSTANCE_A}`,
     ]);
     expect(enqueue.mock.calls[0]?.[0].payload).toMatchObject({ event: "message.edited" });
     expect(enqueue.mock.calls[1]?.[0].payload).toMatchObject({ event: "message.received" });

@@ -898,9 +898,16 @@ async function instanceWebhookRows(): Promise<ReadonlyMap<string, InstanceWebhoo
   if (cachedInstanceWebhookRows?.generation === generation) {
     return cachedInstanceWebhookRows.byInstance;
   }
-  const byInstance = listInstanceWebhooks().then((rows) => new Map(rows.map((row) => [row.instanceId, row])));
+  const byInstance = listInstanceWebhooks().then(
+    (rows) => new Map(rows.map((row) => [row.instanceId, row])),
+  );
   cachedInstanceWebhookRows = { generation, byInstance };
-  return byInstance;
+  try {
+    return await byInstance;
+  } catch (error) {
+    if (cachedInstanceWebhookRows?.byInstance === byInstance) cachedInstanceWebhookRows = null;
+    throw error;
+  }
 }
 
 /** Global destinations, or the instance webhook in replace mode, or both when merge is on. */
