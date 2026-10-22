@@ -875,12 +875,21 @@ Both backends implement the same `ChannelAdapter` interface. Your agent doesn't 
 
 ## ⚙️ Configuration
 
-Copy `.env.example` to `.env` and configure:
+Copy `.env.example` to `.env` and configure. Leave the new HTTP auth settings unset to keep the current URLs and the existing API key behavior. Remote MCP OAuth is documented in [docs/mcp-oauth.md](docs/mcp-oauth.md).
 
 | Variable                    | Default                  | Description                              |
 | --------------------------- | ------------------------ | ---------------------------------------- |
 | `WA_TRANSPORT`              | `http`                   | `http` (Streamable HTTP) or `stdio`      |
-| `WA_MCP_API_KEY`            | —                        | Bearer token auth. Unset = no auth (dev) |
+| `WA_MCP_API_KEY`            | —                        | Bearer token or `x-api-key`. Unset = no API key |
+| `WA_BASIC_AUTH`             | —                        | Comma-separated `user:password` accounts, or a `$scrypt$` verifier. Unset = no Basic Auth |
+| `WA_BASE_PATH`              | —                        | Prefix for `/mcp`, `/health`, webhooks, dashboard, and OAuth routes, for example `/wamcp` |
+| `WA_MCP_OAUTH_ENABLED`      | `false`                  | Embed an OAuth 2.1 authorization server for the MCP endpoint |
+| `WA_MCP_OAUTH_ISSUER_URL`   | —                        | Public HTTPS issuer. Required when OAuth is enabled; its path must match `WA_BASE_PATH` |
+| `WA_MCP_OAUTH_RESOURCE_URL` | issuer origin + base path + `/mcp` | Canonical MCP resource URL checked on every token |
+| `WA_MCP_OAUTH_DB_PATH`      | `data/oauth.db`          | SQLite file for OAuth clients and token hashes. Separate from the WhatsApp database. Mode 0600. Back up the sibling `oauth.db.mac` key with it; losing the key signs every session out. Existing parent directories are not chmodded |
+| `WA_MCP_OAUTH_DCR`          | `open`                   | `open` or `disabled`. `disabled` turns off dynamic client registration |
+| `WA_MCP_OAUTH_REDIRECT_HOST_ALLOWLIST` | —           | Comma-separated redirect hostnames or reverse-DNS native schemes. Unset allows every valid redirect |
+| `WA_TRUST_PROXY`            | —                        | CIDR list. `X-Forwarded-For` is honored only when the socket peer matches. Unset uses the socket address |
 | `WA_DASHBOARD_ENABLED`      | `false`                  | Serve `GET /dashboard`. Requires `WA_TRANSPORT=http` and `WA_DASHBOARD_USERS` |
 | `WA_DASHBOARD_USERS`        | —                        | Required when the dashboard is enabled. Comma-separated `user:password` entries |
 | `WA_MCP_PORT`               | `3000`                   | HTTP server port                         |
@@ -1347,7 +1356,7 @@ The page shows connection health, each instance's state, last connect and discon
 
 The only write action is `POST /dashboard/api/instances/{instanceId}/pairing` for an existing Baileys instance that has never registered. The dashboard does not create instances. An instance whose stored credentials are already registered, whose credential record does not say `registered: false`, or whose state is `connected`, is left untouched: the dashboard does not connect it, request a pairing code, or load a QR. Pairing requires `Content-Type: application/json` even when the body is empty, and the server rejects a cross-site `Sec-Fetch-Site` or an `Origin` that does not match `Host`. Port 80 matches an `http` origin with no port, and port 443 matches `https` the same way. When nginx proxies the page, set `proxy_set_header Host $host;`. The default `$proxy_host` is the upstream address, so the browser origin does not match and pairing returns 403. `X-Forwarded-Proto` is not trusted. The scheme is compared only when the socket to this process is TLS; a TLS terminator that speaks plain HTTP to the process skips that check. It also does not send messages, log out, delete, or restart instances. `WA_DATABASE_PATH`, the Baileys auth keys, and the Compose volume stay where they are.
 
-**HTTP routing integration.** This branch serves the dashboard at `/dashboard` and uses the socket address for login limits. Integration with [#137](https://github.com/delltrak/wamcp/pull/137) must mount the handler at `basePath + "/dashboard"` through the shared listener and use its trusted-proxy client address while retaining IPv6 `/64` login buckets.
+**HTTP routing.** The shared listener serves the dashboard at `WA_BASE_PATH + "/dashboard"`. Login limits use the trusted-proxy address rules from `WA_TRUST_PROXY`, including IPv6 `/64` buckets; without that setting, forwarded addresses are ignored. Dashboard credentials and pairing CSRF checks remain independent of MCP OAuth. The Chatwoot webhook also follows `WA_BASE_PATH`.
 
 ---
 

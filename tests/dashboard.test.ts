@@ -8,6 +8,10 @@ import {
 import { readFileSync } from "node:fs";
 import { afterEach, describe, expect, it } from "vitest";
 import { baileysCredsArePaired, pairingRefusal } from "../src/channels/baileys/pairing-state.js";
+import { createHttpRequestHandler } from "../src/server/http-listener.js";
+import { httpRoutesForBasePath } from "../src/server/http-config.js";
+import { clientAddress, parseTrustProxy } from "../src/server/ip-address.js";
+import { authorizeMcpHttpRequest } from "../src/server/mcp-auth.js";
 import { DashboardEventLog } from "../src/server/dashboard-activity.js";
 import {
   dashboardCredentialsMatch,
@@ -1228,5 +1232,80 @@ describe("dashboard source boundaries", () => {
     expect(source).not.toContain("WA_DATABASE_PATH");
     expect(dashboardPage("noncevalue12345678")).not.toContain("/api/send");
     expect(dashboardPage("noncevalue12345678")).not.toContain("/dashboard/api/");
+  });
+});
+
+describe("dashboard through the OAuth HTTP listener", () => {
+  it("preserves prefixed routes, independent credentials, proxy buckets and pairing CSRF checks", async () => {
+    const trust = parseTrustProxy("127.0.0.1/32");
+    const { handle, calls } = handlerFor({
+      mountPath: "/wamcp/dashboard",
+      clientAddress: (req) => clientAddress(req, trust),
+      maxLoginFailures: 1,
+    });
+    const request = createHttpRequestHandler({
+      routes: httpRoutesForBasePath("/wamcp"),
+      oauth: null,
+      authorize: (req, res) =>
+        authorizeMcpHttpRequest(req, res, { apiKey: "mcp-fixture", basicUsers: [] }, null),
+      health: (_req, res) => {
+        res.writeHead(200);
+        res.end("healthy");
+      },
+      mcp: async (_req, res) => {
+        res.writeHead(200);
+        res.end("mcp");
+      },
+      webhook: async (_req, res) => {
+        res.writeHead(200);
+        res.end("webhook");
+      },
+      fallback: handle,
+    });
+    const { base } = await listen(async (req, res) => {
+      await request(req, res);
+      return true;
+    });
+    expect((await fetch(`${base}/dashboard/`)).status).toBe(404);
+    expect((await fetch(`${base}/wamcp/health`)).status).toBe(200);
+    expect(
+      (
+        await fetch(`${base}/wamcp/mcp`, {
+          headers: { authorization: basic("ops", "correct-horse") },
+        })
+      ).status,
+    ).toBe(401);
+    expect(
+      (await fetch(`${base}/wamcp/mcp`, { headers: { authorization: "Bearer mcp-fixture" } }))
+        .status,
+    ).toBe(200);
+    const wrong = { authorization: basic("ops", "wrong"), "x-forwarded-for": "2001:db8:1:2::1" };
+    expect((await fetch(`${base}/wamcp/dashboard/`, { headers: wrong })).status).toBe(401);
+    expect(
+      (
+        await fetch(`${base}/wamcp/dashboard/`, {
+          headers: { ...wrong, "x-forwarded-for": "2001:db8:1:2::2" },
+        })
+      ).status,
+    ).toBe(429);
+    const valid = {
+      authorization: basic("ops", "correct-horse"),
+      "x-forwarded-for": "2001:db8:1:3::1",
+    };
+    const page = await fetch(`${base}/wamcp/dashboard/`, { headers: valid });
+    expect(page.status).toBe(200);
+    expect(await page.text()).toContain('"api/overview"');
+    const crossSite = await fetch(`${base}/wamcp/dashboard/api/instances/inst_aabbccdd/pairing`, {
+      method: "POST",
+      headers: {
+        ...valid,
+        "content-type": "application/json",
+        origin: "https://attacker.example",
+        "sec-fetch-site": "cross-site",
+      },
+      body: JSON.stringify({ method: "qr" }),
+    });
+    expect(crossSite.status).toBe(403);
+    expect(calls).toEqual([]);
   });
 });

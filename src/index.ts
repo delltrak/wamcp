@@ -2,7 +2,6 @@ import "dotenv/config";
 import { sqlite } from "./db/client.js";
 import { MessageScheduler } from "./services/scheduler.js";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
-import { timingSafeEqual } from "node:crypto";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { McpHttpSessionManager } from "./server/http-session.js";
 import {
@@ -10,8 +9,6 @@ import {
   SERVER_NAME,
   DEFAULT_TRANSPORT,
   DEFAULT_PORT,
-  MCP_ENDPOINT,
-  HEALTH_ENDPOINT,
   CHATWOOT_WEBHOOK_PATH,
   STDIO_MAX_BUFFER_BYTES,
 } from "./constants.js";
@@ -45,46 +42,22 @@ import { loadChatwootConfig, type ChatwootConfig } from "./services/chatwoot-con
 import { ChatwootService, handleChatwootHttpRequest } from "./services/chatwoot.js";
 import { parseBaileysProxyUrl } from "./channels/baileys/proxy.js";
 
-const CLOUD_WEBHOOK_PATH = "/cloud-webhook";
+import { AuthAttemptLimiter, clientAddress } from "./server/auth-limiter.js";
+import {
+  credentialFingerprint,
+  findBasicUser,
+  verifyBasicCredentials,
+} from "./server/basic-auth.js";
+import {
+  loadHttpTransportConfigForTransport,
+  type HttpTransportConfig,
+} from "./server/http-config.js";
+import { createHttpRequestHandler } from "./server/http-listener.js";
+import { authorizeMcpHttpRequest } from "./server/mcp-auth.js";
+import { createMcpOAuthServer, type McpOAuthServer } from "./server/oauth/server.js";
 
 const transport = process.env.WA_TRANSPORT ?? DEFAULT_TRANSPORT;
 const port = parseInt(process.env.WA_MCP_PORT ?? String(DEFAULT_PORT), 10);
-
-/** Timing-safe API key comparison to prevent timing attacks */
-function verifyApiKey(provided: string, expected: string): boolean {
-  if (provided.length !== expected.length) return false;
-  try {
-    return timingSafeEqual(Buffer.from(provided), Buffer.from(expected));
-  } catch {
-    return false;
-  }
-}
-
-/** Check API key from request headers. Returns true if valid, or no key is configured. */
-function checkApiKey(req: IncomingMessage, res: ServerResponse): boolean {
-  const apiKey = process.env.WA_MCP_API_KEY;
-  if (!apiKey) return true; // No key configured, allow
-
-  const authHeader = req.headers.authorization;
-  const apiKeyHeader = req.headers["x-api-key"] as string | undefined;
-
-  let provided: string | undefined;
-
-  if (authHeader?.startsWith("Bearer ")) {
-    provided = authHeader.slice(7);
-  } else if (apiKeyHeader) {
-    provided = apiKeyHeader;
-  }
-
-  if (!provided || !verifyApiKey(provided, apiKey)) {
-    logger.warn("Unauthorized request: invalid or missing API key");
-    res.writeHead(401, { "Content-Type": "application/json" });
-    res.end(JSON.stringify({ error: "Unauthorized" }));
-    return false;
-  }
-
-  return true;
-}
 
 async function initServices(chatwootConfig: ChatwootConfig) {
   const autoReplyConfig = loadAutoReplyConfig();
@@ -160,10 +133,117 @@ async function initServices(chatwootConfig: ChatwootConfig) {
   };
 }
 
+function openOAuth(
+  httpConfig: HttpTransportConfig,
+  limiter: AuthAttemptLimiter,
+): McpOAuthServer | null {
+  if (!httpConfig.oauth.enabled) return null;
+  return createMcpOAuthServer({
+    issuerUrl: httpConfig.oauth.issuerUrl,
+    resourceUrl: httpConfig.oauth.resourceUrl,
+    dbPath: httpConfig.oauth.dbPath,
+    dynamicRegistration: httpConfig.oauth.dynamicRegistration,
+    redirectHostAllowlist: httpConfig.oauth.redirectHostAllowlist,
+    ...(httpConfig.apiKey ? { apiKey: httpConfig.apiKey } : {}),
+    limiter,
+    validateCredential: (username, password, context) =>
+      verifyBasicCredentials(httpConfig.basicUsers, username, password, {
+        priority: context?.priority === true,
+      }),
+    ...(httpConfig.trustProxy ? { trustProxy: httpConfig.trustProxy } : {}),
+    resolveCredentialVersion: (username, macKey) => {
+      const user = findBasicUser(httpConfig.basicUsers, username);
+      return user ? credentialFingerprint(user, macKey) : undefined;
+    },
+  });
+}
+
+async function handleCloudWebhook(
+  req: IncomingMessage,
+  res: ServerResponse,
+  url: URL,
+  instanceManager: InstanceManager,
+): Promise<void> {
+  if (req.method === "GET") {
+    const mode = url.searchParams.get("hub.mode");
+    const token = url.searchParams.get("hub.verify_token");
+    const challenge = url.searchParams.get("hub.challenge");
+    const verifyToken = process.env.WA_CLOUD_VERIFY_TOKEN;
+
+    if (mode === "subscribe" && token === verifyToken && challenge) {
+      logger.info("Cloud webhook verified");
+      res.writeHead(200, { "Content-Type": "text/plain" });
+      res.end(challenge);
+    } else {
+      logger.warn("Cloud webhook verification failed");
+      res.writeHead(403, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: "Verification failed" }));
+    }
+    return;
+  }
+
+  if (req.method === "POST") {
+    const chunks: Buffer[] = [];
+    for await (const chunk of req) {
+      chunks.push(typeof chunk === "string" ? Buffer.from(chunk) : chunk);
+    }
+    const rawBody = Buffer.concat(chunks);
+
+    const webhookSecret = process.env.WA_CLOUD_WEBHOOK_SECRET;
+    if (webhookSecret) {
+      const signature = req.headers["x-hub-signature-256"] as string | undefined;
+      if (!verifyWebhookSignature(rawBody, signature, webhookSecret)) {
+        logger.warn("Cloud webhook signature verification failed");
+        res.writeHead(401, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "Invalid signature" }));
+        return;
+      }
+    }
+
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ status: "ok" }));
+
+    try {
+      const payload = JSON.parse(rawBody.toString()) as MetaWebhookPayload;
+      const events = normalizeWebhookPayload(payload);
+
+      for (const evt of events) {
+        const match = instanceManager.findCloudAdapterByPhoneNumberId(evt.phoneNumberId);
+        if (!match) {
+          logger.warn(
+            { phoneNumberId: evt.phoneNumberId },
+            "No Cloud API instance found for phone number ID",
+          );
+          continue;
+        }
+
+        (evt.payload as unknown as { instanceId: string }).instanceId = match.instanceId;
+        match.adapter.emit(evt.event, evt.payload);
+      }
+    } catch (err) {
+      logger.error({ err }, "Failed to process cloud webhook payload");
+    }
+    return;
+  }
+
+  res.writeHead(405, { "Content-Type": "application/json" });
+  res.end(JSON.stringify({ error: "Method not allowed" }));
+}
+
 async function startHttp(
+  httpConfig: HttpTransportConfig,
   dashboardConfig: DashboardConfig,
   chatwootConfig: ChatwootConfig,
 ): Promise<void> {
+  const signInLimiter = new AuthAttemptLimiter();
+  const oauth = openOAuth(httpConfig, signInLimiter);
+  let services: Awaited<ReturnType<typeof initServices>>;
+  try {
+    services = await initServices(chatwootConfig);
+  } catch (error) {
+    oauth?.close();
+    throw error;
+  }
   const {
     instanceManager,
     messageQueue,
@@ -173,7 +253,7 @@ async function startHttp(
     presencePulse,
     autoReply,
     scheduler,
-  } = await initServices(chatwootConfig);
+  } = services;
   const mcpSessions = new McpHttpSessionManager(
     instanceManager,
     messageQueue,
@@ -189,6 +269,8 @@ async function startHttp(
   }
   const handleDashboard = createDashboardHandler({
     config: dashboardConfig,
+    mountPath: `${httpConfig.basePath}/dashboard`,
+    clientAddress: (req) => clientAddress(req, httpConfig.trustProxy),
     startedAt: startTime,
     instances: instanceManager,
     isPaired: isBaileysInstancePaired,
@@ -200,13 +282,24 @@ async function startHttp(
     version: VERSION,
   });
 
-  const httpServer = createServer(async (req: IncomingMessage, res: ServerResponse) => {
-    const url = new URL(req.url ?? "/", `http://localhost:${port}`);
-
-    // Health endpoint
-    if (url.pathname === HEALTH_ENDPOINT && req.method === "GET") {
+  const handleRequest = createHttpRequestHandler({
+    routes: httpConfig.routes,
+    oauth,
+    authorize: (req, res) =>
+      authorizeMcpHttpRequest(
+        req,
+        res,
+        {
+          ...(httpConfig.apiKey ? { apiKey: httpConfig.apiKey } : {}),
+          basicUsers: httpConfig.basicUsers,
+          limiter: signInLimiter,
+          ...(httpConfig.trustProxy ? { trustProxy: httpConfig.trustProxy } : {}),
+        },
+        oauth,
+      ),
+    health: (_req, res) => {
       const allInstances = instanceManager.getAllInstances();
-      const connected = allInstances.filter((i) => i.status === "connected").length;
+      const connected = allInstances.filter((instance) => instance.status === "connected").length;
       const health = buildHealthBody({
         uptimeSeconds: Math.floor((Date.now() - startTime) / 1000),
         instances: {
@@ -219,114 +312,34 @@ async function startHttp(
       });
       res.writeHead(200, { "Content-Type": "application/json" });
       res.end(renderHealthBody(health));
-      return;
-    }
-
-    // MCP endpoint
-    if (url.pathname === MCP_ENDPOINT) {
-      // Authenticate before processing MCP requests
-      if (!checkApiKey(req, res)) return;
-      await mcpSessions.handleRequest(req, res);
-      return;
-    }
-
-    // Cloud API Webhook endpoint
-    if (url.pathname === CLOUD_WEBHOOK_PATH) {
-      // GET — Meta webhook verification (hub.challenge)
-      if (req.method === "GET") {
-        const mode = url.searchParams.get("hub.mode");
-        const token = url.searchParams.get("hub.verify_token");
-        const challenge = url.searchParams.get("hub.challenge");
-        const verifyToken = process.env.WA_CLOUD_VERIFY_TOKEN;
-
-        if (mode === "subscribe" && token === verifyToken && challenge) {
-          logger.info("Cloud webhook verified");
-          res.writeHead(200, { "Content-Type": "text/plain" });
-          res.end(challenge);
+    },
+    mcp: (req, res) => mcpSessions.handleRequest(req, res),
+    webhook: (req, res, url) => handleCloudWebhook(req, res, url, instanceManager),
+    fallback: async (req, res, url) => {
+      if (url.pathname === `${httpConfig.basePath}${CHATWOOT_WEBHOOK_PATH}`) {
+        if (!chatwoot.isEnabled()) {
+          res.writeHead(404, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "Not found" }));
+        } else if (req.method !== "POST") {
+          res.writeHead(405, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "Method not allowed" }));
         } else {
-          logger.warn("Cloud webhook verification failed");
-          res.writeHead(403, { "Content-Type": "application/json" });
-          res.end(JSON.stringify({ error: "Verification failed" }));
+          await handleChatwootHttpRequest(req, res, chatwoot);
         }
-        return;
+        return true;
       }
+      return handleDashboard(req, res, url);
+    },
+  });
 
-      // POST — Incoming webhook events
-      if (req.method === "POST") {
-        // Read body
-        const chunks: Buffer[] = [];
-        for await (const chunk of req) {
-          chunks.push(typeof chunk === "string" ? Buffer.from(chunk) : chunk);
-        }
-        const rawBody = Buffer.concat(chunks);
-
-        // Verify signature if secret is configured
-        const webhookSecret = process.env.WA_CLOUD_WEBHOOK_SECRET;
-        if (webhookSecret) {
-          const signature = req.headers["x-hub-signature-256"] as string | undefined;
-          if (!verifyWebhookSignature(rawBody, signature, webhookSecret)) {
-            logger.warn("Cloud webhook signature verification failed");
-            res.writeHead(401, { "Content-Type": "application/json" });
-            res.end(JSON.stringify({ error: "Invalid signature" }));
-            return;
-          }
-        }
-
-        // Return 200 immediately — Meta requires a response within 5 seconds
-        res.writeHead(200, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ status: "ok" }));
-
-        // Process asynchronously
-        try {
-          const payload = JSON.parse(rawBody.toString()) as MetaWebhookPayload;
-          const events = normalizeWebhookPayload(payload);
-
-          for (const evt of events) {
-            const match = instanceManager.findCloudAdapterByPhoneNumberId(evt.phoneNumberId);
-            if (!match) {
-              logger.warn(
-                { phoneNumberId: evt.phoneNumberId },
-                "No Cloud API instance found for phone number ID",
-              );
-              continue;
-            }
-
-            // Set instanceId on the payload
-            (evt.payload as unknown as { instanceId: string }).instanceId = match.instanceId;
-
-            match.adapter.emit(evt.event, evt.payload);
-          }
-        } catch (err) {
-          logger.error({ err }, "Failed to process cloud webhook payload");
-        }
-        return;
+  const httpServer = createServer((req, res) => {
+    void handleRequest(req, res).catch((err: unknown) => {
+      logger.error({ err }, "HTTP request failed");
+      if (!res.headersSent) {
+        res.writeHead(500, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "Internal server error" }));
       }
-
-      res.writeHead(405, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ error: "Method not allowed" }));
-      return;
-    }
-
-    // Chatwoot API-channel agent replies. Disabled installs keep the previous 404.
-    if (url.pathname === CHATWOOT_WEBHOOK_PATH) {
-      if (!chatwoot.isEnabled()) {
-        res.writeHead(404, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ error: "Not found" }));
-        return;
-      }
-      if (req.method !== "POST") {
-        res.writeHead(405, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ error: "Method not allowed" }));
-        return;
-      }
-      await handleChatwootHttpRequest(req, res, chatwoot);
-      return;
-    }
-
-    if (await handleDashboard(req, res, url)) return;
-
-    res.writeHead(404, { "Content-Type": "application/json" });
-    res.end(JSON.stringify({ error: "Not found" }));
+    });
   });
 
   let servicesClosePromise: Promise<void> | null = null;
@@ -335,9 +348,12 @@ async function startHttp(
     autoReply.stop();
     // Finish in-flight Chatwoot replies before the outbound queue closes.
     servicesClosePromise ??= Promise.all([scheduler.stop(), chatwoot.stop()]).then(() =>
-      Promise.all([messageQueue.close(), eventWebhook.close(), maintenance.stop()]).then(
-        () => undefined,
-      ),
+      Promise.all([
+        messageQueue.close(),
+        eventWebhook.close(),
+        maintenance.stop(),
+        Promise.resolve().then(() => oauth?.close()),
+      ]).then(() => undefined),
     );
     return servicesClosePromise;
   };
@@ -428,6 +444,7 @@ async function startStdio(chatwootConfig: ChatwootConfig): Promise<void> {
 }
 
 async function main(): Promise<void> {
+  const httpConfig = loadHttpTransportConfigForTransport(transport, process.env);
   const dashboardConfig = loadDashboardConfig();
   assertDashboardTransport(dashboardConfig, transport);
   parseBaileysProxyUrl(process.env.WA_PROXY_URL);
@@ -440,10 +457,10 @@ async function main(): Promise<void> {
     );
   }
 
-  if (transport === "stdio") {
+  if (!httpConfig) {
     await startStdio(chatwootConfig);
   } else {
-    await startHttp(dashboardConfig, chatwootConfig);
+    await startHttp(httpConfig, dashboardConfig, chatwootConfig);
   }
 }
 
