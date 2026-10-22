@@ -36,7 +36,7 @@
 
 **WA MCP** is a WhatsApp MCP server built with TypeScript that gives AI agents full access to WhatsApp through the [Model Context Protocol](https://modelcontextprotocol.io). It supports both **Baileys** (WhatsApp Web) and **Meta Cloud API** as dual-channel backends, deployable with **Docker** in a single command.
 
-Your agent connects once and auto-discovers **155 tools**, **10 resources**, and **22 real-time events** — zero configuration, zero REST wrappers, zero glue code.
+Your agent connects once and auto-discovers **157 tools**, **10 resources**, and **22 real-time events** — zero configuration, zero REST wrappers, zero glue code.
 
 ```
 Your AI Agent ←→ MCP Protocol ←→ WA MCP ←→ WhatsApp
@@ -82,7 +82,7 @@ from google.adk.tools.mcp_tool import McpToolset
 
 tools = McpToolset(url="http://localhost:3000/mcp")
 
-# Agent auto-discovers 155 WhatsApp tools
+# Agent auto-discovers 157 WhatsApp tools
 # wa_create_instance, wa_send_text, wa_send_image, ...
 ```
 
@@ -146,7 +146,7 @@ Add to your `claude_desktop_config.json`:
 
 ## 🛠️ Tools
 
-WA MCP exposes **155 tools** across 16 domains. All tools use the `wa_` prefix.
+WA MCP exposes **157 tools** across 16 domains. All tools use the `wa_` prefix.
 
 <details>
 <summary>📋 <strong>Instance Management</strong> (9 tools)</summary>
@@ -171,10 +171,10 @@ WA MCP exposes **155 tools** across 16 domains. All tools use the `wa_` prefix.
 | Tool                   | Description             |
 | ---------------------- | ----------------------- |
 | `wa_send_text`         | Send text message       |
-| `wa_send_image`        | Send image with caption |
-| `wa_send_video`        | Send video with caption |
+| `wa_send_image`        | Send image with caption; optional compression |
+| `wa_send_video`        | Send video with caption; optional compression |
 | `wa_send_ptv`          | Send a round video note (Baileys) |
-| `wa_send_sticker`      | Send a static or animated sticker |
+| `wa_send_sticker`      | Convert PNG, JPG, GIF, WebP, or short MP4 to a sticker |
 | `wa_send_gif`          | Send a GIF as a looping MP4 (Baileys) |
 | `wa_send_audio`        | Send audio; Baileys `ptt=true` adds waveform and duration when available |
 | `wa_send_document`     | Send file / document    |
@@ -278,12 +278,13 @@ WA MCP exposes **155 tools** across 16 domains. All tools use the `wa_` prefix.
 </details>
 
 <details>
-<summary>👥 <strong>Groups</strong> (26 tools)</summary>
+<summary>👥 <strong>Groups</strong> (27 tools)</summary>
 
 | Tool                           | Description                   |
 | ------------------------------ | ----------------------------- |
 | `wa_list_groups`               | List groups and account role  |
 | `wa_get_group_info`            | Get group metadata and members |
+| `wa_export_group_participants` | Export participants as CSV in the data directory (`contactsTruncated` when the name lookup stops at 5000 identities) |
 | `wa_group_set_member_label`     | Set this account's group member label (Baileys, gated, queued) |
 | `wa_group_remove_member_label`  | Remove this account's group member label (Baileys, gated, queued) |
 | `wa_get_group_invite_info`     | Read invite metadata before joining (Baileys) |
@@ -362,7 +363,7 @@ this operation.
 </details>
 
 <details>
-<summary>📰 <strong>Newsletter / Channels</strong> (10 tools)</summary>
+<summary>📰 <strong>Newsletter / Channels</strong> (11 tools)</summary>
 
 | Tool                     | Description           |
 | ------------------------ | --------------------- |
@@ -376,6 +377,7 @@ this operation.
 | `wa_newsletter_update_picture` | Update Channel picture (Baileys, gated write) |
 | `wa_newsletter_react` | React to a Channel post (Baileys, gated write) |
 | `wa_newsletter_list_posts` | List Channel posts (Baileys) |
+| `wa_download_newsletter_media` | Download Channel post media, including plaintext posts without a media key (Baileys) |
 
 </details>
 
@@ -826,8 +828,13 @@ Copy `.env.example` to `.env` and configure:
 | `WA_MEDIA_CACHE_MAX_MB`     | `500`                    | Media cache size limit                   |
 | `WA_MEDIA_DOWNLOAD_DIR`     | `data/media-downloads`   | Dedicated directory for downloaded files; separate from Baileys session data |
 | `WA_MEDIA_DOWNLOAD_MAX_BYTES` | `26214400` (25 MB)     | Maximum size for received media downloads; base64 mode is capped at 5 MB |
-| `WA_MEDIA_FFMPEG_PATH`      | `ffmpeg` from `PATH`     | Optional ffmpeg executable for sticker and GIF conversion |
+| `WA_MEDIA_FFMPEG_PATH`      | `ffmpeg` from `PATH`     | Optional ffmpeg executable for stickers, GIFs, and opt-in compression |
 | `WA_MEDIA_FFMPEG_TIMEOUT_MS` | `60000`                 | Conversion timeout in milliseconds |
+| `WA_MEDIA_COMPRESS`         | `false`                  | Compress `wa_send_image` and `wa_send_video` before sending. `true` or `false` only |
+| `WA_MEDIA_IMAGE_MAX_EDGE`   | `600`                    | Longest edge for a compressed image, from 16 to 4096 |
+| `WA_MEDIA_IMAGE_QUALITY`    | `75`                     | JPEG quality for a compressed image, from 1 to 100 |
+| `WA_MEDIA_VIDEO_MAX_EDGE`   | `720`                    | Longest edge for a compressed video, from 16 to 4096 |
+| `WA_MEDIA_VIDEO_CRF`        | `28`                     | libx264 CRF for a compressed video, from 0 to 51 |
 | `WA_TRANSCRIPTION_ENABLED`  | `false`                  | Enable transcription and audio notifications |
 | `WA_TRANSCRIPTION_API_KEY`  | —                        | API key for the transcription endpoint   |
 | `WA_TRANSCRIPTION_BASE_URL` | `https://api.openai.com/v1` | OpenAI-compatible API base URL           |
@@ -957,14 +964,32 @@ also recovers a `connecting` status older than 2 minutes when the adapter has no
 instance connected before.
 Connection close and reconnect logs include the disconnect reason, status code, and offline duration.
 
-`wa_send_sticker` accepts PNG, JPG, GIF, and WebP URLs or base64. PNG/JPG and GIF inputs are
-converted to 512x512 WebP with transparent padding. Static stickers are limited to 100 KB and
-animated stickers to 500 KB. Static WebP files that are not 512x512 are normalized with ffmpeg;
-animated WebP files pass through only when they are already 512x512, since ffmpeg cannot safely
-resize animated WebP. Send a GIF to convert an animated sticker to 512x512. Correctly sized WebP
-files pass through unchanged within their size limit. `wa_send_gif` converts GIF or MP4 input to
-silent H.264 MP4 and sends it with native GIF playback on Baileys. Cloud API does not support the
-GIF playback option.
+`wa_send_sticker` accepts PNG, JPG, GIF, WebP, and short MP4 URLs or base64. PNG, JPG, GIF, and
+MP4 inputs are converted to 512x512 WebP with transparent padding. A GIF or MP4 stays animated
+unless `animated` is false. MP4 stickers are read from a private temporary file and trimmed to 10
+seconds, including files whose `moov` atom follows `mdat`. Static stickers are limited to
+100 KB and animated stickers to 500 KB. Static WebP files that are not 512x512 are normalized with
+ffmpeg; animated WebP files pass through only when they are already 512x512, since ffmpeg cannot
+safely resize animated WebP. Send a GIF or short MP4 to convert an animated sticker to 512x512.
+Correctly sized WebP files pass through unchanged within their size limit. `wa_send_gif` converts
+GIF or MP4 input to silent H.264 MP4 and sends it with native GIF playback on Baileys. Cloud API
+does not support the GIF playback option.
+
+`wa_send_image` and `wa_send_video` send the original media unless compression is requested.
+`WA_MEDIA_COMPRESS=false` is the default. Set it to `true`, or pass `compress: true` on the call,
+to re-encode before sending. `hd: true` always sends the original, including when compression is
+otherwise enabled. `hd: true` and `compress: false` do not read the numeric compression settings.
+Those settings are validated only when a message is actually compressed. Compressed images become
+JPEG and are scaled so the longest edge is at most `WA_MEDIA_IMAGE_MAX_EDGE` (default 600) at
+`WA_MEDIA_IMAGE_QUALITY` (default 75). PNG files with transparency are left unchanged, because JPEG
+has no alpha channel. Compressed videos become H.264/AAC MP4, scaled to `WA_MEDIA_VIDEO_MAX_EDGE`
+(default 720) at `WA_MEDIA_VIDEO_CRF` (default 28). Video compression and MP4 sticker conversion
+read the input from a private temporary file, so an MP4 whose `moov` atom follows `mdat` still
+decodes. If ffmpeg fails, or the compressed result is not smaller, the original input is sent and
+the failure is logged. These calls need ffmpeg with `mjpeg` for images and `libx264` plus `aac`
+for videos. Sticker conversion needs `libwebp` and `libwebp_anim`. The Docker image installs
+Alpine `ffmpeg`, which provides those encoders. Sharp and the libwebp command-line tools are not
+used. On a host install, use `ffmpeg` from `PATH` or set `WA_MEDIA_FFMPEG_PATH`.
 
 `wa_download_media` locates a received media message by `messageId` and optional `chatId`. File
 mode saves it under `WA_MEDIA_DOWNLOAD_DIR` and returns a path; base64 mode returns inline data and
@@ -1064,7 +1089,7 @@ docker compose up -d
 
 Services:
 
-- **wa-mcp** — The MCP server on port `3000`
+- **wa-mcp** — The MCP server on port `3000`. The image installs `ffmpeg` for sticker conversion and optional image/video compression (`libwebp`, `libwebp_anim`, `mjpeg`, `libx264`, `aac`). Sharp is not installed.
 - **redis** — BullMQ backend with AOF persistence
 
 The GitHub Container Registry image is one manifest list for `linux/amd64` and `linux/arm64`.
@@ -1118,7 +1143,7 @@ src/
 ├── index.ts                     # Entry point (HTTP/stdio)
 ├── constants.ts                 # Defaults and limits
 ├── server/mcp.ts                # MCP server setup
-├── tools/                       # 🔧 155 MCP tools (16 files)
+├── tools/                       # 🔧 157 MCP tools (16 files)
 ├── resources/                   # 📖 10 MCP resources (8 files)
 ├── notifications/events.ts      # 📡 15 documented event types
 ├── channels/

@@ -97,6 +97,8 @@ import type {
   CatalogProductUpdateInput,
   NewsletterPost,
   NewsletterPostsPage,
+  NewsletterMediaDownload,
+  GroupParticipantsExport,
   InstanceAuthMethod,
   InstanceRuntimeStatus,
 } from "../../types/channel.types.js";
@@ -170,10 +172,12 @@ import {
   ContactStore,
   type ContactPnResolver,
   type ContactSyncRecord,
+  type StoredContactIdentity,
 } from "../../services/contact-store.js";
 import { AppStateResyncLogObserver, observeAppStateResyncLogs } from "./app-state-write-safety.js";
 import { baileysSupportsNativeGroupMentionAll } from "./native-mention-all.js";
 import { GroupMemberLabelStore } from "../../services/group-member-label-store.js";
+import * as newsletterMedia from "./newsletter-media.js";
 
 const logger = createChildLogger({ service: "baileys-adapter" });
 const mediaService = new MediaService();
@@ -665,6 +669,29 @@ function isMissingGroupError(error: unknown): boolean {
   return (
     statusCode === 404 ||
     /item-not-found|group (?:was )?not found|group does not exist/i.test(message)
+  );
+}
+
+function matchStoredContact(
+  identities: string[],
+  phone: string | null,
+  stored: StoredContactIdentity[],
+): StoredContactIdentity | undefined {
+  const identitySet = new Set(identities);
+  const matches = stored.filter(
+    (contact) =>
+      identitySet.has(contact.jid) ||
+      (contact.lid !== null && identitySet.has(contact.lid)) ||
+      (phone !== null && contact.phone === phone),
+  );
+  return (
+    matches.find((contact) => identitySet.has(contact.jid) && contact.name) ??
+    matches.find(
+      (contact) => contact.lid !== null && identitySet.has(contact.lid) && contact.name,
+    ) ??
+    matches.find((contact) => contact.name) ??
+    matches.find((contact) => identitySet.has(contact.jid)) ??
+    matches[0]
   );
 }
 
@@ -1633,6 +1660,24 @@ export class BaileysAdapter implements ChannelAdapter {
     return Buffer.from(input, "base64");
   }
 
+  private async outgoingImage(
+    input: string,
+    compress?: boolean,
+  ): Promise<{ url: string } | Buffer> {
+    if (compress !== true) return this.resolveMedia(input);
+    const prepared = await mediaService.prepareOutgoingImage(input);
+    return prepared.compressed ? prepared.data : this.resolveMedia(prepared.input);
+  }
+
+  private async outgoingVideo(
+    input: string,
+    compress?: boolean,
+  ): Promise<{ url: string } | Buffer> {
+    if (compress !== true) return this.resolveMedia(input);
+    const prepared = await mediaService.prepareOutgoingVideo(input);
+    return prepared.compressed ? prepared.data : this.resolveMedia(prepared.input);
+  }
+
   private generateVCard(name: string, phone: string): string {
     const cleaned = phone.replace(/[^0-9]/g, "");
     const escapedName = name
@@ -2153,14 +2198,17 @@ export class BaileysAdapter implements ChannelAdapter {
         }
         break;
       case "image":
-        msg = { image: this.resolveMedia(content.image), caption: content.caption };
+        msg = {
+          image: await this.outgoingImage(content.image, content.compress),
+          caption: content.caption,
+        };
         if (content.quotedMessageId) {
           opts.quoted = this.getQuotedMessage(jid, content.quotedMessageId);
         }
         break;
       case "video":
         msg = {
-          video: this.resolveMedia(content.video),
+          video: await this.outgoingVideo(content.video, content.compress),
           caption: content.caption,
           ...(content.gifPlayback ? { gifPlayback: true } : {}),
           ...(content.ptv ? { ptv: true } : {}),
@@ -3836,6 +3884,67 @@ export class BaileysAdapter implements ChannelAdapter {
     return this.normalizeGroupMetadata(meta);
   }
 
+  async exportGroupParticipants(groupJid: string): Promise<GroupParticipantsExport> {
+    const sock = this.getSock();
+    const jid = normalizeGroupJid(groupJid);
+    const meta = await sock.groupMetadata(jid);
+    const resolved = await Promise.all(
+      (meta.participants ?? []).map(async (participant) => {
+        const identities = await this.getGroupParticipantIdentities(participant);
+        const lid = participant.lid
+          ? jidNormalizedUser(participant.lid)
+          : ([...identities].find((identity) => identity.endsWith("@lid")) ?? null);
+        const phoneJid = participant.phoneNumber
+          ? jidNormalizedUser(participant.phoneNumber)
+          : ([...identities].find((identity) => identity.endsWith("@s.whatsapp.net")) ?? null);
+        const phone = phoneJid?.endsWith("@s.whatsapp.net")
+          ? (phoneJid.split("@")[0]?.split(":")[0] ?? null)
+          : null;
+        const role: GroupParticipantsExport["participants"][number]["role"] =
+          participant.admin === "superadmin"
+            ? "superadmin"
+            : participant.admin === "admin"
+              ? "admin"
+              : "member";
+        return {
+          jid: jidNormalizedUser(participant.id),
+          phone,
+          lid,
+          name: participant.name?.trim() || null,
+          pushName: participant.notify?.trim() || null,
+          role,
+          identities: [...identities],
+        };
+      }),
+    );
+    const stored = this.contactStore.findByIdentities(
+      resolved.flatMap((participant) => [
+        ...participant.identities,
+        ...(participant.phone ? [participant.phone] : []),
+      ]),
+    );
+
+    return {
+      groupJid: meta.id,
+      contactsTruncated: stored.truncated,
+      participants: resolved.map((participant) => {
+        const match = matchStoredContact(
+          participant.identities,
+          participant.phone,
+          stored.contacts,
+        );
+        return {
+          jid: participant.jid,
+          phone: participant.phone,
+          lid: participant.lid,
+          name: match?.name?.trim() || participant.name,
+          pushName: match?.notifyName?.trim() || participant.pushName,
+          role: participant.role,
+        };
+      }),
+    };
+  }
+
   assertGroupMemberLabelWritesEnabled(): void {
     if (!this.groupWritesEnabled) {
       throw new Error(
@@ -5072,6 +5181,61 @@ export class BaileysAdapter implements ChannelAdapter {
     return isBinaryNode(response)
       ? parseNewsletterMessagesResponse(response)
       : { posts: [], pagination: { oldestServerId: null, newestServerId: null, after: null } };
+  }
+
+  async downloadNewsletterMedia(
+    newsletterJid: string,
+    messageId: string,
+    maxBytes?: number,
+    timeoutMs?: number,
+  ): Promise<NewsletterMediaDownload> {
+    if (!/^\d{5,20}@newsletter$/.test(newsletterJid)) {
+      throw new Error("Invalid Channel JID; expected a JID ending in @newsletter");
+    }
+    const postId = messageId.trim();
+    if (!postId || postId.length > 128) throw new Error("Invalid Channel messageId");
+
+    const sock = this.getSock();
+    const attempts: Array<Record<string, string>> = [];
+    if (/^[1-9]\d{0,19}$/.test(postId)) {
+      // Same stanza as rc14 newsletterFetchMessages; BigInt preserves large server IDs.
+      attempts.push({ count: "1", since: "0", after: (BigInt(postId) - 1n).toString() });
+    }
+    attempts.push({ count: "100", since: "0" });
+
+    for (const attrs of attempts) {
+      const response: unknown = await sock.query({
+        tag: "iq",
+        attrs: {
+          id: sock.generateMessageTag(),
+          type: "get",
+          xmlns: "newsletter",
+          to: newsletterJid,
+        },
+        content: [{ tag: "message_updates", attrs }],
+      });
+      if (!isBinaryNode(response)) {
+        throw new Error("Channel post history returned an unexpected response");
+      }
+      const lookup = newsletterMedia.findNewsletterPostMedia(response, postId);
+      if (lookup.status === "missing") continue;
+      if (lookup.status === "no-media") {
+        throw new Error(`Channel post '${lookup.messageId}' does not contain downloadable media`);
+      }
+      const data = await newsletterMedia.readNewsletterMediaBytes(
+        lookup.media,
+        maxBytes,
+        timeoutMs,
+      );
+      return {
+        data,
+        mimeType: lookup.media.mimeType,
+        mediaType: lookup.media.mediaType,
+        ...(lookup.media.fileName ? { fileName: lookup.media.fileName } : {}),
+      };
+    }
+
+    throw new Error(`Channel post '${postId}' is unavailable`);
   }
 
   // ---- Business catalog ----

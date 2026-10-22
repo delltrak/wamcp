@@ -11,11 +11,11 @@
    - [Instance Management](#21-instance-management-9-tools)
    - [Messaging](#22-messaging-32-tools)
    - [Chat Management](#23-chat-management-11-tools)
-   - [Group Management](#24-group-management-26-tools)
+   - [Group Management](#24-group-management-27-tools)
    - [Contact Management](#25-contact-management-8-tools)
    - [Profile Management](#26-profile-management-7-tools)
    - [Status / Stories](#27-status--stories-4-tools)
-   - [Newsletter / Channels](#28-newsletter--channels-10-tools)
+   - [Newsletter / Channels](#28-newsletter--channels-11-tools)
    - [Call Management](#29-call-management-1-tool)
    - [Message Search](#210-message-search-1-tool)
    - [WhatsApp Business Labels](#211-whatsapp-business-labels-8-tools)
@@ -66,10 +66,15 @@ Tools marked **Baileys only** are not available on Cloud API instances.
 - **`to`** -- Recipient for send operations. Use a phone number (e.g. `"5511999999999"`) or a group JID (e.g. `"120363...@g.us"`).
 - **JID** -- Jabber ID, WhatsApp's internal identifier. Individual: `5511999999999@s.whatsapp.net`. Group: `120363...@g.us`.
 - **Media** -- Image/video/audio/document fields accept a URL (`https://...`) or base64-encoded data.
-  Stickers and GIFs are converted to WhatsApp-compatible formats with ffmpeg. Received media can
-  be saved under `WA_MEDIA_DOWNLOAD_DIR` (default `data/media-downloads`) or returned as base64.
+  Stickers and GIFs are converted to WhatsApp-compatible formats with ffmpeg. `wa_send_sticker`
+  accepts PNG, JPG, GIF, WebP, and short MP4 and produces 512x512 WebP. `wa_send_image` and
+  `wa_send_video` send the original media unless `compress` is true or `WA_MEDIA_COMPRESS=true`
+  (default `false`). `hd: true` sends the original. Received media can be saved under
+  `WA_MEDIA_DOWNLOAD_DIR` (default `data/media-downloads`) or returned as base64.
   `WA_MEDIA_DOWNLOAD_MAX_BYTES` defaults to 25 MB, and base64 mode is capped at 5 MB. Docker
-  includes ffmpeg; `WA_MEDIA_FFMPEG_PATH` and `WA_MEDIA_FFMPEG_TIMEOUT_MS` configure conversions.
+  installs Alpine `ffmpeg` (`libwebp`, `libwebp_anim`, `mjpeg`, `libx264`, `aac`). Sharp and the
+  libwebp CLI tools are not required. `WA_MEDIA_FFMPEG_PATH` and `WA_MEDIA_FFMPEG_TIMEOUT_MS`
+  configure conversions.
 - **Automatic read receipts** -- `WA_AUTO_READ=false` (default), `on_fetch` to mark incoming
   messages read when a tool or resource returns them, or `on_receive` to mark them read when they
   arrive. Invalid values disable the feature and log a warning.
@@ -111,7 +116,7 @@ Tools marked **Baileys only** are not available on Cloud API instances.
 
 ## 2. Tools Reference
 
-WA MCP exposes **155 tools** grouped by domain. All tools return MCP-standard responses.
+WA MCP exposes **157 tools** grouped by domain. All tools return MCP-standard responses.
 
 ### Success Response Format
 
@@ -415,8 +420,15 @@ Send an image to a WhatsApp contact or group.
 | `caption`         | string | No       | Image caption                       |
 | `quotedMessageId` | string | No       | Message ID to reply to              |
 | `mentions`        | string[] | No     | Participant phone numbers or JIDs to mention |
+| `compress`        | boolean | No      | Compress before sending. Omit to follow `WA_MEDIA_COMPRESS` (default `false`) |
+| `hd`              | boolean | No      | Send the original image. Overrides `compress` and `WA_MEDIA_COMPRESS` |
 
-**Channel support:** Both
+Compression re-encodes to JPEG, limits the longest edge to `WA_MEDIA_IMAGE_MAX_EDGE` (default 600),
+and uses `WA_MEDIA_IMAGE_QUALITY` (default 75). The original is sent when the PNG has transparency,
+ffmpeg fails, or the result is not smaller. `hd: true` skips compression. Edge and quality are
+validated only when compression runs.
+
+**Channel support:** Both. A compressed Cloud API image is uploaded and sent by media id.
 
 **Response:**
 
@@ -441,8 +453,16 @@ Send a video to a WhatsApp contact or group.
 | `caption`         | string | No       | Video caption                       |
 | `quotedMessageId` | string | No       | Message ID to reply to              |
 | `mentions`        | string[] | No     | Participant phone numbers or JIDs to mention |
+| `compress`        | boolean | No      | Compress before sending. Omit to follow `WA_MEDIA_COMPRESS` (default `false`) |
+| `hd`              | boolean | No      | Send the original video. Overrides `compress` and `WA_MEDIA_COMPRESS` |
 
-**Channel support:** Both
+Compression re-encodes to H.264/AAC MP4, limits the longest edge to `WA_MEDIA_VIDEO_MAX_EDGE`
+(default 720), and uses `WA_MEDIA_VIDEO_CRF` (default 28). The source is read from a private
+temporary file so an MP4 with its `moov` atom at the end still decodes. The original is sent when
+ffmpeg fails or the result is not smaller. `hd: true` skips compression. Edge and CRF are validated
+only when compression runs.
+
+**Channel support:** Both. A compressed Cloud API video is uploaded and sent by media id.
 
 **Response:**
 
@@ -473,18 +493,21 @@ Send a round video note through the normal queued video path. Baileys sends it w
 
 #### `wa_send_sticker`
 
-Send a native WhatsApp sticker. PNG/JPG images and GIFs are converted to 512x512 WebP with
-transparent padding. Static stickers are limited to 100 KB and animated stickers to 500 KB. Static
-WebP files that are not 512x512 are normalized with ffmpeg; animated WebP passes through only at
-512x512 because ffmpeg cannot safely resize animated WebP. Send a GIF to convert an animated sticker
-to 512x512. Correctly sized WebP files pass through unchanged when they are within their size limit.
+Send a native WhatsApp sticker. PNG, JPG, GIF, and short MP4 inputs are converted to 512x512 WebP
+with transparent padding. GIF and MP4 sources stay animated unless `animated` is false. MP4 input
+is read from a private temporary file and trimmed to 10 seconds, including files whose `moov` atom
+follows `mdat`. Static stickers are limited to 100 KB and animated stickers to 500 KB.
+Static WebP files that are not 512x512 are normalized with ffmpeg; animated WebP passes through only
+at 512x512 because ffmpeg cannot safely resize animated WebP. Send a GIF or short MP4 to convert an
+animated sticker to 512x512. Correctly sized WebP files pass through unchanged when they are within
+their size limit.
 
 | Parameter         | Type    | Required | Description                                      |
 | ----------------- | ------- | -------- | ------------------------------------------------ |
 | `instanceId`      | string  | Yes      | The instance to send from                        |
 | `to`              | string  | Yes      | Recipient phone number or group JID              |
-| `sticker`         | string  | Yes      | PNG, JPG, GIF, or WebP URL or base64 data        |
-| `animated`        | boolean | No       | Hint to retain or flatten GIF animation          |
+| `sticker`         | string  | Yes      | PNG, JPG, GIF, WebP, or short MP4 URL or base64  |
+| `animated`        | boolean | No       | Keep or flatten GIF/MP4 animation                |
 | `quotedMessageId` | string  | No       | Message ID to reply to                           |
 
 **Channel support:** Both. Cloud API uploads the prepared WebP before sending it.
@@ -1313,7 +1336,7 @@ is blocked unless `WA_APP_STATE_WRITES_ENABLED=true`.
 
 ---
 
-### 2.4 Group Management (26 tools)
+### 2.4 Group Management (27 tools)
 
 Tools for creating and managing WhatsApp groups.
 
@@ -1401,6 +1424,42 @@ locally.
   ]
 }
 ```
+
+---
+
+#### `wa_export_group_participants`
+
+Export the participants of a group as a CSV file. The file is written under the data directory
+(`<database directory>/exports`, `data/exports` by default) and the response returns that path.
+That directory is mode `0700`. On the next export, regular files in it that are older than 24 hours
+are deleted. One row is written per participant. Phone is empty when it is not known. `name` is the
+saved contact name when one is stored; `push_name` is the name the contact set on WhatsApp. `role`
+is `admin`, `superadmin`, or `member`. `contactsTruncated` is true when the saved-name lookup was
+limited to the first 5000 identities.
+
+| Parameter    | Type   | Required | Description                        |
+| ------------ | ------ | -------- | ---------------------------------- |
+| `instanceId` | string | Yes      | The instance ID                    |
+| `groupJid`   | string | Yes      | Group JID or bare numeric group ID |
+
+**Channel support:** Baileys only. Read-only; no write flag is required. Cloud API does not support
+group participant export.
+
+**Response:**
+
+```json
+{
+  "groupJid": "120363000000000000@g.us",
+  "participantCount": 3,
+  "contactsTruncated": false,
+  "mimeType": "text/csv",
+  "path": "data/exports/group-120363000000000000_g.us-participants.csv",
+  "fileName": "group-120363000000000000_g.us-participants.csv",
+  "size": 240
+}
+```
+
+CSV header: `jid,phone,lid,name,push_name,role`.
 
 ---
 
@@ -2396,7 +2455,7 @@ receipt; Cloud API does not expose status viewers.
 
 ---
 
-### 2.8 Newsletter / Channels (10 tools)
+### 2.8 Newsletter / Channels (11 tools)
 
 Tools for interacting with WhatsApp Channels (Newsletters). **Baileys only.**
 
@@ -2480,6 +2539,7 @@ unsupported-operation error for these Baileys-only operations.
 | `wa_newsletter_update_picture`     | `instanceId`, `jid`, `image`                       | Update picture. Gated write.                     |
 | `wa_newsletter_react`              | `instanceId`, `jid`, `serverId`, `reaction`        | Add or remove a post reaction. Gated write.       |
 | `wa_newsletter_list_posts`         | `instanceId`, `jid`, optional `count`, `since`, `after` | Fetch parsed posts with timestamp and server-ID cursors. |
+| `wa_download_newsletter_media`     | `instanceId`, `newsletterJid`, `messageId`         | Download media from a Channel post and return the saved path. |
 
 Channel picture URLs use the existing public-HTTPS validation and media size limits, then are
 converted to JPEG before upload.
@@ -2489,6 +2549,45 @@ Post results contain JSON-safe `posts` with `id`, `serverId`, Unix-seconds `time
 `pagination.newestServerId` identify the page bounds. `pagination.after` is the newest numeric server
 ID; pass it as `after` on the next call to continue through newer posts. `since` accepts a Unix
 timestamp lower bound.
+
+#### `wa_download_newsletter_media`
+
+Download image, video, audio, document, sticker, or video-note media from one Channel post. Pass
+`serverId` or the post `id` from `wa_newsletter_list_posts` as `messageId`. The bytes are saved with
+the same directory, size cap, and file-name rules as `wa_download_media`, and the response returns
+that path. Posts that include a media key are decrypted. Posts uploaded without a media key are
+downloaded as plaintext from `https://mmg.whatsapp.net` plus the post `directPath`, with the same
+size cap and timeout, with redirects refused, and are kept only when the SHA-256 matches
+`fileSha256`. URL-only posts are accepted only on that same HTTPS origin. Encrypted downloads
+also stay on that origin and refuse redirects. A numeric server ID is looked up with the rc14
+`message_updates` stanza and exclusive `after = serverId - 1` cursor (`since = 0`); IDs retain
+integer precision. A missing numeric result or a non-numeric ID searches one additional page of
+at most 100 posts. History outside that bounded lookup can be unavailable; use `serverId` when
+possible. Media download timeout is 60 seconds; configured file-download size limits apply.
+
+| Parameter       | Type   | Required | Description                                      |
+| --------------- | ------ | -------- | ------------------------------------------------ |
+| `instanceId`    | string | Yes      | The instance ID                                  |
+| `newsletterJid` | string | Yes      | Channel JID ending in `@newsletter`              |
+| `messageId`     | string | Yes      | Post server ID or message ID                     |
+
+**Channel support:** Baileys only. Read-only; no write flag is required. Cloud API does not support
+Channel post media.
+
+**Response:**
+
+```json
+{
+  "newsletterJid": "123456789012345@newsletter",
+  "messageId": "102",
+  "mediaType": "image",
+  "mimeType": "image/jpeg",
+  "mode": "file",
+  "path": "data/media-downloads/102.jpg",
+  "fileName": "102.jpg",
+  "size": 2048
+}
+```
 
 ---
 
@@ -3561,7 +3660,7 @@ Add to your Claude Desktop MCP configuration:
 }
 ```
 
-Once configured, the client will auto-discover all 155 WA MCP tools and can interact with WhatsApp directly.
+Once configured, the client will auto-discover all 157 WA MCP tools and can interact with WhatsApp directly.
 
 ### 6.3 LangChain (Python)
 
@@ -3574,7 +3673,7 @@ toolkit = MCPToolkit(
 )
 
 tools = toolkit.get_tools()
-# tools now contains all 155 WA MCP tools, ready for any LangChain agent
+# tools now contains all 157 WA MCP tools, ready for any LangChain agent
 ```
 
 ---
@@ -3591,15 +3690,15 @@ tools = toolkit.get_tools()
 | Message Search                    | 1     | Both                                 |
 | WhatsApp Business Labels          | 8     | Baileys                              |
 | WhatsApp Events                   | 2     | Baileys                              |
-| Group Management                  | 26    | Baileys                              |
+| Group Management                  | 27    | Baileys                              |
 | Contact Management                | 8     | Both                                 |
 | Profile Management                | 7     | Both                                 |
 | Status / Stories                  | 4     | Baileys only                         |
-| Newsletter / Channels             | 10    | Baileys only                         |
+| Newsletter / Channels             | 11    | Baileys only                         |
 | Business, Communities, and Catalog| 16    | Baileys only                         |
 | Call Management                   | 1     | Baileys only                         |
 | Community administration | 16 | Baileys only |
-| **Total**                         | **155** |                                    |
+| **Total**                         | **157** |                                    |
 
 | Resources     | 10  |
 | ------------- | --- |

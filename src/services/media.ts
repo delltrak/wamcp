@@ -3,7 +3,8 @@
 // ============================================================
 
 import { existsSync, mkdirSync, readdirSync, statSync, unlinkSync } from "node:fs";
-import { mkdir, realpath, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { randomUUID } from "node:crypto";
 import { DEFAULT_MEDIA_CACHE_MAX_MB, MEDIA_LIMITS } from "../constants.js";
@@ -12,6 +13,7 @@ import {
   resolveFfmpegExecutable,
   runFfmpegCommand,
 } from "../tts/audio.js";
+import { logger } from "../utils/logger.js";
 import { validateMediaUrl, validateBase64Size } from "../utils/validation.js";
 
 const MEDIA_DIR = process.env.WA_MEDIA_DIR?.trim() || "data/media";
@@ -43,6 +45,160 @@ function mediaFfmpegTimeoutMs(): number {
   if (!raw) return DEFAULT_FFMPEG_TIMEOUT_MS;
   const parsed = Number(raw);
   return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : DEFAULT_FFMPEG_TIMEOUT_MS;
+}
+
+export const DEFAULT_MEDIA_COMPRESS = false;
+export const DEFAULT_MEDIA_IMAGE_MAX_EDGE = 600;
+export const DEFAULT_MEDIA_IMAGE_QUALITY = 75;
+export const DEFAULT_MEDIA_VIDEO_MAX_EDGE = 720;
+export const DEFAULT_MEDIA_VIDEO_CRF = 28;
+const STICKER_VIDEO_MAX_SECONDS = 10;
+const MEDIA_EDGE_MIN = 16;
+const MEDIA_EDGE_MAX = 4096;
+
+export interface MediaCompressionSettings {
+  enabled: boolean;
+  imageMaxEdge: number;
+  imageQuality: number;
+  videoMaxEdge: number;
+  videoCrf: number;
+}
+
+export interface OutgoingCompressionOptions {
+  compress?: boolean;
+  hd?: boolean;
+}
+
+export type PreparedOutgoingMedia =
+  { compressed: false; input: string } | { compressed: true; data: Buffer; mimeType: string };
+
+function parseBooleanSetting(value: string | undefined, key: string, fallback: boolean): boolean {
+  if (value === undefined || value.trim() === "") return fallback;
+  const normalized = value.trim().toLowerCase();
+  if (normalized === "true") return true;
+  if (normalized === "false") return false;
+  throw new Error(`Invalid ${key}; expected true or false`);
+}
+
+function parseIntegerSetting(
+  value: string | undefined,
+  key: string,
+  fallback: number,
+  minimum: number,
+  maximum: number,
+): number {
+  if (value === undefined || value.trim() === "") return fallback;
+  if (!/^\d+$/.test(value.trim())) {
+    throw new Error(`Invalid ${key}; expected an integer from ${minimum} to ${maximum}`);
+  }
+  const parsed = Number(value.trim());
+  if (!Number.isSafeInteger(parsed) || parsed < minimum || parsed > maximum) {
+    throw new Error(`Invalid ${key}; expected an integer from ${minimum} to ${maximum}`);
+  }
+  return parsed;
+}
+
+export function getMediaCompressionSettings(
+  env: NodeJS.ProcessEnv = process.env,
+): MediaCompressionSettings {
+  return {
+    enabled: parseBooleanSetting(
+      env.WA_MEDIA_COMPRESS,
+      "WA_MEDIA_COMPRESS",
+      DEFAULT_MEDIA_COMPRESS,
+    ),
+    imageMaxEdge: parseIntegerSetting(
+      env.WA_MEDIA_IMAGE_MAX_EDGE,
+      "WA_MEDIA_IMAGE_MAX_EDGE",
+      DEFAULT_MEDIA_IMAGE_MAX_EDGE,
+      MEDIA_EDGE_MIN,
+      MEDIA_EDGE_MAX,
+    ),
+    imageQuality: parseIntegerSetting(
+      env.WA_MEDIA_IMAGE_QUALITY,
+      "WA_MEDIA_IMAGE_QUALITY",
+      DEFAULT_MEDIA_IMAGE_QUALITY,
+      1,
+      100,
+    ),
+    videoMaxEdge: parseIntegerSetting(
+      env.WA_MEDIA_VIDEO_MAX_EDGE,
+      "WA_MEDIA_VIDEO_MAX_EDGE",
+      DEFAULT_MEDIA_VIDEO_MAX_EDGE,
+      MEDIA_EDGE_MIN,
+      MEDIA_EDGE_MAX,
+    ),
+    videoCrf: parseIntegerSetting(
+      env.WA_MEDIA_VIDEO_CRF,
+      "WA_MEDIA_VIDEO_CRF",
+      DEFAULT_MEDIA_VIDEO_CRF,
+      0,
+      51,
+    ),
+  };
+}
+
+/**
+ * `hd: true` and `compress: false` skip compression without reading settings.
+ * An omitted `compress` follows only `WA_MEDIA_COMPRESS`. Edge, quality, and CRF are
+ * validated later, when a message is actually compressed.
+ */
+export function shouldCompressOutgoingMedia(
+  options: OutgoingCompressionOptions = {},
+  env: NodeJS.ProcessEnv = process.env,
+): boolean {
+  if (options.hd === true || options.compress === false) return false;
+  if (options.compress === true) return true;
+  return parseBooleanSetting(env.WA_MEDIA_COMPRESS, "WA_MEDIA_COMPRESS", DEFAULT_MEDIA_COMPRESS);
+}
+
+function mjpegQualityValue(quality: number): number {
+  const clamped = Math.min(100, Math.max(1, quality));
+  return Math.round(2 + ((100 - clamped) * 29) / 99);
+}
+
+function fitWithinEdgeFilter(maxEdge: number): string {
+  return `scale='min(${maxEdge},iw)':'min(${maxEdge},ih)':force_original_aspect_ratio=decrease:force_divisible_by=2`;
+}
+
+/** Write media to a 0600 file under mkdtemp and always remove the directory. */
+async function withPrivateTempFile<T>(
+  data: Buffer,
+  extension: string,
+  run: (filePath: string) => Promise<T>,
+): Promise<T> {
+  const directory = await mkdtemp(join(tmpdir(), "wamcp-media-"));
+  const filePath = join(directory, `input${extension}`);
+  try {
+    await writeFile(filePath, data, { mode: 0o600 });
+    await chmod(filePath, 0o600);
+    return await run(filePath);
+  } finally {
+    await rm(directory, { recursive: true, force: true }).catch((error: unknown) => {
+      logger.warn({ err: error }, "failed to remove temporary media file");
+    });
+  }
+}
+
+function pngHasTransparency(buffer: Buffer): boolean {
+  if (detectMediaInputFormat(buffer) !== "png" || buffer.length < 26) return false;
+  const colorType = buffer[25];
+  if (colorType === 4 || colorType === 6) return true;
+  let offset = 8;
+  while (offset + 12 <= buffer.length) {
+    const length = buffer.readUInt32BE(offset);
+    const type = buffer.toString("ascii", offset + 4, offset + 8);
+    if (type === "tRNS") return true;
+    if (type === "IDAT" || type === "IEND") return false;
+    const next = offset + 12 + length;
+    if (next <= offset || next > buffer.length) return false;
+    offset = next;
+  }
+  return false;
+}
+
+function warnCompressionFallback(kind: "image" | "video", error: unknown): void {
+  logger.warn({ err: error, kind }, "ffmpeg media compression failed; sending the original");
 }
 
 function mediaDownloadMaxBytes(): number {
@@ -89,7 +245,7 @@ export function sanitizeMediaFileName(fileName: string | undefined): string {
   return safeName;
 }
 
-function detectMediaInputFormat(buffer: Buffer): MediaInputFormat {
+export function detectMediaInputFormat(buffer: Buffer): MediaInputFormat {
   if (
     buffer.length >= 6 &&
     ["GIF87a", "GIF89a"].includes(buffer.subarray(0, 6).toString("ascii"))
@@ -276,10 +432,13 @@ function stickerSizeError(size: number, animated: boolean): Error {
   );
 }
 
-function staticStickerFfmpegArgs(quality: number, scaleAndPad: string): string[] {
+function stickerInputArgs(input: string): string[] {
+  return input === "pipe:0" ? ["-i", input] : ["-nostdin", "-i", input];
+}
+
+function staticStickerFfmpegArgs(quality: number, scaleAndPad: string, input = "pipe:0"): string[] {
   return [
-    "-i",
-    "pipe:0",
+    ...stickerInputArgs(input),
     "-frames:v",
     "1",
     "-vf",
@@ -295,6 +454,34 @@ function staticStickerFfmpegArgs(quality: number, scaleAndPad: string): string[]
     "webp",
     "pipe:1",
   ];
+}
+
+function animatedStickerFfmpegArgs(
+  quality: number,
+  fps: number,
+  scaleAndPad: string,
+  maxSeconds?: number,
+  input = "pipe:0",
+): string[] {
+  const args = stickerInputArgs(input);
+  if (maxSeconds !== undefined) args.push("-t", String(maxSeconds));
+  args.push(
+    "-vf",
+    `fps=${fps},${scaleAndPad},format=yuva420p`,
+    "-an",
+    "-c:v",
+    "libwebp_anim",
+    "-lossless",
+    "0",
+    "-q:v",
+    String(quality),
+    "-loop",
+    "0",
+    "-f",
+    "webp",
+    "pipe:1",
+  );
+  return args;
 }
 
 function assertMaxBytes(size: number, maxBytes: number): void {
@@ -441,96 +628,111 @@ export class MediaService {
 
       if (info.width !== 512 || info.height !== 512) {
         if (animated) {
-          throw new Error("Animated WebP stickers must be 512x512; send a GIF to convert it");
+          throw new Error(
+            "Animated WebP stickers must be 512x512; send a GIF or short MP4 to convert it",
+          );
         }
         normalizeWebP = true;
       }
       if (!normalizeWebP) return { data: source, animated };
     } else {
-      if (format !== "png" && format !== "jpeg" && format !== "gif") {
-        throw new Error("Sticker input must be PNG, JPG, GIF, or WebP media");
+      if (format !== "png" && format !== "jpeg" && format !== "gif" && format !== "mp4") {
+        throw new Error("Sticker input must be PNG, JPG, GIF, MP4, or WebP media");
       }
-      animated = format === "gif" && (animatedHint ?? gifFrameCount(source) > 1);
+      animated =
+        format === "mp4"
+          ? animatedHint !== false
+          : format === "gif" && (animatedHint ?? gifFrameCount(source) > 1);
     }
 
     const scaleAndPad =
       "scale=512:512:force_original_aspect_ratio=decrease:flags=lanczos,pad=512:512:(ow-iw)/2:(oh-ih)/2:color=0x00000000";
-    const args = animated
-      ? [
-          "-i",
-          "pipe:0",
-          "-vf",
-          `fps=15,${scaleAndPad},format=yuva420p`,
-          "-an",
-          "-c:v",
-          "libwebp_anim",
-          "-lossless",
-          "0",
-          "-q:v",
-          "55",
-          "-loop",
-          "0",
-          "-f",
-          "webp",
-          "pipe:1",
-        ]
-      : staticStickerFfmpegArgs(75, scaleAndPad);
-
     const limit = stickerSizeLimit(animated);
-    const qualities = animated ? [55] : [75, 50];
-    let converted: Buffer | undefined;
-    let lastSizeError: Error | undefined;
-    for (let attempt = 0; attempt < qualities.length; attempt += 1) {
-      try {
-        converted = await runFfmpegCommand(
-          [source],
-          animated ? args : staticStickerFfmpegArgs(qualities[attempt]!, scaleAndPad),
-          mediaFfmpegExecutable(),
-          mediaFfmpegTimeoutMs(),
-          limit,
-        );
-      } catch (error) {
-        if (error instanceof Error && "code" in error && error.code === "ENOENT") {
-          throw new Error(
-            "ffmpeg is required to convert this sticker. Install ffmpeg or set WA_MEDIA_FFMPEG_PATH.",
-            { cause: error },
-          );
-        }
-        if (error instanceof Error && /unknown encoder|encoder not found/i.test(error.message)) {
-          const encoder = animated ? "libwebp_anim" : "libwebp";
-          throw new Error(`ffmpeg lacks ${encoder} support required for stickers`, {
-            cause: error,
-          });
-        }
-        if (error instanceof Error && error.message.includes("output exceeded")) {
-          lastSizeError = stickerSizeError(limit + 1, animated);
-          if (!animated && attempt === 0) continue;
-          throw new Error(`Converted ${lastSizeError.message}`, { cause: error });
-        }
-        throw error;
-      }
+    const attempts: Array<{ quality: number; fps: number; maxSeconds?: number }> = animated
+      ? format === "mp4"
+        ? [
+            { quality: 50, fps: 12, maxSeconds: STICKER_VIDEO_MAX_SECONDS },
+            { quality: 35, fps: 10, maxSeconds: STICKER_VIDEO_MAX_SECONDS },
+            { quality: 25, fps: 8, maxSeconds: STICKER_VIDEO_MAX_SECONDS },
+          ]
+        : [{ quality: 55, fps: 15 }]
+      : [
+          { quality: 75, fps: 0 },
+          { quality: 50, fps: 0 },
+        ];
 
-      if (converted.length <= limit) break;
-      lastSizeError = stickerSizeError(converted.length, animated);
-      converted = undefined;
-      if (animated || attempt > 0) {
+    const renderSticker = async (inputPath?: string): Promise<PreparedSticker> => {
+      const input = inputPath ?? "pipe:0";
+      let converted: Buffer | undefined;
+      let lastSizeError: Error | undefined;
+      for (let attempt = 0; attempt < attempts.length; attempt += 1) {
+        const current = attempts[attempt]!;
+        const ffmpegArgs = animated
+          ? animatedStickerFfmpegArgs(
+              current.quality,
+              current.fps,
+              scaleAndPad,
+              current.maxSeconds,
+              input,
+            )
+          : staticStickerFfmpegArgs(current.quality, scaleAndPad, input);
+        try {
+          converted = await runFfmpegCommand(
+            inputPath ? [] : [source],
+            ffmpegArgs,
+            mediaFfmpegExecutable(),
+            mediaFfmpegTimeoutMs(),
+            limit,
+          );
+        } catch (error) {
+          if (error instanceof Error && "code" in error && error.code === "ENOENT") {
+            throw new Error(
+              "ffmpeg is required to convert this sticker. Install ffmpeg or set WA_MEDIA_FFMPEG_PATH.",
+              { cause: error },
+            );
+          }
+          if (error instanceof Error && /unknown encoder|encoder not found/i.test(error.message)) {
+            const encoder = animated ? "libwebp_anim" : "libwebp";
+            throw new Error(`ffmpeg lacks ${encoder} support required for stickers`, {
+              cause: error,
+            });
+          }
+          if (error instanceof Error && error.message.includes("output exceeded")) {
+            lastSizeError = stickerSizeError(limit + 1, animated);
+            converted = undefined;
+            if (attempt < attempts.length - 1) continue;
+            throw new Error(`Converted ${lastSizeError.message}`, { cause: error });
+          }
+          throw error;
+        }
+
+        if (converted.length <= limit) break;
+        lastSizeError = stickerSizeError(converted.length, animated);
+        converted = undefined;
+        if (attempt < attempts.length - 1) continue;
         throw new Error(`Converted ${lastSizeError.message}`);
       }
-    }
 
-    if (!converted) {
-      throw new Error(
-        `Converted ${lastSizeError?.message ?? stickerSizeError(limit + 1, animated).message}`,
-      );
+      if (!converted) {
+        throw new Error(
+          `Converted ${lastSizeError?.message ?? stickerSizeError(limit + 1, animated).message}`,
+        );
+      }
+      const info = getWebPInfo(converted);
+      if (!info) throw new Error("ffmpeg did not produce a valid WebP sticker");
+      if (info.width !== 512 || info.height !== 512) {
+        throw new Error("ffmpeg did not produce a 512x512 WebP sticker");
+      }
+      if (converted.length > limit) {
+        throw new Error(`Converted ${stickerSizeError(converted.length, animated).message}`);
+      }
+      return { data: converted, animated };
+    };
+
+    if (format === "mp4") {
+      return withPrivateTempFile(source, ".mp4", (filePath) => renderSticker(filePath));
     }
-    const info = getWebPInfo(converted);
-    if (!info) throw new Error("ffmpeg did not produce a valid WebP sticker");
-    if (info.width !== 512 || info.height !== 512) {
-      throw new Error("ffmpeg did not produce a 512x512 WebP sticker");
-    }
-    if (converted.length > limit)
-      throw new Error(`Converted ${stickerSizeError(converted.length, animated).message}`);
-    return { data: converted, animated };
+    return renderSticker();
   }
 
   /** Convert supported image media to a square JPEG suitable for a group profile picture. */
@@ -647,6 +849,125 @@ export class MediaService {
       throw new Error("ffmpeg did not produce an MP4 video");
     }
     return converted;
+  }
+
+  /**
+   * Re-encode an image so its longest edge and JPEG quality stay within the configured limits.
+   * Returns the original input when the PNG has transparency, ffmpeg fails, or the result is not smaller.
+   */
+  async prepareOutgoingImage(input: string): Promise<PreparedOutgoingMedia> {
+    return this.compressOutgoingMedia(input, "image");
+  }
+
+  /**
+   * Re-encode a video to H.264/AAC within the configured edge length and CRF.
+   * Returns the original input when ffmpeg fails or the result is not smaller.
+   */
+  async prepareOutgoingVideo(input: string): Promise<PreparedOutgoingMedia> {
+    return this.compressOutgoingMedia(input, "video");
+  }
+
+  private async compressOutgoingMedia(
+    input: string,
+    kind: "image" | "video",
+  ): Promise<PreparedOutgoingMedia> {
+    const maxBytes = kind === "image" ? MEDIA_LIMITS.image : MEDIA_LIMITS.video;
+    const source = await this.getMediaBuffer(input, { maxBytes });
+    const format = detectMediaInputFormat(source);
+    if (kind === "image") {
+      if (format !== "jpeg" && format !== "png" && format !== "webp" && format !== "gif") {
+        throw new Error("Compressed image input must be PNG, JPG, GIF, or WebP media");
+      }
+      if (format === "png" && pngHasTransparency(source)) {
+        logger.info("skipping JPEG compression for a PNG with transparency");
+        return { compressed: false, input };
+      }
+    } else if (format !== "mp4") {
+      throw new Error("Compressed video input must be an MP4 video");
+    }
+
+    const settings = getMediaCompressionSettings();
+    const imageArgs = [
+      "-i",
+      "pipe:0",
+      "-frames:v",
+      "1",
+      "-vf",
+      `${fitWithinEdgeFilter(settings.imageMaxEdge)}:flags=lanczos`,
+      "-an",
+      "-c:v",
+      "mjpeg",
+      "-q:v",
+      String(mjpegQualityValue(settings.imageQuality)),
+      "-f",
+      "image2pipe",
+      "pipe:1",
+    ];
+    const videoArgs = (filePath: string): string[] => [
+      "-nostdin",
+      "-i",
+      filePath,
+      "-map",
+      "0:v:0",
+      "-map",
+      "0:a:0?",
+      "-vf",
+      fitWithinEdgeFilter(settings.videoMaxEdge),
+      "-c:v",
+      "libx264",
+      "-preset",
+      "fast",
+      "-crf",
+      String(settings.videoCrf),
+      "-pix_fmt",
+      "yuv420p",
+      "-c:a",
+      "aac",
+      "-b:a",
+      "128k",
+      "-movflags",
+      "+frag_keyframe+empty_moov",
+      "-f",
+      "mp4",
+      "pipe:1",
+    ];
+
+    let converted: Buffer;
+    try {
+      converted =
+        kind === "image"
+          ? await runFfmpegCommand(
+              [source],
+              imageArgs,
+              mediaFfmpegExecutable(),
+              mediaFfmpegTimeoutMs(),
+              maxBytes,
+            )
+          : await withPrivateTempFile(source, ".mp4", (filePath) =>
+              runFfmpegCommand(
+                [],
+                videoArgs(filePath),
+                mediaFfmpegExecutable(),
+                mediaFfmpegTimeoutMs(),
+                maxBytes,
+              ),
+            );
+      if (kind === "image") {
+        if (converted.length < 3 || detectMediaInputFormat(converted) !== "jpeg") {
+          throw new Error("ffmpeg did not produce a JPEG image");
+        }
+      } else if (converted.length < 12 || converted.subarray(4, 8).toString("ascii") !== "ftyp") {
+        throw new Error("ffmpeg did not produce an MP4 video");
+      }
+    } catch (error) {
+      warnCompressionFallback(kind, error);
+      return { compressed: false, input };
+    }
+
+    if (converted.length >= source.length) return { compressed: false, input };
+    return kind === "image"
+      ? { compressed: true, data: converted, mimeType: "image/jpeg" }
+      : { compressed: true, data: converted, mimeType: "video/mp4" };
   }
 
   /** Store a download under the dedicated media directory with a generated, contained path. */
