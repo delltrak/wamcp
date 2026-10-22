@@ -105,6 +105,8 @@ Everything that is not a "send a message" call (edit, delete, react, presence, g
    Always use `toolSuccess`/`handleToolError` — they sanitize file paths and stack traces out of agent-visible output.
 3. Add the method to `channel.interface.ts`, implement in Baileys, implement or throw-with-the-standard-wording in Cloud API.
 4. Update `README.md` and `docs/API_REFERENCE.md` tables.
+5. Record user-visible features, fixes, and behavior changes in `CHANGELOG.md` under
+   `[Unreleased]` before merging. Include relevant issue/PR links and material limitations.
 
 ## Adding a resource
 
