@@ -15,20 +15,33 @@ import {
 } from "./constants.js";
 import { InstanceManager } from "./services/instance-manager.js";
 import { MessageQueue } from "./services/message-queue.js";
-import { EventWebhookService } from "./services/event-webhook.js";
+import { EventWebhookService, getRecentWebhookDeliveries } from "./services/event-webhook.js";
 import { MaintenanceService } from "./services/maintenance.js";
 import { createMcpServer } from "./server/mcp.js";
+import { isBaileysInstancePaired } from "./channels/baileys/baileys.auth.js";
 import { verifyWebhookSignature } from "./channels/cloud-api/cloud.auth.js";
 import { normalizeWebhookPayload } from "./channels/cloud-api/cloud.events.js";
 import type { MetaWebhookPayload } from "./channels/cloud-api/cloud.events.js";
 import { installShutdownHandlers, SHUTDOWN_TIMEOUT_MS } from "./utils/shutdown.js";
 import { logger } from "./utils/logger.js";
+import { loadAutoReplyConfig, startAutoReply } from "./services/auto-reply.js";
 import { getAutoReadMode } from "./services/auto-read.js";
+import { loadPresencePulseConfig, PresencePulseScheduler } from "./services/presence-pulse.js";
 import { loadAutoMarkPlayedConfig } from "./services/auto-mark-played.js";
-import { bootEventWebhook, type EventWebhookStatus } from "./services/event-webhook-config.js";
+import { bootEventWebhook, getEventWebhookStatus } from "./services/event-webhook-config.js";
+import { buildHealthBody, renderHealthBody } from "./server/health.js";
+import { DashboardEventLog } from "./server/dashboard-activity.js";
+import {
+  assertDashboardTransport,
+  cloudWebhookFlags,
+  loadDashboardConfig,
+  type DashboardConfig,
+} from "./server/dashboard-config.js";
+import { createDashboardHandler } from "./server/dashboard.js";
+import { renderQrDataUrl } from "./server/dashboard-qr.js";
 import { loadChatwootConfig, type ChatwootConfig } from "./services/chatwoot-config.js";
 import { ChatwootService, handleChatwootHttpRequest } from "./services/chatwoot.js";
-import { buildHealthBody } from "./server/health.js";
+import { parseBaileysProxyUrl } from "./channels/baileys/proxy.js";
 
 const CLOUD_WEBHOOK_PATH = "/cloud-webhook";
 
@@ -72,6 +85,8 @@ function checkApiKey(req: IncomingMessage, res: ServerResponse): boolean {
 }
 
 async function initServices(chatwootConfig: ChatwootConfig) {
+  const autoReplyConfig = loadAutoReplyConfig();
+  const presencePulseConfig = loadPresencePulseConfig();
   loadAutoMarkPlayedConfig();
   getAutoReadMode();
 
@@ -86,10 +101,11 @@ async function initServices(chatwootConfig: ChatwootConfig) {
     listInstanceIds: () => instanceManager.getAllInstances().map((instance) => instance.id),
   });
 
-  // Wire them together. Chatwoot listens beside the event webhook, not inside it.
+  // Wire them together
   instanceManager.setMessageQueue(messageQueue);
   eventWebhook.start(instanceManager);
   chatwoot.start(instanceManager);
+  const autoReply = startAutoReply(instanceManager, messageQueue, autoReplyConfig);
 
   // Load existing instances from DB and reconnect
   await instanceManager.init();
@@ -98,19 +114,66 @@ async function initServices(chatwootConfig: ChatwootConfig) {
   const maintenance = new MaintenanceService(instanceManager);
   await maintenance.start();
 
-  logger.info("Services initialized");
+  const presencePulse = new PresencePulseScheduler({
+    config: presencePulseConfig,
+    listDevices: () =>
+      instanceManager.listBaileysAdapters().map(({ instanceId, adapter }) => ({
+        id: instanceId,
+        isReady: () => adapter.getStatus() === "connected",
+        runPulse: (durationMs: number) => adapter.runPresencePulse(durationMs),
+      })),
+  });
+  presencePulse.start();
 
-  return { instanceManager, messageQueue, eventWebhook, chatwoot, maintenance };
+  logger.info(
+    { presencePulse: presencePulseConfig.enabled, autoReply: autoReplyConfig.enabled },
+    "Services initialized",
+  );
+
+  return {
+    instanceManager,
+    messageQueue,
+    eventWebhook,
+    chatwoot,
+    maintenance,
+    presencePulse,
+    autoReply,
+  };
 }
 
 async function startHttp(
-  webhookStatus: EventWebhookStatus,
+  dashboardConfig: DashboardConfig,
   chatwootConfig: ChatwootConfig,
 ): Promise<void> {
-  const { instanceManager, messageQueue, eventWebhook, chatwoot, maintenance } =
-    await initServices(chatwootConfig);
-  const mcpSessions = new McpHttpSessionManager(instanceManager, messageQueue);
+  const {
+    instanceManager,
+    messageQueue,
+    eventWebhook,
+    chatwoot,
+    maintenance,
+    presencePulse,
+    autoReply,
+  } = await initServices(chatwootConfig);
+  const mcpSessions = new McpHttpSessionManager(instanceManager, messageQueue, eventWebhook);
   const startTime = Date.now();
+  const dashboardEvents = new DashboardEventLog();
+  if (dashboardConfig.enabled) {
+    instanceManager.onAnyEvent((event, instanceId, payload) => {
+      dashboardEvents.record(event, instanceId, payload);
+    });
+  }
+  const handleDashboard = createDashboardHandler({
+    config: dashboardConfig,
+    startedAt: startTime,
+    instances: instanceManager,
+    isPaired: isBaileysInstancePaired,
+    webhookStatus: () => getEventWebhookStatus(),
+    deliveries: getRecentWebhookDeliveries,
+    events: dashboardEvents,
+    cloudWebhook: () => cloudWebhookFlags(),
+    renderQr: renderQrDataUrl,
+    version: VERSION,
+  });
 
   const httpServer = createServer(async (req: IncomingMessage, res: ServerResponse) => {
     const url = new URL(req.url ?? "/", `http://localhost:${port}`);
@@ -127,10 +190,10 @@ async function startHttp(
           disconnected: allInstances.length - connected,
         },
         version: VERSION,
-        webhook: webhookStatus,
+        webhook: getEventWebhookStatus(),
       });
       res.writeHead(200, { "Content-Type": "application/json" });
-      res.end(JSON.stringify(health));
+      res.end(renderHealthBody(health));
       return;
     }
 
@@ -235,12 +298,16 @@ async function startHttp(
       return;
     }
 
+    if (await handleDashboard(req, res, url)) return;
+
     res.writeHead(404, { "Content-Type": "application/json" });
     res.end(JSON.stringify({ error: "Not found" }));
   });
 
   let servicesClosePromise: Promise<void> | null = null;
   const closeServices = (): Promise<void> => {
+    presencePulse.stop();
+    autoReply.stop();
     // Finish in-flight Chatwoot replies before the outbound queue closes.
     servicesClosePromise ??= chatwoot
       .stop()
@@ -284,12 +351,21 @@ async function startHttp(
 }
 
 async function startStdio(chatwootConfig: ChatwootConfig): Promise<void> {
-  const { instanceManager, messageQueue, eventWebhook, chatwoot, maintenance } =
-    await initServices(chatwootConfig);
-  const { server: mcpServer } = createMcpServer(instanceManager, messageQueue);
+  const {
+    instanceManager,
+    messageQueue,
+    eventWebhook,
+    chatwoot,
+    maintenance,
+    presencePulse,
+    autoReply,
+  } = await initServices(chatwootConfig);
+  const { server: mcpServer } = createMcpServer(instanceManager, messageQueue, eventWebhook);
   const onServerClose = mcpServer.server.onclose;
   let servicesClosePromise: Promise<void> | null = null;
   const closeServices = (): Promise<void> => {
+    presencePulse.stop();
+    autoReply.stop();
     // Finish in-flight Chatwoot replies before the outbound queue closes.
     servicesClosePromise ??= chatwoot
       .stop()
@@ -325,8 +401,11 @@ async function startStdio(chatwootConfig: ChatwootConfig): Promise<void> {
 }
 
 async function main(): Promise<void> {
+  const dashboardConfig = loadDashboardConfig();
+  assertDashboardTransport(dashboardConfig, transport);
+  parseBaileysProxyUrl(process.env.WA_PROXY_URL);
   logger.info({ transport, version: VERSION }, "Starting WA MCP server");
-  const webhookStatus = bootEventWebhook();
+  bootEventWebhook();
   const chatwootConfig = loadChatwootConfig();
   if (chatwootConfig.enabled && transport === "stdio") {
     logger.warn(
@@ -337,7 +416,7 @@ async function main(): Promise<void> {
   if (transport === "stdio") {
     await startStdio(chatwootConfig);
   } else {
-    await startHttp(webhookStatus, chatwootConfig);
+    await startHttp(dashboardConfig, chatwootConfig);
   }
 }
 

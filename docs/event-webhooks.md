@@ -24,7 +24,7 @@ HTTP Host header.
 | --- | --- | --- |
 | `WA_EVENT_WEBHOOK_URL` | unset | One outgoing destination; unset disables it. |
 | `WA_EVENT_WEBHOOKS` | unset | JSON array of destinations. Use instead of `URL` for multiple endpoints. |
-| `WA_EVENT_WEBHOOK_PRESET` | unset | `grok-bot` selects compact Grok Bot message and lifecycle payloads plus incoming-message filters. |
+| `WA_EVENT_WEBHOOK_PRESET` | unset | `grok-bot` selects compact Grok Bot message, lifecycle, and #141 routine payloads plus incoming-message filters. |
 | `WA_EVENT_WEBHOOK_EVENTS` | `message.received` | Comma-separated events for the single destination and multi-destination defaults. |
 | `WA_EVENT_WEBHOOK_IGNORE_FROM_ME` | `true` | Ignore messages sent by this WhatsApp instance. |
 | `WA_EVENT_WEBHOOK_IGNORE_JIDS` | unset | Exact JIDs, chat-only `@` wildcards, or one `*` in the user part (#140). Case-insensitive. Unset forwards every chat. |
@@ -40,11 +40,90 @@ HTTP Host header.
 | `WA_EVENT_WEBHOOK_TIMEOUT_MS` | `10000` | Per-request timeout, from 1 to 300000 ms. |
 | `WA_EVENT_WEBHOOK_RETRY_ATTEMPTS` | `5` | Total BullMQ attempts per delivery, including the first. |
 | `WA_EVENT_WEBHOOK_RETRY_DELAY_MS` | `1000` | Initial exponential retry delay, from 1 to 300000 ms. Retries add 20% jitter and are capped at five minutes. |
-| `WA_REQUIRE_EVENT_WEBHOOK` | `false` | Refuse to start when no destination is configured or the resolved event set is empty. |
+| `WA_REQUIRE_EVENT_WEBHOOK` | `false` | Refuse to start when no global destination and no per-instance webhook is configured, or the resolved event set is empty. A webhook on any one instance satisfies this for the process (#142). |
+| `WA_EVENT_WEBHOOK_INSTANCE_MERGE_GLOBAL` | `false` | When false, a stored instance webhook replaces global destinations for that instance. When true, the instance URL is added to the global destinations. The same URL is delivered once. |
+| `WA_INSTANCE_WEBHOOK_TOOLS_ENABLED` | `false` | Register the three per-instance webhook tools. |
+| `WA_INSTANCE_WEBHOOK_ALLOWED_HOSTS` | unset | Comma-separated hosts `wa_set_instance_webhook` may save. |
 
 `group.member_label_changed` can be selected in `WA_EVENT_WEBHOOK_EVENTS` or in a destination's
-`events` array. The default event set remains `message.received`, and the `grok-bot` preset remains
-limited to incoming messages.
+`events` array. The default event set remains `message.received`. The `grok-bot` preset forwards
+incoming messages, `instance.*` lifecycle events, and the six #141 routine events when those names
+are listed.
+
+These additional events are also off unless their names are listed:
+
+| Event | When it is emitted |
+| --- | --- |
+| `group.joined` | A group roster or a participant-add lists this account. The payload carries `memberCount` and does not include member JIDs. An empty roster does not emit. `wa_create_group` does not emit this event. `wa_join_group` waits for a later roster that includes this account. |
+| `label.association` | A label is applied to or removed from a chat or message. `label.updated` is still emitted for the same change. |
+| `newsletter.joined` | `wa_newsletter_follow` or `wa_create_newsletter` succeeds, or a newsletter participant update adds this account. A follow started on the phone is best-effort on Baileys 7.0.0-rc14. |
+| `newsletter.left` | `wa_newsletter_unfollow` succeeds, or a newsletter participant update removes this account. |
+| `newsletter.message` | A newsletter post arrives. Append-path posts are not also sent as `message.received`. Notify-path posts still emit `message.received` and this event. `WA_EVENT_WEBHOOK_IGNORE_FROM_ME` applies. |
+| `newsletter.mute` | Best-effort. Emitted when a newsletter settings object includes `mute`, `mute_state`, or `muted`. |
+
+Newsletter post deduplication uses the instance, channel JID, and post ID: two channels may
+both publish post `99`. Fresh `append` posts are emitted only when that channel/post was not
+already stored before the batch; history sync itself emits no post event. The existing
+`processed_messages` cleanup removes dedup records after 24 hours, so this is not an indefinite
+exactly-once guarantee. The legacy local `messages` table is still keyed by instance and message
+ID rather than channel: equal numeric IDs in different newsletters can collide in local history.
+The dedicated `newsletter.message` event uses the incoming post and its channel, so those local
+history collisions do not suppress a new channel's webhook event.
+
+When one of these events is delivered, `text` is a short Portuguese line:
+`Você entrou no grupo {subject}` (or `Você entrou em um grupo`),
+`Etiqueta "{name}" aplicada` / `Etiqueta "{name}" removida`,
+`Você entrou no canal {name}` / `Você entrou em um canal`,
+`Você saiu do canal {name}` / `Você saiu de um canal`,
+the newsletter post text or `Nova mensagem no canal`,
+and `Canal silenciado` / `Canal com som`.
+The Grok Bot preset forwards these six events when they are listed and still drops
+other non-message, non-lifecycle events.
+
+## #141 routine bodies
+
+Without the `grok-bot` preset, each routine event uses the standard body: `event`,
+`instanceId`, `chat`, `sender`, `type`, `text`, and `timestamp`. `timestamp` is the
+event time when the channel payload has one, and `null` when it does not.
+`group.joined` adds `subject`, `description`, and `memberCount`. It does not add
+`participants`.
+
+With `WA_EVENT_WEBHOOK_PRESET=grok-bot`, the same event uses the compact Grok Bot
+shape. `timestamp` is always a Unix-seconds event time: the channel timestamp when
+present (a newsletter post uses the post time), otherwise the time the body is built.
+`messageId` is the message id when the event has one, and `""` otherwise.
+
+```json
+{
+  "event": "group.joined",
+  "instanceId": "inst_1234abcd",
+  "chatId": "120363000000000119@g.us",
+  "chatName": "Weekend",
+  "senderId": "5511999999999@s.whatsapp.net",
+  "senderName": null,
+  "isGroup": true,
+  "type": "group.joined",
+  "text": "Você entrou no grupo Weekend",
+  "timestamp": 1700000100,
+  "messageId": "",
+  "memberCount": 12,
+  "subject": "Weekend",
+  "description": null
+}
+```
+
+`event` is present so a routine body is not mixed into a `{ "messages": [...] }`
+batch. Destination debounce flushes it with other non-message events.
+
+Baileys 7.0.0-rc14 does not expose every newsletter notification. Participant updates that are not
+join or leave, such as promote and demote, do not emit membership events. The binary newsletter
+settings stanza only carries name and description, so `newsletter.mute` and a follow started on the
+phone are best-effort: mute is emitted only when the settings object contains `mute`, `mute_state`,
+or `muted`, and a phone follow is not confirmed from that stanza. Local follow, unfollow, and
+newsletter create still emit after the tool succeeds. `newsletter.message` leaves `views` null
+because that Baileys message does not include a view count. These events are Baileys-only.
+Groups created with `wa_create_group` do not emit `group.joined`. A later `groups.upsert` that
+lists this account can still emit it, because rc14 does not mark that upsert as self-created.
 
 `WA_EVENT_WEBHOOK_IGNORE_JIDS` (#140) drops events whose JID matches the list. It is
 independent of `WA_EVENT_WEBHOOK_EVENTS`: an event is delivered only when its name is selected and
@@ -93,7 +172,55 @@ dropped). The public `GET /health` response returns only the first five fields;
 it includes the warning code but never includes `droppedEvents` or any event
 names, including configured or dropped event names. Neither response includes
 URLs or secrets. `WA_REQUIRE_EVENT_WEBHOOK=true` exits before the server starts
-when no destination is configured or the event set is empty.
+when no global destination and no per-instance webhook is configured, or the
+event set is empty. A stored instance webhook on any single instance counts as
+a configured destination for the whole process. `GET /health` caches that
+database read until instance webhook storage changes and still omits URLs,
+header names, header values, tokens, and secrets.
+
+## Per-instance webhooks
+
+`wa_set_instance_webhook`, `wa_get_instance_webhook`, and
+`wa_delete_instance_webhook` persist one webhook per instance in SQLite (#142).
+The tools are registered only when `WA_INSTANCE_WEBHOOK_TOOLS_ENABLED=true`.
+`WA_INSTANCE_WEBHOOK_ALLOWED_HOSTS` optionally limits the host that can be saved.
+The fields are the URL, an optional auth header, and an optional event list. Omit
+`events` to inherit `WA_EVENT_WEBHOOK_EVENTS`; an empty list is rejected.
+Instance webhooks also use `WA_EVENT_WEBHOOK_PRESET` and
+`WA_EVENT_WEBHOOK_IGNORE_FROM_ME`. `auth_value` is stored in plaintext for
+delivery and is never included in tool results, logs, or `GET /health`. The get
+and set tools return the endpoint origin and the auth header name, plus
+`authConfigured`. They do not return the full URL. When
+`WA_EVENT_WEBHOOK_SECRET` is set, instance deliveries are signed with that same
+HMAC secret, including when no global URL is set. If several global destinations use different secrets, the instance
+destination takes the secret of the global URL it replaces, and otherwise a
+secret only when every global destination shares one. When those secrets differ
+and the instance URL matches none of them, the instance webhook is sent unsigned.
+That condition logs one warning for the process. The warning does not include
+the URL or the secret.
+
+With `WA_EVENT_WEBHOOK_INSTANCE_MERGE_GLOBAL=false` (the default), events for
+that instance go only to its webhook. Saving that webhook logs a warning when a
+global destination exists. Other instances keep the global destinations. Set the
+variable to `true` to deliver to the instance webhook and the global
+destinations. URLs are compared after lowercasing the host and removing a
+trailing slash. If the instance URL is the same as a global URL, the event is
+sent once and the instance auth header, event list, and global HMAC secret are
+used. Deleting the row, or deleting the instance, restores global routing for
+that instance. A stored row that no longer passes validation is skipped with a
+warning. `wa_get_instance_webhook` returns `{ "configured": false, "invalid": true }`
+for that row and does not throw. That skip does not fail `/health`, startup, or
+deliveries to the remaining destinations. Event routing keeps the stored rows in
+memory until a webhook is saved or deleted, so a burst of events does not query
+once per event. The delivery worker reloads instance rows on `sync()` or after storage changes,
+including instance deletion; unchanged jobs reuse the cached rows. When the new options are unset and no instance webhook is
+stored, routing matches the global configuration.
+
+`WA_EVENT_WEBHOOK_IGNORE_JIDS` applies to instance destinations even when there
+is no global URL. Instance destinations also inherit the configured global
+destination JID filters. Worker routing and message batching distinguish full
+destination identities, so a global ID such as `instance:inst_1234abcd` cannot
+overwrite that instance’s delivery configuration.
 
 For HTTP 429 and 5xx responses, a valid `Retry-After` header (seconds or an
 HTTP date) sets a minimum retry delay. Its value is capped at five minutes.
