@@ -221,6 +221,51 @@ describe("BaileysAdapter.markRead", () => {
     ]);
   });
 
+  it.each([true, false])(
+    "preserves the status author in read receipts (raw key stored: %s)",
+    async (withRawKey) => {
+      const chatId = "status@broadcast";
+      const messageId = "incoming-status";
+      const senderId = "5511888888888@s.whatsapp.net";
+      const rawParticipant = "9000000000001@lid";
+      db.insert(messages)
+        .values({
+          id: messageId,
+          instanceId,
+          chatId,
+          senderId,
+          type: "text",
+          isFromMe: 0,
+          status: "received",
+          timestamp: 1,
+          rawData: withRawKey
+            ? JSON.stringify({
+                key: {
+                  remoteJid: chatId,
+                  id: messageId,
+                  fromMe: false,
+                  participant: rawParticipant,
+                },
+                message: { conversation: "status fixture" },
+              })
+            : null,
+        })
+        .run();
+      const { adapter, readMessages } = connectedAdapter();
+
+      await adapter.markRead(chatId, [messageId]);
+
+      expect(readMessages).toHaveBeenCalledWith([
+        {
+          remoteJid: chatId,
+          id: messageId,
+          fromMe: false,
+          participant: withRawKey ? rawParticipant : senderId,
+        },
+      ]);
+    },
+  );
+
   it("sets ownership and omits participants for direct chat keys", async () => {
     const chatJid = "5511888888888@s.whatsapp.net";
     const { adapter, readMessages } = connectedAdapter();

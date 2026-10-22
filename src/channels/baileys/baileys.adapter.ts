@@ -1709,8 +1709,10 @@ export class BaileysAdapter implements ChannelAdapter {
         : storedRow;
     const storedKey = row ? getStoredMessage(row.rawData, messageId)?.key : undefined;
     const fromMe = row ? row.isFromMe === 1 : fallbackFromMe;
-    const isGroup = (row?.chatId ?? remoteJid).endsWith("@g.us");
-    const participant = isGroup
+    const chatJid = row?.chatId ?? remoteJid;
+    // Groups and status broadcasts identify the original author with participant.
+    const needsParticipant = chatJid.endsWith("@g.us") || chatJid === STATUS_BROADCAST_JID;
+    const participant = needsParticipant
       ? storedKey?.participant ||
         (row?.senderId && row.senderId !== "me" ? row.senderId : undefined)
       : undefined;
