@@ -1,6 +1,12 @@
 import { randomUUID } from "node:crypto";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { BaileysEventMap, WAMessage, WASocket } from "@whiskeysockets/baileys";
+import {
+  generateWAMessageContent,
+  type AnyMessageContent,
+  type BaileysEventMap,
+  type WAMessage,
+  type WASocket,
+} from "@whiskeysockets/baileys";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { z } from "zod";
 import { BaileysAdapter } from "../src/channels/baileys/baileys.adapter.js";
@@ -176,7 +182,7 @@ describe("issue 80 feature completion", () => {
     };
   }
 
-  it("subscribes per chat, throttles presence, expands @all and supports send-time mentions", async () => {
+  it("subscribes per chat, throttles presence, sends native @all and supports send-time mentions", async () => {
     const { adapter, socket, queue, invoke } = createFixture();
     await invoke("wa_send_presence", { chatId: CONTACT_ID, status: "typing" });
     await invoke("wa_send_presence", { chatId: CONTACT_ID, status: "paused" });
@@ -200,15 +206,36 @@ describe("issue 80 feature completion", () => {
     vi.mocked(queue.enqueueMessage).mockClear();
     const all = await invoke("wa_send_group_mention_all", { groupId: GROUP_ID, text: "Update" });
     expect(all.isError).not.toBe(true);
+    expect(JSON.parse(all.content[0]?.text ?? "{}")).toMatchObject({ mode: "native" });
     expect(socket.sendMessage).toHaveBeenCalledTimes(1);
     expect(queue.enqueueMessage).toHaveBeenCalledTimes(1);
     expect(socket.sendMessage).toHaveBeenLastCalledWith(
       GROUP_ID,
       {
         text: "Update @all",
-        mentions: [ACCOUNT_ID, CONTACT_ID, SECOND_CONTACT_ID],
         mentionAll: true,
       },
+      {},
+    );
+    const nativePayload = vi.mocked(socket.sendMessage).mock.lastCall?.[1] as AnyMessageContent;
+    const encoded = await generateWAMessageContent(nativePayload, {
+      upload: async () => {
+        throw new Error("unused");
+      },
+    });
+    const context = encoded.toJSON().extendedTextMessage?.contextInfo;
+    expect(context?.nonJidMentions).toBe(1);
+    expect(context?.mentionedJid).toBeUndefined();
+    expect(context?.groupMentions).toBeUndefined();
+    await adapter.sendMessage(GROUP_ID, {
+      type: "text",
+      text: "Already @all here",
+      mentions: [CONTACT_ID],
+      mentionAll: true,
+    });
+    expect(socket.sendMessage).toHaveBeenLastCalledWith(
+      GROUP_ID,
+      { text: "Already @all here", mentionAll: true },
       {},
     );
     await adapter.sendMessage(GROUP_ID, {
@@ -251,6 +278,35 @@ describe("issue 80 feature completion", () => {
     );
     expect(socket.chatModify).not.toHaveBeenCalled();
     expect(socket.appPatch).not.toHaveBeenCalled();
+  });
+
+  it("falls back to participant mentions when native @all is unavailable", async () => {
+    const { adapter, socket, invoke } = createFixture();
+    vi.spyOn(adapter, "supportsNativeGroupMentionAll").mockResolvedValue(false);
+    const all = await invoke("wa_send_group_mention_all", { groupId: GROUP_ID, text: "Update" });
+    expect(all.isError).not.toBe(true);
+    expect(JSON.parse(all.content[0]?.text ?? "{}")).toMatchObject({
+      mode: "participants",
+      mentionCount: 3,
+    });
+    expect(socket.sendMessage).toHaveBeenLastCalledWith(
+      GROUP_ID,
+      {
+        text: "Update @all",
+        mentions: [ACCOUNT_ID, CONTACT_ID, SECOND_CONTACT_ID],
+      },
+      {},
+    );
+    const fallbackPayload = vi.mocked(socket.sendMessage).mock.lastCall?.[1] as AnyMessageContent;
+    expect(fallbackPayload).not.toHaveProperty("mentionAll");
+    const encoded = await generateWAMessageContent(fallbackPayload, {
+      upload: async () => {
+        throw new Error("unused");
+      },
+    });
+    const context = encoded.toJSON().extendedTextMessage?.contextInfo;
+    expect(context?.mentionedJid).toEqual([ACCOUNT_ID, CONTACT_ID, SECOND_CONTACT_ID]);
+    expect(context?.nonJidMentions ?? 0).toBe(0);
   });
 
   it("uses readable Baileys fallbacks and native Cloud API buttons and lists", async () => {
@@ -490,7 +546,7 @@ describe("issue 80 feature completion", () => {
 
     await adapter.markRead(CONTACT_ID, ["same-message", "same-message"]);
     expect(socket.readMessages).toHaveBeenCalledWith([
-      { remoteJid: CONTACT_ID, id: "same-message" },
+      { remoteJid: CONTACT_ID, id: "same-message", fromMe: false },
     ]);
 
     const now = vi

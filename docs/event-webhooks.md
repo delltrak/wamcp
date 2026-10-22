@@ -324,7 +324,11 @@ is stored and retried when the event arrives, and is emitted after decryption.
 
 Configured `instance.*` events use a compact Grok Bot body with `event`,
 `instanceId`, a short Portuguese `text`, and an event timestamp. Disconnect
-payloads may also contain `reason`, `statusCode`, and reconnect state. Pairing
+payloads may also contain `reason`, `statusCode`, and reconnect state. The
+standard disconnect body stays coalesced to the first close after an open,
+plus a terminal logged-out event. After the exponential reconnect cap, one
+additional `instance.disconnected` uses that same shape with `willReconnect`
+still true and `reconnectInMs` of 30000 while retries continue. Pairing
 and QR payloads may contain the method and expiry time. Pairing codes, QR
 strings, credentials, and secrets are never included. The preset drops other
 configured events and lists their names in `droppedEvents` from

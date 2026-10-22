@@ -1,3 +1,4 @@
+import { safeGroupChanges } from "../../utils/group-event-fields.js";
 // ============================================================
 // WA MCP — Baileys Event Normalization
 // Maps raw Baileys events to normalized ChannelEvent types.
@@ -855,7 +856,7 @@ export function normalizeGroupsUpdate(
   return updates.map((update) => ({
     instanceId,
     groupId: update.id ?? "",
-    changes: { ...update } as Record<string, unknown>,
+    changes: safeGroupChanges(update as Record<string, unknown>),
   }));
 }
 
@@ -864,11 +865,12 @@ export function normalizeGroupParticipantsUpdate(
   instanceId: string,
   data: BaileysEventMap["group-participants.update"],
 ): NormalizedGroupParticipantsEvent {
-  const actionMap: Record<string, "add" | "remove" | "promote" | "demote"> = {
+  const actionMap: Record<string, "add" | "remove" | "promote" | "demote" | "modify"> = {
     add: "add",
     remove: "remove",
     promote: "promote",
     demote: "demote",
+    modify: "modify",
   };
 
   return {

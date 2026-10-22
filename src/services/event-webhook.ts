@@ -1,10 +1,11 @@
+import { safeGroupChanges } from "../utils/group-event-fields.js";
 import { createHash, createHmac } from "node:crypto";
 import { lookup as lookupDns } from "node:dns/promises";
 import { isIP } from "node:net";
 import type { ConnectionOptions } from "node:tls";
 import { Queue, UnrecoverableError, Worker, type Job, type JobsOptions } from "bullmq";
 import { and, eq, inArray, or } from "drizzle-orm";
-import { Agent } from "undici";
+import { Agent, fetch as undiciFetch } from "undici";
 import { db } from "../db/client.js";
 import { contacts } from "../db/schema.js";
 import type { InstanceManager } from "./instance-manager.js";
@@ -52,6 +53,9 @@ export interface EventWebhookPayload {
   rawType?: string;
   action?: string;
   groupId?: string;
+  groupChanges?: Record<string, unknown>;
+  participants?: string[];
+  requestMethod?: string | null;
   memberLabel?: string | null;
   eventMessageId?: string;
   responseMessageId?: string;
@@ -556,6 +560,20 @@ export function normalizeEventWebhookPayload(
           groupId: firstString(data.groupId) ?? "",
           memberLabel: memberLabel ?? null,
         }
+      : {}),
+    ...(event === "group.updated"
+      ? { groupId: firstString(data.groupId) ?? "", groupChanges: safeGroupChanges(changes) }
+      : {}),
+    ...(event === "group.participants_changed"
+      ? {
+          groupId: firstString(data.groupId) ?? "",
+          participants: Array.isArray(data.participants)
+            ? data.participants.filter((p): p is string => typeof p === "string")
+            : [],
+        }
+      : {}),
+    ...(event === "group.join_request"
+      ? { groupId: firstString(data.groupId) ?? "", requestMethod: firstString(data.method) }
       : {}),
     ...(eventMessageId ? { eventMessageId } : {}),
     ...(responseMessageId ? { responseMessageId } : {}),
@@ -1448,10 +1466,12 @@ export async function postEventWebhook(
   destination: EventWebhookDestination,
   payload: EventWebhookBody,
   timeoutMs: number,
-  fetchRequest: typeof fetch = fetch,
+  // Use the client from the same Undici version as Agent: Node's bundled fetch
+  // can still use the legacy dispatcher contract.
+  fetchRequest: typeof fetch | typeof undiciFetch = undiciFetch,
   resolveDns: EventWebhookDnsResolver = resolveWebhookDns,
 ): Promise<void> {
-  let response: Response | undefined;
+  let response: Response | Awaited<ReturnType<typeof undiciFetch>> | undefined;
   let dispatcher: Agent | undefined;
   try {
     const url = new URL(destination.url);
@@ -1483,12 +1503,12 @@ export async function postEventWebhook(
     try {
       response = await fetchRequest(destination.url, {
         method: "POST",
-        headers: createEventWebhookHeaders(body, destination),
+        headers: Object.fromEntries(createEventWebhookHeaders(body, destination)),
         body,
         signal: AbortSignal.timeout(timeoutMs),
         redirect: "error",
         dispatcher,
-      } as RequestInit & { dispatcher: Agent });
+      });
     } catch (error) {
       const diagnostics = readWebhookFailureDiagnostics(error, destination);
       if (isRetryableNetworkError(error)) {
