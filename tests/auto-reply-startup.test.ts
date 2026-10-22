@@ -6,6 +6,7 @@ const state = vi.hoisted(() => ({
     ((event: string, id: string, payload: NormalizedMessageEvent) => void) | undefined,
   enqueue: vi.fn(async () => ({ status: "queued", jobId: "startup-reply" })),
   connected: vi.fn(async () => undefined),
+  schedulerStarted: vi.fn(),
 }));
 vi.mock("../src/services/instance-manager.js", () => ({
   InstanceManager: class {
@@ -33,6 +34,12 @@ vi.mock("../src/services/instance-manager.js", () => ({
         },
       });
     }
+  },
+}));
+vi.mock("../src/db/client.js", () => ({ sqlite: {} }));
+vi.mock("../src/services/scheduler.js", () => ({
+  MessageScheduler: class {
+    start = state.schedulerStarted;
   },
 }));
 vi.mock("../src/services/message-queue.js", () => ({
@@ -76,6 +83,7 @@ it("answers an eligible message emitted while reconnecting existing instances at
   vi.stubEnv("WA_AUTO_REPLY_TEXT", "startup response");
   await import("../src/index.js");
   await vi.waitFor(() => expect(state.connected).toHaveBeenCalledTimes(1));
+  expect(state.schedulerStarted).toHaveBeenCalledTimes(1);
   expect(state.enqueue).toHaveBeenCalledExactlyOnceWith(
     "startup",
     "5511999999999@s.whatsapp.net",

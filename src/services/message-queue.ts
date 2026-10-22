@@ -60,6 +60,12 @@ export interface EnqueueResult {
   jobId: string;
 }
 
+export type OutboundJobState =
+  | { state: "pending" }
+  | { state: "completed" }
+  | { state: "missing" }
+  | { state: "failed"; error: string };
+
 export interface QueueStats {
   waiting: number;
   active: number;
@@ -209,6 +215,7 @@ export class MessageQueue {
     to: string,
     content: MessageContent,
     channel: "baileys" | "cloud" = "baileys",
+    jobId?: string,
   ): Promise<EnqueueResult> {
     if ("quotedMessageId" in content && content.quotedMessageId && this.getAdapter) {
       this.getAdapter(instanceId).validateQuotedMessage?.(to, content.quotedMessageId);
@@ -216,8 +223,35 @@ export class MessageQueue {
 
     const queue = this.getOrCreateQueue(instanceId, channel);
     const jobData: OutboundJob = { instanceId, to, content };
-    const job = await queue.add("send", jobData);
+    // Retain scheduled results until the scheduler observes them after a restart.
+    const job = await queue.add(
+      "send",
+      jobData,
+      jobId ? { jobId, removeOnComplete: false, removeOnFail: false } : undefined,
+    );
     return { status: "queued", jobId: job.id ?? "" };
+  }
+
+  /** Reading a persisted scheduled job also starts its worker after a restart. */
+  async getMessageJobState(
+    instanceId: string,
+    jobId: string,
+    channel: ChannelType,
+  ): Promise<OutboundJobState> {
+    const job = await this.getOrCreateQueue(instanceId, channel).getJob(jobId);
+    if (!job) return { state: "missing" };
+    const state = await job.getState();
+    if (state === "completed") return { state: "completed" };
+    if (state === "failed")
+      return { state: "failed", error: job.failedReason || "Outbound message failed" };
+    if (state === "unknown") return { state: "missing" };
+    return { state: "pending" };
+  }
+
+  /** Called only after a terminal outcome has been committed to SQLite. */
+  async removeScheduledJob(instanceId: string, jobId: string, channel: ChannelType): Promise<void> {
+    const job = await this.getOrCreateQueue(instanceId, channel).getJob(jobId);
+    if (job) await job.remove();
   }
 
   /** Enqueue a bounded Baileys album through the same per-instance rate limiter as messages. */

@@ -1,4 +1,6 @@
 import "dotenv/config";
+import { sqlite } from "./db/client.js";
+import { MessageScheduler } from "./services/scheduler.js";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { timingSafeEqual } from "node:crypto";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
@@ -114,6 +116,22 @@ async function initServices(chatwootConfig: ChatwootConfig) {
   const maintenance = new MaintenanceService(instanceManager);
   await maintenance.start();
 
+  const scheduler = new MessageScheduler({
+    sqlite,
+    enqueue: (instanceId, to, content, channel, jobId) =>
+      messageQueue.enqueueMessage(instanceId, to, content, channel, jobId),
+    getJobState: (instanceId, jobId, channel) =>
+      messageQueue.getMessageJobState(instanceId, jobId, channel),
+    removeJob: (instanceId, jobId, channel) =>
+      messageQueue.removeScheduledJob(instanceId, jobId, channel),
+    resolveChannel: (instanceId) => instanceManager.getInstanceChannel(instanceId),
+    instanceExists: (instanceId) => {
+      instanceManager.getInstance(instanceId);
+    },
+    driver: "sqlite",
+  });
+  scheduler.start();
+
   const presencePulse = new PresencePulseScheduler({
     config: presencePulseConfig,
     listDevices: () =>
@@ -138,6 +156,7 @@ async function initServices(chatwootConfig: ChatwootConfig) {
     maintenance,
     presencePulse,
     autoReply,
+    scheduler,
   };
 }
 
@@ -153,8 +172,14 @@ async function startHttp(
     maintenance,
     presencePulse,
     autoReply,
+    scheduler,
   } = await initServices(chatwootConfig);
-  const mcpSessions = new McpHttpSessionManager(instanceManager, messageQueue, eventWebhook);
+  const mcpSessions = new McpHttpSessionManager(
+    instanceManager,
+    messageQueue,
+    scheduler,
+    eventWebhook,
+  );
   const startTime = Date.now();
   const dashboardEvents = new DashboardEventLog();
   if (dashboardConfig.enabled) {
@@ -309,13 +334,11 @@ async function startHttp(
     presencePulse.stop();
     autoReply.stop();
     // Finish in-flight Chatwoot replies before the outbound queue closes.
-    servicesClosePromise ??= chatwoot
-      .stop()
-      .then(() =>
-        Promise.all([messageQueue.close(), eventWebhook.close(), maintenance.stop()]).then(
-          () => undefined,
-        ),
-      );
+    servicesClosePromise ??= Promise.all([scheduler.stop(), chatwoot.stop()]).then(() =>
+      Promise.all([messageQueue.close(), eventWebhook.close(), maintenance.stop()]).then(
+        () => undefined,
+      ),
+    );
     return servicesClosePromise;
   };
   httpServer.on("close", () => {
@@ -359,21 +382,25 @@ async function startStdio(chatwootConfig: ChatwootConfig): Promise<void> {
     maintenance,
     presencePulse,
     autoReply,
+    scheduler,
   } = await initServices(chatwootConfig);
-  const { server: mcpServer } = createMcpServer(instanceManager, messageQueue, eventWebhook);
+  const { server: mcpServer } = createMcpServer(
+    instanceManager,
+    messageQueue,
+    scheduler,
+    eventWebhook,
+  );
   const onServerClose = mcpServer.server.onclose;
   let servicesClosePromise: Promise<void> | null = null;
   const closeServices = (): Promise<void> => {
     presencePulse.stop();
     autoReply.stop();
     // Finish in-flight Chatwoot replies before the outbound queue closes.
-    servicesClosePromise ??= chatwoot
-      .stop()
-      .then(() =>
-        Promise.all([messageQueue.close(), eventWebhook.close(), maintenance.stop()]).then(
-          () => undefined,
-        ),
-      );
+    servicesClosePromise ??= Promise.all([scheduler.stop(), chatwoot.stop()]).then(() =>
+      Promise.all([messageQueue.close(), eventWebhook.close(), maintenance.stop()]).then(
+        () => undefined,
+      ),
+    );
     return servicesClosePromise;
   };
   mcpServer.server.onclose = () => {

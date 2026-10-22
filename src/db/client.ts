@@ -9,6 +9,7 @@ import { drizzle } from "drizzle-orm/better-sqlite3";
 import { AUTO_REPLY_COOLDOWNS_TABLE_SQL } from "./auto-reply-cooldown-sql.js";
 import { INSTANCE_WEBHOOKS_SCHEMA_SQL } from "./instance-webhooks-schema.js";
 import * as schema from "./schema.js";
+import { createScheduledMessagesTable } from "./scheduled-messages.js";
 
 const DB_PATH = resolve(process.env.WA_DATABASE_PATH?.trim() || "data/whatsapp.db");
 
@@ -294,6 +295,7 @@ try {
 }
 
 initializeDatabase();
+createScheduledMessagesTable(sqlite);
 
 try {
   sqlite.exec(`ALTER TABLE event_responses ADD COLUMN extra_guest_count INTEGER`);

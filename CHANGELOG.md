@@ -47,6 +47,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Added five tools for one-shot and daily, weekly, or monthly scheduled sends
+  ([#139](https://github.com/delltrak/wamcp/issues/139), [#136](https://github.com/delltrak/wamcp/pull/136)).
+  Schedules persist in the existing SQLite database; `WA_SCHEDULER_ENABLED=false` by default.
+  Each schedule uses an IANA timezone (default `America/Bahia`), a one-year initial horizon,
+  and optional end/occurrence limits. Invalid RFC3339 calendar dates are rejected.
+  Pause and cancel remain available with the gate off. Missed occurrences follow `skip` or `send`.
+  Sends use the existing outbound limiter; only completed queue jobs count as successful
+  occurrences. Persisted job identities reconcile success/failure across restarts, and shutdown
+  waits for an active tick. Ambiguous or missing queue outcomes are never submitted again.
+  Failed recurring occurrences advance without consuming the success limit. This does not
+  guarantee exactly-once delivery across provider timeouts; real-account validation is pending.
 - Added an operations dashboard at `/dashboard`, disabled by default and protected by
   separate Basic credentials, login throttling, CSP, and same-origin JSON mutation checks
   ([#149](https://github.com/delltrak/wamcp/issues/149),

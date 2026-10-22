@@ -50,6 +50,13 @@
       "when": 1792468215207,
       "tag": "0006_group_history_sends",
       "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "6",
+      "when": 1792468215208,
+      "tag": "0007_scheduled_messages",
+      "breakpoints": true
     }
   ]
 }
