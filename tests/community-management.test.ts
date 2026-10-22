@@ -66,7 +66,7 @@ function fixture() {
       metadata(GROUP, { linkedParent: PARENT }),
     ),
     communityUpdateSubject: vi.fn(async () => {}),
-    communityUpdateDescription: vi.fn(async () => {}),
+    groupUpdateDescription: vi.fn(async () => {}),
     updateProfilePicture: vi.fn(async () => {}),
     removeProfilePicture: vi.fn(async () => {}),
     communityParticipantsUpdate: vi.fn(async (_id: string, ids: string[], _action: string) =>
@@ -80,8 +80,8 @@ function fixture() {
     ),
     communityInviteCode: vi.fn(async (): Promise<string | undefined> => "FixtureCode"),
     communityRevokeInvite: vi.fn(async (): Promise<string | undefined> => "ReplacementCode"),
-    communityGetInviteInfo: vi.fn(async () => parent),
-    communityAcceptInvite: vi.fn(async (): Promise<string | undefined> => PARENT),
+    groupGetInviteInfo: vi.fn(async () => parent),
+    groupAcceptInvite: vi.fn(async (): Promise<string | undefined> => PARENT),
     communityAcceptInviteV4: vi.fn(async () => PARENT),
     communityRevokeInviteV4: vi.fn(async () => true),
     communitySettingUpdate: vi.fn(async () => {}),
@@ -152,7 +152,7 @@ describe("community management", () => {
       const { adapter, socket } = fixture();
       await expect(run(adapter)).rejects.toThrow("writes are disabled");
       expect(socket.groupMetadata).not.toHaveBeenCalled();
-      expect(socket.communityGetInviteInfo).not.toHaveBeenCalled();
+      expect(socket.groupGetInviteInfo).not.toHaveBeenCalled();
     },
   );
   it.each(mutations.filter(([name]) => !["leave", "join", "join v4"].includes(name)))(
@@ -174,7 +174,7 @@ describe("community management", () => {
     await adapter.updateCommunityPicture(PARENT, "aW1hZ2U=");
     await adapter.updateCommunityPicture(PARENT, null);
     expect(socket.communityUpdateSubject).toHaveBeenCalledWith(PARENT, "Renamed");
-    expect(socket.communityUpdateDescription).toHaveBeenCalledWith(PARENT, "");
+    expect(socket.groupUpdateDescription).toHaveBeenCalledWith(PARENT, "");
     expect(prepare).toHaveBeenCalledWith("aW1hZ2U=");
     expect(socket.updateProfilePicture).toHaveBeenCalledWith(PARENT, Buffer.from("jpeg"));
     expect(socket.removeProfilePicture).toHaveBeenCalledWith(PARENT);
@@ -282,15 +282,15 @@ describe("community management", () => {
     await expect(adapter.getCommunityInviteCode(PARENT, true)).rejects.toThrow(
       "may have been reset",
     );
-    socket.communityAcceptInvite.mockResolvedValue(undefined);
+    socket.groupAcceptInvite.mockResolvedValue(undefined);
     expect(await adapter.joinCommunity("FixtureCode")).toEqual({
       communityId: null,
       status: "unknown",
       retrySafe: false,
     });
-    socket.communityGetInviteInfo.mockResolvedValue(metadata(GROUP));
+    socket.groupGetInviteInfo.mockResolvedValue(metadata(GROUP));
     await expect(adapter.joinCommunity("FixtureCode")).rejects.toThrow("could not be verified");
-    expect(socket.communityAcceptInvite).toHaveBeenCalledOnce();
+    expect(socket.groupAcceptInvite).toHaveBeenCalledOnce();
     await expect(adapter.getCommunityInviteInfo("https://evil.example/invite")).rejects.toThrow();
   });
   it("only reports joined when membership is confirmed, not merely an invitation acknowledgement", async () => {
@@ -302,7 +302,7 @@ describe("community management", () => {
       status: "unknown",
       retrySafe: false,
     });
-    expect(socket.communityAcceptInvite).toHaveBeenCalledTimes(2);
+    expect(socket.groupAcceptInvite).toHaveBeenCalledTimes(2);
   });
   it("accepts V4 invitations only before expiry and for the verified parent", async () => {
     const { adapter, socket } = fixture();

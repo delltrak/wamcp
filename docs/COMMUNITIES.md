@@ -47,7 +47,8 @@ No automatically repeated multi-step administrative writes are introduced.
 
 - Discovery uses `groupFetchAllParticipating` and filters explicit parent markers. In rc14 the native
   community-list helper sends the same IQ but expects a different response container. Details use
-  `groupMetadata` and reject non-community parents.
+  `groupMetadata` and reject non-community parents. Description editing and invitation inspection/joining
+  also use the standard group helpers, retaining explicit community checks before mutations.
 - Metadata preserves `isCommunity`, `isCommunityAnnounce`, `linkedParent`, `joinApprovalMode`,
   and `memberAddMode`. Missing fields remain `null`.
 - The hierarchy query verifies the parent, queries visible links, and crosses them with participating
@@ -128,7 +129,7 @@ that mention is not sufficient evidence for an irreversible protocol operation.
 | Group visibility and non-admin subgroup-creation switches | No dedicated, typed management helper verified in this version; not exposed as arbitrary protocol commands. |
 | Accept a V4 invitation message | Implemented with sender, code, expiry and verified parent; does not rewrite the stored source message. |
 | Complete discovery/roster | Limited by server visibility and returned participant metadata. |
-| Native discovery/parsing | Community list/detail use group helpers with explicit parent markers; specialized invitation responses still need live fixtures. |
+| Native discovery/parsing | List/detail, description and invitation parsing use group helpers with explicit parent markers; live fixtures remain pending. |
 | PN/LID in native community participant parsing | Upstream contains an incomplete PN/LID handling TODO; preserve IDs and avoid invented phone numbers. |
 | Physical delivery and mobile UI | Not validated by mocks or in-memory MCP tests. |
 

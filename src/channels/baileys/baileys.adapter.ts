@@ -3934,7 +3934,7 @@ export class BaileysAdapter implements ChannelAdapter {
   async updateCommunityDescription(communityId: string, description: string): Promise<void> {
     this.requireGroupWritesEnabled();
     const parent = await this.requireCommunity(communityId, true);
-    await this.getSock().communityUpdateDescription(parent.id, description);
+    await this.getSock().groupUpdateDescription(parent.id, description);
   }
 
   async updateCommunityPicture(communityId: string, image: string | null): Promise<void> {
@@ -4042,8 +4042,8 @@ export class BaileysAdapter implements ChannelAdapter {
   }
 
   async getCommunityInviteInfo(code: string): Promise<GroupMetadata> {
-    const metadata = await this.getSock().communityGetInviteInfo(normalizeGroupInviteCode(code));
-    if (metadata.isCommunity !== true || metadata.linkedParent) {
+    const metadata = await this.getSock().groupGetInviteInfo(normalizeGroupInviteCode(code));
+    if (!isValidGroupId(metadata.id) || metadata.isCommunity !== true || metadata.linkedParent) {
       throw new Error("This invitation could not be verified as a community invitation");
     }
     return this.normalizeGroupMetadata(metadata);
@@ -4055,7 +4055,7 @@ export class BaileysAdapter implements ChannelAdapter {
     this.requireGroupWritesEnabled();
     const normalized = normalizeGroupInviteCode(code);
     const expected = await this.getCommunityInviteInfo(normalized);
-    const jid = await this.getSock().communityAcceptInvite(normalized);
+    const jid = await this.getSock().groupAcceptInvite(normalized);
     return this.confirmCommunityJoin(expected.jid, jid);
   }
 
