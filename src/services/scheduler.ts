@@ -536,7 +536,7 @@ export class MessageScheduler {
   private async hasDispatchBudget(instanceId: string): Promise<boolean> {
     const limit = await this.limitFor(instanceId);
     const now = this.now();
-    const recent = ((await this.dispatchedAt.get(instanceId)) ?? []).filter(
+    const recent = (this.dispatchedAt.get(instanceId) ?? []).filter(
       (at) => now - at < SCHEDULER_RATE_WINDOW_MS,
     );
     this.dispatchedAt.set(instanceId, recent);
@@ -545,7 +545,7 @@ export class MessageScheduler {
 
   private async noteDispatch(instanceId: string): Promise<void> {
     const now = this.now();
-    const recent = ((await this.dispatchedAt.get(instanceId)) ?? []).filter(
+    const recent = (this.dispatchedAt.get(instanceId) ?? []).filter(
       (at) => now - at < SCHEDULER_RATE_WINDOW_MS,
     );
     recent.push(now);

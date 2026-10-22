@@ -106,10 +106,16 @@ function connectionAttempt(adapter: BaileysAdapter): Promise<void> | null {
 }
 
 async function advanceTimersAndConnections(milliseconds: number): Promise<void> {
-  await vi.advanceTimersByTimeAsync(milliseconds);
-  // Fake timers only flush timer callbacks, not the PostgreSQL I/O started by reconnect.
-  // Await the attempt that the timer actually started; never trigger connect() from the fixture.
-  await Promise.all(adapters.map(connectionAttempt));
+  // Stop at each possible reconnect boundary so PostgreSQL I/O can finish before
+  // advancing through its query timeout. A single large jump can time out a new
+  // connection before the real event loop has had a chance to answer its queries.
+  for (let remaining = milliseconds; remaining > 0;) {
+    const step = Math.min(remaining, RECONNECT_INITIAL_DELAY_MS);
+    await vi.advanceTimersByTimeAsync(step);
+    // Await only attempts started by timers; never trigger connect() from the fixture.
+    await Promise.all(adapters.map(connectionAttempt));
+    remaining -= step;
+  }
 }
 
 async function closeSocket(index: number, statusCode: number): Promise<void> {

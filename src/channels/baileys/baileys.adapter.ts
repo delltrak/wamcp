@@ -2204,12 +2204,12 @@ export class BaileysAdapter implements ChannelAdapter {
     this.sock = sock;
     this.lastPresenceUpdateAt.clear();
     this.presenceSubscriptions.clear();
-    this.bindEvents(sock);
-    if (this.sock !== sock) return;
-    this.emit("connection.changed", {
+    const connecting = this.emit("connection.changed", {
       instanceId: this.instanceId,
       status: "connecting",
     });
+    this.bindEvents(sock, connecting);
+    await connecting;
   }
 
   async disconnect(): Promise<void> {
@@ -7414,8 +7414,8 @@ export class BaileysAdapter implements ChannelAdapter {
     }
   }
 
-  private bindEvents(sock: WASocket): void {
-    let connectionUpdates: Promise<void> = Promise.resolve();
+  private bindEvents(sock: WASocket, initialUpdate: Promise<void> = Promise.resolve()): void {
+    let connectionUpdates: Promise<void> = initialUpdate;
     const processConnectionUpdate = async (update: BaileysEventMap["connection.update"]) => {
       try {
         if (this.sock !== null && this.sock !== sock) return;

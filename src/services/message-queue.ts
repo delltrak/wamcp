@@ -138,7 +138,7 @@ export class MessageQueue {
               );
             }
             if ("quotedMessageId" in data.content && data.content.quotedMessageId) {
-              adapter.validateQuotedMessage?.(target, data.content.quotedMessageId);
+              await adapter.validateQuotedMessage?.(target, data.content.quotedMessageId);
             }
             await adapter.sendMessage(target, data.content);
           } else if (data.kind === "group-member-label") {
@@ -191,7 +191,7 @@ export class MessageQueue {
     const adapter = this.getAdapter(instanceId);
     const to = await adapter.resolveCommunityAnnouncementGroup(communityId, true);
     if ("quotedMessageId" in content && content.quotedMessageId) {
-      adapter.validateQuotedMessage?.(to, content.quotedMessageId);
+      await adapter.validateQuotedMessage?.(to, content.quotedMessageId);
     }
     const data: OutboundJob = {
       kind: "community-announcement",
