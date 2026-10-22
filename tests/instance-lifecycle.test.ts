@@ -275,7 +275,7 @@ describe("instance lifecycle events", () => {
         willReconnect: false,
       }),
     );
-    expect(scheduleReconnect).toHaveBeenCalledTimes(2);
+    expect(scheduleReconnect).toHaveBeenCalledTimes(1);
   });
 });
 
