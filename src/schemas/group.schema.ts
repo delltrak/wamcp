@@ -41,7 +41,7 @@ export const SendGroupHistoryToMemberSchema = z
       .int()
       .optional()
       .describe(
-        "How many recent shareable messages to include (defaults to 50; values are clamped to 25–100). Revoked and view-once messages are skipped.",
+        "How many recent shareable messages to include (defaults to 50; values are clamped to 25–100). Revoked, view-once, disappearing, and unverifiable stored messages are skipped.",
       ),
   })
   .strict();

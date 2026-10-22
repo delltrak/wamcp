@@ -18,6 +18,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Added gated `wa_send_group_history_to_member` and opt-in automatic history digests for
+  direct-add stubs authored by this account ([#106](https://github.com/delltrak/wamcp/issues/106),
+  [#116](https://github.com/delltrak/wamcp/pull/116)). This Baileys-only workaround sends at most
+  five text chunks from 25–100 requested local messages. Current PN/LID membership, disappearing
+  timers, and unchanged shareable source messages are rechecked at delivery. Received edits, revocations,
+  and deletions are persisted with privacy restrictions preserved; view-once, individually disappearing, and unverifiable raw messages
+  are excluded. Automatic claims survive restart but can leave partial sends after an ambiguous
+  enqueue/crash; queue acceptance is not delivery, and pending workers resume lazily after restart.
+  Live-account behavior remains unverified, and approved joins encoded as own direct-add stubs
+  cannot be distinguished upstream.
 - Added optional webhook JID ignore rules with exact addresses, user-part wildcards and
   chat-only domain patterns ([#140](https://github.com/delltrak/wamcp/issues/140),
   [#159](https://github.com/delltrak/wamcp/pull/159)). Group sender phone aliases from Baileys

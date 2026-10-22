@@ -22,6 +22,7 @@ import {
   prepareGroupHistoryChunks,
   registerGroupHistoryOnJoin,
   type GroupHistorySendResult,
+  sendGroupHistoryToMember,
 } from "../src/services/group-history.js";
 import {
   assertGroupHistoryWritesEnabled,
@@ -304,6 +305,7 @@ describe("wa_send_group_history_to_member", () => {
       "5511000000001@s.whatsapp.net",
       expect.any(String),
       "baileys",
+      expect.objectContaining({ groupJid: GROUP_JID, sources: expect.any(Array) }),
     );
   });
 
@@ -350,7 +352,30 @@ describe("wa_send_group_history_to_member", () => {
       MEMBER_JID,
       expect.stringContaining("hello"),
       "baileys",
+      expect.objectContaining({ groupJid: GROUP_JID, sources: expect.any(Array) }),
     );
+  });
+
+  it("does not route a verified LID member to an unverified phone alias", async () => {
+    const adapter = createAdapter({
+      getGroupMetadata: vi.fn(async () =>
+        groupMetadata({
+          participants: [
+            { jid: MEMBER_LID, role: "member", phone: null, isAdmin: false, isSuperAdmin: false },
+          ],
+        }),
+      ),
+    });
+    const queue = createQueue();
+    await sendGroupHistoryToMember({
+      instanceId: INSTANCE_ID,
+      groupJid: GROUP_JID,
+      participant: "5511999999999@s.whatsapp.net",
+      participantAliases: [MEMBER_LID],
+      adapter,
+      messageQueue: queue,
+    });
+    expect(queue.enqueueGroupHistoryMessage.mock.calls[0]?.[1]).toBe(MEMBER_LID);
   });
 
   it("refuses groups with disappearing messages", async () => {
@@ -410,6 +435,25 @@ describe("wa_send_group_history_to_member", () => {
     expect(sent).not.toContain("view once secret");
     expect(isShareableGroupHistoryMessage(hidden)).toBe(false);
     expect(isShareableGroupHistoryMessage(revoked[0]!)).toBe(false);
+  });
+
+  it("does not copy old disappearing messages after the group timer is disabled", async () => {
+    const hidden = message({
+      id: "ephemeral",
+      timestamp: 2,
+      content: "temporary secret",
+      ephemeral: true,
+    } as Partial<Message> & Pick<Message, "id" | "timestamp">);
+    const visible = message({ id: "normal", timestamp: 1, content: "normal text" });
+    const adapter = createAdapter({ getMessages: vi.fn(async () => [hidden, visible]) });
+    const queue = createQueue();
+    const result = await invoke(registerTool(adapter, queue), {
+      instanceId: INSTANCE_ID,
+      groupJid: GROUP_JID,
+      participant: MEMBER_JID,
+    });
+    expect(responseData(result).messagesIncluded).toBe(1);
+    expect(queue.enqueueGroupHistoryMessage.mock.calls[0]?.[2]).not.toContain("temporary secret");
   });
 
   it("truncates lines, caps the digest at 5 chunks, and notes the remainder", async () => {
@@ -668,8 +712,28 @@ describe("automatic group history on direct adds", () => {
       MEMBER_JID,
       expect.any(String),
       "baileys",
+      expect.objectContaining({ groupJid: GROUP_JID, sources: expect.any(Array) }),
     );
     expect(isOwnGroupHistoryParticipant(OWN_PN, { phone: OWN_PN, lid: OWN_LID })).toBe(true);
+  });
+
+  it("leaves a failed preparation unclaimed so a redelivered stub can try again", async () => {
+    vi.stubEnv("WA_GROUP_HISTORY_ON_JOIN", "true");
+    const fixture = autoJoinFixture();
+    vi.mocked(fixture.adapter.getContacts).mockRejectedValueOnce(
+      new Error("temporary contact failure"),
+    );
+    publishOwnDirectParticipantAdds(INSTANCE_ID, [directAddStub("retry-preparation")], {
+      phone: OWN_PN,
+      lid: OWN_LID,
+    });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(fixture.queue.enqueueGroupHistoryMessage).not.toHaveBeenCalled();
+    publishOwnDirectParticipantAdds(INSTANCE_ID, [directAddStub("retry-preparation")], {
+      phone: OWN_PN,
+      lid: OWN_LID,
+    });
+    await vi.waitFor(() => expect(fixture.queue.enqueueGroupHistoryMessage).toHaveBeenCalledOnce());
   });
 
   it("does not send a redelivered stub again after the id was recorded", async () => {

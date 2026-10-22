@@ -16,6 +16,7 @@ import {
 import { createChildLogger } from "../utils/logger.js";
 import { QuotedMessageResolutionError } from "../utils/quoted-message.js";
 import { assertGroupHistoryWritesEnabled } from "../utils/group-history-error.js";
+import { validateGroupHistoryDelivery, type GroupHistoryDeliveryContext } from "./group-history.js";
 import { getRedisConnectionOptions } from "./redis.js";
 
 const logger = createChildLogger({ service: "message-queue" });
@@ -48,6 +49,7 @@ export type OutboundJob =
     }
   | {
       kind: "group-history";
+      validation?: GroupHistoryDeliveryContext;
       instanceId: string;
       to: string;
       content: Extract<MessageContent, { type: "text" }>;
@@ -139,6 +141,7 @@ export class MessageQueue {
             await adapter.sendMediaAlbum(data.to, data.images);
           } else if (data.kind === "group-history") {
             assertGroupHistoryWritesEnabled();
+            await validateGroupHistoryDelivery(adapter, data.to, data.validation);
             await adapter.sendMessage(data.to, data.content);
           } else {
             await adapter.sendMessage(data.to, data.content);
@@ -258,6 +261,7 @@ export class MessageQueue {
     to: string,
     text: string,
     channel: ChannelType = "baileys",
+    validation?: GroupHistoryDeliveryContext,
   ): Promise<EnqueueResult> {
     if (channel !== "baileys") {
       throw new Error("Group history sharing is only supported on Baileys");
@@ -266,11 +270,12 @@ export class MessageQueue {
     const queue = this.getOrCreateQueue(instanceId, channel);
     const jobData: OutboundJob = {
       kind: "group-history",
+      validation,
       instanceId,
       to,
       content: { type: "text", text },
     };
-    const job = await queue.add("group-history", jobData);
+    const job = await queue.add("group-history", jobData, { attempts: 1 });
     return { status: "queued", jobId: job.id ?? "" };
   }
 

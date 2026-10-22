@@ -1344,15 +1344,32 @@ to a current member's direct chat. Baileys rc14 cannot use WhatsApp's native rec
 sharing, so this sends plain text as a workaround. It requires `WA_GROUP_WRITES_ENABLED=true`; the
 app-state write flag alone does not enable it. The participant must match a current group
 participant by PN or LID. The direct message is addressed to the member's phone JID when group
-metadata (or, for automatic sends, the stub) has one. Groups with `ephemeralDuration` greater than
+metadata has one. Unverified phone aliases from join stubs are never used as destinations. Groups with `ephemeralDuration` greater than
 0 are refused entirely, so disappearing messages are never copied into a permanent chat. Revoked
-messages and view-once messages are skipped; the read widens until the requested count of shareable
+messages, view-once messages, individually disappearing messages (even after the group timer is
+disabled), and rows without a verifiable raw payload are skipped; the read widens until the requested count of shareable
 messages is reached or 1,000 stored rows have been scanned. Each digest line is truncated to 400
 characters. At most 5 chunks are queued. Chunks are numbered `(2/4)` when there is more than one.
 If the cap is reached, the oldest messages are omitted with a `…mais N` line and the newest are
 sent in chronological order. If enqueue fails after at least one
 chunk was accepted, the tool still returns that `chunksSent` count. Digest chunks use the
 per-instance outbound message limiter.
+
+`chunksSent` counts chunks accepted by Redis, not confirmed WhatsApp deliveries. Before every
+chunk the worker rechecks current PN/LID membership, the group timer, and source-message
+fingerprints against at most 1,000 stored rows. Revocation, edits, disappearance, unverifiable
+raw content, or a source falling outside that window cancel the remaining job. Old persisted
+jobs without validation context fail closed. Each chunk has one normal queue attempt because
+an ambiguous send failure may already have delivered it; stalled-job recovery can still replay
+a job, so exactly-once delivery is not guaranteed.
+
+The automatic stub claim is durable and made after preparation, immediately before queueing.
+A crash or enqueue failure after the claim can leave an incomplete digest; redelivery does not
+automatically resend it. Review the received chunks before manually requesting another digest.
+Outbound workers currently start lazily: after process restart pending jobs resume when another
+outbound job starts that instance's worker. This change does not add startup queue recovery.
+Live-account delivery remains unverified; all tests use synthetic messages and mocked sockets.
+
 
 Optional automatic sending is controlled by `WA_GROUP_HISTORY_ON_JOIN` (default `false`, only
 `true` or `false`) and `WA_GROUP_HISTORY_ON_JOIN_COUNT` (default `50`, an integer clamped to

@@ -139,6 +139,7 @@ import {
   unwrapMessageContent,
   extractQuotedMessageId,
   isViewOnceMessage,
+  isEphemeralMessage,
   isMessageForwarded,
   getChatJid,
   getSenderJid,
@@ -5144,6 +5145,10 @@ export class BaileysAdapter implements ChannelAdapter {
         status: r.status as Message["status"],
         timestamp: r.timestamp,
         ...(raw && isViewOnceMessage(raw) ? { viewOnce: true } : {}),
+        ...(raw && isEphemeralMessage(raw) ? { ephemeral: true } : {}),
+        ...(!raw?.message || typeof raw.message !== "object" || Array.isArray(raw.message)
+          ? { historySharingBlocked: true }
+          : {}),
         ...(r.pushName ? { pushName: r.pushName } : {}),
         starred: r.starred === 1,
         ...(labels.length ? { labels } : {}),
@@ -6307,6 +6312,50 @@ export class BaileysAdapter implements ChannelAdapter {
     }
   }
 
+  private persistMessageEdit(
+    chatId: string,
+    messageId: string,
+    content: NonNullable<WAMessage["message"]>,
+  ): void {
+    if (!chatId || !messageId) return;
+    const filter = and(
+      eq(messagesTable.instanceId, this.instanceId),
+      eq(messagesTable.chatId, chatId),
+      eq(messagesTable.id, messageId),
+    );
+    const row = db
+      .select({ rawData: messagesTable.rawData })
+      .from(messagesTable)
+      .where(filter)
+      .get();
+    if (!row) return;
+    let original: WAMessage | undefined;
+    try {
+      original = row.rawData
+        ? (JSON.parse(row.rawData, BufferJSON.reviver) as WAMessage)
+        : undefined;
+    } catch {
+      /* Keep unverifiable history blocked. */
+    }
+    let replacement = content;
+    if (isViewOnceMessage(original)) replacement = { viewOnceMessage: { message: replacement } };
+    if (isEphemeralMessage(original)) replacement = { ephemeralMessage: { message: replacement } };
+    const updated: WAMessage = {
+      ...original,
+      key: original?.key ?? { remoteJid: chatId, id: messageId },
+      message: replacement,
+    };
+    const details = extractMessageDetails(updated);
+    db.update(messagesTable)
+      .set({
+        type: details.type,
+        content: details.content,
+        rawData: original?.message ? JSON.stringify(updated, BufferJSON.replacer) : null,
+      })
+      .where(filter)
+      .run();
+  }
+
   private updateMessageStatus(
     messageId: string,
     status: MessageDeliveryStatus,
@@ -7143,6 +7192,16 @@ export class BaileysAdapter implements ChannelAdapter {
               msg.key.remoteJid ?? "",
               unwrappedContent,
             );
+            if (
+              protocolMessage.editedMessage &&
+              typeof protocolMessage.editedMessage === "object"
+            ) {
+              this.persistMessageEdit(
+                editEvent.chatId,
+                editEvent.messageId,
+                protocolMessage.editedMessage as NonNullable<WAMessage["message"]>,
+              );
+            }
             this.emit("message.edited", editEvent);
             continue;
           }
@@ -7275,6 +7334,9 @@ export class BaileysAdapter implements ChannelAdapter {
           const messageId = update.key.id;
           const chatId = update.key.remoteJid;
           const receipt = typeof status === "number" ? receiptStatus[status] : undefined;
+          if (messageId && chatId && update.update.message?.editedMessage?.message) {
+            this.persistMessageEdit(chatId, messageId, update.update.message.editedMessage.message);
+          }
           if (receipt && messageId && chatId) {
             this.persistReceipt(
               chatId,
@@ -7305,7 +7367,7 @@ export class BaileysAdapter implements ChannelAdapter {
         }
         const normalized = normalizeMessagesUpdate(this.instanceId, events["messages.update"]);
         for (const event of normalized) {
-          this.updateMessageStatus(event.messageId, event.status);
+          this.updateMessageStatus(event.messageId, event.status, event.chatId);
           this.emit("message.updated", event);
         }
       }
@@ -7335,7 +7397,23 @@ export class BaileysAdapter implements ChannelAdapter {
 
       if (events["messages.delete"]) {
         const normalized = normalizeMessagesDelete(this.instanceId, events["messages.delete"]);
-        for (const event of normalized) this.emit("message.deleted", event);
+        for (const event of normalized) {
+          if (event.chatId && event.messageId)
+            this.updateMessageStatus(event.messageId, "revoked", event.chatId);
+          this.emit("message.deleted", event);
+        }
+        const deleted = events["messages.delete"];
+        if ("all" in deleted && deleted.all && deleted.jid) {
+          db.update(messagesTable)
+            .set({ status: "revoked" })
+            .where(
+              and(
+                eq(messagesTable.instanceId, this.instanceId),
+                eq(messagesTable.chatId, deleted.jid),
+              ),
+            )
+            .run();
+        }
       }
 
       if (events["messages.reaction"]) {

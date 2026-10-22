@@ -8,7 +8,9 @@ import {
 import { ownDirectParticipantAdds } from "../src/channels/baileys/group-history-event.js";
 import {
   isViewOnceMessage,
+  isEphemeralMessage,
   normalizeGroupParticipantsUpdate,
+  normalizeMessagesUpdate,
 } from "../src/channels/baileys/baileys.events.js";
 
 const GROUP_JID = "120363000000000001@g.us";
@@ -94,6 +96,19 @@ describe("Baileys direct-add stub detection", () => {
     ["join request", WAMessageStubType.GROUP_PARTICIPANT_ADD_REQUEST_JOIN],
   ])("ignores a %s stub even when this account is the author", (_name, type) => {
     expect(ownDirectParticipantAdds([stubMessage(type)], own)).toEqual([]);
+  });
+
+  it("does not transfer direct-add proof to a different participant in the same batch", () => {
+    const direct = stubMessage(WAMessageStubType.GROUP_PARTICIPANT_ADD);
+    const other = stubMessage(
+      WAMessageStubType.GROUP_PARTICIPANT_ADD,
+      { id: "333@lid", phoneNumber: "444@s.whatsapp.net" },
+      "other",
+    );
+    other.key.participant = "555@lid";
+    other.key.participantAlt = "666@s.whatsapp.net";
+    const targets = ownDirectParticipantAdds([direct, other], own).flatMap((add) => add.targets);
+    expect(targets).toEqual([{ identities: [MEMBER_LID, MEMBER_PN], phoneJid: MEMBER_PN }]);
   });
 
   it("requires our identity, a group, a message id, and a target", () => {
@@ -184,5 +199,47 @@ describe("view-once detection", () => {
       }),
     ).toBe(false);
     expect(isViewOnceMessage({ message: { conversation: "hello" } })).toBe(false);
+  });
+});
+
+describe("history privacy for received revocations", () => {
+  it("normalizes rc14 revoke updates without a numeric delivery status", () => {
+    expect(
+      normalizeMessagesUpdate("fixture", [
+        {
+          key: { remoteJid: GROUP_JID, id: "deleted" },
+          update: { message: null, messageStubType: WAMessageStubType.REVOKE },
+        },
+      ]),
+    ).toEqual([
+      { instanceId: "fixture", chatId: GROUP_JID, messageId: "deleted", status: "revoked" },
+    ]);
+  });
+});
+
+describe("raw disappearing-message detection", () => {
+  it.each([
+    { message: { ephemeralMessage: { message: { conversation: "secret" } } } },
+    { message: { extendedTextMessage: { text: "secret", contextInfo: { expiration: 86400 } } } },
+    { message: { conversation: "secret" }, ephemeralDuration: 86400 },
+  ])("detects privacy restrictions before unwrapping %#", (raw) => {
+    expect(isEphemeralMessage(raw)).toBe(true);
+  });
+  it("does not confuse a quoted ephemeral payload with the outer normal message", () => {
+    expect(
+      isEphemeralMessage({
+        message: {
+          extendedTextMessage: {
+            text: "normal",
+            contextInfo: { quotedMessage: { ephemeralMessage: { message: {} } } },
+          },
+        },
+      }),
+    ).toBe(false);
+  });
+  it("detects view-once through more than six wrapper levels", () => {
+    let content: unknown = { imageMessage: { viewOnce: true } };
+    for (let i = 0; i < 5; i++) content = { deviceSentMessage: { message: content } };
+    expect(isViewOnceMessage({ message: content })).toBe(true);
   });
 });

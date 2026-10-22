@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+import { UnrecoverableError } from "bullmq";
 import { jidNormalizedUser } from "@whiskeysockets/baileys";
 import type { ChannelAdapter } from "../channels/channel.interface.js";
 import {
@@ -220,7 +222,12 @@ export function formatGroupHistoryDigest(options: {
 }
 
 export function isShareableGroupHistoryMessage(message: Message): boolean {
-  return message.status !== "revoked" && message.viewOnce !== true;
+  return (
+    message.status !== "revoked" &&
+    message.viewOnce !== true &&
+    message.ephemeral !== true &&
+    message.historySharingBlocked !== true
+  );
 }
 
 function truncateLine(line: string, maxChars: number): string {
@@ -384,18 +391,69 @@ function matchesMember(alias: string, member: GroupParticipant): boolean {
   return false;
 }
 
-function directMessageDestination(member: GroupParticipant, aliases: string[]): string {
-  const phone = member.phone?.replace(/\D/g, "");
-  if (phone) return `${phone}@s.whatsapp.net`;
-  for (const alias of aliases) {
-    if (!alias.includes("@")) continue;
-    const normalized = jidNormalizedUser(alias.trim());
-    if (normalized.endsWith("@s.whatsapp.net")) return normalized;
+function directMessageDestination(member: GroupParticipant): string {
+  const phone = member.phone ? normalizeIdentity(member.phone) : "";
+  if (phone) return jidNormalizedUser(normalizeGroupHistoryParticipant(phone));
+  return jidNormalizedUser(member.jid) || member.jid;
+}
+
+export interface GroupHistoryDeliveryContext {
+  groupJid: string;
+  sources: Array<{ id: string; fingerprint: string }>;
+}
+
+export function groupHistoryMessageFingerprint(message: Message): string {
+  // Delivery/read receipts can change while waiting. Only fingerprint content represented in the digest.
+  return createHash("sha256")
+    .update(
+      JSON.stringify([
+        message.id,
+        message.senderId,
+        message.type,
+        message.content,
+        message.mediaCaption,
+        message.caption,
+        message.mediaFileName,
+        message.fileName,
+        message.timestamp,
+        message.isFromMe,
+        message.pushName,
+      ]),
+    )
+    .digest("hex");
+}
+
+/** Revalidate every chunk immediately before handing its permanent copy to WhatsApp. */
+export async function validateGroupHistoryDelivery(
+  adapter: ChannelAdapter,
+  destination: string,
+  context: GroupHistoryDeliveryContext | undefined,
+): Promise<void> {
+  if (!context?.groupJid || !context.sources?.length) {
+    throw new UnrecoverableError(
+      "Group history job has no source validation context; enqueue a new digest.",
+    );
   }
-  if (member.jid.toLowerCase().endsWith("@s.whatsapp.net")) {
-    return jidNormalizedUser(member.jid) || member.jid;
+  const metadata = await adapter.getGroupMetadata(context.groupJid);
+  if ((metadata.ephemeralDuration ?? 0) > 0)
+    throw new UnrecoverableError(GROUP_HISTORY_EPHEMERAL_MESSAGE);
+  if (!metadata.participants.some((member) => matchesMember(destination, member))) {
+    throw new UnrecoverableError(GROUP_HISTORY_NOT_A_MEMBER_MESSAGE);
   }
-  return member.jid;
+  const rows = await adapter.getMessages(context.groupJid, MAX_GROUP_HISTORY_SCAN);
+  const current = new Map(rows.map((message) => [message.id, message]));
+  for (const source of context.sources) {
+    const message = current.get(source.id);
+    if (
+      !message ||
+      !isShareableGroupHistoryMessage(message) ||
+      groupHistoryMessageFingerprint(message) !== source.fingerprint
+    ) {
+      throw new UnrecoverableError(
+        "Group history source changed or is no longer shareable; enqueue a new digest.",
+      );
+    }
+  }
 }
 
 async function loadShareableGroupHistory(
@@ -443,7 +501,7 @@ export async function sendGroupHistoryToMember(options: {
     aliases.some((alias) => matchesMember(alias, candidate)),
   );
   if (!member) throw new Error(GROUP_HISTORY_NOT_A_MEMBER_MESSAGE);
-  const destination = directMessageDestination(member, aliases);
+  const destination = directMessageDestination(member);
 
   const shareable = await loadShareableGroupHistory(options.adapter, groupJid, count.count);
   const empty = (note: string, omittedMessages = 0): GroupHistorySendResult => ({
@@ -453,9 +511,6 @@ export async function sendGroupHistoryToMember(options: {
     omittedMessages,
     note,
   });
-  if (!(options.claimBeforeSend?.() ?? true)) {
-    return empty("Este aviso de entrada já foi processado; nada foi enviado.");
-  }
   if (shareable.length === 0) {
     return empty("Nenhuma mensagem encontrada no histórico local deste grupo; nada foi enviado.");
   }
@@ -477,6 +532,16 @@ export async function sendGroupHistoryToMember(options: {
     );
   }
 
+  if (!(options.claimBeforeSend?.() ?? true)) {
+    return empty("Este aviso de entrada já foi processado; nada foi enviado.");
+  }
+  const deliveryContext: GroupHistoryDeliveryContext = {
+    groupJid,
+    sources: shareable.map((message) => ({
+      id: message.id,
+      fingerprint: groupHistoryMessageFingerprint(message),
+    })),
+  };
   const omittedNote =
     prepared.omittedMessages > 0 ? `…mais ${prepared.omittedMessages}` : undefined;
   let chunksSent = 0;
@@ -487,6 +552,7 @@ export async function sendGroupHistoryToMember(options: {
         destination,
         chunk,
         "baileys",
+        deliveryContext,
       );
       chunksSent += 1;
     }

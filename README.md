@@ -310,6 +310,14 @@ WA MCP exposes **156 tools** across 16 domains. All tools use the `wa_` prefix.
 | `wa_group_join_approval_mode`  | Set join-request approval mode (Baileys, gated write) |
 | `wa_group_member_add_mode`     | Set who can add members (Baileys, gated write) |
 
+Group-history digests require current PN/LID membership and skip revoked, view-once,
+disappearing, and unverifiable stored messages. The worker revalidates membership and source
+content before each chunk. `chunksSent` means queued, not delivered. Automatic join sharing
+is off by default, uses durable stub claims, and may remain partial after a crash or enqueue
+failure. Pending outbound jobs resume lazily after restart when the instance's worker starts.
+See [delivery limits](docs/API_REFERENCE.md#24-group-management-27-tools); live-account
+validation remains pending.
+
 </details>
 
 <details>
@@ -987,14 +995,16 @@ Normal message sends, read receipts, and app-state reads/resyncs remain availabl
 
 `wa_send_group_history_to_member` is a workaround for Baileys rc14's lack of WhatsApp's native
 recent-history sharing for new group members. It reads up to 100 latest local messages, skips
-revoked and view-once rows (widening the read until that many shareable messages remain or 1,000
+revoked, view-once, individually disappearing, and unverifiable raw rows (widening the read until that many shareable messages remain or 1,000
 rows are scanned), truncates each line to 400 characters, and queues at most 5 chunks. When
 more than one chunk is queued they are numbered `(2/4)`. If the cap is reached, the oldest
 messages are left out with a `…mais N` note and the newest are sent in chronological order. The participant must be a current member, matched by phone
 number (PN) or LID in group metadata; the direct message goes to the PN when one is known. A group
 whose `ephemeralDuration` is greater than 0 is refused so disappearing messages are not copied into
 a permanent chat. If a later chunk fails to enqueue, the response still reports the `chunksSent`
-already accepted.
+already accepted. Each queued delivery rechecks current membership and unchanged source content;
+received revocations, deletions, and edits are persisted before those checks. Queue acceptance does
+not confirm delivery. See the delivery and restart limits above and in the API reference.
 
 `WA_GROUP_HISTORY_ON_JOIN=true` enables the same digest and also requires
 `WA_GROUP_WRITES_ENABLED=true`. Both variables are strict: `WA_GROUP_HISTORY_ON_JOIN` accepts only
