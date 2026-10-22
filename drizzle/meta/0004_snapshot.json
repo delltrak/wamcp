@@ -1,7 +1,7 @@
 {
   "version": "6",
   "dialect": "sqlite",
-  "id": "a0b30240-adf5-4f61-97ee-868d6c8d261b",
+  "id": "d48ded43-3d75-4569-89a1-634fe6e83222",
   "prevId": "2128b657-4a42-49e7-97a0-46ef49e066b8",
   "tables": {
     "auth_keys": {
@@ -32,9 +32,7 @@
       "indexes": {
         "idx_auth_keys_instance": {
           "name": "idx_auth_keys_instance",
-          "columns": [
-            "instance_id"
-          ],
+          "columns": ["instance_id"],
           "isUnique": false
         }
       },
@@ -43,22 +41,15 @@
           "name": "auth_keys_instance_id_instances_id_fk",
           "tableFrom": "auth_keys",
           "tableTo": "instances",
-          "columnsFrom": [
-            "instance_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["instance_id"],
+          "columnsTo": ["id"],
           "onDelete": "cascade",
           "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {
         "auth_keys_instance_id_key_id_pk": {
-          "columns": [
-            "instance_id",
-            "key_id"
-          ],
+          "columns": ["instance_id", "key_id"],
           "name": "auth_keys_instance_id_key_id_pk"
         }
       },
@@ -161,10 +152,7 @@
       "indexes": {
         "idx_chats_recent": {
           "name": "idx_chats_recent",
-          "columns": [
-            "instance_id",
-            "last_message_at"
-          ],
+          "columns": ["instance_id", "last_message_at"],
           "isUnique": false
         }
       },
@@ -173,22 +161,15 @@
           "name": "chats_instance_id_instances_id_fk",
           "tableFrom": "chats",
           "tableTo": "instances",
-          "columnsFrom": [
-            "instance_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["instance_id"],
+          "columnsTo": ["id"],
           "onDelete": "cascade",
           "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {
         "chats_instance_id_jid_pk": {
-          "columns": [
-            "instance_id",
-            "jid"
-          ],
+          "columns": ["instance_id", "jid"],
           "name": "chats_instance_id_jid_pk"
         }
       },
@@ -281,18 +262,12 @@
       "indexes": {
         "idx_contacts_phone": {
           "name": "idx_contacts_phone",
-          "columns": [
-            "instance_id",
-            "phone"
-          ],
+          "columns": ["instance_id", "phone"],
           "isUnique": false
         },
         "idx_contacts_lid": {
           "name": "idx_contacts_lid",
-          "columns": [
-            "instance_id",
-            "lid"
-          ],
+          "columns": ["instance_id", "lid"],
           "isUnique": false
         }
       },
@@ -301,22 +276,15 @@
           "name": "contacts_instance_id_instances_id_fk",
           "tableFrom": "contacts",
           "tableTo": "instances",
-          "columnsFrom": [
-            "instance_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["instance_id"],
+          "columnsTo": ["id"],
           "onDelete": "cascade",
           "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {
         "contacts_instance_id_jid_pk": {
-          "columns": [
-            "instance_id",
-            "jid"
-          ],
+          "columns": ["instance_id", "jid"],
           "name": "contacts_instance_id_jid_pk"
         }
       },
@@ -393,11 +361,7 @@
       "indexes": {
         "idx_event_responses_chat": {
           "name": "idx_event_responses_chat",
-          "columns": [
-            "instance_id",
-            "chat_id",
-            "event_message_id"
-          ],
+          "columns": ["instance_id", "chat_id", "event_message_id"],
           "isUnique": false
         }
       },
@@ -406,77 +370,16 @@
           "name": "event_responses_instance_id_instances_id_fk",
           "tableFrom": "event_responses",
           "tableTo": "instances",
-          "columnsFrom": [
-            "instance_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["instance_id"],
+          "columnsTo": ["id"],
           "onDelete": "cascade",
           "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {
         "event_responses_instance_id_event_message_id_responder_pk": {
-          "columns": [
-            "instance_id",
-            "event_message_id",
-            "responder"
-          ],
+          "columns": ["instance_id", "event_message_id", "responder"],
           "name": "event_responses_instance_id_event_message_id_responder_pk"
-        }
-      },
-      "uniqueConstraints": {},
-      "checkConstraints": {}
-    },
-    "group_history_sends": {
-      "name": "group_history_sends",
-      "columns": {
-        "instance_id": {
-          "name": "instance_id",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
-        },
-        "message_id": {
-          "name": "message_id",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
-        },
-        "sent_at": {
-          "name": "sent_at",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
-        }
-      },
-      "indexes": {},
-      "foreignKeys": {
-        "group_history_sends_instance_id_instances_id_fk": {
-          "name": "group_history_sends_instance_id_instances_id_fk",
-          "tableFrom": "group_history_sends",
-          "tableTo": "instances",
-          "columnsFrom": [
-            "instance_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
-        }
-      },
-      "compositePrimaryKeys": {
-        "group_history_sends_instance_id_message_id_pk": {
-          "columns": [
-            "instance_id",
-            "message_id"
-          ],
-          "name": "group_history_sends_instance_id_message_id_pk"
         }
       },
       "uniqueConstraints": {},
@@ -534,23 +437,15 @@
           "name": "group_member_labels_instance_id_instances_id_fk",
           "tableFrom": "group_member_labels",
           "tableTo": "instances",
-          "columnsFrom": [
-            "instance_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["instance_id"],
+          "columnsTo": ["id"],
           "onDelete": "cascade",
           "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {
         "group_member_labels_instance_id_group_jid_participant_jid_pk": {
-          "columns": [
-            "instance_id",
-            "group_jid",
-            "participant_jid"
-          ],
+          "columns": ["instance_id", "group_jid", "participant_jid"],
           "name": "group_member_labels_instance_id_group_jid_participant_jid_pk"
         }
       },
@@ -662,25 +557,80 @@
           "name": "groups_cache_instance_id_instances_id_fk",
           "tableFrom": "groups_cache",
           "tableTo": "instances",
-          "columnsFrom": [
-            "instance_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["instance_id"],
+          "columnsTo": ["id"],
           "onDelete": "cascade",
           "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {
         "groups_cache_instance_id_jid_pk": {
-          "columns": [
-            "instance_id",
-            "jid"
-          ],
+          "columns": ["instance_id", "jid"],
           "name": "groups_cache_instance_id_jid_pk"
         }
       },
+      "uniqueConstraints": {},
+      "checkConstraints": {}
+    },
+    "instance_webhooks": {
+      "name": "instance_webhooks",
+      "columns": {
+        "instance_id": {
+          "name": "instance_id",
+          "type": "text",
+          "primaryKey": true,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "url": {
+          "name": "url",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "auth_header": {
+          "name": "auth_header",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "auth_value": {
+          "name": "auth_value",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "events": {
+          "name": "events",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "updated_at": {
+          "name": "updated_at",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {
+        "instance_webhooks_instance_id_instances_id_fk": {
+          "name": "instance_webhooks_instance_id_instances_id_fk",
+          "tableFrom": "instance_webhooks",
+          "tableTo": "instances",
+          "columnsFrom": ["instance_id"],
+          "columnsTo": ["id"],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
       "uniqueConstraints": {},
       "checkConstraints": {}
     },
@@ -851,21 +801,12 @@
       "indexes": {
         "idx_label_associations_chat": {
           "name": "idx_label_associations_chat",
-          "columns": [
-            "instance_id",
-            "chat_id",
-            "association_type"
-          ],
+          "columns": ["instance_id", "chat_id", "association_type"],
           "isUnique": false
         },
         "idx_label_associations_message": {
           "name": "idx_label_associations_message",
-          "columns": [
-            "instance_id",
-            "chat_id",
-            "message_id",
-            "association_type"
-          ],
+          "columns": ["instance_id", "chat_id", "message_id", "association_type"],
           "isUnique": false
         }
       },
@@ -874,25 +815,15 @@
           "name": "label_associations_instance_id_instances_id_fk",
           "tableFrom": "label_associations",
           "tableTo": "instances",
-          "columnsFrom": [
-            "instance_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["instance_id"],
+          "columnsTo": ["id"],
           "onDelete": "cascade",
           "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {
         "label_associations_instance_id_label_id_association_type_chat_id_message_id_pk": {
-          "columns": [
-            "instance_id",
-            "label_id",
-            "association_type",
-            "chat_id",
-            "message_id"
-          ],
+          "columns": ["instance_id", "label_id", "association_type", "chat_id", "message_id"],
           "name": "label_associations_instance_id_label_id_association_type_chat_id_message_id_pk"
         }
       },
@@ -959,22 +890,15 @@
           "name": "labels_instance_id_instances_id_fk",
           "tableFrom": "labels",
           "tableTo": "instances",
-          "columnsFrom": [
-            "instance_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["instance_id"],
+          "columnsTo": ["id"],
           "onDelete": "cascade",
           "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {
         "labels_instance_id_label_id_pk": {
-          "columns": [
-            "instance_id",
-            "label_id"
-          ],
+          "columns": ["instance_id", "label_id"],
           "name": "labels_instance_id_label_id_pk"
         }
       },
@@ -1030,11 +954,7 @@
       "indexes": {
         "idx_message_reactions_message": {
           "name": "idx_message_reactions_message",
-          "columns": [
-            "instance_id",
-            "chat_id",
-            "message_id"
-          ],
+          "columns": ["instance_id", "chat_id", "message_id"],
           "isUnique": false
         }
       },
@@ -1043,24 +963,15 @@
           "name": "message_reactions_instance_id_instances_id_fk",
           "tableFrom": "message_reactions",
           "tableTo": "instances",
-          "columnsFrom": [
-            "instance_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["instance_id"],
+          "columnsTo": ["id"],
           "onDelete": "cascade",
           "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {
         "message_reactions_instance_id_chat_id_message_id_participant_pk": {
-          "columns": [
-            "instance_id",
-            "chat_id",
-            "message_id",
-            "participant"
-          ],
+          "columns": ["instance_id", "chat_id", "message_id", "participant"],
           "name": "message_reactions_instance_id_chat_id_message_id_participant_pk"
         }
       },
@@ -1116,11 +1027,7 @@
       "indexes": {
         "idx_message_receipts_message": {
           "name": "idx_message_receipts_message",
-          "columns": [
-            "instance_id",
-            "chat_id",
-            "message_id"
-          ],
+          "columns": ["instance_id", "chat_id", "message_id"],
           "isUnique": false
         }
       },
@@ -1129,24 +1036,15 @@
           "name": "message_receipts_instance_id_instances_id_fk",
           "tableFrom": "message_receipts",
           "tableTo": "instances",
-          "columnsFrom": [
-            "instance_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["instance_id"],
+          "columnsTo": ["id"],
           "onDelete": "cascade",
           "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {
         "message_receipts_instance_id_chat_id_message_id_participant_pk": {
-          "columns": [
-            "instance_id",
-            "chat_id",
-            "message_id",
-            "participant"
-          ],
+          "columns": ["instance_id", "chat_id", "message_id", "participant"],
           "name": "message_receipts_instance_id_chat_id_message_id_participant_pk"
         }
       },
@@ -1283,19 +1181,12 @@
       "indexes": {
         "idx_messages_chat": {
           "name": "idx_messages_chat",
-          "columns": [
-            "instance_id",
-            "chat_id",
-            "timestamp"
-          ],
+          "columns": ["instance_id", "chat_id", "timestamp"],
           "isUnique": false
         },
         "idx_messages_timestamp": {
           "name": "idx_messages_timestamp",
-          "columns": [
-            "instance_id",
-            "timestamp"
-          ],
+          "columns": ["instance_id", "timestamp"],
           "isUnique": false
         }
       },
@@ -1304,22 +1195,15 @@
           "name": "messages_instance_id_instances_id_fk",
           "tableFrom": "messages",
           "tableTo": "instances",
-          "columnsFrom": [
-            "instance_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["instance_id"],
+          "columnsTo": ["id"],
           "onDelete": "cascade",
           "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {
         "messages_instance_id_id_pk": {
-          "columns": [
-            "instance_id",
-            "id"
-          ],
+          "columns": ["instance_id", "id"],
           "name": "messages_instance_id_id_pk"
         }
       },
@@ -1361,10 +1245,7 @@
       "indexes": {
         "idx_pending_poll_votes_poll": {
           "name": "idx_pending_poll_votes_poll",
-          "columns": [
-            "instance_id",
-            "poll_message_id"
-          ],
+          "columns": ["instance_id", "poll_message_id"],
           "isUnique": false
         }
       },
@@ -1373,23 +1254,15 @@
           "name": "pending_poll_votes_instance_id_instances_id_fk",
           "tableFrom": "pending_poll_votes",
           "tableTo": "instances",
-          "columnsFrom": [
-            "instance_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["instance_id"],
+          "columnsTo": ["id"],
           "onDelete": "cascade",
           "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {
         "pending_poll_votes_instance_id_poll_message_id_vote_message_id_pk": {
-          "columns": [
-            "instance_id",
-            "poll_message_id",
-            "vote_message_id"
-          ],
+          "columns": ["instance_id", "poll_message_id", "vote_message_id"],
           "name": "pending_poll_votes_instance_id_poll_message_id_vote_message_id_pk"
         }
       },
@@ -1427,22 +1300,15 @@
           "name": "processed_messages_instance_id_instances_id_fk",
           "tableFrom": "processed_messages",
           "tableTo": "instances",
-          "columnsFrom": [
-            "instance_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["instance_id"],
+          "columnsTo": ["id"],
           "onDelete": "cascade",
           "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {
         "processed_messages_instance_id_message_id_pk": {
-          "columns": [
-            "instance_id",
-            "message_id"
-          ],
+          "columns": ["instance_id", "message_id"],
           "name": "processed_messages_instance_id_message_id_pk"
         }
       },
@@ -1496,12 +1362,8 @@
           "name": "queue_stats_instance_id_instances_id_fk",
           "tableFrom": "queue_stats",
           "tableTo": "instances",
-          "columnsFrom": [
-            "instance_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["instance_id"],
+          "columnsTo": ["id"],
           "onDelete": "cascade",
           "onUpdate": "no action"
         }
@@ -1548,22 +1410,15 @@
           "name": "status_audiences_instance_id_instances_id_fk",
           "tableFrom": "status_audiences",
           "tableTo": "instances",
-          "columnsFrom": [
-            "instance_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["instance_id"],
+          "columnsTo": ["id"],
           "onDelete": "cascade",
           "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {
         "status_audiences_instance_id_message_id_pk": {
-          "columns": [
-            "instance_id",
-            "message_id"
-          ],
+          "columns": ["instance_id", "message_id"],
           "name": "status_audiences_instance_id_message_id_pk"
         }
       },

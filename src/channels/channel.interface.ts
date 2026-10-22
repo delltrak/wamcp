@@ -21,6 +21,7 @@ import type {
   Chat,
   Message,
   GroupMetadata,
+  GroupParticipantsExport,
   CommunityHierarchy,
   CommunityInviteV4,
   CommunityParticipantAction,
@@ -49,6 +50,7 @@ import type {
   CatalogProductCreateInput,
   CatalogProductUpdateInput,
   NewsletterPostsPage,
+  NewsletterMediaDownload,
   InstanceRuntimeStatus,
 } from "../types/channel.types.js";
 import type {
@@ -162,6 +164,7 @@ export interface ChannelAdapter {
     action: ParticipantAction,
   ): Promise<void>;
   getGroupMetadata(groupId: string): Promise<GroupMetadata>;
+  exportGroupParticipants(groupJid: string): Promise<GroupParticipantsExport>;
   assertGroupMemberLabelWritesEnabled(): void;
   updateGroupMemberLabel(groupId: string, memberLabel: string | null): Promise<void>;
   updateGroupPicture(groupId: string, image: string): Promise<void>;
@@ -262,6 +265,12 @@ export interface ChannelAdapter {
     since: number,
     after: number,
   ): Promise<NewsletterPostsPage>;
+  downloadNewsletterMedia(
+    newsletterJid: string,
+    messageId: string,
+    maxBytes?: number,
+    timeoutMs?: number,
+  ): Promise<NewsletterMediaDownload>;
 
   // ---- Business catalog ----
   getCatalog(

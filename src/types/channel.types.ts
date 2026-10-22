@@ -70,6 +70,13 @@ export interface NewsletterPostsPage {
   };
 }
 
+export interface NewsletterMediaDownload {
+  data: Buffer;
+  mimeType: string;
+  fileName?: string;
+  mediaType: string;
+}
+
 export interface CatalogProductCreateInput extends CatalogProductFields {
   originCountryCode?: string;
 }
@@ -190,6 +197,7 @@ export interface ImageContent {
   caption?: string;
   quotedMessageId?: string;
   mentions?: string[];
+  compress?: boolean;
 }
 
 export interface VideoContent {
@@ -200,6 +208,7 @@ export interface VideoContent {
   ptv?: boolean;
   quotedMessageId?: string;
   mentions?: string[];
+  compress?: boolean;
 }
 
 export interface StickerContent {
@@ -522,6 +531,22 @@ export interface GroupParticipant {
   memberLabel?: string;
 }
 
+export interface GroupParticipantExport {
+  jid: string;
+  phone: string | null;
+  lid: string | null;
+  name: string | null;
+  pushName: string | null;
+  role: "admin" | "superadmin" | "member";
+}
+
+export interface GroupParticipantsExport {
+  groupJid: string;
+  participants: GroupParticipantExport[];
+  /** True when saved-name lookup stopped after 5000 identities. */
+  contactsTruncated: boolean;
+}
+
 export interface NormalizedGroupMemberLabelEvent {
   instanceId: string;
   groupId: string;
@@ -779,6 +804,71 @@ export interface NormalizedLabelUpdateEvent {
   };
 }
 
+export interface NormalizedLabelAssociationEvent {
+  instanceId: string;
+  labelId: string;
+  labeled: boolean;
+  chatId: string;
+  messageId?: string;
+  label: BusinessLabel;
+  association: {
+    type: "chat" | "message";
+    chatId: string;
+    messageId?: string;
+  };
+  /** Unix seconds when this process observed the association. */
+  timestamp?: number;
+}
+
+export interface NormalizedGroupJoinedEvent {
+  instanceId: string;
+  groupId: string;
+  chatId: string;
+  subject: string | null;
+  description: string | null;
+  /** Size of the member list that contained this account. Individual member JIDs are not included. */
+  memberCount: number;
+  author: string | null;
+  /** Unix seconds when this process observed the join. */
+  timestamp?: number;
+}
+
+export interface NormalizedNewsletterMembershipEvent {
+  instanceId: string;
+  newsletterId: string;
+  chatId: string;
+  name: string | null;
+  description: string | null;
+  role: string | null;
+  /** Unix seconds when this process observed the membership change. */
+  timestamp?: number;
+}
+
+export interface NormalizedNewsletterMuteEvent {
+  instanceId: string;
+  newsletterId: string;
+  chatId: string;
+  mute: "on" | "off";
+  /** Unix seconds when this process observed the mute change. */
+  timestamp?: number;
+}
+
+export interface NormalizedNewsletterMessageEvent {
+  instanceId: string;
+  newsletterId: string;
+  chatId: string;
+  message: {
+    id: string;
+    serverId: string | null;
+    sender: string;
+    timestamp: number;
+    type: string;
+    text: string | null;
+    views: number | null;
+    isFromMe: boolean;
+  };
+}
+
 export interface NormalizedEventResponseEvent {
   instanceId: string;
   chatId: string;
@@ -801,6 +891,7 @@ export const CHANNEL_EVENTS = [
   "chat.updated",
   "group.updated",
   "group.participants_changed",
+  "group.joined",
   "group.member_label_changed",
   "group.join_request",
   "contact.updated",
@@ -813,10 +904,31 @@ export const CHANNEL_EVENTS = [
   "instance.qr_expired",
   "call.received",
   "label.updated",
+  "label.association",
+  "newsletter.joined",
+  "newsletter.left",
+  "newsletter.message",
+  "newsletter.mute",
   "event.response",
 ] as const;
 
 export type ChannelEvent = (typeof CHANNEL_EVENTS)[number];
+
+/** Opt-in webhook events whose body includes a short routine text. */
+export const WEBHOOK_ROUTINE_EVENTS = [
+  "group.joined",
+  "label.association",
+  "newsletter.joined",
+  "newsletter.left",
+  "newsletter.message",
+  "newsletter.mute",
+] as const satisfies readonly ChannelEvent[];
+
+export function isWebhookRoutineEvent(
+  event: string,
+): event is (typeof WEBHOOK_ROUTINE_EVENTS)[number] {
+  return (WEBHOOK_ROUTINE_EVENTS as readonly string[]).includes(event);
+}
 
 // Event payload map
 export type ChannelEventPayload = {
@@ -829,6 +941,7 @@ export type ChannelEventPayload = {
   "chat.updated": NormalizedChatUpdateEvent;
   "group.updated": NormalizedGroupUpdateEvent;
   "group.participants_changed": NormalizedGroupParticipantsEvent;
+  "group.joined": NormalizedGroupJoinedEvent;
   "group.member_label_changed": NormalizedGroupMemberLabelEvent;
   "group.join_request": {
     instanceId: string;
@@ -847,5 +960,10 @@ export type ChannelEventPayload = {
   "instance.qr_expired": InstanceAuthChallengeExpiredEvent;
   "call.received": NormalizedCallEvent;
   "label.updated": NormalizedLabelUpdateEvent;
+  "label.association": NormalizedLabelAssociationEvent;
+  "newsletter.joined": NormalizedNewsletterMembershipEvent;
+  "newsletter.left": NormalizedNewsletterMembershipEvent;
+  "newsletter.message": NormalizedNewsletterMessageEvent;
+  "newsletter.mute": NormalizedNewsletterMuteEvent;
   "event.response": NormalizedEventResponseEvent;
 };

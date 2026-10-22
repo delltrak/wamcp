@@ -2,6 +2,8 @@
 // WA MCP — MCP Tool Response Types
 // ============================================================
 
+import { PROXY_URL_ENV, redactProxyCredentials } from "../utils/proxy-redact.js";
+
 export interface ToolTextContent {
   type: "text";
   text: string;
@@ -39,8 +41,8 @@ export function toolSuccess(data: unknown): ToolSuccessResponse {
 
 // Helper to create an error text response (sanitized for agent consumption)
 export function toolError(message: string): ToolErrorResponse {
-  // Strip internal paths and stack traces from error messages
-  let sanitized = message;
+  // Strip internal paths, stack traces, and proxy credentials from error messages
+  let sanitized = redactProxyCredentials(message, process.env[PROXY_URL_ENV]);
   sanitized = sanitized.replace(/\/[^\s:]+\.(ts|js|mjs|cjs)/g, "[internal]");
   sanitized = sanitized.replace(/\s+at\s+.+/g, "");
   return {
@@ -70,6 +72,12 @@ export type McpNotificationMethod =
   | "whatsapp/instance.qr_expired"
   | "whatsapp/call.received"
   | "whatsapp/label.updated"
+  | "whatsapp/label.association"
+  | "whatsapp/group.joined"
+  | "whatsapp/newsletter.joined"
+  | "whatsapp/newsletter.left"
+  | "whatsapp/newsletter.message"
+  | "whatsapp/newsletter.mute"
   | "whatsapp/event.response";
 
 // MCP resource URI patterns

@@ -5,12 +5,18 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { InstanceManager } from "../services/instance-manager.js";
 import type { MessageQueue } from "../services/message-queue.js";
+import { saveDataDirectoryFile } from "../services/data-export.js";
 import { toolSuccess } from "../types/mcp.types.js";
 import { handleToolError } from "../utils/tool-handler.js";
+import {
+  groupParticipantsExportFileName,
+  renderGroupParticipantsCsv,
+} from "../utils/group-participants-csv.js";
 import { createRequestLogger } from "../utils/logger.js";
 import {
   ListGroupsSchema,
   GetGroupInfoSchema,
+  ExportGroupParticipantsSchema,
   UpdateGroupPictureSchema,
   RemoveGroupPictureSchema,
   CreateGroupSchema,
@@ -121,6 +127,41 @@ export function registerGroupTools(
         return toolSuccess(result);
       } catch (err) {
         return handleToolError("wa_send_group_history_to_member", err, params.instanceId);
+      }
+    },
+  );
+
+  server.registerTool(
+    "wa_export_group_participants",
+    {
+      description:
+        "Export a group's participants as CSV (jid, phone when known, lid, saved name, push name, and admin/superadmin/member role). The file is saved in the data directory and the path is returned. contactsTruncated is true when saved names were looked up for only the first 5000 identities. Read-only. Baileys only.",
+      inputSchema: ExportGroupParticipantsSchema,
+    },
+    async (params) => {
+      const log = createRequestLogger("wa_export_group_participants", params.instanceId);
+      const start = Date.now();
+      try {
+        const adapter = instanceManager.getAdapter(params.instanceId);
+        const exported = await adapter.exportGroupParticipants(params.groupJid);
+        const csv = renderGroupParticipantsCsv(exported.participants);
+        const saved = await saveDataDirectoryFile(
+          Buffer.from(csv, "utf8"),
+          groupParticipantsExportFileName(exported.groupJid),
+        );
+        log.info(
+          { duration: Date.now() - start, participantCount: exported.participants.length },
+          "Group participants exported",
+        );
+        return toolSuccess({
+          groupJid: exported.groupJid,
+          participantCount: exported.participants.length,
+          contactsTruncated: exported.contactsTruncated,
+          mimeType: "text/csv",
+          ...saved,
+        });
+      } catch (err) {
+        return handleToolError("wa_export_group_participants", err, params.instanceId);
       }
     },
   );

@@ -39,6 +39,12 @@ jobs:
       - name: Type check
         run: npx tsc --noEmit
 
+      - name: Install media conversion codecs
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y ffmpeg
+          ffmpeg -hide_banner -encoders 2>/dev/null | grep -q libwebp_anim
+
       - name: Test
         run: npm test
 
