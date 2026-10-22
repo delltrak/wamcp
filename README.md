@@ -851,6 +851,11 @@ Copy `.env.example` to `.env` and configure:
 | `WA_PRESENCE_MODE` | `on_activity` | Baileys presence policy: `on_activity` marks online around sends and typing/recording indicators; `always` preserves the legacy behavior |
 | `WA_PRESENCE_IDLE_SECONDS` | `30` | Seconds after activity before Baileys presence returns to unavailable; must be a positive integer no greater than `2147483` |
 | `WA_MARK_ONLINE_ON_CONNECT` | `false` | In `always` mode, mark the Baileys account online when its socket connects; `on_activity` forces this off |
+| `WA_PRESENCE_PULSE_ENABLED` | `false` | Briefly mark connected Baileys accounts available inside a daily window. Cloud API is skipped |
+| `WA_PRESENCE_PULSE_TIMES_PER_DAY` | `2` | How many pulses to place in the window (1–12), with at least 15 minutes offline between them |
+| `WA_PRESENCE_PULSE_MINUTES` | `5` | How long each pulse stays available (1–15 minutes) |
+| `WA_PRESENCE_PULSE_WINDOW` | `08:00-22:00` | Wall-clock window in `WA_PRESENCE_PULSE_TZ`. Must be `HH:MM-HH:MM` and end after it starts |
+| `WA_PRESENCE_PULSE_TZ` | process `TZ`, or the server zone | IANA time zone for the pulse window. A container without `TZ` runs in UTC |
 | `WA_AUTO_REJECT_CALLS`      | `false`                  | Automatically reject incoming one-to-one Baileys call offers |
 | `WA_STATUS_MAX_RECIPIENTS`  | `256`                    | Maximum recipients per Baileys status; excess recipients are truncated and reported |
 | `WA_AUTO_READ`              | `false`                  | `on_fetch` marks incoming messages read when fetched; `on_receive` marks them read on arrival |
@@ -1086,6 +1091,44 @@ precedence over `WA_MARK_ONLINE_ON_CONNECT` and forces Baileys' `markOnlineOnCon
 to `false`. In `always`, presence changes are left to Baileys and explicit presence tools, and
 `WA_MARK_ONLINE_ON_CONNECT` retains its existing behavior. Presence update failures are logged but
 do not block outgoing messages. Incoming messages and webhook delivery do not change presence.
+
+`WA_PRESENCE_PULSE_ENABLED` defaults to `false`. Set it to `true` to mark each connected Baileys
+account available `WA_PRESENCE_PULSE_TIMES_PER_DAY` times (default 2) for
+`WA_PRESENCE_PULSE_MINUTES` (default 5) inside `WA_PRESENCE_PULSE_WINDOW` (default `08:00-22:00`).
+The window is wall-clock time in `WA_PRESENCE_PULSE_TZ`. When that variable is unset, the window
+uses the process time zone (`TZ`) or the server's local zone. The Docker image and Compose file
+do not set `TZ`, so a container otherwise runs in UTC; set `TZ` or `WA_PRESENCE_PULSE_TZ` (for
+example `America/Bahia`) to follow a local clock. An invalid IANA name is rejected. Each start is
+placed at random in that window, including on days when daylight-saving time changes the UTC
+offset. Pulses cannot overlap: the next one starts at least 15 minutes after the previous one
+ends, and every pulse ends by the window's end. Times per day must be an integer from 1 to 12.
+Minutes must be an integer from 1 to 15. The window must be `HH:MM-HH:MM` and end after it starts
+on the same day. A schedule that cannot fit those pulses and gaps is rejected. Invalid values stop
+startup with an error that names the variable and the accepted range. The scheduler checks about
+once a minute and logs one short line when a pulse starts. An instance that disappears is removed
+from that day's plan on the next check. A spring-forward day whose real span can no longer hold
+the pulses is skipped with a warning, and the next day is planned again. Restarting the process
+plans the day again. Slots that start within 3 minutes of startup are skipped, so a restart does
+not immediately repeat a pulse; later slots in the new plan can still run. It does not change
+`WA_MARK_ONLINE_ON_CONNECT`. In `on_activity`, that
+option stays forced off and the idle timeout does not end a pulse early; an explicit `unavailable`
+presence request does. A send or typing indicator that is still active when the pulse ends keeps
+the existing idle timer, which then returns the account to unavailable. Otherwise the pulse sends
+unavailable when it ends. In `always` with `WA_MARK_ONLINE_ON_CONNECT=true` the account is already
+online, so the scheduler does not pulse and logs that once at startup. Otherwise a pulse sends
+global available only when the account is not already explicitly available, and it sends
+unavailable at the end only when that pulse itself made the account available. An explicit
+`available` presence request stays in effect. The pulse uses normal presence updates, not
+app-state writes, and Cloud API instances are skipped.
+
+Failed `unavailable` updates retry every 5 seconds while the same socket remains connected,
+even after the scheduled slot ends. No new pulse starts during cleanup. New activity can
+resume control through its idle timer; disconnect cancels the pending pulse wait and retries.
+Pulse, retry, and scheduler timers do not keep the process alive during shutdown. Presence
+updates remain best-effort: a persistent connection failure can delay the visible offline
+state. Real-account behavior is unverified, and this feature offers no protection against
+account restrictions.
+
 
 `WA_APP_STATE_WRITES_ENABLED` accepts `true` or `false` and defaults to `false`. It enables
 `wa_archive_chat`, `wa_pin_chat`, `wa_mute_chat`, `wa_delete_chat`, `wa_clear_chat`,

@@ -39,6 +39,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Added optional daily Baileys presence pulses, disabled by default, with bounded duration,
+  spacing, and a configurable time zone ([#145](https://github.com/delltrak/wamcp/issues/145),
+  [#156](https://github.com/delltrak/wamcp/pull/156)). Failed unavailable updates retry every
+  5 seconds while the same socket remains connected, including after activity takes over.
+  Disconnect cancels pending pulse timers; pulses do not override explicit availability in
+  `always` mode. Restarts replan the day, and DST days that cannot fit the configured window
+  are skipped. Real-account validation remains pending; presence timing offers no guarantee
+  against account restrictions.
 - Added optional `WA_PROXY_URL` ([#146](https://github.com/delltrak/wamcp/issues/146),
   [#161](https://github.com/delltrak/wamcp/pull/161)) for a SOCKS5 or HTTP(S) proxy on the
   Baileys WebSocket and media transfers. The connection stays direct when the variable is unset or empty. Proxy
