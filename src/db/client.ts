@@ -6,6 +6,7 @@ import { existsSync, mkdirSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import Database, { type Database as DatabaseType } from "better-sqlite3";
 import { drizzle } from "drizzle-orm/better-sqlite3";
+import { INSTANCE_WEBHOOKS_SCHEMA_SQL } from "./instance-webhooks-schema.js";
 import * as schema from "./schema.js";
 
 const DB_PATH = resolve(process.env.WA_DATABASE_PATH?.trim() || "data/whatsapp.db");
@@ -241,6 +242,7 @@ function initializeDatabase(): void {
       rate_limited_until INTEGER
     );
   `);
+  sqlite.exec(INSTANCE_WEBHOOKS_SCHEMA_SQL);
 }
 
 // Inline migration: add `lid` column for existing databases (pre-v7 upgrade)

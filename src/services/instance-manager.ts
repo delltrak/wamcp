@@ -21,6 +21,7 @@ import type { InstanceEntity } from "../types/db.types.js";
 import { INSTANCE_ID_PREFIX } from "../constants.js";
 import { createChildLogger } from "../utils/logger.js";
 import type { MessageQueue } from "./message-queue.js";
+import { touchInstanceWebhookStorage } from "./instance-webhook-store.js";
 
 const logger = createChildLogger({ service: "instance-manager" });
 
@@ -191,8 +192,9 @@ export class InstanceManager {
     // Delete auth keys
     db.delete(authKeys).where(eq(authKeys.instanceId, id)).run();
 
-    // Delete instance (cascades to messages, contacts, groups, chats, queue_stats)
+    // Delete instance (cascades to messages, contacts, groups, chats, queue_stats, instance_webhooks)
     db.delete(instances).where(eq(instances.id, id)).run();
+    touchInstanceWebhookStorage();
   }
 
   async restartInstance(id: string): Promise<void> {
