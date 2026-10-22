@@ -1,3 +1,4 @@
+import { InstanceNotFoundError, InstanceNotInitializedError } from "./instance-errors.js";
 // ============================================================
 // WA MCP — Tool Handler Wrapper with Error Handling & Tracing
 // ============================================================
@@ -20,13 +21,12 @@ export function handleToolError(
 
   log.error({ err }, `Tool ${toolName} failed`);
 
-  // Instance not found
-  if (message.includes("not found")) {
-    if (message.includes("not found or not initialized")) {
-      return toolError(
-        `Instance '${instanceId ?? "unknown"}' is not initialized. Call wa_connect_instance first, or wa_create_instance if it does not exist.`,
-      );
-    }
+  if (err instanceof InstanceNotInitializedError) {
+    return toolError(
+      `Instance '${instanceId ?? "unknown"}' is not initialized. Call wa_connect_instance first, or wa_create_instance if it does not exist.`,
+    );
+  }
+  if (err instanceof InstanceNotFoundError) {
     return toolError(
       `Instance '${instanceId ?? "unknown"}' not found. Call wa_create_instance to create one.`,
     );

@@ -282,9 +282,16 @@ export const ReplyPrivatelyToGroupMessageSchema = z
 
 export const SendGroupMentionAllSchema = z
   .object({
-    instanceId: z.string().min(1),
-    groupId: z.string().min(5).describe("Group JID whose participants should all be mentioned"),
-    text: z.string().trim().min(1).max(4096).describe("Message text to send with an @all mention"),
+    instanceId: z.string().min(1).describe("The instance to send from"),
+    groupId: z.string().min(5).describe("Group JID that should receive the @all mention"),
+    text: z
+      .string()
+      .trim()
+      .min(1)
+      .max(4096)
+      .describe(
+        "Message text. A trailing @all is added when the text does not already contain one",
+      ),
   })
   .strict();
 
