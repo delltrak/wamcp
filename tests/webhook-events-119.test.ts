@@ -20,7 +20,7 @@ import {
   shouldSendEventWebhook,
   type EventWebhookJob,
 } from "../src/services/event-webhook.js";
-import type { InstanceManager } from "../src/services/instance-manager.js";
+import { InstanceManager } from "../src/services/instance-manager.js";
 import type { ChannelEvent, ChannelEventPayload } from "../src/types/channel.types.js";
 
 const ACCOUNT_ID = "5500000000002:1@s.whatsapp.net";
@@ -40,9 +40,7 @@ const OPTIONAL_EVENTS = [
   "newsletter.mute",
 ] as const;
 
-function newsletterMessage(
-  isFromMe = false,
-): ChannelEventPayload["newsletter.message"] {
+function newsletterMessage(isFromMe = false): ChannelEventPayload["newsletter.message"] {
   return {
     instanceId: "inst_1234abcd",
     newsletterId: NEWSLETTER_ID,
@@ -674,9 +672,7 @@ describe("Baileys optional webhook events", () => {
         name: null,
       }),
     ]);
-    expect(left).toEqual([
-      expect.objectContaining({ newsletterId: NEWSLETTER_ID, role: null }),
-    ]);
+    expect(left).toEqual([expect.objectContaining({ newsletterId: NEWSLETTER_ID, role: null })]);
   });
 
   it("emits newsletter.mute only when the settings update carries a mute flag", async () => {
@@ -747,6 +743,88 @@ describe("Baileys optional webhook events", () => {
     expect(received.map((event) => event.message.id)).toEqual(["append-direct", "99"]);
   });
 
+  it.each(["notify", "append"] as const)(
+    "deduplicates %s newsletter posts by channel and message ID",
+    async (type) => {
+      const { instanceId, adapter, dispatch } = useFixture();
+      const posts = collect(adapter, "newsletter.message");
+      const manager = new InstanceManager();
+      (
+        manager as unknown as {
+          bindAdapterEvents: (id: string, source: BaileysAdapter) => void;
+        }
+      ).bindAdapterEvents(instanceId, adapter);
+      const enqueue = vi.fn((_: EventWebhookJob) => Promise.resolve());
+      const unsubscribe = registerEventWebhookHandler(
+        manager,
+        loadEventWebhookConfig({
+          WA_EVENT_WEBHOOK_URL: "https://hooks.example.test/receive",
+          WA_EVENT_WEBHOOK_EVENTS: "newsletter.message",
+          WA_EVENT_WEBHOOK_PRESET: "grok-bot",
+        }),
+        enqueue,
+      );
+      for (const chatId of [
+        NEWSLETTER_ID,
+        CREATED_NEWSLETTER_ID,
+        NEWSLETTER_ID,
+        CREATED_NEWSLETTER_ID,
+      ]) {
+        await dispatch({
+          "messages.upsert": { type, messages: [textMessage("99", chatId)] },
+        });
+      }
+      await dispatch({
+        "messages.upsert": {
+          type: type === "append" ? "notify" : "append",
+          messages: [textMessage("99", NEWSLETTER_ID), textMessage("99", CREATED_NEWSLETTER_ID)],
+        },
+      });
+      await unsubscribe.flush();
+      unsubscribe();
+      expect(posts.map((event) => [event.newsletterId, event.message.id])).toEqual([
+        [NEWSLETTER_ID, "99"],
+        [CREATED_NEWSLETTER_ID, "99"],
+      ]);
+      expect(enqueue.mock.calls.map(([job]) => job.payload)).toEqual([
+        expect.objectContaining({
+          event: "newsletter.message",
+          newsletterId: NEWSLETTER_ID,
+          messageId: "99",
+        }),
+        expect.objectContaining({
+          event: "newsletter.message",
+          newsletterId: CREATED_NEWSLETTER_ID,
+          messageId: "99",
+        }),
+      ]);
+    },
+  );
+
+  it("skips recent stored newsletter history on append after upgrading", async () => {
+    const { adapter, dispatch } = useFixture();
+    const posts = collect(adapter, "newsletter.message");
+    const stored = textMessage("stored-post", NEWSLETTER_ID);
+    await dispatch({
+      "messaging-history.set": {
+        contacts: [],
+        chats: [],
+        messages: [stored],
+        isLatest: false,
+        progress: 100,
+        syncType: 0,
+        peerDataRequestSessionId: null,
+      },
+    });
+    await dispatch({
+      "messages.upsert": {
+        type: "append",
+        messages: [stored, textMessage("new-post", NEWSLETTER_ID)],
+      },
+    });
+    expect(posts.map((event) => event.message.id)).toEqual(["new-post"]);
+  });
+
   it("does not emit newsletter.message from history sync", async () => {
     const { adapter, dispatch } = useFixture();
     const posts = collect(adapter, "newsletter.message");
@@ -803,12 +881,10 @@ describe("Baileys optional webhook events", () => {
     });
 
     expect(joined).toEqual([]);
-    expect(muted).toEqual([
-      expect.objectContaining({ newsletterId: NEWSLETTER_ID, mute: "on" }),
-    ]);
-    expect(newsletterMuteState({ name: "From phone", description: "Only name and description" })).toBe(
-      null,
-    );
+    expect(muted).toEqual([expect.objectContaining({ newsletterId: NEWSLETTER_ID, mute: "on" })]);
+    expect(
+      newsletterMuteState({ name: "From phone", description: "Only name and description" }),
+    ).toBe(null);
   });
 
   it("emits local follow, unfollow, create, and a later roster join once across a protocol echo", async () => {

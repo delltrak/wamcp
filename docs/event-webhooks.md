@@ -58,6 +58,15 @@ These additional events are also off unless their names are listed:
 | `newsletter.message` | A newsletter post arrives. Append-path posts are not also sent as `message.received`. Notify-path posts still emit `message.received` and this event. `WA_EVENT_WEBHOOK_IGNORE_FROM_ME` applies. |
 | `newsletter.mute` | Best-effort. Emitted when a newsletter settings object includes `mute`, `mute_state`, or `muted`. |
 
+Newsletter post deduplication uses the instance, channel JID, and post ID: two channels may
+both publish post `99`. Fresh `append` posts are emitted only when that channel/post was not
+already stored before the batch; history sync itself emits no post event. The existing
+`processed_messages` cleanup removes dedup records after 24 hours, so this is not an indefinite
+exactly-once guarantee. The legacy local `messages` table is still keyed by instance and message
+ID rather than channel: equal numeric IDs in different newsletters can collide in local history.
+The dedicated `newsletter.message` event uses the incoming post and its channel, so those local
+history collisions do not suppress a new channel's webhook event.
+
 When one of these events is delivered, `text` is a short Portuguese line:
 `Você entrou no grupo {subject}` (or `Você entrou em um grupo`),
 `Etiqueta "{name}" aplicada` / `Etiqueta "{name}" removida`,

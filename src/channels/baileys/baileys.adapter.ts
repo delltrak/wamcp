@@ -4126,10 +4126,14 @@ export class BaileysAdapter implements ChannelAdapter {
     upsertType: string,
     appendWatermark: number | null,
     appendNow: number,
+    preexistingAppendNewsletterKeys: ReadonlySet<string>,
   ): void {
     for (const event of events) {
       if (!event.chatId.endsWith("@newsletter") || !event.message.id) continue;
+      // Newsletter server IDs are scoped to a channel, not the account.
+      const dedupKey = `newsletter:${event.chatId}:${event.message.id}`;
       if (upsertType === "append") {
+        if (preexistingAppendNewsletterKeys.has(dedupKey)) continue;
         const timestampMs = event.message.timestamp * 1000;
         const fresh =
           timestampMs > 0 &&
@@ -4137,7 +4141,7 @@ export class BaileysAdapter implements ChannelAdapter {
           timestampMs <= appendNow + APPEND_NOTIFY_CLOCK_SKEW_MS;
         if (!fresh) continue;
       }
-      if (!this.messageDedup.markProcessed(this.instanceId, `newsletter:${event.message.id}`)) {
+      if (!this.messageDedup.markProcessed(this.instanceId, dedupKey)) {
         continue;
       }
       const serverId = /^\d+$/.test(event.message.id) ? event.message.id : null;
@@ -7253,6 +7257,7 @@ export class BaileysAdapter implements ChannelAdapter {
             ? (this.appendNotifyWatermarkMs ?? this.getAppendNotifyWatermark(appendNow))
             : null;
         const preexistingAppendMessageIds = new Set<string>();
+        const preexistingAppendNewsletterKeys = new Set<string>();
         if (data.type === "append") {
           const checkedMessageIds = new Set<string>();
           for (const message of data.messages) {
@@ -7260,13 +7265,16 @@ export class BaileysAdapter implements ChannelAdapter {
             if (!messageId || checkedMessageIds.has(messageId)) continue;
             checkedMessageIds.add(messageId);
             const existing = db
-              .select({ id: messagesTable.id })
+              .select({ id: messagesTable.id, chatId: messagesTable.chatId })
               .from(messagesTable)
               .where(
                 and(eq(messagesTable.instanceId, this.instanceId), eq(messagesTable.id, messageId)),
               )
               .get();
-            if (existing) preexistingAppendMessageIds.add(messageId);
+            if (existing) {
+              preexistingAppendMessageIds.add(messageId);
+              preexistingAppendNewsletterKeys.add(`newsletter:${existing.chatId}:${messageId}`);
+            }
           }
         }
         logger.info(
@@ -7362,7 +7370,13 @@ export class BaileysAdapter implements ChannelAdapter {
         }
 
         const normalizedEvents = normalizeMessagesUpsert(this.instanceId, data);
-        this.emitNewsletterMessages(normalizedEvents, data.type, appendWatermark, appendNow);
+        this.emitNewsletterMessages(
+          normalizedEvents,
+          data.type,
+          appendWatermark,
+          appendNow,
+          preexistingAppendNewsletterKeys,
+        );
         if (data.type === "append") {
           let appendEmitted = 0;
           const appendMessagesById = new Map<string, WAMessage>();
