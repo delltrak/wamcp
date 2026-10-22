@@ -18,6 +18,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Added an operations dashboard at `/dashboard`, disabled by default and protected by
+  separate Basic credentials, login throttling, CSP, and same-origin JSON mutation checks
+  ([#149](https://github.com/delltrak/wamcp/issues/149),
+  [#154](https://github.com/delltrak/wamcp/pull/154)). It shows redacted connection and webhook
+  status and can start pairing only for an existing unpaired Baileys instance. Stored
+  credentials that are empty, malformed, or omit a boolean `registered` fail closed.
+  It has no instance creation, logout, deletion, message sending, or credential reset action.
+  TLS termination is required for remote access; activity and login limits are process-local,
+  and real-account pairing remains unverified.
+
 - Added optional webhook JID ignore rules with exact addresses, user-part wildcards and
   chat-only domain patterns ([#140](https://github.com/delltrak/wamcp/issues/140),
   [#159](https://github.com/delltrak/wamcp/pull/159)). Group sender phone aliases from Baileys

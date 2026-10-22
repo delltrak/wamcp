@@ -289,6 +289,9 @@ describe("dashboard credentials", () => {
 describe("pairing safety", () => {
   it("treats registered creds as paired and unreadable creds as closed", () => {
     expect(baileysCredsArePaired(null)).toBe(false);
+    expect(baileysCredsArePaired(undefined)).toBe(false);
+    expect(baileysCredsArePaired("")).toBe(true);
+    expect(baileysCredsArePaired("   ")).toBe(true);
     expect(baileysCredsArePaired('{"registered":false}')).toBe(false);
     expect(baileysCredsArePaired('{"registered":true,"me":{"id":"15551212@s.whatsapp.net"}}')).toBe(
       true,
@@ -533,6 +536,33 @@ describe("dashboard HTTP", () => {
     expect(await response.json()).toEqual({ error: "This instance is already paired" });
     expect(calls).toEqual([]);
   });
+
+  it.each(["", "   ", "{}", '{"registered":null}', '{"registered":"false"}'])(
+    "refuses pairing and QR access for malformed stored credentials: %j",
+    async (storedCreds) => {
+      const { handle, calls } = handlerFor({
+        rows: [snapshot({ state: "qr_pending" })],
+        isPaired: () => baileysCredsArePaired(storedCreds),
+      });
+      const base = await serve(handle);
+      const headers = {
+        Authorization: basic("ops", "correct-horse"),
+        "Content-Type": "application/json",
+      };
+      const overview = await fetch(`${base}/dashboard/api/overview`, { headers });
+      expect(overview.status).toBe(200);
+      expect(await overview.json()).toMatchObject({
+        instances: [{ pairingAvailable: false, qrImage: null }],
+      });
+      const response = await fetch(`${base}/dashboard/api/instances/inst_aabbccdd/pairing`, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({ phone: "15551234567" }),
+      });
+      expect(response.status).toBe(409);
+      expect(calls).toEqual([]);
+    },
+  );
 
   it("stops before requesting a code when pairing discovers an existing session", async () => {
     let paired = false;

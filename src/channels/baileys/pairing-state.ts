@@ -23,11 +23,11 @@ export function pairingRefusal(candidate: PairingCandidate): "channel" | "paired
 
 /**
  * `registered: false` in the stored creds JSON means the device is not paired.
- * Missing or empty creds are unpaired. A missing `registered` field, any other
- * value, and unreadable creds fail closed so pairing cannot reset that store.
+ * Only an absent credentials row is also unpaired. Empty stored data, a missing
+ * `registered` field, any other value, and unreadable creds fail closed.
  */
 export function baileysCredsArePaired(keyData: string | null | undefined): boolean {
-  if (keyData == null || keyData.trim() === "") return false;
+  if (keyData == null) return false;
   try {
     const parsed: unknown = JSON.parse(keyData);
     if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) return true;
