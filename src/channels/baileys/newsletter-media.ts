@@ -32,6 +32,7 @@ export interface NewsletterMediaSource {
   encrypted: boolean;
   downloadable?: DownloadableMessage;
   directPath?: string;
+  url?: string;
   fileSha256?: Uint8Array;
 }
 
@@ -130,9 +131,17 @@ export async function readNewsletterMediaBytes(
     throw new Error("Channel media is missing a media key");
   }
   const stream = await downloadContentFromMessage(
-    media.downloadable,
+    {
+      mediaKey: media.downloadable.mediaKey,
+      url: trustedChannelMediaUrl(media.downloadable.directPath, media.downloadable.url),
+    },
     media.mediaType satisfies MediaType,
-    timeoutMs ? { options: { signal: AbortSignal.timeout(timeoutMs) } } : {},
+    {
+      options: {
+        redirect: "error",
+        ...(timeoutMs !== undefined ? { signal: AbortSignal.timeout(timeoutMs) } : {}),
+      },
+    },
   );
   const chunks: Buffer[] = [];
   let size = 0;
@@ -188,11 +197,12 @@ function describeMedia(
     };
   }
 
-  if (!directPath) return undefined;
+  if (!directPath && !url) return undefined;
   return {
     ...shared,
     encrypted: false,
-    directPath,
+    ...(directPath ? { directPath } : {}),
+    ...(url ? { url } : {}),
     ...(fileSha256 ? { fileSha256 } : {}),
   };
 }
@@ -202,8 +212,7 @@ async function readUnencryptedNewsletterMedia(
   maxBytes: number | undefined,
   timeoutMs: number | undefined,
 ): Promise<Buffer> {
-  if (!media.directPath) throw new Error("Channel media directPath is not a CDN path");
-  const url = channelMediaUrl(media.directPath);
+  const url = trustedChannelMediaUrl(media.directPath, media.url);
   let response: Response;
   try {
     response = await fetch(url, {
@@ -233,6 +242,28 @@ async function readUnencryptedNewsletterMedia(
   }
   assertFileSha256(data, media.fileSha256);
   return data;
+}
+
+/** Resolve only the fixed WhatsApp origin, including legacy URL-only posts. */
+function trustedChannelMediaUrl(directPath?: string | null, mediaUrl?: string | null): string {
+  if (directPath) return channelMediaUrl(directPath);
+  if (mediaUrl) {
+    let parsed: URL;
+    try {
+      parsed = new URL(mediaUrl);
+    } catch {
+      throw new Error("Channel media URL is not a CDN path");
+    }
+    if (
+      parsed.origin === CHANNEL_MEDIA_ORIGIN &&
+      !parsed.username &&
+      !parsed.password &&
+      !parsed.hash
+    ) {
+      return channelMediaUrl(parsed.pathname + parsed.search);
+    }
+  }
+  throw new Error("Channel media URL is not a CDN path");
 }
 
 /** Build `https://mmg.whatsapp.net{directPath}` and reject anything that leaves that host. */

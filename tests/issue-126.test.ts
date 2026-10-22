@@ -4,6 +4,7 @@ import {
   lutimes,
   mkdtemp,
   readFile,
+  realpath,
   rm,
   stat,
   symlink,
@@ -192,7 +193,7 @@ describe("group participant CSV", () => {
       mimeType: "text/csv",
       fileName: "group-120363000000000000_g.us-participants.csv",
     });
-    expect(resolve(savedPath).startsWith(resolve(directory, "exports"))).toBe(true);
+    expect(resolve(savedPath).startsWith(await realpath(resolve(directory, "exports")))).toBe(true);
     expect((await stat(savedPath)).mode & 0o777).toBe(0o600);
     expect((await stat(dirname(savedPath))).mode & 0o777).toBe(0o700);
     expect(csv.replace(/^\uFEFF/, "").split("\r\n")).toEqual([
@@ -219,6 +220,31 @@ describe("group participant CSV", () => {
     expect(response.isError).toBe(true);
     expect(response.content[0]?.text).toContain("not supported on Cloud API");
   });
+
+  it("refuses an exports directory symlink before deleting files outside the data directory", async () => {
+    const directory = await tempDirectory("wamcp-export-link-");
+    const outside = await tempDirectory("wamcp-outside-");
+    const stalePath = join(outside, "keep.csv");
+    await writeFile(stalePath, "private");
+    const expired = new Date(Date.now() - EXPORT_RETENTION_MS - 60000);
+    await utimes(stalePath, expired, expired);
+    await symlink(outside, join(directory, "exports"));
+    process.env.WA_DATABASE_PATH = join(directory, "whatsapp.db");
+    await expect(saveDataDirectoryFile(Buffer.from("csv"), "group.csv")).rejects.toThrow(
+      "symbolic link",
+    );
+    expect(await readFile(stalePath, "utf8")).toBe("private");
+  });
+
+  it.each([" =1+1", "\n=1+1", "\t+1", "\r@SUM(1)"])(
+    "neutralizes spreadsheet formulas after whitespace: %j",
+    (name) => {
+      const csv = renderGroupParticipantsCsv([
+        { jid: "12345@lid", phone: null, lid: null, name, pushName: null, role: "member" },
+      ]);
+      expect(csv).toContain("'" + name);
+    },
+  );
 
   it("keeps exports private and deletes files older than the retention window", async () => {
     const directory = await tempDirectory("wamcp-export-retention-");
@@ -321,7 +347,7 @@ describe("channel post media", () => {
     ).rejects.toThrow("maximum download size of 10 bytes");
   });
 
-  it("queries a numeric server id with an exclusive before cursor and saves the file", async () => {
+  it("queries a numeric server id with an exclusive after cursor and saves the file", async () => {
     const directory = await tempDirectory("wamcp-channel-media-");
     process.env.WA_MEDIA_DOWNLOAD_DIR = directory;
     const payload = Buffer.from("jpeg-bytes");
@@ -364,8 +390,8 @@ describe("channel post media", () => {
     expect(query).toHaveBeenCalledTimes(1);
     const request = query.mock.calls[0]?.[0] as BinaryNode;
     expect(request.content?.[0]).toMatchObject({
-      tag: "messages",
-      attrs: { count: "1", before: "103" },
+      tag: "message_updates",
+      attrs: { count: "1", since: "0", after: "101" },
     });
     expect(readSpy).toHaveBeenCalledOnce();
     expect(body).toMatchObject({
@@ -378,10 +404,10 @@ describe("channel post media", () => {
       size: payload.length,
     });
     expect(await readFile(String(body.path))).toEqual(payload);
-    expect(resolve(String(body.path)).startsWith(resolve(directory))).toBe(true);
+    expect(resolve(String(body.path)).startsWith(await realpath(directory))).toBe(true);
   });
 
-  it("looks up a non-numeric message id in the latest page", async () => {
+  it("looks up a non-numeric message id in one bounded history page", async () => {
     const query = vi.fn(async () =>
       newsletterIq([
         newsletterMessage("50", "POST-ABC", {
@@ -413,7 +439,10 @@ describe("channel post media", () => {
     expect(downloaded.mediaType).toBe("sticker");
     const request = query.mock.calls[0]?.[0] as BinaryNode;
     const messages = Array.isArray(request.content) ? request.content[0] : undefined;
-    expect(messages && "attrs" in messages ? messages.attrs : {}).toEqual({ count: "100" });
+    expect(messages && "attrs" in messages ? messages.attrs : {}).toEqual({
+      count: "100",
+      since: "0",
+    });
   });
 
   it("reports a text post without calling the byte fallback", async () => {
@@ -521,6 +550,52 @@ describe("channel post media", () => {
         1_000,
       ),
     ).rejects.toThrow("maximum download size of 10 bytes");
+  });
+
+  it("accepts raw URL-only media on the fixed CDN", async () => {
+    const payload = Buffer.from("raw-url-only");
+    const lookup = newsletterMedia.findNewsletterPostMedia(
+      newsletterIq([
+        newsletterMessage("201", "raw-201", {
+          imageMessage: {
+            url: "https://mmg.whatsapp.net/v/raw",
+            fileSha256: createHash("sha256").update(payload).digest(),
+          },
+        }),
+      ]),
+      "201",
+    );
+    expect(lookup.status).toBe("ready");
+    if (lookup.status !== "ready") throw new Error("missing raw media");
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => new Response(payload)),
+    );
+    await expect(
+      newsletterMedia.readNewsletterMediaBytes(lookup.media, 100, 1000),
+    ).resolves.toEqual(payload);
+  });
+
+  it("rejects encrypted URLs outside the CDN before downloading", async () => {
+    const fetchMock = vi.fn(() => {
+      throw new Error("unexpected network request");
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    await expect(
+      newsletterMedia.readNewsletterMediaBytes(
+        {
+          messageId: "1",
+          serverId: "1",
+          mediaType: "image",
+          mimeType: "image/jpeg",
+          encrypted: true,
+          downloadable: { mediaKey: new Uint8Array(32), url: "http://127.0.0.1/mms/image" },
+        },
+        100,
+        1000,
+      ),
+    ).rejects.toThrow("not a CDN path");
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 
   it("rejects the download on Cloud API", async () => {

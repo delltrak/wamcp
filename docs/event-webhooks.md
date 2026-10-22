@@ -27,6 +27,7 @@ HTTP Host header.
 | `WA_EVENT_WEBHOOK_PRESET` | unset | `grok-bot` selects compact Grok Bot message and lifecycle payloads plus incoming-message filters. |
 | `WA_EVENT_WEBHOOK_EVENTS` | `message.received` | Comma-separated events for the single destination and multi-destination defaults. |
 | `WA_EVENT_WEBHOOK_IGNORE_FROM_ME` | `true` | Ignore messages sent by this WhatsApp instance. |
+| `WA_EVENT_WEBHOOK_IGNORE_JIDS` | unset | Exact JIDs, chat-only `@` wildcards, or one `*` in the user part (#140). Case-insensitive. Unset forwards every chat. |
 | `WA_EVENT_WEBHOOK_HEADERS` | unset | JSON object of extra headers for the single destination. |
 | `WA_EVENT_WEBHOOK_AUTH_HEADER` | unset | Single-destination authentication header. Grok Bot defaults to `X-Grok-Bot-Key` when the preset and auth value are set. |
 | `WA_EVENT_WEBHOOK_AUTH_VALUE` | unset | Single-destination authentication value. |
@@ -44,6 +45,42 @@ HTTP Host header.
 `group.member_label_changed` can be selected in `WA_EVENT_WEBHOOK_EVENTS` or in a destination's
 `events` array. The default event set remains `message.received`, and the `grok-bot` preset remains
 limited to incoming messages.
+
+`WA_EVENT_WEBHOOK_IGNORE_JIDS` (#140) drops events whose JID matches the list. It is
+independent of `WA_EVENT_WEBHOOK_EVENTS`: an event is delivered only when its name is selected and
+none of its compared JIDs are ignored. Unset or empty applies no JID filter.
+
+An entry that starts with `@` is an address-space wildcard. Supported wildcards are `@g.us`,
+`@s.whatsapp.net`, `@lid`, `@newsletter`, `@broadcast`, and `@c.us`. Those wildcards match only
+the chat JID (`chatId`, `groupId`, `newsletterId`, or an association `chatId`). They do not match
+the sender or a LID alias, so `@lid` does not hide a phone chat that also carries a LID, and
+`@s.whatsapp.net` does not hide a group message sent from a phone JID.
+
+An entry with one `*` in the user part is a prefix or suffix wildcard, for example
+`5577*@s.whatsapp.net`. A star with nothing before it and nothing between it and `@`
+(`*@lid`, `*@s.whatsapp.net`) is stored as the address wildcard (`@lid`,
+`@s.whatsapp.net`) and follows the chat-only rule. Every other entry is an exact JID.
+Exact and starred entries match the
+chat, the sender (`message.sender`, `participant`, `callerId`, `reactedBy`, `deletedBy`, `author`,
+`contactId`), phone aliases (`message.senderPn`), and LID aliases (`chatLid`, `senderLid`, `fromLid`, `participantLid`). Participant
+arrays are not scanned. Comparison is case-insensitive, and a device suffix (`:12` immediately
+before `@`) is ignored on both the entry and the candidate.
+
+A group message retains the phone alias supplied in Baileys' `participantAlt` even when
+the primary sender is a LID and no contact mapping has been stored. This alias is used for
+filtering and does not change the primary sender or the outgoing webhook body.
+Before exact and starred matching, the filter also
+looks up `contacts` for that instance (`jid`, `lid`, or `phone`) and adds the stored phone JID and
+LID. If that row is missing, list both forms. Address wildcards do not use this lookup.
+
+Blank slots from a trailing or repeated comma are skipped. Any other invalid entry fails startup
+with `Invalid WA_EVENT_WEBHOOK_IGNORE_JIDS`. Matching chats are still stored; only webhook delivery
+is skipped. `instance.*` events are never dropped by this list. A multi-destination `ignoreJids`
+array is unioned with the global list for that destination only.
+
+`@g.us` mutes group traffic because the group id ends in `@g.us`. `@s.whatsapp.net` mutes
+direct phone chats and does not mute a group message from a phone sender. Use an exact JID
+to mute one direct chat. `@lid` matches a chat whose id ends in `@lid`.
 
 Startup logs a warning when no destination is configured, when the single-destination
 auth header and value are not set together, when the event set is empty, or when a
@@ -88,7 +125,7 @@ GROK_FAMILY_ROUTINE_KEY=replace-with-the-second-routine-key
 
 Each destination accepts `id`, `url`, `headers`, `authHeader`, `authEnv`,
 `authValue`, `secretEnv`, `secret`, `events`, `preset`, `ignoreFromMe`,
-`chatAllowlist`, `senderAllowlist`, and `debounceMs`. Missing destination event
+`chatAllowlist`, `senderAllowlist`, `ignoreJids`, and `debounceMs`. Missing destination event
 lists inherit `WA_EVENT_WEBHOOK_EVENTS`. A Grok Bot destination with the
 `grok-bot` preset forwards configured `message.received` and `instance.*`
 lifecycle events. It drops other configured events and reports their names in
@@ -290,7 +327,11 @@ is stored and retried when the event arrives, and is emitted after decryption.
 
 Configured `instance.*` events use a compact Grok Bot body with `event`,
 `instanceId`, a short Portuguese `text`, and an event timestamp. Disconnect
-payloads may also contain `reason`, `statusCode`, and reconnect state. Pairing
+payloads may also contain `reason`, `statusCode`, and reconnect state. The
+standard disconnect body stays coalesced to the first close after an open,
+plus a terminal logged-out event. After the exponential reconnect cap, one
+additional `instance.disconnected` uses that same shape with `willReconnect`
+still true and `reconnectInMs` of 30000 while retries continue. Pairing
 and QR payloads may contain the method and expiry time. Pairing codes, QR
 strings, credentials, and secrets are never included. The preset drops other
 configured events and lists their names in `droppedEvents` from

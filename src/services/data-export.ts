@@ -31,6 +31,10 @@ export async function saveDataDirectoryFile(
 ): Promise<SavedMediaDownload> {
   const requestedDirectory = resolve(dataDirectory(), "exports");
   await mkdir(requestedDirectory, { recursive: true });
+  // Refuse a pre-existing link before chmod or retention can touch an outside directory.
+  if ((await lstat(requestedDirectory)).isSymbolicLink()) {
+    throw new Error("Export directory must not be a symbolic link");
+  }
   await chmod(requestedDirectory, 0o700);
   const directory = await realpath(requestedDirectory);
   await removeExpiredExports(directory);

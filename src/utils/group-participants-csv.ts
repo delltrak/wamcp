@@ -38,7 +38,7 @@ export function groupParticipantsExportFileName(groupJid: string): string {
 
 function csvCell(value: string): string {
   let cell = value;
-  if (/^[=+\-@\t\r]/.test(cell)) cell = `'${cell}`;
+  if (/^(?:\s*[=+\-@]|[\t\r\n])/.test(cell)) cell = `'${cell}`;
   if (/[",\r\n]/.test(cell)) return `"${cell.replaceAll('"', '""')}"`;
   return cell;
 }

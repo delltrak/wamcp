@@ -27,6 +27,14 @@ import type {
   Message,
   GroupMetadata,
   GroupParticipantsExport,
+  CommunityHierarchy,
+  CommunityInviteV4,
+  CommunityParticipantAction,
+  CommunityMemberScope,
+  CommunitySetting,
+  CommunityParticipantUpdateResult,
+  CommunityGroupCreationResult,
+  CommunityJoinRequest,
   ChatModification,
   GroupModification,
   ParticipantAction,
@@ -300,6 +308,10 @@ export class CloudApiAdapter implements ChannelAdapter {
   }
 
   // ---- Messaging ----
+
+  async supportsNativeGroupMentionAll(): Promise<boolean> {
+    return false;
+  }
 
   async sendMessage(to: string, content: MessageContent): Promise<MessageResponse> {
     const phone = this.normalizePhone(to);
@@ -652,6 +664,14 @@ export class CloudApiAdapter implements ChannelAdapter {
     throw new Error("Grouped media albums are not supported on Cloud API; use a Baileys instance");
   }
 
+  async markPlayed(_chatId: string, _messageIds: string[], _participant?: string): Promise<void> {
+    throw new Error("Marking audio or video messages as played is not supported on Cloud API");
+  }
+
+  async markPlayedMessage(_messageId: string, _chatId?: string): Promise<void> {
+    throw new Error("Marking audio or video messages as played is not supported on Cloud API");
+  }
+
   async markRead(chatId: string, messageIds: string[], _participant?: string): Promise<void> {
     // Cloud API marks one message at a time
     const _phone = this.normalizePhone(chatId);
@@ -833,6 +853,89 @@ export class CloudApiAdapter implements ChannelAdapter {
   }
 
   // ---- Communities ----
+  async joinCommunityV4(
+    _invite: CommunityInviteV4,
+  ): Promise<{ communityId: string | null; status: "joined" | "unknown"; retrySafe: false }> {
+    throw new Error("Community management is not supported on Cloud API; use a Baileys instance");
+  }
+
+  async createCommunityGroup(
+    _communityId: string,
+    _name: string,
+    _participants: string[],
+  ): Promise<CommunityGroupCreationResult> {
+    throw new Error("Community management is not supported on Cloud API; use a Baileys instance");
+  }
+
+  async updateCommunityName(_communityId: string, _name: string): Promise<void> {
+    throw new Error("Community management is not supported on Cloud API; use a Baileys instance");
+  }
+
+  async updateCommunityDescription(_communityId: string, _description: string): Promise<void> {
+    throw new Error("Community management is not supported on Cloud API; use a Baileys instance");
+  }
+
+  async updateCommunityPicture(_communityId: string, _image: string | null): Promise<void> {
+    throw new Error("Community management is not supported on Cloud API; use a Baileys instance");
+  }
+
+  async getCommunityMembers(
+    _communityId: string,
+    _scope: CommunityMemberScope,
+    _groupId?: string,
+  ): Promise<GroupMetadata> {
+    throw new Error("Community management is not supported on Cloud API; use a Baileys instance");
+  }
+
+  async updateCommunityParticipants(
+    _communityId: string,
+    _participants: string[],
+    _action: CommunityParticipantAction,
+    _confirmLinkedGroupRemoval?: boolean,
+  ): Promise<CommunityParticipantUpdateResult> {
+    throw new Error("Community management is not supported on Cloud API; use a Baileys instance");
+  }
+
+  async listCommunityJoinRequests(_communityId: string): Promise<CommunityJoinRequest[]> {
+    throw new Error("Community management is not supported on Cloud API; use a Baileys instance");
+  }
+
+  async handleCommunityJoinRequests(
+    _communityId: string,
+    _participants: string[],
+    _action: "approve" | "reject",
+  ): Promise<CommunityParticipantUpdateResult> {
+    throw new Error("Community management is not supported on Cloud API; use a Baileys instance");
+  }
+
+  async getCommunityInviteCode(_communityId: string, _revoke?: boolean): Promise<string> {
+    throw new Error("Community management is not supported on Cloud API; use a Baileys instance");
+  }
+
+  async getCommunityInviteInfo(_code: string): Promise<GroupMetadata> {
+    throw new Error("Community management is not supported on Cloud API; use a Baileys instance");
+  }
+
+  async joinCommunity(
+    _code: string,
+  ): Promise<{ communityId: string | null; status: "joined" | "unknown"; retrySafe: false }> {
+    throw new Error("Community management is not supported on Cloud API; use a Baileys instance");
+  }
+
+  async revokeCommunityMemberInvite(_communityId: string, _participant: string): Promise<void> {
+    throw new Error("Community management is not supported on Cloud API; use a Baileys instance");
+  }
+
+  async updateCommunitySetting(_communityId: string, _setting: CommunitySetting): Promise<void> {
+    throw new Error("Community management is not supported on Cloud API; use a Baileys instance");
+  }
+
+  async resolveCommunityAnnouncementGroup(
+    _communityId: string,
+    _forWrite?: boolean,
+  ): Promise<string> {
+    throw new Error("Community management is not supported on Cloud API; use a Baileys instance");
+  }
 
   async createCommunity(_subject: string, _description?: string): Promise<GroupMetadata | null> {
     throw new Error("Community management is only available on Baileys instances");
@@ -844,6 +947,10 @@ export class CloudApiAdapter implements ChannelAdapter {
 
   async getCommunityMetadata(_communityId: string): Promise<GroupMetadata> {
     throw new Error("Community management is only available on Baileys instances");
+  }
+
+  async getCommunityHierarchy(_communityId: string): Promise<CommunityHierarchy> {
+    throw new Error("Community hierarchy is not supported on Cloud API; use a Baileys instance");
   }
 
   async linkGroupToCommunity(_groupId: string, _communityId: string): Promise<void> {

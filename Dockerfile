@@ -34,8 +34,12 @@ COPY package.json ./
 RUN apk add --no-cache ffmpeg \
     && mkdir -p /app/data/sessions /app/data/media /app/data/media-downloads
 
-# Fail the build instead of the container if the native prebuild did not resolve.
-RUN node -e "const D=require('better-sqlite3'); new D(':memory:').exec('create table t(a)'); console.log('better-sqlite3 OK')"
+# Fail the build on this platform instead of at container start. better-sqlite3
+# must load its musl prebuild (linuxmusl-arm64 on ARM). ffmpeg -version verifies
+# ffmpeg is installed and the libs load.
+RUN node -e "const D=require('better-sqlite3'); new D(':memory:').exec('create table t(a)'); console.log('better-sqlite3 OK', process.arch)" \
+    && ffmpeg -hide_banner -version \
+    && echo "ffmpeg OK"
 
 EXPOSE 3000
 

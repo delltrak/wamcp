@@ -446,6 +446,69 @@ export interface GroupMetadata {
   ephemeralDuration: number | null;
   inviteCode: string | null;
   createdAt: number | null;
+  /** null means the backend did not supply this information. */
+  isCommunity?: boolean | null;
+  isCommunityAnnounce?: boolean | null;
+  linkedParent?: string | null;
+  joinApprovalMode?: boolean | null;
+  memberAddMode?: boolean | null;
+}
+
+export interface CommunityInviteV4 {
+  communityId: string;
+  inviter: string;
+  inviteCode: string;
+  inviteExpiration: number;
+}
+
+export type CommunityParticipantAction = "add" | "remove" | "promote" | "demote";
+export type CommunityMemberScope = "community" | "announcements" | "group";
+export type CommunitySetting =
+  | { setting: "edit_info" | "send_messages"; value: "admins" | "all" }
+  | { setting: "add_members"; value: "admins" | "all" }
+  | { setting: "join_approval"; value: "on" | "off" }
+  | { setting: "disappearing_messages"; value: 0 | 86400 | 604800 | 7776000 };
+
+export interface CommunityParticipantResult {
+  participant: string;
+  returnedJid: string | null;
+  status: string | null;
+  success: boolean | null;
+}
+export interface CommunityParticipantUpdateResult {
+  status: "success" | "partial" | "failed" | "unknown";
+  results: CommunityParticipantResult[];
+}
+export interface CommunityGroupCreationResult {
+  groupId: string | null;
+  status: "created" | "unknown";
+  group: GroupMetadata | null;
+  retrySafe: false;
+}
+export interface CommunityJoinRequest {
+  participant: string | null;
+  requestedAt: string | null;
+}
+
+export interface CommunityLinkedGroup {
+  jid: string;
+  subject: string;
+  size: number | null;
+  creation: number | null;
+  owner: string | null;
+  isCommunityAnnounce: boolean | null;
+}
+
+export interface CommunityHierarchy {
+  community: GroupMetadata;
+  groups: CommunityLinkedGroup[];
+  /** Only a unique, positively identified announcement group is returned. */
+  announcementGroupJid: string | null;
+  announcementResolution: "identified" | "unavailable" | "ambiguous";
+  /** The server may hide groups that this account cannot see. */
+  visibility: "server_visible";
+  unresolvedGroupJids: string[];
+  omittedGroupCount: number;
 }
 
 export interface GroupParticipant {
@@ -540,6 +603,8 @@ export interface CloudCredentials {
 export interface NormalizedMessageEvent {
   instanceId: string;
   chatId: string;
+  /** LID for this chat when WhatsApp also supplied a phone JID. */
+  chatLid?: string;
   /** Optional display metadata used by outgoing integrations. */
   chatName?: string | null;
   senderName?: string | null;
@@ -548,6 +613,10 @@ export interface NormalizedMessageEvent {
   message: {
     id: string;
     sender: string;
+    /** LID for the sender when WhatsApp also supplied another sender JID. */
+    senderLid?: string;
+    /** Phone JID supplied alongside a group sender's LID, for identity filtering. */
+    senderPn?: string;
     timestamp: number;
     type: MessageType;
     content: string | null;
@@ -622,7 +691,7 @@ export interface NormalizedGroupUpdateEvent {
 export interface NormalizedGroupParticipantsEvent {
   instanceId: string;
   groupId: string;
-  action: ParticipantAction;
+  action: ParticipantAction | "modify";
   participants: string[];
 }
 
@@ -744,6 +813,7 @@ export const CHANNEL_EVENTS = [
   "group.updated",
   "group.participants_changed",
   "group.member_label_changed",
+  "group.join_request",
   "contact.updated",
   "connection.changed",
   "instance.connected",
@@ -771,6 +841,13 @@ export type ChannelEventPayload = {
   "group.updated": NormalizedGroupUpdateEvent;
   "group.participants_changed": NormalizedGroupParticipantsEvent;
   "group.member_label_changed": NormalizedGroupMemberLabelEvent;
+  "group.join_request": {
+    instanceId: string;
+    groupId: string;
+    participant: string;
+    action: "created" | "revoked" | "rejected";
+    method: "invite_link" | "linked_group_join" | "non_admin_add" | null;
+  };
   "contact.updated": NormalizedContactUpdateEvent;
   "connection.changed": NormalizedConnectionEvent;
   "instance.connected": InstanceConnectedEvent;
