@@ -363,8 +363,14 @@ Send a text message to a WhatsApp contact or group.
 
 #### `wa_send_group_mention_all`
 
-Send a group text message with an `@all` mention. The server reads current group participants and
-adds them to the message's participant mention list.
+Send a group text message with WhatsApp's native `@all` mention. Baileys sends `mentionAll`, which
+is encoded as `contextInfo.nonJidMentions = 1`, and does not put every participant in
+`mentionedJid`. Notification delivery depends on WhatsApp and recipient settings; generating the
+native mention payload does not verify that a notification appeared on each device.
+`@all` is appended to `text` when the text does not already contain that token.
+
+If the installed Baileys build does not emit `nonJidMentions`, the tool falls back to mentioning
+each current participant through `mentionedJid` (at most 1024 participants).
 
 | Parameter    | Type   | Required | Description |
 | ------------ | ------ | -------- | ----------- |
@@ -372,7 +378,28 @@ adds them to the message's participant mention list.
 | `groupId`    | string | Yes      | Group JID |
 | `text`       | string | Yes      | Message text (max 4096 chars) |
 
-**Channel support:** Baileys only. Cloud API does not support participant mentions.
+**Channel support:** Baileys only. Cloud API does not support participant mentions or native `@all`.
+
+**Response (native):**
+
+```json
+{
+  "status": "queued",
+  "jobId": "job_123",
+  "mode": "native"
+}
+```
+
+**Response (participant fallback):**
+
+```json
+{
+  "status": "queued",
+  "jobId": "job_123",
+  "mode": "participants",
+  "mentionCount": 12
+}
+```
 
 ---
 

@@ -116,6 +116,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- `wa_send_group_mention_all` now sends Baileys' native group `@all` (`mentionAll`, encoded as
+  `contextInfo.nonJidMentions`) and does not list every participant. If that flag is unavailable,
+  the tool still mentions each current participant individually
+  ([#105](https://github.com/delltrak/wamcp/issues/105), [#114](https://github.com/delltrak/wamcp/pull/114)).
+  Notification delivery depends on WhatsApp and recipient settings; real-device notification
+  behavior has not been verified.
 - Gate private disappearing-message timers and all Baileys group creation, settings, membership,
   picture, invite, join, and join-request changes behind `WA_APP_STATE_WRITES_ENABLED`.
 - Added `WA_MARK_ONLINE_ON_CONNECT` to control whether Baileys marks the linked account online
