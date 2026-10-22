@@ -4,7 +4,7 @@ import { lookup as lookupDns } from "node:dns/promises";
 import { isIP } from "node:net";
 import type { ConnectionOptions } from "node:tls";
 import { Queue, UnrecoverableError, Worker, type Job, type JobsOptions } from "bullmq";
-import { Agent } from "undici";
+import { Agent, fetch as undiciFetch } from "undici";
 import type { InstanceManager } from "./instance-manager.js";
 import { QUEUE_COMPLETED_AGE_S, QUEUE_FAILED_AGE_S } from "../constants.js";
 import type {
@@ -1315,10 +1315,12 @@ export async function postEventWebhook(
   destination: EventWebhookDestination,
   payload: EventWebhookBody,
   timeoutMs: number,
-  fetchRequest: typeof fetch = fetch,
+  // Use the client from the same Undici version as Agent: Node's bundled fetch
+  // can still use the legacy dispatcher contract.
+  fetchRequest: typeof fetch | typeof undiciFetch = undiciFetch,
   resolveDns: EventWebhookDnsResolver = resolveWebhookDns,
 ): Promise<void> {
-  let response: Response | undefined;
+  let response: Response | Awaited<ReturnType<typeof undiciFetch>> | undefined;
   let dispatcher: Agent | undefined;
   try {
     const url = new URL(destination.url);
@@ -1350,12 +1352,12 @@ export async function postEventWebhook(
     try {
       response = await fetchRequest(destination.url, {
         method: "POST",
-        headers: createEventWebhookHeaders(body, destination),
+        headers: Object.fromEntries(createEventWebhookHeaders(body, destination)),
         body,
         signal: AbortSignal.timeout(timeoutMs),
         redirect: "error",
         dispatcher,
-      } as RequestInit & { dispatcher: Agent });
+      });
     } catch (error) {
       const diagnostics = readWebhookFailureDiagnostics(error, destination);
       if (isRetryableNetworkError(error)) {
