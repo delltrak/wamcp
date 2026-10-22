@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- MP4 sticker conversion and video compression read the source from a private temporary file, so an
+  MP4 with the `moov` atom after `mdat` decodes. Image and video compression sends the original and
+  logs a warning when ffmpeg fails. PNG files with transparency are not re-encoded to JPEG. Image
+  edge, JPEG quality, and video edge and CRF are validated only when a message is compressed.
+  Cloud API uploads the original base64 bytes with their detected MIME type when compression
+  fails or offers no size reduction; original HTTPS links remain links
+  ([#133](https://github.com/delltrak/wamcp/pull/133)).
+
+### Added
+
+- `wa_send_sticker` accepts PNG, JPG, GIF, WebP, and short MP4 input and converts it to 512x512 WebP.
+  GIF and MP4 sources stay animated, MP4 stickers are capped at 10 seconds, and WhatsApp's 100 KB
+  static and 500 KB animated limits still apply. `wa_send_image` and `wa_send_video` can compress
+  before sending when `compress` is true or `WA_MEDIA_COMPRESS=true` (default `false`). `hd: true`
+  sends the original media. Image edge and JPEG quality, and video edge and CRF, are configurable
+  ([#144](https://github.com/delltrak/wamcp/issues/144), [#133](https://github.com/delltrak/wamcp/pull/133)).
+  Conversion is checked with local ffmpeg; delivery and rendering on real WhatsApp accounts
+  remain unverified.
+
 ### Changed
 
 - Updated Undici from 7.30.0 to 8.12.3 and paired outgoing webhook requests with its

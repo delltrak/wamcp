@@ -248,7 +248,9 @@ describe("media conversions and received media downloads", () => {
 
     await expect(
       new MediaService().prepareSticker(animatedWebP(320, 240).toString("base64")),
-    ).rejects.toThrow("Animated WebP stickers must be 512x512; send a GIF to convert it");
+    ).rejects.toThrow(
+      "Animated WebP stickers must be 512x512; send a GIF or short MP4 to convert it",
+    );
     expect(runner).not.toHaveBeenCalled();
   });
 
