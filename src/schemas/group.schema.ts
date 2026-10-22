@@ -23,6 +23,15 @@ export const GetGroupInfoSchema = z
   })
   .strict();
 
+export const ExportGroupParticipantsSchema = z
+  .object({
+    instanceId: z.string().min(1).describe("The instance ID"),
+    groupJid: GroupIdSchema.describe(
+      "WhatsApp group JID or bare group ID whose participants are exported",
+    ),
+  })
+  .strict();
+
 export const SetGroupMemberLabelSchema = z
   .object({
     instanceId: z.string().min(1).describe("The instance ID"),

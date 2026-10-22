@@ -36,7 +36,7 @@
 
 **WA MCP** is a WhatsApp MCP server built with TypeScript that gives AI agents full access to WhatsApp through the [Model Context Protocol](https://modelcontextprotocol.io). It supports both **Baileys** (WhatsApp Web) and **Meta Cloud API** as dual-channel backends, deployable with **Docker** in a single command.
 
-Your agent connects once and auto-discovers **155 tools**, **10 resources**, and **22 real-time events** — zero configuration, zero REST wrappers, zero glue code.
+Your agent connects once and auto-discovers **157 tools**, **10 resources**, and **22 real-time events** — zero configuration, zero REST wrappers, zero glue code.
 
 ```
 Your AI Agent ←→ MCP Protocol ←→ WA MCP ←→ WhatsApp
@@ -82,7 +82,7 @@ from google.adk.tools.mcp_tool import McpToolset
 
 tools = McpToolset(url="http://localhost:3000/mcp")
 
-# Agent auto-discovers 155 WhatsApp tools
+# Agent auto-discovers 157 WhatsApp tools
 # wa_create_instance, wa_send_text, wa_send_image, ...
 ```
 
@@ -146,7 +146,7 @@ Add to your `claude_desktop_config.json`:
 
 ## 🛠️ Tools
 
-WA MCP exposes **155 tools** across 16 domains. All tools use the `wa_` prefix.
+WA MCP exposes **157 tools** across 16 domains. All tools use the `wa_` prefix.
 
 <details>
 <summary>📋 <strong>Instance Management</strong> (9 tools)</summary>
@@ -278,12 +278,13 @@ WA MCP exposes **155 tools** across 16 domains. All tools use the `wa_` prefix.
 </details>
 
 <details>
-<summary>👥 <strong>Groups</strong> (26 tools)</summary>
+<summary>👥 <strong>Groups</strong> (27 tools)</summary>
 
 | Tool                           | Description                   |
 | ------------------------------ | ----------------------------- |
 | `wa_list_groups`               | List groups and account role  |
 | `wa_get_group_info`            | Get group metadata and members |
+| `wa_export_group_participants` | Export participants as CSV in the data directory (`contactsTruncated` when the name lookup stops at 5000 identities) |
 | `wa_group_set_member_label`     | Set this account's group member label (Baileys, gated, queued) |
 | `wa_group_remove_member_label`  | Remove this account's group member label (Baileys, gated, queued) |
 | `wa_get_group_invite_info`     | Read invite metadata before joining (Baileys) |
@@ -362,7 +363,7 @@ this operation.
 </details>
 
 <details>
-<summary>📰 <strong>Newsletter / Channels</strong> (10 tools)</summary>
+<summary>📰 <strong>Newsletter / Channels</strong> (11 tools)</summary>
 
 | Tool                     | Description           |
 | ------------------------ | --------------------- |
@@ -376,6 +377,7 @@ this operation.
 | `wa_newsletter_update_picture` | Update Channel picture (Baileys, gated write) |
 | `wa_newsletter_react` | React to a Channel post (Baileys, gated write) |
 | `wa_newsletter_list_posts` | List Channel posts (Baileys) |
+| `wa_download_newsletter_media` | Download Channel post media, including plaintext posts without a media key (Baileys) |
 
 </details>
 
@@ -1100,7 +1102,7 @@ src/
 ├── index.ts                     # Entry point (HTTP/stdio)
 ├── constants.ts                 # Defaults and limits
 ├── server/mcp.ts                # MCP server setup
-├── tools/                       # 🔧 155 MCP tools (16 files)
+├── tools/                       # 🔧 157 MCP tools (16 files)
 ├── resources/                   # 📖 10 MCP resources (8 files)
 ├── notifications/events.ts      # 📡 15 documented event types
 ├── channels/

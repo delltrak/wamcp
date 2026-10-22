@@ -31,6 +31,7 @@ import type {
   Chat,
   Message,
   GroupMetadata,
+  GroupParticipantsExport,
   CommunityHierarchy,
   CommunityInviteV4,
   CommunityParticipantAction,
@@ -59,6 +60,7 @@ import type {
   SendEventOptions,
   CatalogProductCreateInput,
   CatalogProductUpdateInput,
+  NewsletterMediaDownload,
   InstanceRuntimeStatus,
 } from "../../types/channel.types.js";
 import type {
@@ -794,6 +796,10 @@ export class CloudApiAdapter implements ChannelAdapter {
     throw new Error("Group metadata is not supported on Cloud API");
   }
 
+  async exportGroupParticipants(_groupJid: string): Promise<GroupParticipantsExport> {
+    throw new Error("Exporting group participants is not supported on Cloud API");
+  }
+
   assertGroupMemberLabelWritesEnabled(): void {
     throw new Error("Group member labels are not supported on Cloud API");
   }
@@ -1143,6 +1149,15 @@ export class CloudApiAdapter implements ChannelAdapter {
     _after: number,
   ): Promise<never> {
     throw new Error("Channel post history is only available on Baileys instances");
+  }
+
+  async downloadNewsletterMedia(
+    _newsletterJid: string,
+    _messageId: string,
+    _maxBytes?: number,
+    _timeoutMs?: number,
+  ): Promise<NewsletterMediaDownload> {
+    throw new Error("Downloading Channel post media is not supported on Cloud API");
   }
 
   // ---- Business catalog ----

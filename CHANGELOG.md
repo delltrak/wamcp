@@ -39,6 +39,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Added read-only group-participant CSV export and Channel post media download
+  ([#148](https://github.com/delltrak/wamcp/issues/148), [#134](https://github.com/delltrak/wamcp/pull/134)).
+  CSV exports retain PN/LID identities, escape spreadsheet formulas, use private permissions, and
+  remove exports older than 24 hours on the next export. Saved-name lookup is capped at 5,000
+  identities and reports truncation. Export directories must not be symbolic links.
+  Channel downloads use rc14 `message_updates` with `since`/`after`, preserving numeric ID
+  precision; fallback lookup is capped at 100 posts. Raw and encrypted downloads are restricted to
+  the WhatsApp media CDN with redirects refused, a 60-second media timeout, and the configured
+  file size cap. Raw bytes require a matching SHA-256. Cloud API rejects both tools; real-account
+  validation remains pending.
+
 - Added optional webhook JID ignore rules with exact addresses, user-part wildcards and
   chat-only domain patterns ([#140](https://github.com/delltrak/wamcp/issues/140),
   [#159](https://github.com/delltrak/wamcp/pull/159)). Group sender phone aliases from Baileys

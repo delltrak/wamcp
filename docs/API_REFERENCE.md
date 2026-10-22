@@ -11,11 +11,11 @@
    - [Instance Management](#21-instance-management-9-tools)
    - [Messaging](#22-messaging-32-tools)
    - [Chat Management](#23-chat-management-11-tools)
-   - [Group Management](#24-group-management-26-tools)
+   - [Group Management](#24-group-management-27-tools)
    - [Contact Management](#25-contact-management-8-tools)
    - [Profile Management](#26-profile-management-7-tools)
    - [Status / Stories](#27-status--stories-4-tools)
-   - [Newsletter / Channels](#28-newsletter--channels-10-tools)
+   - [Newsletter / Channels](#28-newsletter--channels-11-tools)
    - [Call Management](#29-call-management-1-tool)
    - [Message Search](#210-message-search-1-tool)
    - [WhatsApp Business Labels](#211-whatsapp-business-labels-8-tools)
@@ -116,7 +116,7 @@ Tools marked **Baileys only** are not available on Cloud API instances.
 
 ## 2. Tools Reference
 
-WA MCP exposes **155 tools** grouped by domain. All tools return MCP-standard responses.
+WA MCP exposes **157 tools** grouped by domain. All tools return MCP-standard responses.
 
 ### Success Response Format
 
@@ -1336,7 +1336,7 @@ is blocked unless `WA_APP_STATE_WRITES_ENABLED=true`.
 
 ---
 
-### 2.4 Group Management (26 tools)
+### 2.4 Group Management (27 tools)
 
 Tools for creating and managing WhatsApp groups.
 
@@ -1424,6 +1424,42 @@ locally.
   ]
 }
 ```
+
+---
+
+#### `wa_export_group_participants`
+
+Export the participants of a group as a CSV file. The file is written under the data directory
+(`<database directory>/exports`, `data/exports` by default) and the response returns that path.
+That directory is mode `0700`. On the next export, regular files in it that are older than 24 hours
+are deleted. One row is written per participant. Phone is empty when it is not known. `name` is the
+saved contact name when one is stored; `push_name` is the name the contact set on WhatsApp. `role`
+is `admin`, `superadmin`, or `member`. `contactsTruncated` is true when the saved-name lookup was
+limited to the first 5000 identities.
+
+| Parameter    | Type   | Required | Description                        |
+| ------------ | ------ | -------- | ---------------------------------- |
+| `instanceId` | string | Yes      | The instance ID                    |
+| `groupJid`   | string | Yes      | Group JID or bare numeric group ID |
+
+**Channel support:** Baileys only. Read-only; no write flag is required. Cloud API does not support
+group participant export.
+
+**Response:**
+
+```json
+{
+  "groupJid": "120363000000000000@g.us",
+  "participantCount": 3,
+  "contactsTruncated": false,
+  "mimeType": "text/csv",
+  "path": "data/exports/group-120363000000000000_g.us-participants.csv",
+  "fileName": "group-120363000000000000_g.us-participants.csv",
+  "size": 240
+}
+```
+
+CSV header: `jid,phone,lid,name,push_name,role`.
 
 ---
 
@@ -2419,7 +2455,7 @@ receipt; Cloud API does not expose status viewers.
 
 ---
 
-### 2.8 Newsletter / Channels (10 tools)
+### 2.8 Newsletter / Channels (11 tools)
 
 Tools for interacting with WhatsApp Channels (Newsletters). **Baileys only.**
 
@@ -2503,6 +2539,7 @@ unsupported-operation error for these Baileys-only operations.
 | `wa_newsletter_update_picture`     | `instanceId`, `jid`, `image`                       | Update picture. Gated write.                     |
 | `wa_newsletter_react`              | `instanceId`, `jid`, `serverId`, `reaction`        | Add or remove a post reaction. Gated write.       |
 | `wa_newsletter_list_posts`         | `instanceId`, `jid`, optional `count`, `since`, `after` | Fetch parsed posts with timestamp and server-ID cursors. |
+| `wa_download_newsletter_media`     | `instanceId`, `newsletterJid`, `messageId`         | Download media from a Channel post and return the saved path. |
 
 Channel picture URLs use the existing public-HTTPS validation and media size limits, then are
 converted to JPEG before upload.
@@ -2512,6 +2549,45 @@ Post results contain JSON-safe `posts` with `id`, `serverId`, Unix-seconds `time
 `pagination.newestServerId` identify the page bounds. `pagination.after` is the newest numeric server
 ID; pass it as `after` on the next call to continue through newer posts. `since` accepts a Unix
 timestamp lower bound.
+
+#### `wa_download_newsletter_media`
+
+Download image, video, audio, document, sticker, or video-note media from one Channel post. Pass
+`serverId` or the post `id` from `wa_newsletter_list_posts` as `messageId`. The bytes are saved with
+the same directory, size cap, and file-name rules as `wa_download_media`, and the response returns
+that path. Posts that include a media key are decrypted. Posts uploaded without a media key are
+downloaded as plaintext from `https://mmg.whatsapp.net` plus the post `directPath`, with the same
+size cap and timeout, with redirects refused, and are kept only when the SHA-256 matches
+`fileSha256`. URL-only posts are accepted only on that same HTTPS origin. Encrypted downloads
+also stay on that origin and refuse redirects. A numeric server ID is looked up with the rc14
+`message_updates` stanza and exclusive `after = serverId - 1` cursor (`since = 0`); IDs retain
+integer precision. A missing numeric result or a non-numeric ID searches one additional page of
+at most 100 posts. History outside that bounded lookup can be unavailable; use `serverId` when
+possible. Media download timeout is 60 seconds; configured file-download size limits apply.
+
+| Parameter       | Type   | Required | Description                                      |
+| --------------- | ------ | -------- | ------------------------------------------------ |
+| `instanceId`    | string | Yes      | The instance ID                                  |
+| `newsletterJid` | string | Yes      | Channel JID ending in `@newsletter`              |
+| `messageId`     | string | Yes      | Post server ID or message ID                     |
+
+**Channel support:** Baileys only. Read-only; no write flag is required. Cloud API does not support
+Channel post media.
+
+**Response:**
+
+```json
+{
+  "newsletterJid": "123456789012345@newsletter",
+  "messageId": "102",
+  "mediaType": "image",
+  "mimeType": "image/jpeg",
+  "mode": "file",
+  "path": "data/media-downloads/102.jpg",
+  "fileName": "102.jpg",
+  "size": 2048
+}
+```
 
 ---
 
@@ -3528,7 +3604,7 @@ Add to your Claude Desktop MCP configuration:
 }
 ```
 
-Once configured, the client will auto-discover all 155 WA MCP tools and can interact with WhatsApp directly.
+Once configured, the client will auto-discover all 157 WA MCP tools and can interact with WhatsApp directly.
 
 ### 6.3 LangChain (Python)
 
@@ -3541,7 +3617,7 @@ toolkit = MCPToolkit(
 )
 
 tools = toolkit.get_tools()
-# tools now contains all 155 WA MCP tools, ready for any LangChain agent
+# tools now contains all 157 WA MCP tools, ready for any LangChain agent
 ```
 
 ---
@@ -3558,15 +3634,15 @@ tools = toolkit.get_tools()
 | Message Search                    | 1     | Both                                 |
 | WhatsApp Business Labels          | 8     | Baileys                              |
 | WhatsApp Events                   | 2     | Baileys                              |
-| Group Management                  | 26    | Baileys                              |
+| Group Management                  | 27    | Baileys                              |
 | Contact Management                | 8     | Both                                 |
 | Profile Management                | 7     | Both                                 |
 | Status / Stories                  | 4     | Baileys only                         |
-| Newsletter / Channels             | 10    | Baileys only                         |
+| Newsletter / Channels             | 11    | Baileys only                         |
 | Business, Communities, and Catalog| 16    | Baileys only                         |
 | Call Management                   | 1     | Baileys only                         |
 | Community administration | 16 | Baileys only |
-| **Total**                         | **155** |                                    |
+| **Total**                         | **157** |                                    |
 
 | Resources     | 10  |
 | ------------- | --- |
