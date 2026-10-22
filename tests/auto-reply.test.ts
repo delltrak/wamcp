@@ -2,16 +2,16 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { WAMessage } from "@whiskeysockets/baileys";
 import { eq } from "drizzle-orm";
 import { randomUUID } from "node:crypto";
-import { messageLidFields, normalizeMessagesUpsert } from "../src/channels/baileys/baileys.events.js";
+import {
+  messageIdentityFields,
+  normalizeMessagesUpsert,
+} from "../src/channels/baileys/baileys.events.js";
 import { db } from "../src/db/client.js";
 import {
   AUTO_REPLY_COOLDOWN_SELECT_SQL,
   AUTO_REPLY_COOLDOWNS_TABLE_SQL,
 } from "../src/db/auto-reply-cooldown-sql.js";
-import {
-  cooldownTimestamp,
-  sqliteAutoReplyCooldownStore,
-} from "../src/db/auto-reply-cooldown.js";
+import { cooldownTimestamp, sqliteAutoReplyCooldownStore } from "../src/db/auto-reply-cooldown.js";
 import { instances } from "../src/db/schema.js";
 import {
   AUTO_REPLY_DEFAULT_COOLDOWN_HOURS,
@@ -238,7 +238,11 @@ describe("auto-reply configuration", () => {
       { jid: "1999991111@s.whatsapp.net", patterns: ["*@lid"], match: false },
       { jid: "1999991111@lid", patterns: ["*@lid"], match: true },
       { jid: "s.whatsapp.net", patterns: ["5511*"], match: false },
-      { jid: "5511999999999:12@s.whatsapp.net", patterns: ["5511*:12@s.whatsapp.net"], match: true },
+      {
+        jid: "5511999999999:12@s.whatsapp.net",
+        patterns: ["5511*:12@s.whatsapp.net"],
+        match: true,
+      },
     ];
 
     for (const entry of cases) {
@@ -288,7 +292,7 @@ describe("auto-reply decisions", () => {
     };
   }
 
-  it("queues the fixed text for a new private chat and waits out the cooldown", () => {
+  it("queues the fixed text for a new private chat and waits out the cooldown", async () => {
     const { service, send, advance, event } = harness(enabledConfig({ cooldownMs: HOUR_MS }));
 
     service.handle("inst_auto", event());
@@ -296,6 +300,7 @@ describe("auto-reply decisions", () => {
     expect(send).toHaveBeenCalledTimes(1);
     expect(send).toHaveBeenCalledWith("inst_auto", DIRECT, REPLY);
 
+    await Promise.resolve();
     advance(HOUR_MS);
     service.handle("inst_auto", event({ message: { id: "after-cooldown" } }));
     expect(send).toHaveBeenCalledTimes(2);
@@ -310,10 +315,7 @@ describe("auto-reply decisions", () => {
     service.handle("inst_auto", event({ chatId: "12345@newsletter", message: { id: "channel" } }));
     service.handle("inst_auto", event({ message: { id: "echo", content: `  ${REPLY}  ` } }));
     service.handle("inst_auto", event({ chatId: GROUP, message: { id: "group" } }));
-    service.handle(
-      "inst_auto",
-      event({ message: { id: "audio", type: "audio", content: null } }),
-    );
+    service.handle("inst_auto", event({ message: { id: "audio", type: "audio", content: null } }));
 
     expect(send).not.toHaveBeenCalled();
   });
@@ -368,10 +370,7 @@ describe("auto-reply decisions", () => {
     service.handle("inst_auto", event({ chatId: "1999991111@lid", message: { id: "lid" } }));
     service.handle("inst_auto", event({ chatId: "13135550002@c.us", message: { id: "legacy" } }));
     service.handle("inst_auto", event({ chatId: "123@hosted", message: { id: "hosted" } }));
-    service.handle(
-      "inst_auto",
-      event({ chatId: "123@hosted.lid", message: { id: "hosted-lid" } }),
-    );
+    service.handle("inst_auto", event({ chatId: "123@hosted.lid", message: { id: "hosted-lid" } }));
 
     expect(send).toHaveBeenCalledTimes(1);
     expect(send).toHaveBeenCalledWith("inst_auto", "1999991111@lid", REPLY);
@@ -435,7 +434,12 @@ describe("auto-reply decisions", () => {
       "inst_auto",
       event({
         chatId: "5511777777777@s.whatsapp.net",
-        message: { id: "image", type: "image", content: null, mediaUrl: "https://cdn.example/a.jpg" },
+        message: {
+          id: "image",
+          type: "image",
+          content: null,
+          mediaUrl: "https://cdn.example/a.jpg",
+        },
       }),
     );
     service.handle(
@@ -677,12 +681,18 @@ describe("auto-reply decisions", () => {
     expect(send).toHaveBeenCalledWith("inst_other", DIRECT, REPLY);
   });
 
-  it("keeps a shared cooldown after a new service is created", () => {
+  it("keeps a shared cooldown after a new service is created", async () => {
     const store = memoryAutoReplyCooldownStore();
     let now = 1_700_000_000_000;
     const firstSend = vi.fn(async () => undefined);
-    const first = new AutoReplyService(enabledConfig({ cooldownMs: HOUR_MS }), firstSend, () => now, store);
+    const first = new AutoReplyService(
+      enabledConfig({ cooldownMs: HOUR_MS }),
+      firstSend,
+      () => now,
+      store,
+    );
     first.handle("inst_auto", incoming({}, now));
+    await Promise.resolve();
     expect(firstSend).toHaveBeenCalledTimes(1);
 
     now += 60_000;
@@ -696,6 +706,82 @@ describe("auto-reply decisions", () => {
     second.handle("inst_auto", incoming({ message: { id: "later" } }, now));
 
     expect(secondSend).not.toHaveBeenCalled();
+  });
+
+  it("does not persist a pending enqueue and releases failures for retry", async () => {
+    const store = memoryAutoReplyCooldownStore();
+    let reject!: (error: Error) => void;
+    const pending = new Promise<void>((_resolve, rejectPromise) => {
+      reject = rejectPromise;
+    });
+    const send = vi.fn().mockReturnValueOnce(pending).mockResolvedValue(undefined);
+    const service = new AutoReplyService(
+      enabledConfig({ ratePerMinute: 1 }),
+      send,
+      Date.now,
+      store,
+    );
+    const event = incoming();
+    service.handle("inst_auto", event);
+    service.handle("inst_auto", incoming({ message: { id: "concurrent" } }));
+    expect(send).toHaveBeenCalledTimes(1);
+    expect(store.load("inst_auto", DIRECT)).toBeUndefined();
+    reject(new Error("redis unavailable"));
+    await vi.waitFor(() => {
+      service.handle("inst_auto", event);
+      expect(send).toHaveBeenCalledTimes(2);
+    });
+    await vi.waitFor(() => expect(store.load("inst_auto", DIRECT)).toBeTypeOf("number"));
+    const restartedSend = vi.fn(async () => undefined);
+    new AutoReplyService(enabledConfig(), restartedSend, Date.now, store).handle(
+      "inst_auto",
+      incoming({ message: { id: "after-restart" } }),
+    );
+    expect(restartedSend).not.toHaveBeenCalled();
+  });
+
+  it("isolates pending reservations and persisted cooldowns by instance", async () => {
+    const store = memoryAutoReplyCooldownStore();
+    const send = vi.fn(async () => undefined);
+    const service = new AutoReplyService(
+      enabledConfig({ ratePerMinute: 1 }),
+      send,
+      Date.now,
+      store,
+    );
+    service.handle("first", incoming());
+    service.handle("second", incoming());
+    expect(send).toHaveBeenCalledTimes(2);
+    await Promise.resolve();
+    service.handle("first", incoming({ message: { id: "later" } }));
+    service.handle("second", incoming({ message: { id: "later" } }));
+    expect(send).toHaveBeenCalledTimes(2);
+    expect(store.load("first", DIRECT)).toBeTypeOf("number");
+    expect(store.load("second", DIRECT)).toBeTypeOf("number");
+  });
+
+  it("keeps a local cooldown if persistence fails after the queue accepts the reply", async () => {
+    const send = vi.fn(async () => undefined);
+    const store = {
+      load: () => undefined,
+      save: () => {
+        throw new Error("database unavailable");
+      },
+    };
+    const service = new AutoReplyService(enabledConfig(), send, Date.now, store);
+    service.handle("inst_auto", incoming());
+    await Promise.resolve();
+    service.handle("inst_auto", incoming({ message: { id: "later" } }));
+    expect(send).toHaveBeenCalledTimes(1);
+  });
+
+  it("uses supplied group sender phone aliases before the LID mapping exists", () => {
+    const { service, send, event } = harness(enabledConfig({ groups: true, ignoreJids: [DIRECT] }));
+    service.handle(
+      "inst_auto",
+      event({ chatId: GROUP, isGroup: true, message: { sender: "123@lid", senderPn: DIRECT } }),
+    );
+    expect(send).not.toHaveBeenCalled();
   });
 
   it("logs a failed send without throwing", async () => {
@@ -843,7 +929,7 @@ describe("auto-reply contact identity", () => {
 });
 
 describe("auto-reply cooldown table", () => {
-  it("survives a new service and is removed with the instance", () => {
+  it("survives a new service and is removed with the instance", async () => {
     const instanceId = `test_${randomUUID()}`;
     const now = 1_700_000_000_000;
     db.insert(instances)
@@ -859,6 +945,7 @@ describe("auto-reply cooldown table", () => {
         sqliteAutoReplyCooldownStore,
       );
       first.handle(instanceId, incoming({}, now));
+      await Promise.resolve();
       expect(firstSend).toHaveBeenCalledTimes(1);
       expect(sqliteAutoReplyCooldownStore.load(instanceId, DIRECT)).toBe(now);
 
@@ -919,7 +1006,7 @@ describe("message lid fields", () => {
     expect(direct?.chatLid).toBe("1999991111@lid");
     expect(direct?.message.senderLid).toBe("1999991111@lid");
 
-    const swapped = messageLidFields(
+    const swapped = messageIdentityFields(
       message({
         id: "swap",
         remoteJid: "1999991111@lid",
@@ -959,7 +1046,7 @@ describe("message lid fields", () => {
     expect(group?.message.sender).toBe(DIRECT);
     expect(group?.message.senderLid).toBe("1999991111@lid");
 
-    const senderIsLid = messageLidFields(
+    const senderIsLid = messageIdentityFields(
       message({
         id: "sender-lid",
         remoteJid: GROUP,

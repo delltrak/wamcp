@@ -96,6 +96,8 @@ export type AutoReplySkipReason =
 export interface AutoReplyDecision {
   action: "reply" | "skip";
   reason?: AutoReplySkipReason;
+  queued?: () => void;
+  failed?: () => void;
 }
 
 type IdentityLookup = {
@@ -383,6 +385,7 @@ function contactAliases(event: NormalizedMessageEvent, resolvedPn: string | unde
     event.chatLid,
     event.message.sender,
     event.message.senderLid,
+    event.message.senderPn,
     resolvedPn,
   ]);
 }
@@ -478,6 +481,8 @@ export function memoryAutoReplyCooldownStore(): AutoReplyCooldownStore {
 export class AutoReplyGate {
   private readonly seenMessageIds = new Map<string, number>();
   private readonly sentAt = new Map<string, number[]>();
+  private readonly pending = new Set<string>();
+  private readonly unpersisted = new Map<string, number>();
 
   constructor(
     private readonly config: AutoReplyConfig,
@@ -513,6 +518,7 @@ export class AutoReplyGate {
       event.chatLid,
       event.message.sender,
       event.message.senderLid,
+      event.message.senderPn,
     ]);
     if (participants.some((jid) => own.has(jid))) {
       return { action: "skip", reason: "own_identity" };
@@ -542,9 +548,11 @@ export class AutoReplyGate {
     if (content === this.config.message) return { action: "skip", reason: "echo" };
 
     const contactKey = contact.contactKey || bareJid(chatId);
+    const cooldownKey = `${instanceId}\0${contactKey}`;
+    if (this.pending.has(cooldownKey)) return { action: "skip", reason: "cooldown" };
     let storedReplyAt: number | undefined;
     try {
-      storedReplyAt = this.store.load(instanceId, contactKey);
+      storedReplyAt = this.unpersisted.get(cooldownKey) ?? this.store.load(instanceId, contactKey);
     } catch (error) {
       logger.warn(
         { err: error instanceof Error ? error.message : String(error), instanceId },
@@ -557,15 +565,34 @@ export class AutoReplyGate {
     }
     if (!this.takeRateSlot(instanceId, now)) return { action: "skip", reason: "rate_limit" };
 
-    try {
-      this.store.save(instanceId, contactKey, now);
-    } catch (error) {
-      logger.warn(
-        { err: error instanceof Error ? error.message : String(error), instanceId },
-        "Auto-reply cooldown could not be saved",
-      );
-    }
-    return { action: "reply" };
+    // Reserve locally while Redis accepts the job. A rejected enqueue must not
+    // leave a persisted cooldown, but concurrent messages must not enqueue twice.
+    this.pending.add(cooldownKey);
+    return {
+      action: "reply",
+      queued: () => {
+        try {
+          this.store.save(instanceId, contactKey, now);
+          this.unpersisted.delete(cooldownKey);
+        } catch (error) {
+          // Keep the cooldown in this process when persistence is unavailable.
+          this.unpersisted.set(cooldownKey, now);
+          logger.warn(
+            { err: error instanceof Error ? error.message : String(error), instanceId },
+            "Auto-reply cooldown could not be saved",
+          );
+        } finally {
+          this.pending.delete(cooldownKey);
+        }
+      },
+      failed: () => {
+        this.pending.delete(cooldownKey);
+        this.seenMessageIds.delete(seenKey);
+        const recent = this.sentAt.get(instanceId);
+        const index = recent?.indexOf(now) ?? -1;
+        if (recent && index !== -1) recent.splice(index, 1);
+      },
+    };
   }
 
   private rememberMessage(key: string, now: number): void {
@@ -609,7 +636,7 @@ export class AutoReplyService {
 
   handle(instanceId: string, event: NormalizedMessageEvent, contact?: AutoReplyContact): void {
     if (!this.resolveContact || contact) {
-      this.dispatch(instanceId, event, contact ?? contactFromEvent(event));
+      void this.dispatch(instanceId, event, contact ?? contactFromEvent(event));
       return;
     }
     const resolveContact = this.resolveContact;
@@ -619,7 +646,7 @@ export class AutoReplyService {
       .then(async () => {
         if (!resolveContact) return;
         const resolved = await resolveContact(instanceId, event);
-        this.dispatch(instanceId, event, resolved);
+        void this.dispatch(instanceId, event, resolved);
       })
       .catch((error: unknown) => {
         logger.warn(
@@ -630,11 +657,11 @@ export class AutoReplyService {
     this.tails.set(instanceId, next);
   }
 
-  private dispatch(
+  private async dispatch(
     instanceId: string,
     event: NormalizedMessageEvent,
     contact: AutoReplyContact,
-  ): void {
+  ): Promise<void> {
     const decision = this.gate.decide(instanceId, event, this.now(), contact);
     if (decision.action === "skip") {
       logger.debug(
@@ -644,7 +671,11 @@ export class AutoReplyService {
       return;
     }
 
-    void this.send(instanceId, event.chatId, this.config.message).catch((error: unknown) => {
+    try {
+      await this.send(instanceId, event.chatId, this.config.message);
+      decision.queued?.();
+    } catch (error: unknown) {
+      decision.failed?.();
       logger.warn(
         {
           err: error instanceof Error ? error.message : String(error),
@@ -653,7 +684,7 @@ export class AutoReplyService {
         },
         "Auto-reply failed",
       );
-    });
+    }
   }
 }
 

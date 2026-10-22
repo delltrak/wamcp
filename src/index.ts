@@ -24,6 +24,7 @@ import { installShutdownHandlers, SHUTDOWN_TIMEOUT_MS } from "./utils/shutdown.j
 import { logger } from "./utils/logger.js";
 import { getAutoReadMode } from "./services/auto-read.js";
 import { loadAutoReplyConfig, startAutoReply } from "./services/auto-reply.js";
+import { loadAutoMarkPlayedConfig } from "./services/auto-mark-played.js";
 import { bootEventWebhook, type EventWebhookStatus } from "./services/event-webhook-config.js";
 import { buildHealthBody } from "./server/health.js";
 
@@ -70,6 +71,7 @@ function checkApiKey(req: IncomingMessage, res: ServerResponse): boolean {
 
 async function initServices() {
   const autoReplyConfig = loadAutoReplyConfig();
+  loadAutoMarkPlayedConfig();
   getAutoReadMode();
 
   // Initialize services
@@ -80,6 +82,7 @@ async function initServices() {
   // Wire them together
   instanceManager.setMessageQueue(messageQueue);
   eventWebhook.start(instanceManager);
+  const autoReply = startAutoReply(instanceManager, messageQueue, autoReplyConfig);
 
   // Load existing instances from DB and reconnect
   await instanceManager.init();
@@ -87,8 +90,6 @@ async function initServices() {
   // Start maintenance jobs (pruning, version checks, health checks)
   const maintenance = new MaintenanceService(instanceManager);
   await maintenance.start();
-
-  const autoReply = startAutoReply(instanceManager, messageQueue, autoReplyConfig);
 
   logger.info({ autoReply: autoReplyConfig.enabled }, "Services initialized");
 
