@@ -106,6 +106,8 @@ import type {
   CatalogProductUpdateInput,
   NewsletterPost,
   NewsletterPostsPage,
+  NewsletterMediaDownload,
+  GroupParticipantsExport,
   InstanceAuthMethod,
   InstanceRuntimeStatus,
 } from "../../types/channel.types.js";
@@ -150,6 +152,8 @@ import {
   isMessageForwarded,
   getChatJid,
   getSenderJid,
+  newsletterMembershipAction,
+  newsletterMuteState,
 } from "./baileys.events.js";
 import {
   DEFAULT_AUTO_RECONNECT,
@@ -177,10 +181,12 @@ import {
   ContactStore,
   type ContactPnResolver,
   type ContactSyncRecord,
+  type StoredContactIdentity,
 } from "../../services/contact-store.js";
 import { AppStateResyncLogObserver, observeAppStateResyncLogs } from "./app-state-write-safety.js";
 import { baileysSupportsNativeGroupMentionAll } from "./native-mention-all.js";
 import { GroupMemberLabelStore } from "../../services/group-member-label-store.js";
+import * as newsletterMedia from "./newsletter-media.js";
 
 const logger = createChildLogger({ service: "baileys-adapter" });
 const mediaService = new MediaService();
@@ -675,6 +681,29 @@ function isMissingGroupError(error: unknown): boolean {
   );
 }
 
+function matchStoredContact(
+  identities: string[],
+  phone: string | null,
+  stored: StoredContactIdentity[],
+): StoredContactIdentity | undefined {
+  const identitySet = new Set(identities);
+  const matches = stored.filter(
+    (contact) =>
+      identitySet.has(contact.jid) ||
+      (contact.lid !== null && identitySet.has(contact.lid)) ||
+      (phone !== null && contact.phone === phone),
+  );
+  return (
+    matches.find((contact) => identitySet.has(contact.jid) && contact.name) ??
+    matches.find(
+      (contact) => contact.lid !== null && identitySet.has(contact.lid) && contact.name,
+    ) ??
+    matches.find((contact) => contact.name) ??
+    matches.find((contact) => identitySet.has(contact.jid)) ??
+    matches[0]
+  );
+}
+
 function hasMatchingIdentity(left: Set<string>, right: Set<string>): boolean {
   for (const identity of left) {
     if (right.has(identity)) return true;
@@ -1019,6 +1048,7 @@ export class BaileysAdapter implements ChannelAdapter {
   private automaticHistoryRecoveryRunning = false;
   private readonly historySyncMaxMessages: number;
   private readonly messageDedup = new DedupService();
+  private readonly recentMembershipEmits = new Map<string, number>();
   private readonly appendNotifyWindowMs: number;
   private readonly appendNotifyMaxPerBatch: number;
   private readonly healthWatchdogMs: number;
@@ -1642,6 +1672,24 @@ export class BaileysAdapter implements ChannelAdapter {
     return Buffer.from(input, "base64");
   }
 
+  private async outgoingImage(
+    input: string,
+    compress?: boolean,
+  ): Promise<{ url: string } | Buffer> {
+    if (compress !== true) return this.resolveMedia(input);
+    const prepared = await mediaService.prepareOutgoingImage(input);
+    return prepared.compressed ? prepared.data : this.resolveMedia(prepared.input);
+  }
+
+  private async outgoingVideo(
+    input: string,
+    compress?: boolean,
+  ): Promise<{ url: string } | Buffer> {
+    if (compress !== true) return this.resolveMedia(input);
+    const prepared = await mediaService.prepareOutgoingVideo(input);
+    return prepared.compressed ? prepared.data : this.resolveMedia(prepared.input);
+  }
+
   private generateVCard(name: string, phone: string): string {
     const cleaned = phone.replace(/[^0-9]/g, "");
     const escapedName = name
@@ -2225,14 +2273,17 @@ export class BaileysAdapter implements ChannelAdapter {
         }
         break;
       case "image":
-        msg = { image: this.resolveMedia(content.image), caption: content.caption };
+        msg = {
+          image: await this.outgoingImage(content.image, content.compress),
+          caption: content.caption,
+        };
         if (content.quotedMessageId) {
           opts.quoted = this.getQuotedMessage(jid, content.quotedMessageId);
         }
         break;
       case "video":
         msg = {
-          video: this.resolveMedia(content.video),
+          video: await this.outgoingVideo(content.video, content.compress),
           caption: content.caption,
           ...(content.gifPlayback ? { gifPlayback: true } : {}),
           ...(content.ptv ? { ptv: true } : {}),
@@ -3728,6 +3779,8 @@ export class BaileysAdapter implements ChannelAdapter {
     const sock = this.getSock();
     const jids = participants.map((p) => this.normalizeJid(p));
     const result = await sock.groupCreate(name, jids);
+    // #141: a group created here does not emit group.joined. A later groups.upsert
+    // that lists this account still can, because rc14 does not mark that upsert as self-created.
     return { groupId: result.id, inviteCode: undefined };
   }
 
@@ -3906,6 +3959,67 @@ export class BaileysAdapter implements ChannelAdapter {
     return this.normalizeGroupMetadata(meta);
   }
 
+  async exportGroupParticipants(groupJid: string): Promise<GroupParticipantsExport> {
+    const sock = this.getSock();
+    const jid = normalizeGroupJid(groupJid);
+    const meta = await sock.groupMetadata(jid);
+    const resolved = await Promise.all(
+      (meta.participants ?? []).map(async (participant) => {
+        const identities = await this.getGroupParticipantIdentities(participant);
+        const lid = participant.lid
+          ? jidNormalizedUser(participant.lid)
+          : ([...identities].find((identity) => identity.endsWith("@lid")) ?? null);
+        const phoneJid = participant.phoneNumber
+          ? jidNormalizedUser(participant.phoneNumber)
+          : ([...identities].find((identity) => identity.endsWith("@s.whatsapp.net")) ?? null);
+        const phone = phoneJid?.endsWith("@s.whatsapp.net")
+          ? (phoneJid.split("@")[0]?.split(":")[0] ?? null)
+          : null;
+        const role: GroupParticipantsExport["participants"][number]["role"] =
+          participant.admin === "superadmin"
+            ? "superadmin"
+            : participant.admin === "admin"
+              ? "admin"
+              : "member";
+        return {
+          jid: jidNormalizedUser(participant.id),
+          phone,
+          lid,
+          name: participant.name?.trim() || null,
+          pushName: participant.notify?.trim() || null,
+          role,
+          identities: [...identities],
+        };
+      }),
+    );
+    const stored = this.contactStore.findByIdentities(
+      resolved.flatMap((participant) => [
+        ...participant.identities,
+        ...(participant.phone ? [participant.phone] : []),
+      ]),
+    );
+
+    return {
+      groupJid: meta.id,
+      contactsTruncated: stored.truncated,
+      participants: resolved.map((participant) => {
+        const match = matchStoredContact(
+          participant.identities,
+          participant.phone,
+          stored.contacts,
+        );
+        return {
+          jid: participant.jid,
+          phone: participant.phone,
+          lid: participant.lid,
+          name: match?.name?.trim() || participant.name,
+          pushName: match?.notifyName?.trim() || participant.pushName,
+          role: participant.role,
+        };
+      }),
+    };
+  }
+
   assertGroupMemberLabelWritesEnabled(): void {
     if (!this.groupWritesEnabled) {
       throw new Error(
@@ -4065,6 +4179,174 @@ export class BaileysAdapter implements ChannelAdapter {
     return this.getNormalizedGroupIdentities([sock.user?.id, sock.user?.lid]);
   }
 
+  private async knownOwnJids(): Promise<Set<string>> {
+    if (!this.sock) return new Set();
+    const own = await this.getOwnGroupParticipantJids(this.sock);
+    for (const extra of [this.authMeId, this.authMeLid]) {
+      if (extra) own.add(jidNormalizedUser(extra));
+    }
+    return own;
+  }
+
+  private async participantListIncludesSelf(
+    participants: BaileysGroupParticipant[],
+  ): Promise<boolean> {
+    const own = await this.knownOwnJids();
+    if (own.size === 0) return false;
+    for (const participant of participants) {
+      const identities = await this.getGroupParticipantIdentities(participant);
+      if ([...identities].some((identity) => own.has(identity))) return true;
+    }
+    return false;
+  }
+
+  private async accountOwnsJid(jid: string | undefined): Promise<boolean> {
+    if (!jid) return false;
+    const own = await this.knownOwnJids();
+    return own.has(jidNormalizedUser(jid));
+  }
+
+  /** Collapse duplicate join/leave notifications from a local call and the matching protocol event. */
+  private rememberMembership(key: string): boolean {
+    const now = Date.now();
+    const previous = this.recentMembershipEmits.get(key);
+    if (previous !== undefined && now - previous < 10_000) return false;
+    this.recentMembershipEmits.set(key, now);
+    if (this.recentMembershipEmits.size > 500) {
+      for (const [entry, at] of this.recentMembershipEmits) {
+        if (now - at >= 10_000) this.recentMembershipEmits.delete(entry);
+      }
+    }
+    return true;
+  }
+
+  private emitGroupJoined(event: {
+    groupId: string;
+    subject: string | null;
+    description: string | null;
+    memberCount: number;
+    author: string | null;
+  }): void {
+    // #141: require a member list that already includes this account. Never copy that roster.
+    if (!event.groupId.endsWith("@g.us") || event.memberCount < 1) return;
+    if (!this.rememberMembership(`group:${event.groupId}`)) return;
+    this.emit("group.joined", {
+      instanceId: this.instanceId,
+      groupId: event.groupId,
+      chatId: event.groupId,
+      subject: event.subject,
+      description: event.description,
+      memberCount: event.memberCount,
+      author: event.author,
+      timestamp: Math.floor(Date.now() / 1000),
+    });
+  }
+
+  private emitNewsletterMembership(
+    kind: "joined" | "left",
+    newsletterId: string,
+    name: string | null,
+    description: string | null,
+    role: string | null,
+  ): void {
+    if (!newsletterId.endsWith("@newsletter")) return;
+    if (!this.rememberMembership(`newsletter:${kind}:${newsletterId}`)) return;
+    const payload = {
+      instanceId: this.instanceId,
+      newsletterId,
+      chatId: newsletterId,
+      name,
+      description,
+      role,
+    };
+    this.emit(kind === "joined" ? "newsletter.joined" : "newsletter.left", {
+      ...payload,
+      timestamp: Math.floor(Date.now() / 1000),
+    });
+  }
+
+  private async handleGroupsUpsert(groups: BaileysEventMap["groups.upsert"]): Promise<void> {
+    const own = await this.knownOwnJids();
+    for (const group of groups) {
+      if (!group.id) continue;
+      const roster = group.participants ?? [];
+      // #141: an empty roster, or a roster we cannot match to this account, is not a join.
+      if (roster.length === 0 || own.size === 0) continue;
+      if (!(await this.participantListIncludesSelf(roster))) continue;
+      this.emitGroupJoined({
+        groupId: group.id,
+        subject: group.subject ?? null,
+        description: group.desc ?? null,
+        memberCount: roster.length,
+        author: group.authorPn ?? group.author ?? null,
+      });
+    }
+  }
+
+  private async handleNewsletterParticipantUpdate(
+    update: BaileysEventMap["newsletter-participants.update"],
+  ): Promise<void> {
+    const kind = newsletterMembershipAction(update.action);
+    if (!kind || !update.id || !(await this.accountOwnsJid(update.user))) return;
+    this.emitNewsletterMembership(kind, update.id, null, null, update.new_role || null);
+  }
+
+  private handleNewsletterSettingsUpdate(
+    update: BaileysEventMap["newsletter-settings.update"],
+  ): void {
+    const mute = newsletterMuteState(update.update);
+    if (!mute || !update.id?.endsWith("@newsletter")) return;
+    this.emit("newsletter.mute", {
+      instanceId: this.instanceId,
+      newsletterId: update.id,
+      chatId: update.id,
+      mute,
+      timestamp: Math.floor(Date.now() / 1000),
+    });
+  }
+
+  private emitNewsletterMessages(
+    events: NormalizedMessageEvent[],
+    upsertType: string,
+    appendWatermark: number | null,
+    appendNow: number,
+    preexistingAppendNewsletterKeys: ReadonlySet<string>,
+  ): void {
+    for (const event of events) {
+      if (!event.chatId.endsWith("@newsletter") || !event.message.id) continue;
+      // Newsletter server IDs are scoped to a channel, not the account.
+      const dedupKey = `newsletter:${event.chatId}:${event.message.id}`;
+      if (upsertType === "append") {
+        if (preexistingAppendNewsletterKeys.has(dedupKey)) continue;
+        const timestampMs = event.message.timestamp * 1000;
+        const fresh =
+          timestampMs > 0 &&
+          timestampMs >= (appendWatermark ?? appendNow - this.appendNotifyWindowMs) &&
+          timestampMs <= appendNow + APPEND_NOTIFY_CLOCK_SKEW_MS;
+        if (!fresh) continue;
+      }
+      if (!this.messageDedup.markProcessed(this.instanceId, dedupKey)) {
+        continue;
+      }
+      const serverId = /^\d+$/.test(event.message.id) ? event.message.id : null;
+      this.emit("newsletter.message", {
+        instanceId: this.instanceId,
+        newsletterId: event.chatId,
+        chatId: event.chatId,
+        message: {
+          id: event.message.id,
+          serverId,
+          sender: event.message.sender,
+          timestamp: event.message.timestamp,
+          type: event.message.type,
+          text: event.message.content,
+          views: null,
+          isFromMe: event.message.isFromMe,
+        },
+      });
+    }
+  }
+
   private async getGroupParticipantIdentities(
     participant: Pick<BaileysGroupParticipant, "id" | "phoneNumber" | "lid">,
   ): Promise<Set<string>> {
@@ -4151,6 +4433,8 @@ export class BaileysAdapter implements ChannelAdapter {
     this.requireGroupWritesEnabled();
     const sock = this.getSock();
     const groupId = await sock.groupAcceptInvite(normalizeGroupInviteCode(inviteCode));
+    // #141: groupAcceptInvite does not return members. group.joined waits for a roster
+    // that includes this account (groups.upsert or a participant add).
     return groupId ?? "";
   }
 
@@ -4886,12 +5170,14 @@ export class BaileysAdapter implements ChannelAdapter {
     this.requireGroupWritesEnabled();
     const sock = this.getSock();
     await sock.newsletterFollow(jid);
+    this.emitNewsletterMembership("joined", jid, null, null, "subscriber");
   }
 
   async newsletterUnfollow(jid: string): Promise<void> {
     this.requireGroupWritesEnabled();
     const sock = this.getSock();
     await sock.newsletterUnfollow(jid);
+    this.emitNewsletterMembership("left", jid, null, null, null);
   }
 
   async newsletterSend(jid: string, text: string): Promise<MessageResponse> {
@@ -4903,7 +5189,15 @@ export class BaileysAdapter implements ChannelAdapter {
   async createNewsletter(name: string, description?: string): Promise<NewsletterMetadata> {
     this.requireGroupWritesEnabled();
     const sock = this.getSock();
-    return sock.newsletterCreate(name, description);
+    const created = await sock.newsletterCreate(name, description);
+    this.emitNewsletterMembership(
+      "joined",
+      created.id,
+      created.name ?? name,
+      created.description ?? description ?? null,
+      "owner",
+    );
+    return created;
   }
 
   async getNewsletterMetadata(
@@ -4962,6 +5256,61 @@ export class BaileysAdapter implements ChannelAdapter {
     return isBinaryNode(response)
       ? parseNewsletterMessagesResponse(response)
       : { posts: [], pagination: { oldestServerId: null, newestServerId: null, after: null } };
+  }
+
+  async downloadNewsletterMedia(
+    newsletterJid: string,
+    messageId: string,
+    maxBytes?: number,
+    timeoutMs?: number,
+  ): Promise<NewsletterMediaDownload> {
+    if (!/^\d{5,20}@newsletter$/.test(newsletterJid)) {
+      throw new Error("Invalid Channel JID; expected a JID ending in @newsletter");
+    }
+    const postId = messageId.trim();
+    if (!postId || postId.length > 128) throw new Error("Invalid Channel messageId");
+
+    const sock = this.getSock();
+    const attempts: Array<Record<string, string>> = [];
+    if (/^[1-9]\d{0,19}$/.test(postId)) {
+      // Same stanza as rc14 newsletterFetchMessages; BigInt preserves large server IDs.
+      attempts.push({ count: "1", since: "0", after: (BigInt(postId) - 1n).toString() });
+    }
+    attempts.push({ count: "100", since: "0" });
+
+    for (const attrs of attempts) {
+      const response: unknown = await sock.query({
+        tag: "iq",
+        attrs: {
+          id: sock.generateMessageTag(),
+          type: "get",
+          xmlns: "newsletter",
+          to: newsletterJid,
+        },
+        content: [{ tag: "message_updates", attrs }],
+      });
+      if (!isBinaryNode(response)) {
+        throw new Error("Channel post history returned an unexpected response");
+      }
+      const lookup = newsletterMedia.findNewsletterPostMedia(response, postId);
+      if (lookup.status === "missing") continue;
+      if (lookup.status === "no-media") {
+        throw new Error(`Channel post '${lookup.messageId}' does not contain downloadable media`);
+      }
+      const data = await newsletterMedia.readNewsletterMediaBytes(
+        lookup.media,
+        maxBytes,
+        timeoutMs,
+      );
+      return {
+        data,
+        mimeType: lookup.media.mimeType,
+        mediaType: lookup.media.mediaType,
+        ...(lookup.media.fileName ? { fileName: lookup.media.fileName } : {}),
+      };
+    }
+
+    throw new Error(`Channel post '${postId}' is unavailable`);
   }
 
   // ---- Business catalog ----
@@ -7144,6 +7493,7 @@ export class BaileysAdapter implements ChannelAdapter {
             ? (this.appendNotifyWatermarkMs ?? this.getAppendNotifyWatermark(appendNow))
             : null;
         const preexistingAppendMessageIds = new Set<string>();
+        const preexistingAppendNewsletterKeys = new Set<string>();
         if (data.type === "append") {
           const checkedMessageIds = new Set<string>();
           for (const message of data.messages) {
@@ -7151,13 +7501,16 @@ export class BaileysAdapter implements ChannelAdapter {
             if (!messageId || checkedMessageIds.has(messageId)) continue;
             checkedMessageIds.add(messageId);
             const existing = db
-              .select({ id: messagesTable.id })
+              .select({ id: messagesTable.id, chatId: messagesTable.chatId })
               .from(messagesTable)
               .where(
                 and(eq(messagesTable.instanceId, this.instanceId), eq(messagesTable.id, messageId)),
               )
               .get();
-            if (existing) preexistingAppendMessageIds.add(messageId);
+            if (existing) {
+              preexistingAppendMessageIds.add(messageId);
+              preexistingAppendNewsletterKeys.add(`newsletter:${existing.chatId}:${messageId}`);
+            }
           }
         }
         logger.info(
@@ -7253,6 +7606,13 @@ export class BaileysAdapter implements ChannelAdapter {
         }
 
         const normalizedEvents = normalizeMessagesUpsert(this.instanceId, data);
+        this.emitNewsletterMessages(
+          normalizedEvents,
+          data.type,
+          appendWatermark,
+          appendNow,
+          preexistingAppendNewsletterKeys,
+        );
         if (data.type === "append") {
           let appendEmitted = 0;
           const appendMessagesById = new Map<string, WAMessage>();
@@ -7495,12 +7855,26 @@ export class BaileysAdapter implements ChannelAdapter {
         });
       }
 
+      if (events["groups.upsert"]) {
+        await this.handleGroupsUpsert(events["groups.upsert"]);
+      }
+
       if (events["group-participants.update"]) {
-        const event = normalizeGroupParticipantsUpdate(
-          this.instanceId,
-          events["group-participants.update"],
-        );
+        const update = events["group-participants.update"];
+        const event = normalizeGroupParticipantsUpdate(this.instanceId, update);
         this.emit("group.participants_changed", event);
+        if (
+          event.action === "add" &&
+          (await this.participantListIncludesSelf(update.participants))
+        ) {
+          this.emitGroupJoined({
+            groupId: event.groupId,
+            subject: null,
+            description: null,
+            memberCount: update.participants.length,
+            author: update.authorPn ?? update.author ?? null,
+          });
+        }
       }
 
       if (events["group.member-tag.update"]) {
@@ -7599,6 +7973,26 @@ export class BaileysAdapter implements ChannelAdapter {
           },
         };
         this.emit("label.updated", labelEvent);
+        if (labelEvent.association) {
+          this.emit("label.association", {
+            instanceId: this.instanceId,
+            labelId: label.id,
+            labeled: type === "add",
+            chatId,
+            ...(messageId ? { messageId } : {}),
+            label,
+            association: labelEvent.association,
+            timestamp: Math.floor(Date.now() / 1000),
+          });
+        }
+      }
+
+      if (events["newsletter-participants.update"]) {
+        await this.handleNewsletterParticipantUpdate(events["newsletter-participants.update"]);
+      }
+
+      if (events["newsletter-settings.update"]) {
+        this.handleNewsletterSettingsUpdate(events["newsletter-settings.update"]);
       }
     };
 

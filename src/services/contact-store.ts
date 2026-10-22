@@ -3,12 +3,15 @@
 // Persists contacts received from Baileys and serves local lookups.
 // ============================================================
 
-import { and, count, eq, isNotNull, isNull, like, or, sql } from "drizzle-orm";
+import { and, count, eq, inArray, isNotNull, isNull, like, or, sql } from "drizzle-orm";
 import type { db as applicationDb } from "../db/client.js";
 import { chats as chatsTable, contacts as contactsTable } from "../db/schema.js";
 import type { Contact } from "../types/channel.types.js";
+import { createChildLogger } from "../utils/logger.js";
 
 const MAX_LOCAL_MESSAGE_CONTACT_CANDIDATES = 50_000;
+const IDENTITY_LOOKUP_LIMIT = 5_000;
+const log = createChildLogger({ service: "contact-store" });
 
 export interface ContactSyncRecord {
   id?: string | null;
@@ -25,6 +28,20 @@ export interface ContactHistorySync {
 }
 
 export type ContactPnResolver = (lid: string) => Promise<string | null>;
+
+export interface StoredContactIdentity {
+  jid: string;
+  lid: string | null;
+  phone: string | null;
+  name: string | null;
+  notifyName: string | null;
+}
+
+export interface ContactIdentityLookup {
+  contacts: StoredContactIdentity[];
+  /** True when the caller passed more than 5000 identities and the rest were not queried. */
+  truncated: boolean;
+}
 
 export interface ContactRecoverySourceResult {
   candidates: number;
@@ -247,6 +264,56 @@ export class ContactStore {
       isBusiness: row.isBusiness === 1,
       isBlocked: row.isBlocked === 1,
     }));
+  }
+
+  /** Match stored contacts by JID, LID, or phone digits. Names stay separate from push names. */
+  findByIdentities(identities: string[]): ContactIdentityLookup {
+    const unique = [...new Set(identities.map((identity) => identity.trim()).filter(Boolean))];
+    const truncated = unique.length > IDENTITY_LOOKUP_LIMIT;
+    const keys = truncated ? unique.slice(0, IDENTITY_LOOKUP_LIMIT) : unique;
+    if (truncated) {
+      log.warn(
+        { instanceId: this.instanceId, requested: unique.length, limit: IDENTITY_LOOKUP_LIMIT },
+        "Contact identity lookup truncated",
+      );
+    }
+    if (keys.length === 0) return { contacts: [], truncated: false };
+
+    const phones = [
+      ...new Set(
+        keys.flatMap((key) => {
+          if (/^\d+$/.test(key)) return [key];
+          if (!key.endsWith("@s.whatsapp.net")) return [];
+          const user = key.split("@")[0]?.split(":")[0];
+          return user && /^\d+$/.test(user) ? [user] : [];
+        }),
+      ),
+    ];
+    const identityMatch = [
+      inArray(contactsTable.jid, keys),
+      inArray(contactsTable.lid, keys),
+      ...(phones.length > 0 ? [inArray(contactsTable.phone, phones)] : []),
+    ];
+
+    const contacts = this.database
+      .select({
+        jid: contactsTable.jid,
+        lid: contactsTable.lid,
+        phone: contactsTable.phone,
+        name: contactsTable.name,
+        notifyName: contactsTable.notifyName,
+      })
+      .from(contactsTable)
+      .where(and(eq(contactsTable.instanceId, this.instanceId), or(...identityMatch)))
+      .all()
+      .map((row) => ({
+        jid: row.jid,
+        lid: row.lid ?? null,
+        phone: row.phone ?? null,
+        name: row.name ?? null,
+        notifyName: row.notifyName ?? null,
+      }));
+    return { contacts, truncated };
   }
 
   private upsertContact(contact: ContactSyncRecord): void {
