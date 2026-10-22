@@ -605,6 +605,54 @@ describe("Baileys business and message features", () => {
     );
   });
 
+  it("adds the connected user as participant to an own group history anchor", async () => {
+    const { instanceId: id, adapter } = createFixture();
+    const groupChatId = "120363000000000001@g.us";
+    const anchorId = "own-group-history-anchor";
+    addStoredMessage(id, anchorId, {
+      chatId: groupChatId,
+      sender: "me",
+      fromMe: true,
+      timestamp: 50,
+      rawData: rawKeyMessage(groupChatId, anchorId, true, 50),
+    });
+    const { socket, processEvents } = installSocket(adapter);
+
+    const request = adapter.fetchMessageHistory(groupChatId, 20, 1_000);
+
+    expect(socket.fetchMessageHistory).toHaveBeenCalledWith(
+      20,
+      {
+        remoteJid: groupChatId,
+        id: anchorId,
+        fromMe: true,
+        participant: ACCOUNT_ID,
+      },
+      50_000,
+    );
+    await processEvents({
+      "messaging-history.set": {
+        contacts: [],
+        chats: [],
+        messages: [],
+        syncType: proto.HistorySync.HistorySyncType.ON_DEMAND,
+        peerDataRequestSessionId: "history-request",
+      },
+      "messaging-history.status": {
+        syncType: proto.HistorySync.HistorySyncType.ON_DEMAND,
+        status: "complete",
+      },
+    });
+
+    await expect(request).resolves.toEqual({
+      requested: 20,
+      limit: 20,
+      capped: false,
+      stored: 0,
+      timedOut: false,
+    });
+  });
+
   it("automatically requests bounded history when a chat has no stored messages", async () => {
     vi.stubEnv("WA_BAILEYS_HISTORY_SYNC_MAX_MESSAGES", "7");
     const { adapter } = createFixture();

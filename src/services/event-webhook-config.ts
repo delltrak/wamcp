@@ -33,6 +33,8 @@ export interface EventWebhookDestination {
   ignoreFromMe: boolean;
   chatAllowlist?: string[];
   senderAllowlist?: string[];
+  /** Exact JIDs and address-space wildcards. Unset or empty forwards every chat. */
+  ignoreJids?: string[];
   debounceMs: number;
 }
 
@@ -274,6 +276,79 @@ function parseAllowlist(value: unknown, label: string): string[] | undefined {
   return [...new Set(value.map((item) => (item as string).trim()))];
 }
 
+/** Address-space wildcards. An entry must be one of these or an exact JID. */
+export const JID_ADDRESS_WILDCARDS = [
+  "@g.us",
+  "@s.whatsapp.net",
+  "@lid",
+  "@newsletter",
+  "@broadcast",
+  "@c.us",
+] as const;
+
+const EXACT_JID_RE = /^[0-9A-Za-z][0-9A-Za-z._:-]{0,180}@[A-Za-z0-9][A-Za-z0-9.-]{0,80}$/;
+const STAR_JID_RE = /^([0-9A-Za-z._:-]*)\*([0-9A-Za-z._:-]*)@([A-Za-z0-9][A-Za-z0-9.-]{0,80})$/;
+const JID_DOMAINS = ["g.us", "s.whatsapp.net", "lid", "newsletter", "broadcast", "c.us"] as const;
+
+export function parseIgnoreJidEntry(entry: string, label: string): string {
+  const value = entry.trim().toLowerCase();
+  if (!value) throw new Error(`Invalid ${label}; empty entry`);
+  if (/\s/.test(value)) throw new Error(`Invalid ${label}; invalid JID "${value}"`);
+  if (value.startsWith("@")) {
+    if (!(JID_ADDRESS_WILDCARDS as readonly string[]).includes(value)) {
+      throw new Error(
+        `Invalid ${label}; unsupported wildcard "${value}". Supported wildcards: ${JID_ADDRESS_WILDCARDS.join(", ")}`,
+      );
+    }
+    return value;
+  }
+  if (value.includes("*")) {
+    const match = STAR_JID_RE.exec(value);
+    const domain = match?.[3];
+    if (!domain || !(JID_DOMAINS as readonly string[]).includes(domain)) {
+      throw new Error(
+        `Invalid ${label}; invalid JID wildcard "${value}". Use one * in the user part, for example 5577*@s.whatsapp.net`,
+      );
+    }
+    // #140: *@domain has an empty user part, so it is the chat-only address wildcard.
+    if ((match?.[1] ?? "") === "" && (match?.[2] ?? "") === "") return `@${domain}`;
+    return value;
+  }
+  if (!EXACT_JID_RE.test(value)) {
+    throw new Error(`Invalid ${label}; invalid JID "${value}"`);
+  }
+  return value;
+}
+
+/** Empty or unset means no JID filter. Blank comma slots are skipped; other invalid entries fail. */
+export function parseIgnoreJidList(value: string | undefined, label: string): string[] {
+  if (value === undefined || value.trim() === "") return [];
+  const entries = value
+    .split(",")
+    .map((entry) => entry.trim())
+    .filter(Boolean);
+  return [...new Set(entries.map((entry) => parseIgnoreJidEntry(entry, label)))];
+}
+
+function parseDestinationIgnoreJids(value: unknown): string[] {
+  if (value === undefined) return [];
+  if (!Array.isArray(value) || !value.every((item) => typeof item === "string")) {
+    throw new Error("Invalid WA_EVENT_WEBHOOKS; ignoreJids must be an array of JID patterns");
+  }
+  return [
+    ...new Set(
+      value
+        .map((item) => item.trim())
+        .filter(Boolean)
+        .map((item) => parseIgnoreJidEntry(item, "WA_EVENT_WEBHOOKS ignoreJids")),
+    ),
+  ];
+}
+
+function mergeIgnoreJids(globalJids: readonly string[], extra: readonly string[]): string[] {
+  return [...new Set([...globalJids, ...extra])];
+}
+
 function validateDestinationUrl(url: string, allowHttp: boolean, label: string): string {
   if (validateWebhookUrl(url, allowHttp)) {
     throw new Error(`Invalid ${label}; expected a public URL under the configured protocol policy`);
@@ -291,6 +366,7 @@ function parseDestination(
     ignoreFromMe: boolean;
     preset?: EventWebhookPreset;
     debounceMs: number;
+    ignoreJids: string[];
   },
   ids: Set<string>,
 ): EventWebhookDestination {
@@ -354,6 +430,10 @@ function parseDestination(
     input.senderAllowlist,
     "WA_EVENT_WEBHOOKS senderAllowlist",
   );
+  const ignoreJids = mergeIgnoreJids(
+    global.ignoreJids,
+    parseDestinationIgnoreJids(input.ignoreJids),
+  );
 
   return trackDestinationAuth(
     {
@@ -366,6 +446,7 @@ function parseDestination(
       ignoreFromMe,
       ...(chatAllowlist !== undefined ? { chatAllowlist } : {}),
       ...(senderAllowlist !== undefined ? { senderAllowlist } : {}),
+      ...(ignoreJids.length > 0 ? { ignoreJids } : {}),
       debounceMs,
     },
     authHeader !== undefined,
@@ -499,7 +580,11 @@ export function loadEventWebhookConfig(env: Environment = process.env): EventWeb
   }
   const events = parseEvents(env.WA_EVENT_WEBHOOK_EVENTS);
   const preset = parsePreset(env.WA_EVENT_WEBHOOK_PRESET, "WA_EVENT_WEBHOOK_PRESET");
-  const global = { allowHttp, events, ignoreFromMe, preset, debounceMs };
+  const ignoreJids = parseIgnoreJidList(
+    env.WA_EVENT_WEBHOOK_IGNORE_JIDS,
+    "WA_EVENT_WEBHOOK_IGNORE_JIDS",
+  );
+  const global = { allowHttp, events, ignoreFromMe, preset, debounceMs, ignoreJids };
   const multiValue = env.WA_EVENT_WEBHOOKS?.trim();
 
   if (multiValue) {
@@ -567,6 +652,7 @@ export function loadEventWebhookConfig(env: Environment = process.env): EventWeb
           ...(preset ? { preset } : {}),
           events,
           ignoreFromMe,
+          ...(ignoreJids.length > 0 ? { ignoreJids } : {}),
           debounceMs,
         },
         auth.configured,
