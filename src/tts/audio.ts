@@ -206,8 +206,7 @@ export function runFfmpegCommand(
       }
     });
 
-    chunks.forEach((chunk, index) => {
-      const descriptor = inputFileDescriptors[index]!;
+    const writeChunk = (descriptor: number, chunk: Buffer): void => {
       const input = child.stdio[descriptor];
       if (input && "end" in input && typeof input.end === "function") {
         if ("on" in input && typeof input.on === "function") {
@@ -217,6 +216,10 @@ export function runFfmpegCommand(
         }
         input.end(chunk);
       }
+    };
+    if (chunks.length === 0) writeChunk(0, Buffer.alloc(0));
+    chunks.forEach((chunk, index) => {
+      writeChunk(inputFileDescriptors[index]!, chunk);
     });
   });
 }

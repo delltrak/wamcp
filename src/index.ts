@@ -23,14 +23,12 @@ import { normalizeWebhookPayload } from "./channels/cloud-api/cloud.events.js";
 import type { MetaWebhookPayload } from "./channels/cloud-api/cloud.events.js";
 import { installShutdownHandlers, SHUTDOWN_TIMEOUT_MS } from "./utils/shutdown.js";
 import { logger } from "./utils/logger.js";
+import { loadAutoReplyConfig, startAutoReply } from "./services/auto-reply.js";
 import { getAutoReadMode } from "./services/auto-read.js";
+import { loadPresencePulseConfig, PresencePulseScheduler } from "./services/presence-pulse.js";
 import { loadAutoMarkPlayedConfig } from "./services/auto-mark-played.js";
-import {
-  bootEventWebhook,
-  getEventWebhookStatus,
-  type EventWebhookStatus,
-} from "./services/event-webhook-config.js";
-import { buildHealthBody } from "./server/health.js";
+import { bootEventWebhook, getEventWebhookStatus } from "./services/event-webhook-config.js";
+import { buildHealthBody, renderHealthBody } from "./server/health.js";
 import { DashboardEventLog } from "./server/dashboard-activity.js";
 import {
   assertDashboardTransport,
@@ -40,6 +38,7 @@ import {
 } from "./server/dashboard-config.js";
 import { createDashboardHandler } from "./server/dashboard.js";
 import { renderQrDataUrl } from "./server/dashboard-qr.js";
+import { parseBaileysProxyUrl } from "./channels/baileys/proxy.js";
 
 const CLOUD_WEBHOOK_PATH = "/cloud-webhook";
 
@@ -83,6 +82,8 @@ function checkApiKey(req: IncomingMessage, res: ServerResponse): boolean {
 }
 
 async function initServices() {
+  const autoReplyConfig = loadAutoReplyConfig();
+  const presencePulseConfig = loadPresencePulseConfig();
   loadAutoMarkPlayedConfig();
   getAutoReadMode();
 
@@ -94,6 +95,7 @@ async function initServices() {
   // Wire them together
   instanceManager.setMessageQueue(messageQueue);
   eventWebhook.start(instanceManager);
+  const autoReply = startAutoReply(instanceManager, messageQueue, autoReplyConfig);
 
   // Load existing instances from DB and reconnect
   await instanceManager.init();
@@ -102,17 +104,29 @@ async function initServices() {
   const maintenance = new MaintenanceService(instanceManager);
   await maintenance.start();
 
-  logger.info("Services initialized");
+  const presencePulse = new PresencePulseScheduler({
+    config: presencePulseConfig,
+    listDevices: () =>
+      instanceManager.listBaileysAdapters().map(({ instanceId, adapter }) => ({
+        id: instanceId,
+        isReady: () => adapter.getStatus() === "connected",
+        runPulse: (durationMs: number) => adapter.runPresencePulse(durationMs),
+      })),
+  });
+  presencePulse.start();
 
-  return { instanceManager, messageQueue, eventWebhook, maintenance };
+  logger.info(
+    { presencePulse: presencePulseConfig.enabled, autoReply: autoReplyConfig.enabled },
+    "Services initialized",
+  );
+
+  return { instanceManager, messageQueue, eventWebhook, maintenance, presencePulse, autoReply };
 }
 
-async function startHttp(
-  webhookStatus: EventWebhookStatus,
-  dashboardConfig: DashboardConfig,
-): Promise<void> {
-  const { instanceManager, messageQueue, eventWebhook, maintenance } = await initServices();
-  const mcpSessions = new McpHttpSessionManager(instanceManager, messageQueue);
+async function startHttp(dashboardConfig: DashboardConfig): Promise<void> {
+  const { instanceManager, messageQueue, eventWebhook, maintenance, presencePulse, autoReply } =
+    await initServices();
+  const mcpSessions = new McpHttpSessionManager(instanceManager, messageQueue, eventWebhook);
   const startTime = Date.now();
   const dashboardEvents = new DashboardEventLog();
   if (dashboardConfig.enabled) {
@@ -148,10 +162,10 @@ async function startHttp(
           disconnected: allInstances.length - connected,
         },
         version: VERSION,
-        webhook: webhookStatus,
+        webhook: getEventWebhookStatus(),
       });
       res.writeHead(200, { "Content-Type": "application/json" });
-      res.end(JSON.stringify(health));
+      res.end(renderHealthBody(health));
       return;
     }
 
@@ -248,6 +262,8 @@ async function startHttp(
 
   let servicesClosePromise: Promise<void> | null = null;
   const closeServices = (): Promise<void> => {
+    presencePulse.stop();
+    autoReply.stop();
     servicesClosePromise ??= Promise.all([
       messageQueue.close(),
       eventWebhook.close(),
@@ -288,11 +304,14 @@ async function startHttp(
 }
 
 async function startStdio(): Promise<void> {
-  const { instanceManager, messageQueue, eventWebhook, maintenance } = await initServices();
-  const { server: mcpServer } = createMcpServer(instanceManager, messageQueue);
+  const { instanceManager, messageQueue, eventWebhook, maintenance, presencePulse, autoReply } =
+    await initServices();
+  const { server: mcpServer } = createMcpServer(instanceManager, messageQueue, eventWebhook);
   const onServerClose = mcpServer.server.onclose;
   let servicesClosePromise: Promise<void> | null = null;
   const closeServices = (): Promise<void> => {
+    presencePulse.stop();
+    autoReply.stop();
     servicesClosePromise ??= Promise.all([
       messageQueue.close(),
       eventWebhook.close(),
@@ -327,13 +346,14 @@ async function startStdio(): Promise<void> {
 async function main(): Promise<void> {
   const dashboardConfig = loadDashboardConfig();
   assertDashboardTransport(dashboardConfig, transport);
+  parseBaileysProxyUrl(process.env.WA_PROXY_URL);
   logger.info({ transport, version: VERSION }, "Starting WA MCP server");
-  const webhookStatus = bootEventWebhook();
+  bootEventWebhook();
 
   if (transport === "stdio") {
     await startStdio();
   } else {
-    await startHttp(webhookStatus, dashboardConfig);
+    await startHttp(dashboardConfig);
   }
 }
 
