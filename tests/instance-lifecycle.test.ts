@@ -89,7 +89,7 @@ afterEach(async () => {
   for (const adapter of activeAdapters) invokePrivate(adapter, "clearAuthChallenges");
   activeAdapters.clear();
   for (const instanceId of activeInstanceIds) {
-    (await sqlite.prepare("DELETE FROM instances WHERE id = ?").run(instanceId));
+    await sqlite.prepare("DELETE FROM instances WHERE id = ?").run(instanceId);
   }
   activeInstanceIds.clear();
   vi.useRealTimers();
@@ -97,6 +97,18 @@ afterEach(async () => {
 });
 
 describe("instance lifecycle events", () => {
+  it("shares one adapter across concurrent database lookups", async () => {
+    const manager = new InstanceManager();
+    const instance = await manager.createInstance("concurrent adapter");
+    activeInstanceIds.add(instance.id);
+    const [first, second] = await Promise.all([
+      manager.ensureAdapter(instance.id),
+      manager.ensureAdapter(instance.id),
+    ]);
+    expect(first).toBe(second);
+    expect(manager.getAdapter(instance.id)).toBe(first);
+  });
+
   it("emits a safe pairing-code event and marks the following open as paired", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-10-19T12:00:00.000Z"));
@@ -162,11 +174,11 @@ describe("instance lifecycle events", () => {
     } satisfies ChannelEventPayload["instance.disconnected"]);
 
     expect(
-      (await sqlite
+      await sqlite
         .prepare(
           "SELECT last_disconnect_reason, last_disconnect_status_code FROM instances WHERE id = ?",
         )
-        .get(instance.id)),
+        .get(instance.id),
     ).toEqual({ last_disconnect_reason: "logged out", last_disconnect_status_code: 401 });
 
     const recreatedManager = new InstanceManager();
@@ -275,7 +287,7 @@ describe("instance lifecycle events", () => {
         willReconnect: false,
       }),
     );
-    expect(scheduleReconnect).toHaveBeenCalledTimes(2);
+    expect(scheduleReconnect).toHaveBeenCalledTimes(1);
   });
 });
 

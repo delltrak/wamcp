@@ -21,6 +21,13 @@ const logger = createChildLogger({ service: "message-queue" });
 
 export type OutboundJob =
   | {
+      kind: "community-announcement";
+      instanceId: string;
+      communityId: string;
+      to: string;
+      content: MessageContent;
+    }
+  | {
       instanceId: string;
       to: string;
       content: MessageContent;
@@ -108,7 +115,18 @@ export class MessageQueue {
         const data = job.data as OutboundJob;
         const adapter = this.getAdapter(data.instanceId);
         try {
-          if (data.kind === "group-member-label") {
+          if (data.kind === "community-announcement") {
+            const target = await adapter.resolveCommunityAnnouncementGroup(data.communityId, true);
+            if (target !== data.to) {
+              throw new UnrecoverableError(
+                "The community Avisos destination changed; enqueue a new announcement after review",
+              );
+            }
+            if ("quotedMessageId" in data.content && data.content.quotedMessageId) {
+              adapter.validateQuotedMessage?.(target, data.content.quotedMessageId);
+            }
+            await adapter.sendMessage(target, data.content);
+          } else if (data.kind === "group-member-label") {
             await adapter.updateGroupMemberLabel(data.groupId, data.memberLabel);
           } else if (data.kind === "album") {
             await adapter.sendMediaAlbum(data.to, data.images);
@@ -142,6 +160,34 @@ export class MessageQueue {
     this.queues.set(instanceId, queue);
     this.workers.set(instanceId, worker);
     return queue;
+  }
+
+  /** Resolve before enqueueing and revalidate in the worker; never retarget silently. */
+  async enqueueCommunityAnnouncement(
+    instanceId: string,
+    communityId: string,
+    content: MessageContent,
+  ): Promise<EnqueueResult & { to: string }> {
+    if (!this.getAdapter) throw new Error("Adapter resolver not set");
+    const adapter = this.getAdapter(instanceId);
+    const to = await adapter.resolveCommunityAnnouncementGroup(communityId, true);
+    if ("quotedMessageId" in content && content.quotedMessageId) {
+      adapter.validateQuotedMessage?.(to, content.quotedMessageId);
+    }
+    const data: OutboundJob = {
+      kind: "community-announcement",
+      instanceId,
+      communityId,
+      to,
+      content,
+    };
+    // A send timeout can happen after delivery. Avoid automatic duplicate broadcasts.
+    const job = await this.getOrCreateQueue(instanceId, "baileys").add(
+      "community-announcement",
+      data,
+      { attempts: 1 },
+    );
+    return { status: "queued", jobId: job.id ?? "", to };
   }
 
   /** Enqueue an outbound message */

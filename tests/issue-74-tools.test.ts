@@ -119,6 +119,7 @@ function makeSocket(overrides: Record<string, unknown> = {}) {
     }),
     set: vi.fn(async () => {}),
   };
+  let linkedToCommunity = false;
   const socket = {
     user: { id: CONTACT_JID },
     ws: { isOpen: true },
@@ -142,15 +143,28 @@ function makeSocket(overrides: Record<string, unknown> = {}) {
       [COMMUNITY_JID]: { id: COMMUNITY_JID, subject: "Community" },
     })),
     communityMetadata: vi.fn(async () => ({ id: COMMUNITY_JID, subject: "Community details" })),
-    communityLinkGroup: vi.fn(async () => undefined),
-    communityUnlinkGroup: vi.fn(async () => undefined),
+    communityLinkGroup: vi.fn(async () => {
+      linkedToCommunity = true;
+    }),
+    communityUnlinkGroup: vi.fn(async () => {
+      linkedToCommunity = false;
+    }),
     communityLeave: vi.fn(async () => undefined),
-    groupMetadata: vi.fn(async () => ({
-      id: GROUP_JID,
-      subject: "Group",
+    groupMetadata: vi.fn(async (id: string) => ({
+      id,
+      subject: id === COMMUNITY_JID ? "Community details" : "Group",
+      isCommunity: id === COMMUNITY_JID,
+      isCommunityAnnounce: false,
+      linkedParent: id === GROUP_JID && linkedToCommunity ? COMMUNITY_JID : undefined,
       participants: [{ id: CONTACT_JID, admin: "admin" }],
     })),
     groupFetchAllParticipating: vi.fn(async () => ({
+      [COMMUNITY_JID]: {
+        id: COMMUNITY_JID,
+        subject: "Community",
+        isCommunity: true,
+        participants: [],
+      },
       [GROUP_JID]: {
         id: GROUP_JID,
         subject: "Group",
@@ -562,8 +576,8 @@ describe("issue #74 tools", () => {
     await invoke(tools, "wa_leave_community", { communityId: COMMUNITY_JID });
 
     expect(socket.communityCreate).toHaveBeenCalledWith("Community", "About");
-    expect(socket.communityFetchAllParticipating).toHaveBeenCalledOnce();
-    expect(socket.communityMetadata).toHaveBeenCalledWith(COMMUNITY_JID);
+    expect(socket.groupFetchAllParticipating).toHaveBeenCalledOnce();
+    expect(socket.groupMetadata).toHaveBeenCalledWith(COMMUNITY_JID);
     expect(socket.communityLinkGroup).toHaveBeenCalledWith(GROUP_JID, COMMUNITY_JID);
     expect(socket.communityUnlinkGroup).toHaveBeenCalledWith(GROUP_JID, COMMUNITY_JID);
     expect(socket.communityLeave).toHaveBeenCalledWith(COMMUNITY_JID);
@@ -879,7 +893,9 @@ describe("issue #74 tools", () => {
       const socket = makeSocket();
       const adapter = makeAdapter(socket);
 
-      await expect(adapter.listGroups()).resolves.toMatchObject([{ jid: GROUP_JID }]);
+      await expect(adapter.listGroups()).resolves.toEqual(
+        expect.arrayContaining([expect.objectContaining({ jid: GROUP_JID })]),
+      );
       await expect(adapter.getGroupMetadata(GROUP_JID)).resolves.toMatchObject({
         jid: GROUP_JID,
         subject: "Group",

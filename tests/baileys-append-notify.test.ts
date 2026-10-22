@@ -98,6 +98,7 @@ async function createFixture(
     end: vi.fn(),
   } as unknown as WASocket;
   const adapter = new BaileysAdapter(instanceId);
+  (adapter as unknown as { sock: WASocket }).sock = socket;
   (adapter as unknown as AdapterInternals).bindEvents(socket);
   (new InstanceManager() as unknown as InstanceManagerInternals).bindAdapterEvents(
     instanceId,
@@ -118,6 +119,8 @@ async function createFixture(
       await dispatchBatch({ "messages.upsert": { type, messages } } as Partial<BaileysEventMap>);
     },
     dispatchConnectionUpdate: async (update) => {
+      // Simulate the active socket assigned by openSocket before an open notification.
+      if (update.connection === "open") (adapter as unknown as { sock: WASocket }).sock = socket;
       if (!connectionUpdate)
         throw new Error("Baileys connection update handler was not registered");
       await connectionUpdate(update);

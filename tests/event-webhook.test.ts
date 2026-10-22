@@ -269,12 +269,14 @@ describe("outgoing event webhook config", () => {
 });
 
 describe("outgoing event webhook events", () => {
-  it("filters unconfigured events and ignores self-sent messages by default", () => {
+  it("filters unconfigured events and ignores self-sent messages by default", async () => {
     const config = configuredWebhook();
-    expect(shouldSendEventWebhook("message.received", incomingMessage(), config)).toBe(true);
-    expect(shouldSendEventWebhook("message.received", incomingMessage(true), config)).toBe(false);
+    expect(await shouldSendEventWebhook("message.received", incomingMessage(), config)).toBe(true);
+    expect(await shouldSendEventWebhook("message.received", incomingMessage(true), config)).toBe(
+      false,
+    );
     expect(
-      shouldSendEventWebhook(
+      await shouldSendEventWebhook(
         "message.edited",
         {
           instanceId: "inst_1234abcd",
@@ -288,12 +290,12 @@ describe("outgoing event webhook events", () => {
     ).toBe(false);
 
     const includeSelf = configuredWebhook({ WA_EVENT_WEBHOOK_IGNORE_FROM_ME: "false" });
-    expect(shouldSendEventWebhook("message.received", incomingMessage(true), includeSelf)).toBe(
-      true,
-    );
+    expect(
+      await shouldSendEventWebhook("message.received", incomingMessage(true), includeSelf),
+    ).toBe(true);
   });
 
-  it("sends lifecycle events when chat and sender allowlists are configured", () => {
+  it("sends lifecycle events when chat and sender allowlists are configured", async () => {
     const destination = loadEventWebhookConfig({
       WA_EVENT_WEBHOOKS: JSON.stringify([
         {
@@ -314,9 +316,11 @@ describe("outgoing event webhook events", () => {
       disconnectedAt: 1_800_000_123_000,
     };
 
-    expect(shouldSendEventWebhook("instance.disconnected", disconnected, destination)).toBe(true);
+    expect(await shouldSendEventWebhook("instance.disconnected", disconnected, destination)).toBe(
+      true,
+    );
     expect(
-      shouldSendEventWebhook("message.received", incomingMessage(), {
+      await shouldSendEventWebhook("message.received", incomingMessage(), {
         ...destination,
         events: ["message.received"],
       }),
@@ -366,7 +370,7 @@ describe("outgoing event webhook events", () => {
     });
   });
 
-  it("forwards group member label events with the label and group identifiers", () => {
+  it("forwards group member label events with the label and group identifiers", async () => {
     const payload: ChannelEventPayload["group.member_label_changed"] = {
       instanceId: "inst_fixture",
       groupId: "120363000000000000@g.us",
@@ -377,7 +381,7 @@ describe("outgoing event webhook events", () => {
     };
     const config = configuredWebhook({ WA_EVENT_WEBHOOK_EVENTS: "group.member_label_changed" });
 
-    expect(shouldSendEventWebhook("group.member_label_changed", payload, config)).toBe(true);
+    expect(await shouldSendEventWebhook("group.member_label_changed", payload, config)).toBe(true);
     expect(
       normalizeEventWebhookPayload("group.member_label_changed", payload.instanceId, payload),
     ).toMatchObject({
@@ -439,7 +443,7 @@ describe("outgoing event webhook events", () => {
     });
   });
 
-  it("filters Grok Bot self messages, statuses, broadcasts and allowlists", () => {
+  it("filters Grok Bot self messages, statuses, broadcasts and allowlists", async () => {
     const destination = loadEventWebhookConfig({
       WA_EVENT_WEBHOOKS: JSON.stringify([
         {
@@ -457,44 +461,46 @@ describe("outgoing event webhook events", () => {
       message: { ...incomingMessage().message, sender: "allowed-sender" },
     };
 
-    expect(shouldSendEventWebhook("message.received", allowedMessage, destination)).toBe(true);
+    expect(await shouldSendEventWebhook("message.received", allowedMessage, destination)).toBe(
+      true,
+    );
     expect(
-      shouldSendEventWebhook(
+      await shouldSendEventWebhook(
         "message.received",
         { ...allowedMessage, message: { ...allowedMessage.message, isFromMe: true } },
         destination,
       ),
     ).toBe(false);
     expect(
-      shouldSendEventWebhook(
+      await shouldSendEventWebhook(
         "message.received",
         { ...allowedMessage, chatId: "status@broadcast" },
         destination,
       ),
     ).toBe(false);
     expect(
-      shouldSendEventWebhook(
+      await shouldSendEventWebhook(
         "message.received",
         { ...allowedMessage, chatId: "1234567890@broadcast" },
         destination,
       ),
     ).toBe(false);
     expect(
-      shouldSendEventWebhook(
+      await shouldSendEventWebhook(
         "message.received",
         { ...allowedMessage, chatId: "other-chat" },
         destination,
       ),
     ).toBe(false);
     expect(
-      shouldSendEventWebhook(
+      await shouldSendEventWebhook(
         "message.received",
         { ...allowedMessage, message: { ...allowedMessage.message, sender: "other-sender" } },
         destination,
       ),
     ).toBe(false);
     expect(
-      shouldSendEventWebhook(
+      await shouldSendEventWebhook(
         "message.edited",
         {
           instanceId: "inst_1234abcd",
@@ -570,16 +576,16 @@ describe("outgoing event webhook events", () => {
       message: { ...incomingMessage().message, sender: "5500000000000@s.whatsapp.net" },
     };
 
-    eventHandler?.("message.received", "inst_1234abcd", incoming);
-    eventHandler?.("message.received", "inst_1234abcd", {
+    await eventHandler?.("message.received", "inst_1234abcd", incoming);
+    await eventHandler?.("message.received", "inst_1234abcd", {
       ...incoming,
       message: { ...incoming.message, isFromMe: true },
     });
-    eventHandler?.("message.received", "inst_1234abcd", {
+    await eventHandler?.("message.received", "inst_1234abcd", {
       ...incoming,
       chatId: "status@broadcast",
     });
-    eventHandler?.("instance.connected", "inst_1234abcd", {
+    await eventHandler?.("instance.connected", "inst_1234abcd", {
       instanceId: "inst_1234abcd",
       phone: null,
       lid: null,
@@ -631,7 +637,7 @@ describe("outgoing event webhook events", () => {
     const enqueue = vi.fn<(_: EventWebhookJob) => Promise<unknown>>(() => Promise.resolve());
     const unsubscribe = registerEventWebhookHandler(instanceManager, config, enqueue);
 
-    eventHandler?.("instance.connected", "inst_1234abcd", {
+    await eventHandler?.("instance.connected", "inst_1234abcd", {
       instanceId: "inst_1234abcd",
       phone: null,
       lid: null,
@@ -639,7 +645,7 @@ describe("outgoing event webhook events", () => {
       connectedAt: 1_800_000_000_000,
       wasPairing: true,
     });
-    eventHandler?.("instance.disconnected", "inst_1234abcd", {
+    await eventHandler?.("instance.disconnected", "inst_1234abcd", {
       instanceId: "inst_1234abcd",
       reason: "loggedOut",
       statusCode: 401,
@@ -647,7 +653,7 @@ describe("outgoing event webhook events", () => {
       willReconnect: false,
       disconnectedAt: 1_800_000_001_000,
     });
-    eventHandler?.("instance.pairing_code_generated", "inst_1234abcd", {
+    await eventHandler?.("instance.pairing_code_generated", "inst_1234abcd", {
       instanceId: "inst_1234abcd",
       method: "pairing_code",
       generatedAt: 1_800_000_002_000,
@@ -656,7 +662,7 @@ describe("outgoing event webhook events", () => {
       qr: "fixture-qr-string",
       credentials: { token: "fixture-credential" },
     } as never);
-    eventHandler?.("instance.qr_generated", "inst_1234abcd", {
+    await eventHandler?.("instance.qr_generated", "inst_1234abcd", {
       instanceId: "inst_1234abcd",
       method: "qr",
       generatedAt: 1_800_000_003_000,
@@ -664,13 +670,13 @@ describe("outgoing event webhook events", () => {
       pairingCode: "fixture-pairing-code",
       qr: "fixture-qr-string",
     } as never);
-    eventHandler?.("instance.pairing_expired", "inst_1234abcd", {
+    await eventHandler?.("instance.pairing_expired", "inst_1234abcd", {
       instanceId: "inst_1234abcd",
       method: "pairing_code",
       generatedAt: 1_800_000_004_000,
       expiredAt: 1_800_000_064_000,
     });
-    eventHandler?.("instance.qr_expired", "inst_1234abcd", {
+    await eventHandler?.("instance.qr_expired", "inst_1234abcd", {
       instanceId: "inst_1234abcd",
       method: "qr",
       generatedAt: 1_800_000_005_000,
@@ -789,12 +795,12 @@ describe("outgoing event webhook events", () => {
       message: { ...incomingMessage().message, id: "wamid.second", content: "second" },
     };
 
-    eventHandler?.("instance.connected", "inst_1234abcd", connected);
-    eventHandler?.("instance.disconnected", "inst_1234abcd", disconnected);
-    eventHandler?.("message.received", "inst_1234abcd", firstMessage);
-    eventHandler?.("message.received", "inst_1234abcd", secondMessage);
-    eventHandler?.("instance.connected", "inst_1234abcd", connected);
-    eventHandler?.("instance.disconnected", "inst_1234abcd", disconnected);
+    await eventHandler?.("instance.connected", "inst_1234abcd", connected);
+    await eventHandler?.("instance.disconnected", "inst_1234abcd", disconnected);
+    await eventHandler?.("message.received", "inst_1234abcd", firstMessage);
+    await eventHandler?.("message.received", "inst_1234abcd", secondMessage);
+    await eventHandler?.("instance.connected", "inst_1234abcd", connected);
+    await eventHandler?.("instance.disconnected", "inst_1234abcd", disconnected);
     await vi.advanceTimersByTimeAsync(1000);
 
     expect(enqueue).toHaveBeenCalledTimes(3);
@@ -848,7 +854,9 @@ describe("outgoing event webhook events", () => {
     const warning = vi.fn();
     registerEventWebhookHandler(instanceManager, configuredWebhook(), enqueue, warning);
 
-    expect(eventHandler?.("message.received", "inst_1234abcd", incomingMessage())).toBeUndefined();
+    expect(
+      await eventHandler?.("message.received", "inst_1234abcd", incomingMessage()),
+    ).toBeUndefined();
     await vi.waitFor(() => expect(warning).toHaveBeenCalledOnce());
     expect(warning).toHaveBeenCalledWith();
   });
@@ -872,7 +880,7 @@ describe("outgoing event webhook events", () => {
     const enqueue = vi.fn<(_: EventWebhookJob) => Promise<unknown>>(() => Promise.resolve());
     registerEventWebhookHandler(instanceManager, config, enqueue);
 
-    eventHandler?.("message.received", "inst_1234abcd", incomingMessage());
+    await eventHandler?.("message.received", "inst_1234abcd", incomingMessage());
     await vi.waitFor(() => expect(enqueue).toHaveBeenCalledTimes(2));
 
     expect(enqueue).toHaveBeenCalledWith(
@@ -944,7 +952,7 @@ describe("outgoing event webhook events", () => {
       "Destination debounce is ignored while per-chat batching is enabled",
     );
 
-    eventHandler?.("message.edited", "inst_1234abcd", {
+    await eventHandler?.("message.edited", "inst_1234abcd", {
       instanceId: "inst_1234abcd",
       chatId: "5511888888888@s.whatsapp.net",
       messageId: "wamid.edited",
@@ -958,7 +966,7 @@ describe("outgoing event webhook events", () => {
       "immediate",
     ]);
 
-    eventHandler?.("message.received", "inst_1234abcd", incomingMessage());
+    await eventHandler?.("message.received", "inst_1234abcd", incomingMessage());
     expect(enqueue).toHaveBeenCalledTimes(3);
     await vi.advanceTimersByTimeAsync(100);
     expect(enqueue).toHaveBeenCalledTimes(6);
@@ -1003,8 +1011,8 @@ describe("outgoing event webhook events", () => {
     const enqueue = vi.fn<(_: EventWebhookJob) => Promise<unknown>>(() => Promise.resolve());
     const unsubscribe = registerEventWebhookHandler(instanceManager, config, enqueue);
 
-    eventHandler?.("message.received", "inst_1234abcd", incomingMessage());
-    eventHandler?.("message.received", "inst_1234abcd", {
+    await eventHandler?.("message.received", "inst_1234abcd", incomingMessage());
+    await eventHandler?.("message.received", "inst_1234abcd", {
       ...incomingMessage(),
       message: { ...incomingMessage().message, id: "wamid.second", content: "second" },
     });
@@ -1045,7 +1053,7 @@ describe("outgoing event webhook events", () => {
     const unsubscribe = registerEventWebhookHandler(instanceManager, config, enqueue);
 
     for (const [index, text] of ["first", "second", "third"].entries()) {
-      eventHandler?.("message.received", "inst_1234abcd", {
+      await eventHandler?.("message.received", "inst_1234abcd", {
         ...incomingMessage(),
         message: { ...incomingMessage().message, id: `message-${index}`, content: text },
       });
@@ -1077,9 +1085,9 @@ describe("outgoing event webhook events", () => {
     const enqueue = vi.fn<(_: EventWebhookJob) => Promise<unknown>>(() => Promise.resolve());
     const unsubscribe = registerEventWebhookHandler(instanceManager, config, enqueue);
 
-    eventHandler?.("message.received", "inst_1234abcd", incomingMessage());
+    await eventHandler?.("message.received", "inst_1234abcd", incomingMessage());
     await vi.advanceTimersByTimeAsync(400);
-    eventHandler?.("message.received", "inst_1234abcd", {
+    await eventHandler?.("message.received", "inst_1234abcd", {
       ...incomingMessage(),
       message: { ...incomingMessage().message, id: "message-two", content: "second" },
     });
@@ -1112,7 +1120,7 @@ describe("outgoing event webhook events", () => {
     const unsubscribe = registerEventWebhookHandler(instanceManager, config, enqueue);
 
     for (let index = 0; index < 4; index += 1) {
-      eventHandler?.("message.received", "inst_1234abcd", {
+      await eventHandler?.("message.received", "inst_1234abcd", {
         ...incomingMessage(),
         message: { ...incomingMessage().message, id: `message-${index}`, content: `${index}` },
       });
@@ -1144,8 +1152,8 @@ describe("outgoing event webhook events", () => {
     const enqueue = vi.fn<(_: EventWebhookJob) => Promise<unknown>>(() => Promise.resolve());
     const unsubscribe = registerEventWebhookHandler(instanceManager, config, enqueue);
 
-    eventHandler?.("message.received", "inst_1234abcd", incomingMessage());
-    eventHandler?.("message.received", "inst_1234abcd", {
+    await eventHandler?.("message.received", "inst_1234abcd", incomingMessage());
+    await eventHandler?.("message.received", "inst_1234abcd", {
       ...incomingMessage(),
       chatId: "5511999999999@s.whatsapp.net",
       message: { ...incomingMessage().message, id: "other-chat-message" },
@@ -1176,8 +1184,8 @@ describe("outgoing event webhook events", () => {
     const enqueue = vi.fn<(_: EventWebhookJob) => Promise<unknown>>(() => Promise.resolve());
     const unsubscribe = registerEventWebhookHandler(instanceManager, config, enqueue);
 
-    eventHandler?.("message.received", "inst_1234abcd", incomingMessage());
-    eventHandler?.("connection.changed", "inst_1234abcd", {
+    await eventHandler?.("message.received", "inst_1234abcd", incomingMessage());
+    await eventHandler?.("connection.changed", "inst_1234abcd", {
       instanceId: "inst_1234abcd",
       status: "open",
     });
@@ -1192,7 +1200,7 @@ describe("outgoing event webhook events", () => {
     await unsubscribe.flush();
   });
 
-  it("keeps disabled batching at one unchanged payload per incoming message", () => {
+  it("keeps disabled batching at one unchanged payload per incoming message", async () => {
     let eventHandler: EventHandler | undefined;
     const instanceManager = {
       onAnyEvent: (handler: EventHandler) => {
@@ -1209,8 +1217,8 @@ describe("outgoing event webhook events", () => {
       message: { ...incomingMessage().message, id: "message-two", content: "second" },
     };
 
-    eventHandler?.("message.received", "inst_1234abcd", first);
-    eventHandler?.("message.received", "inst_1234abcd", second);
+    await eventHandler?.("message.received", "inst_1234abcd", first);
+    await eventHandler?.("message.received", "inst_1234abcd", second);
 
     expect(enqueue).toHaveBeenCalledTimes(2);
     expect(enqueue.mock.calls.map(([job]) => job.payload)).toEqual([
@@ -1236,7 +1244,7 @@ describe("outgoing event webhook events", () => {
     const unsubscribe = registerEventWebhookHandler(instanceManager, config, enqueue);
 
     for (let index = 0; index < 26; index += 1) {
-      eventHandler?.("message.received", "inst_1234abcd", {
+      await eventHandler?.("message.received", "inst_1234abcd", {
         ...incomingMessage(),
         message: { ...incomingMessage().message, content: `${index}` },
       });
@@ -1297,8 +1305,8 @@ describe("outgoing event webhook events", () => {
       ...incomingMessage(),
       message: { ...incomingMessage().message, id: "text-after-voice", content: "after" },
     };
-    eventHandler?.("message.received", "inst_1234abcd", voice);
-    eventHandler?.("message.received", "inst_1234abcd", laterText);
+    await eventHandler?.("message.received", "inst_1234abcd", voice);
+    await eventHandler?.("message.received", "inst_1234abcd", laterText);
     await vi.advanceTimersByTimeAsync(500);
     expect(enqueue).not.toHaveBeenCalled();
 
@@ -1351,7 +1359,7 @@ describe("outgoing event webhook events", () => {
       message: { ...incomingMessage().message, type: "audio" as const, content: null },
     };
 
-    eventHandler?.("message.received", "inst_1234abcd", voice);
+    await eventHandler?.("message.received", "inst_1234abcd", voice);
     await vi.advanceTimersByTimeAsync(700);
     expect(enqueue).toHaveBeenCalledOnce();
     expect(enqueue.mock.calls[0]?.[0].payload).toMatchObject({
@@ -1382,7 +1390,7 @@ describe("outgoing event webhook events", () => {
     });
     const enqueue = vi.fn<(_: EventWebhookJob) => Promise<unknown>>(() => Promise.resolve());
     const unsubscribe = registerEventWebhookHandler(instanceManager, config, enqueue);
-    eventHandler?.("message.received", "inst_1234abcd", incomingMessage());
+    await eventHandler?.("message.received", "inst_1234abcd", incomingMessage());
     await vi.advanceTimersByTimeAsync(100);
 
     const payload = enqueue.mock.calls[0]?.[0].payload;
@@ -1424,7 +1432,7 @@ describe("outgoing event webhook events", () => {
     const unsubscribe = registerEventWebhookHandler(instanceManager, config, enqueue);
 
     for (let index = 0; index < 26; index += 1) {
-      eventHandler?.("message.received", "inst_1234abcd", {
+      await eventHandler?.("message.received", "inst_1234abcd", {
         ...incomingMessage(),
         message: { ...incomingMessage().message, id: `message-${index}` },
       });
@@ -1469,10 +1477,10 @@ describe("outgoing event webhook events", () => {
       { exit, timeoutMs: 500 },
     );
 
-    eventHandler?.("message.received", "inst_1234abcd", incomingMessage());
+    await eventHandler?.("message.received", "inst_1234abcd", incomingMessage());
     expect(enqueue).not.toHaveBeenCalled();
 
-    process.emit("SIGTERM");
+    await process.emit("SIGTERM");
     await exited;
     removeShutdownHandlers();
 

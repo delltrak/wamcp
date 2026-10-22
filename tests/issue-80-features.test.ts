@@ -1,6 +1,12 @@
 import { randomUUID } from "node:crypto";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { BaileysEventMap, WAMessage, WASocket } from "@whiskeysockets/baileys";
+import {
+  generateWAMessageContent,
+  type AnyMessageContent,
+  type BaileysEventMap,
+  type WAMessage,
+  type WASocket,
+} from "@whiskeysockets/baileys";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { z } from "zod";
 import { BaileysAdapter } from "../src/channels/baileys/baileys.adapter.js";
@@ -70,7 +76,7 @@ describe("issue 80 feature completion", () => {
 
   afterEach(async () => {
     for (const instanceId of activeInstanceIds) {
-      (await sqlite.prepare("DELETE FROM instances WHERE id = ?").run(instanceId));
+      await sqlite.prepare("DELETE FROM instances WHERE id = ?").run(instanceId);
     }
     activeInstanceIds.clear();
     vi.restoreAllMocks();
@@ -83,11 +89,11 @@ describe("issue 80 feature completion", () => {
   async function createFixture(extraSocket: Record<string, unknown> = {}) {
     const instanceId = `issue-80-${randomUUID()}`;
     activeInstanceIds.add(instanceId);
-    (await sqlite
+    await sqlite
       .prepare(
         "INSERT INTO instances (id, name, channel, status, created_at, updated_at) VALUES (?, ?, 'baileys', 'connected', 1, 1)",
       )
-      .run(instanceId, "Issue 80 simulated instance"));
+      .run(instanceId, "Issue 80 simulated instance");
 
     let processEvents: ((events: Partial<BaileysEventMap>) => Promise<void> | void) | undefined;
     const socket = {
@@ -144,12 +150,13 @@ describe("issue 80 feature completion", () => {
       getInstanceChannel: () => "baileys",
     } as unknown as InstanceManager;
     const queue = {
-      enqueueMessage: vi.fn(async (_id: string, to: string, content: MessageContent) =>
-        (await adapter.sendMessage(to, content)),
+      enqueueMessage: vi.fn(
+        async (_id: string, to: string, content: MessageContent) =>
+          await adapter.sendMessage(to, content),
       ),
       enqueueMediaAlbum: vi.fn(
         async (_id: string, to: string, images: Array<{ image: string; caption?: string }>) =>
-          (await adapter.sendMediaAlbum(to, images)),
+          await adapter.sendMediaAlbum(to, images),
       ),
     } as unknown as MessageQueue;
     registerMessagingTools(server, instanceManager, queue);
@@ -176,8 +183,8 @@ describe("issue 80 feature completion", () => {
     };
   }
 
-  it("subscribes per chat, throttles presence, expands @all and supports send-time mentions", async () => {
-    const { adapter, socket, queue, invoke } = (await createFixture());
+  it("subscribes per chat, throttles presence, sends native @all and supports send-time mentions", async () => {
+    const { adapter, socket, queue, invoke } = await createFixture();
     await invoke("wa_send_presence", { chatId: CONTACT_ID, status: "typing" });
     await invoke("wa_send_presence", { chatId: CONTACT_ID, status: "paused" });
     await invoke("wa_send_presence", { chatId: GROUP_ID, status: "recording" });
@@ -200,15 +207,36 @@ describe("issue 80 feature completion", () => {
     vi.mocked(queue.enqueueMessage).mockClear();
     const all = await invoke("wa_send_group_mention_all", { groupId: GROUP_ID, text: "Update" });
     expect(all.isError).not.toBe(true);
+    expect(JSON.parse(all.content[0]?.text ?? "{}")).toMatchObject({ mode: "native" });
     expect(socket.sendMessage).toHaveBeenCalledTimes(1);
     expect(queue.enqueueMessage).toHaveBeenCalledTimes(1);
     expect(socket.sendMessage).toHaveBeenLastCalledWith(
       GROUP_ID,
       {
         text: "Update @all",
-        mentions: [ACCOUNT_ID, CONTACT_ID, SECOND_CONTACT_ID],
         mentionAll: true,
       },
+      {},
+    );
+    const nativePayload = vi.mocked(socket.sendMessage).mock.lastCall?.[1] as AnyMessageContent;
+    const encoded = await generateWAMessageContent(nativePayload, {
+      upload: async () => {
+        throw new Error("unused");
+      },
+    });
+    const context = encoded.toJSON().extendedTextMessage?.contextInfo;
+    expect(context?.nonJidMentions).toBe(1);
+    expect(context?.mentionedJid).toBeUndefined();
+    expect(context?.groupMentions).toBeUndefined();
+    await adapter.sendMessage(GROUP_ID, {
+      type: "text",
+      text: "Already @all here",
+      mentions: [CONTACT_ID],
+      mentionAll: true,
+    });
+    expect(socket.sendMessage).toHaveBeenLastCalledWith(
+      GROUP_ID,
+      { text: "Already @all here", mentionAll: true },
       {},
     );
     await adapter.sendMessage(GROUP_ID, {
@@ -253,8 +281,37 @@ describe("issue 80 feature completion", () => {
     expect(socket.appPatch).not.toHaveBeenCalled();
   });
 
+  it("falls back to participant mentions when native @all is unavailable", async () => {
+    const { adapter, socket, invoke } = await createFixture();
+    vi.spyOn(adapter, "supportsNativeGroupMentionAll").mockResolvedValue(false);
+    const all = await invoke("wa_send_group_mention_all", { groupId: GROUP_ID, text: "Update" });
+    expect(all.isError).not.toBe(true);
+    expect(JSON.parse(all.content[0]?.text ?? "{}")).toMatchObject({
+      mode: "participants",
+      mentionCount: 3,
+    });
+    expect(socket.sendMessage).toHaveBeenLastCalledWith(
+      GROUP_ID,
+      {
+        text: "Update @all",
+        mentions: [ACCOUNT_ID, CONTACT_ID, SECOND_CONTACT_ID],
+      },
+      {},
+    );
+    const fallbackPayload = vi.mocked(socket.sendMessage).mock.lastCall?.[1] as AnyMessageContent;
+    expect(fallbackPayload).not.toHaveProperty("mentionAll");
+    const encoded = await generateWAMessageContent(fallbackPayload, {
+      upload: async () => {
+        throw new Error("unused");
+      },
+    });
+    const context = encoded.toJSON().extendedTextMessage?.contextInfo;
+    expect(context?.mentionedJid).toEqual([ACCOUNT_ID, CONTACT_ID, SECOND_CONTACT_ID]);
+    expect(context?.nonJidMentions ?? 0).toBe(0);
+  });
+
   it("uses readable Baileys fallbacks and native Cloud API buttons and lists", async () => {
-    const { adapter, socket, invoke } = (await createFixture());
+    const { adapter, socket, invoke } = await createFixture();
     await invoke("wa_send_buttons", {
       to: CONTACT_ID,
       text: "Choose",
@@ -308,7 +365,7 @@ describe("issue 80 feature completion", () => {
   });
 
   it("generates preview metadata and thumbnails for custom link previews", async () => {
-    const { adapter, socket } = (await createFixture());
+    const { adapter, socket } = await createFixture();
     mocks.getUrlInfo.mockResolvedValue({
       "canonical-url": "https://example.test/article",
       "matched-text": "https://example.test/article",
@@ -342,7 +399,7 @@ describe("issue 80 feature completion", () => {
 
   it("stores group receipts, status viewers, reactions and reaction removals", async () => {
     const lid = "7700000000000@lid";
-    const { adapter, processEvents } = (await createFixture({
+    const { adapter, processEvents } = await createFixture({
       signalRepository: {
         lidMapping: {
           getPNForLID: vi.fn(async (value: string) =>
@@ -350,7 +407,7 @@ describe("issue 80 feature completion", () => {
           ),
         },
       },
-    }));
+    });
     const updates: ChannelEventPayload["message.updated"][] = [];
     const reactionEvents: ChannelEventPayload["message.reaction"][] = [];
     adapter.on("message.updated", (event) => updates.push(event));
@@ -480,7 +537,7 @@ describe("issue 80 feature completion", () => {
   });
 
   it("limits mark-read batches and debounces per-chat presence updates", async () => {
-    const { adapter, socket } = (await createFixture());
+    const { adapter, socket } = await createFixture();
     await expect(
       adapter.markRead(
         CONTACT_ID,
@@ -490,7 +547,7 @@ describe("issue 80 feature completion", () => {
 
     await adapter.markRead(CONTACT_ID, ["same-message", "same-message"]);
     expect(socket.readMessages).toHaveBeenCalledWith([
-      { remoteJid: CONTACT_ID, id: "same-message" },
+      { remoteJid: CONTACT_ID, id: "same-message", fromMe: false },
     ]);
 
     const now = vi
@@ -506,7 +563,7 @@ describe("issue 80 feature completion", () => {
   });
 
   it("caps unique presence subscriptions per adapter", async () => {
-    const { adapter, socket } = (await createFixture());
+    const { adapter, socket } = await createFixture();
     for (let index = 0; index < 100; index += 1) {
       await adapter.subscribePresence(`${String(index).padStart(13, "0")}@s.whatsapp.net`);
     }
@@ -517,7 +574,7 @@ describe("issue 80 feature completion", () => {
   });
 
   it("queues album sends and rejects an album larger than the bounded tool limit", async () => {
-    const { adapter, queue, socket, invoke } = (await createFixture());
+    const { adapter, queue, socket, invoke } = await createFixture();
     const images = [
       { image: Buffer.from("one").toString("base64") },
       { image: Buffer.from("two").toString("base64") },
@@ -535,7 +592,7 @@ describe("issue 80 feature completion", () => {
   });
 
   it("validates album media before sending the parent message", async () => {
-    const { adapter, socket } = (await createFixture());
+    const { adapter, socket } = await createFixture();
     await expect(
       adapter.sendMediaAlbum(CONTACT_ID, [
         { image: "https://127.0.0.1/private-image" },
@@ -546,7 +603,7 @@ describe("issue 80 feature completion", () => {
   });
 
   it("sends albums and private replies using regular message sends", async () => {
-    const { adapter, socket, instanceId } = (await createFixture());
+    const { adapter, socket, instanceId } = await createFixture();
     const album = await adapter.sendMediaAlbum(CONTACT_ID, [
       { image: Buffer.from("one").toString("base64"), caption: "One" },
       { image: Buffer.from("two").toString("base64") },
@@ -565,11 +622,11 @@ describe("issue 80 feature completion", () => {
     expect(albumRows.map((row) => row.type)).toEqual(["album", "image", "image"]);
     expect(albumRows[0]?.raw_data).toContain('"albumMessage"');
 
-    (await sqlite
+    await sqlite
       .prepare(
         "INSERT INTO messages (id, instance_id, chat_id, sender_id, type, is_from_me, status, timestamp) VALUES (?, ?, ?, ?, 'text', 0, 'received', 1)",
       )
-      .run("group-message", instanceId, GROUP_ID, CONTACT_ID));
+      .run("group-message", instanceId, GROUP_ID, CONTACT_ID);
     await adapter.replyPrivatelyToGroupMessage(GROUP_ID, "group-message", "Thanks");
     expect(socket.sendMessage).toHaveBeenLastCalledWith(CONTACT_ID, { text: "Thanks" });
     expect(socket.chatModify).not.toHaveBeenCalled();
@@ -578,7 +635,7 @@ describe("issue 80 feature completion", () => {
 
   it("keeps automatic call rejection disabled when its setting is unset", async () => {
     vi.stubEnv("WA_AUTO_REJECT_CALLS", undefined);
-    const defaultFixture = (await createFixture());
+    const defaultFixture = await createFixture();
     await defaultFixture.processEvents({
       call: [
         {
@@ -598,7 +655,7 @@ describe("issue 80 feature completion", () => {
 
   it("auto-rejects direct call offers only when enabled and keeps call details in webhooks", async () => {
     vi.stubEnv("WA_AUTO_REJECT_CALLS", "true");
-    const { adapter, socket, processEvents } = (await createFixture());
+    const { adapter, socket, processEvents } = await createFixture();
     const emitted: ChannelEventPayload["call.received"][] = [];
     adapter.on("call.received", (event) => emitted.push(event));
     await processEvents({
@@ -737,7 +794,7 @@ describe("issue 80 feature completion", () => {
   it("keeps group join approval and request changes gated with the flag unset", async () => {
     vi.stubEnv("WA_APP_STATE_WRITES_ENABLED", undefined);
     vi.stubEnv("WA_GROUP_WRITES_ENABLED", undefined);
-    const { adapter, socket } = (await createFixture());
+    const { adapter, socket } = await createFixture();
     await expect(adapter.setGroupJoinApprovalMode(GROUP_ID, "on")).rejects.toThrow(
       "WhatsApp group, community, and Channel writes are disabled",
     );

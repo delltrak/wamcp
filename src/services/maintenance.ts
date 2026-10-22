@@ -8,6 +8,7 @@ import { db } from "../db/client.js";
 import { messages, processedMessages, statusAudiences } from "../db/schema.js";
 import { refreshWaVersion } from "../channels/baileys/baileys.version.js";
 import type { InstanceManager } from "./instance-manager.js";
+import type { InstanceEntity } from "../types/db.types.js";
 import { createChildLogger } from "../utils/logger.js";
 import {
   DEFAULT_REDIS_URL,
@@ -17,6 +18,7 @@ import {
   PRUNE_DEDUP_CRON,
   CHECK_VERSION_CRON,
   HEALTH_CHECK_INTERVAL_MS,
+  CONNECTING_STUCK_AFTER_MS,
 } from "../constants.js";
 
 const logger = createChildLogger({ service: "maintenance" });
@@ -186,23 +188,33 @@ export class MaintenanceService {
 
   private async runHealthCheck(): Promise<void> {
     const allInstances = await this.instanceManager.getAllInstances();
+    const now = Date.now();
+    if (process.env.WA_AUTO_RECONNECT === "false") return;
 
     for (const instance of allInstances) {
-      if (instance.status === "disconnected") {
-        // Check if auto_reconnect is enabled (default: true)
-        const autoReconnect = process.env.WA_AUTO_RECONNECT !== "false";
-        if (!autoReconnect) continue;
+      const stuckConnecting = this.isStuckConnecting(instance, now);
+      if (instance.status !== "disconnected" && !stuckConnecting) continue;
+      // Only reconnect instances that connected before, so an abandoned pairing
+      // does not keep generating QR codes.
+      if (!instance.lastConnected) continue;
 
-        // Only reconnect instances that were previously connected
-        if (!instance.lastConnected) continue;
-
-        try {
-          logger.info({ instanceId: instance.id }, "Auto-reconnecting instance");
-          await this.instanceManager.connectInstance(instance.id);
-        } catch (err) {
-          logger.warn({ instanceId: instance.id, err }, "Failed to auto-reconnect instance");
-        }
+      try {
+        logger.info(
+          { instanceId: instance.id, stuckConnecting },
+          stuckConnecting ? "Recovering stuck connecting instance" : "Auto-reconnecting instance",
+        );
+        await this.instanceManager.connectInstance(instance.id);
+      } catch (err) {
+        logger.warn({ instanceId: instance.id, err }, "Failed to auto-reconnect instance");
       }
     }
+  }
+
+  private isStuckConnecting(instance: InstanceEntity, now: number): boolean {
+    return (
+      instance.status === "connecting" &&
+      now - instance.updatedAt >= CONNECTING_STUCK_AFTER_MS &&
+      !this.instanceManager.hasLiveSocket(instance.id)
+    );
   }
 }

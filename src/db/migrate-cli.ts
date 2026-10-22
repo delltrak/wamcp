@@ -1,3 +1,4 @@
+import "dotenv/config";
 import { spawnSync } from "node:child_process";
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
@@ -8,9 +9,8 @@ import { applySchemaSql } from "./schema-sql.js";
 const config = resolveDatabaseConfig();
 
 if (config.driver === "sqlite") {
-  // drizzle-kit reads data/whatsapp.db from drizzle.config.ts and does not create the directory.
+  // drizzle-kit reads WA_DATABASE_PATH from drizzle.config.ts and needs its directory.
   // The production image does not include drizzle-kit; run this SQLite path from a checkout.
-  mkdirSync("data", { recursive: true });
   mkdirSync(dirname(config.path), { recursive: true });
   const result = spawnSync(process.execPath, ["./node_modules/drizzle-kit/bin.cjs", "migrate"], {
     stdio: "inherit",

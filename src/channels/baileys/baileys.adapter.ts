@@ -60,6 +60,15 @@ import type {
   Message,
   GroupSummary,
   GroupMetadata,
+  CommunityHierarchy,
+  CommunityInviteV4,
+  CommunityParticipantAction,
+  CommunityMemberScope,
+  CommunitySetting,
+  CommunityParticipantUpdateResult,
+  CommunityGroupCreationResult,
+  CommunityJoinRequest,
+  CommunityLinkedGroup,
   CreateGroupFromGroupResponse,
   ChatModification,
   GroupModification,
@@ -147,7 +156,7 @@ import { createChildLogger } from "../../utils/logger.js";
 import { scheduleBaileysMessagesRead } from "../../services/auto-read.js";
 import { QuotedMessageResolutionError } from "../../utils/quoted-message.js";
 import { isValidStatusRecipient } from "../../utils/validation.js";
-import { normalizeGroupJid } from "../../utils/group-jid.js";
+import { isValidGroupId, normalizeGroupJid } from "../../utils/group-jid.js";
 import { MediaService } from "../../services/media.js";
 import {
   isOggContainer,
@@ -161,6 +170,7 @@ import {
   type ContactSyncRecord,
 } from "../../services/contact-store.js";
 import { AppStateResyncLogObserver, observeAppStateResyncLogs } from "./app-state-write-safety.js";
+import { baileysSupportsNativeGroupMentionAll } from "./native-mention-all.js";
 import { GroupMemberLabelStore } from "../../services/group-member-label-store.js";
 
 const logger = createChildLogger({ service: "baileys-adapter" });
@@ -239,6 +249,45 @@ interface ViewOnceAudio {
 interface StoredAppStateMessage {
   key: WAMessageKey;
   messageTimestamp: number;
+}
+
+const PLAYED_RECEIPT_SERVERS = new Set(["s.whatsapp.net", "lid", "g.us", "hosted", "hosted.lid"]);
+
+function chatServer(jid: string): string {
+  const normalized = jid.trim().toLowerCase();
+  const at = normalized.lastIndexOf("@");
+  return at === -1 ? "" : normalized.slice(at + 1);
+}
+
+/** Played receipts go to user, hosted, and group chats. Status and newsletters are refused. */
+function assertPlayedReceiptChat(jid: string): void {
+  const normalized = jid.trim().toLowerCase();
+  const server = chatServer(normalized);
+  if (normalized === "status@broadcast" || server === "broadcast" || server === "newsletter") {
+    throw new Error(`Played receipts are not sent to status broadcasts or newsletters (${jid})`);
+  }
+  if (!PLAYED_RECEIPT_SERVERS.has(server)) {
+    throw new Error(`Played receipts only support @s.whatsapp.net, @lid, and @g.us chats (${jid})`);
+  }
+}
+
+function isPlayableMedia(type: string, rawMessage: WAMessage | undefined): boolean {
+  if (type === "audio" || type === "video") return true;
+  const content = unwrapMessageContent(rawMessage?.message);
+  if (!content) return false;
+  return (
+    content.audioMessage !== undefined ||
+    content.videoMessage !== undefined ||
+    content.ptvMessage !== undefined
+  );
+}
+
+interface StoredMessageKeyRow {
+  id: string;
+  chatId: string;
+  senderId: string;
+  isFromMe: number;
+  rawData: string | null;
 }
 
 function getStoredMessage(rawData: string | null, id: string): WAMessage | undefined {
@@ -926,6 +975,10 @@ export class BaileysAdapter implements ChannelAdapter {
   private pairingCodeResolver: ((code: string | null) => void) | null = null;
   private reconnectAttempt = 0;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  private retainedClosedSocket: WASocket | null = null;
+  private reconnectSuspended = false;
+  private reconnectBackoffExhaustedNotified = false;
+  private connectInFlight: Promise<void> | null = null;
   private watchdogTimer: ReturnType<typeof setTimeout> | null = null;
   private saveCreds: (() => Promise<void>) | null = null;
   private credsSaveTimer: ReturnType<typeof setTimeout> | null = null;
@@ -947,6 +1000,7 @@ export class BaileysAdapter implements ChannelAdapter {
   private readonly activityInFlight = new Map<WASocket, number>();
   private readonly maxStatusRecipients: number;
   private readonly autoRejectCalls: boolean;
+  private readonly groupEventSnapshots = new Map<string, Record<string, unknown>>();
   private readonly pendingCalls = new Map<string, { from: string; isVideo: boolean }>();
   private readonly lastPresenceUpdateAt = new Map<string, number>();
   private readonly presenceSubscriptions = new Set<string>();
@@ -1671,6 +1725,53 @@ export class BaileysAdapter implements ChannelAdapter {
     };
   }
 
+  private async resolveMessageKey(
+    remoteJid: string,
+    messageId: string,
+    fallbackFromMe = false,
+    storedRow?: StoredMessageKeyRow | null,
+  ): Promise<WAMessageKey> {
+    const row =
+      storedRow === undefined
+        ? await db
+            .select({
+              id: messagesTable.id,
+              chatId: messagesTable.chatId,
+              senderId: messagesTable.senderId,
+              isFromMe: messagesTable.isFromMe,
+              rawData: messagesTable.rawData,
+            })
+            .from(messagesTable)
+            .where(
+              and(
+                eq(messagesTable.instanceId, this.instanceId),
+                eq(messagesTable.chatId, remoteJid),
+                eq(messagesTable.id, messageId),
+              ),
+            )
+            .get()
+        : storedRow;
+    const storedKey = row ? getStoredMessage(row.rawData, messageId)?.key : undefined;
+    const fromMe = row ? row.isFromMe === 1 : fallbackFromMe;
+    const chatJid = row?.chatId ?? remoteJid;
+    // Groups and status broadcasts identify the original author with participant.
+    const needsParticipant = chatJid.endsWith("@g.us") || chatJid === STATUS_BROADCAST_JID;
+    const participant = needsParticipant
+      ? storedKey?.participant ||
+        (row?.senderId && row.senderId !== "me" ? row.senderId : undefined)
+      : undefined;
+
+    const key: WAMessageKey = {
+      ...storedKey,
+      remoteJid: storedKey?.remoteJid ?? row?.chatId ?? remoteJid,
+      id: messageId,
+      fromMe,
+    };
+    if (participant) key.participant = participant;
+    else delete key.participant;
+    return key;
+  }
+
   private buildStoredMessageContent(
     type: Message["type"],
     content: string | null,
@@ -1716,19 +1817,65 @@ export class BaileysAdapter implements ChannelAdapter {
   // ---- Lifecycle ----
 
   async connect(): Promise<void> {
-    if (this.sock) {
+    // The reconnect timer, the health check, and tool calls can all call connect();
+    // share one in-flight attempt so they never open two sockets at once.
+    if (this.connectInFlight) return this.connectInFlight;
+    const attempt = this.connectOnce();
+    this.connectInFlight = attempt;
+    try {
+      await attempt;
+    } finally {
+      if (this.connectInFlight === attempt) this.connectInFlight = null;
+    }
+  }
+
+  private async connectOnce(): Promise<void> {
+    if (this.sock && this.status !== "disconnected") {
+      this.cancelReconnectTimer();
       logger.warn({ instanceId: this.instanceId }, "Already connected or connecting");
       return;
     }
 
+    if (this.sock) {
+      const stale = this.sock;
+      this.sock = null;
+      this.retainedClosedSocket = null;
+      try {
+        stale.end(undefined);
+      } catch (error) {
+        logger.warn(
+          { err: error, instanceId: this.instanceId },
+          "Failed to end stale Baileys socket",
+        );
+      }
+    }
+
+    this.cancelReconnectTimer();
+    this.reconnectSuspended = false;
     this.status = "connecting";
 
+    try {
+      await this.openSocket();
+    } catch (error) {
+      if (!this.sock) this.status = "disconnected";
+      if (this.autoReconnect && !this.sock && !this.reconnectSuspended && !this.reconnectTimer) {
+        this.scheduleReconnect();
+      }
+      throw error;
+    }
+  }
+
+  private async openSocket(): Promise<void> {
     const { state, saveCreds } = await useSqliteAuthState(this.instanceId);
+    if (this.reconnectSuspended) return;
     this.saveCreds = saveCreds;
     this.authMeId = state.creds.me?.id;
     this.authMeLid = state.creds.me?.lid;
 
     const { version } = await getWaVersion();
+    // Logout/disconnect may arrive while auth or version lookup is awaiting.
+    // Do not start a replacement connection with credentials from that attempt.
+    if (this.reconnectSuspended) return;
     const requestFullHistory = !(await this.hasStoredMessages());
 
     const sock = makeWASocket({
@@ -1780,32 +1927,55 @@ export class BaileysAdapter implements ChannelAdapter {
       },
     });
 
+    if (this.reconnectSuspended) {
+      try {
+        sock.end(undefined);
+      } catch (error) {
+        logger.warn(
+          { err: error, instanceId: this.instanceId },
+          "Failed to end Baileys socket after disconnect",
+        );
+      }
+      return;
+    }
+
     this.resetActivityPresence();
+    this.retainedClosedSocket = null;
     this.sock = sock;
     this.lastPresenceUpdateAt.clear();
     this.presenceSubscriptions.clear();
     this.bindEvents(sock);
+    if (this.sock !== sock) return;
+    this.emit("connection.changed", {
+      instanceId: this.instanceId,
+      status: "connecting",
+    });
   }
 
   async disconnect(): Promise<void> {
     this.clearCredsSaveTimer();
+    this.reconnectSuspended = true;
     this.clearReconnectTimer();
     this.clearHealthWatchdog();
     this.clearEventBufferStallWatchdog();
     await this.clearAuthChallenges(Date.now());
     this.resetActivityPresence();
     this.pendingCalls.clear();
-    if (this.sock) {
-      this.sock.end(undefined);
-      this.sock = null;
-    }
+    const sock = this.sock;
+    this.sock = null;
+    this.retainedClosedSocket = null;
     this.automaticHistoryRecoveryQueue.clear();
     this.finishHistoryFetch(true);
     this.status = "disconnected";
+    if (sock) sock.end(undefined);
   }
 
   getStatus(): ConnectionStatus {
     return this.status;
+  }
+
+  hasLiveSocket(): boolean {
+    return this.sock !== null && this.status !== "disconnected";
   }
 
   getLifecycleStatus(): InstanceRuntimeStatus {
@@ -1966,6 +2136,10 @@ export class BaileysAdapter implements ChannelAdapter {
   }
 
   // ---- Messaging ----
+
+  supportsNativeGroupMentionAll(): Promise<boolean> {
+    return baileysSupportsNativeGroupMentionAll();
+  }
 
   async sendMessage(to: string, content: MessageContent): Promise<MessageResponse> {
     const sock = this.getSock();
@@ -2128,15 +2302,17 @@ export class BaileysAdapter implements ChannelAdapter {
         throw new Error(`Unsupported message type: ${(content as MessageContent).type}`);
     }
 
-    const mentions =
-      "mentions" in content ? content.mentions?.map((jid) => this.normalizeJid(jid)) : undefined;
     const mentionAll = content.type === "text" && content.mentionAll === true;
-    if ((mentions?.length ?? 0) > 0 || mentionAll) {
-      msg = {
-        ...msg,
-        ...(mentions?.length ? { mentions } : {}),
-        ...(mentionAll ? { mentionAll: true } : {}),
-      } as AnyMessageContent;
+    if (mentionAll) {
+      // Native @all is mentionAll -> contextInfo.nonJidMentions. Participant JIDs
+      // on the same payload are individual mentions, so they are not sent with it.
+      msg = { ...msg, mentionAll: true } as AnyMessageContent;
+    } else {
+      const mentions =
+        "mentions" in content ? content.mentions?.map((jid) => this.normalizeJid(jid)) : undefined;
+      if ((mentions?.length ?? 0) > 0) {
+        msg = { ...msg, mentions } as AnyMessageContent;
+      }
     }
 
     const result = await this.sendMessageWithActivity(sock, jid, msg, opts);
@@ -2304,7 +2480,10 @@ export class BaileysAdapter implements ChannelAdapter {
           inArray(eventResponsesTable.chatId, [...chatAliases]),
         ),
       )
-      .orderBy(asc(eventResponsesTable.timestamp), asc(eventResponsesTable.responder))
+      .orderBy(
+        sql`${eventResponsesTable.timestamp} ASC NULLS FIRST`,
+        asc(eventResponsesTable.responder),
+      )
       .all();
 
     return Promise.all(
@@ -2545,7 +2724,7 @@ export class BaileysAdapter implements ChannelAdapter {
     const jid = this.normalizeJid(chatId);
     await this.sendMessageWithActivity(sock, jid, {
       text: newText,
-      edit: { remoteJid: jid, id: msgId, fromMe: true },
+      edit: await this.resolveMessageKey(jid, msgId, true),
     } as AnyMessageContent);
   }
 
@@ -2562,6 +2741,7 @@ export class BaileysAdapter implements ChannelAdapter {
         `Cannot revoke message '${msgId}': the stored message is not an outgoing message in chat '${jid}'.`,
       );
     }
+    const messageKey = await this.resolveMessageKey(jid, msgId, true);
 
     if (jid === STATUS_BROADCAST_JID) {
       const storedJids =
@@ -2572,15 +2752,10 @@ export class BaileysAdapter implements ChannelAdapter {
           : storedJids !== undefined
             ? this.reuseStoredStatusAudience(sock, storedJids)
             : (await this.resolveStatusAudience(sock)).statusJidList;
-      await this.sendMessageWithActivity(
-        sock,
-        jid,
-        { delete: { remoteJid: jid, id: msgId, fromMe: true } },
-        { statusJidList },
-      );
+      await this.sendMessageWithActivity(sock, jid, { delete: messageKey }, { statusJidList });
     } else {
       await this.sendMessageWithActivity(sock, jid, {
-        delete: { remoteJid: jid, id: msgId, fromMe: true },
+        delete: messageKey,
       });
     }
     await this.updateMessageStatus(msgId, "revoked", jid, 1);
@@ -2594,6 +2769,7 @@ export class BaileysAdapter implements ChannelAdapter {
       .select({
         id: messagesTable.id,
         chatId: messagesTable.chatId,
+        senderId: messagesTable.senderId,
         type: messagesTable.type,
         content: messagesTable.content,
         isFromMe: messagesTable.isFromMe,
@@ -2627,15 +2803,14 @@ export class BaileysAdapter implements ChannelAdapter {
     }
 
     const hasStoredFullOriginal = sourceMessage !== undefined;
+    const sourceKey = await this.resolveMessageKey(fromJid, msgId, false, row);
     if (!hasForwardableContent(sourceMessage ?? ({} as WAMessage), hasStoredFullOriginal)) {
       if (row.type === "text" && typeof row.content === "string" && row.content.trim()) {
         sourceMessage = {
           ...sourceMessage,
           key: {
             ...sourceMessage?.key,
-            remoteJid: row.chatId,
-            id: row.id,
-            fromMe: row.isFromMe === 1,
+            ...sourceKey,
           },
           message: { conversation: row.content },
           messageTimestamp: row.timestamp,
@@ -2651,9 +2826,7 @@ export class BaileysAdapter implements ChannelAdapter {
       ...sourceMessage,
       key: {
         ...sourceMessage?.key,
-        remoteJid: row.chatId,
-        id: row.id,
-        fromMe: row.isFromMe === 1,
+        ...sourceKey,
       },
     } as WAMessage;
 
@@ -2672,7 +2845,7 @@ export class BaileysAdapter implements ChannelAdapter {
     const sock = this.getSock();
     const jid = this.normalizeJid(chatId);
     await this.sendMessageWithActivity(sock, jid, {
-      react: { text: emoji, key: { remoteJid: jid, id: msgId } },
+      react: { text: emoji, key: await this.resolveMessageKey(jid, msgId) },
     });
   }
 
@@ -2680,7 +2853,7 @@ export class BaileysAdapter implements ChannelAdapter {
     const sock = this.getSock();
     const jid = this.normalizeJid(chatId);
     const pinMsg = {
-      pin: { remoteJid: jid, id: msgId, fromMe: true },
+      pin: await this.resolveMessageKey(jid, msgId, true),
       type: pin ? 1 : 0,
       time: pin ? 604800 : undefined,
     };
@@ -2934,6 +3107,8 @@ export class BaileysAdapter implements ChannelAdapter {
         [...new Set(messageIds)].map(async (id) => {
           const storedMessage = await db
             .select({
+              id: messagesTable.id,
+              chatId: messagesTable.chatId,
               senderId: messagesTable.senderId,
               isFromMe: messagesTable.isFromMe,
               rawData: messagesTable.rawData,
@@ -2947,16 +3122,12 @@ export class BaileysAdapter implements ChannelAdapter {
               ),
             )
             .get();
-
-          const rawKey = getStoredMessage(storedMessage?.rawData ?? null, id)?.key;
-          if (rawKey?.remoteJid) {
-            return [rawKey];
+          const messageKey = await this.resolveMessageKey(jid, id, false, storedMessage ?? null);
+          if (!jid.endsWith("@g.us") || messageKey.participant || messageKey.fromMe) {
+            return [messageKey];
           }
 
-          if (!jid.endsWith("@g.us")) return [{ remoteJid: jid, id }];
-          const messageParticipant = storedMessage?.senderId || participant;
-
-          if (!messageParticipant || messageParticipant === "me") {
+          if (!participant) {
             logger.warn(
               { instanceId: this.instanceId, messageId: id },
               "Skipping group read receipt because the message participant is unavailable",
@@ -2966,10 +3137,8 @@ export class BaileysAdapter implements ChannelAdapter {
 
           return [
             {
-              remoteJid: jid,
-              id,
-              participant: messageParticipant,
-              fromMe: storedMessage?.isFromMe === 1,
+              ...messageKey,
+              participant,
             },
           ];
         }),
@@ -2978,6 +3147,158 @@ export class BaileysAdapter implements ChannelAdapter {
 
     if (keys.length === 0) return;
     await sock.readMessages(keys);
+  }
+
+  async markPlayed(chatId: string, messageIds: string[], participant?: string): Promise<void> {
+    if (messageIds.length > MAX_MARK_READ_MESSAGE_IDS) {
+      throw new Error(
+        `A mark-played request can contain at most ${MAX_MARK_READ_MESSAGE_IDS} message IDs`,
+      );
+    }
+    const sock = this.getSock();
+    const jid = this.normalizeJid(chatId);
+    assertPlayedReceiptChat(jid);
+    const chatAliases = await this.getChatJidAliases(jid);
+    const batches = new Map<string, { jid: string; participant?: string; messageIds: string[] }>();
+
+    for (const id of [...new Set(messageIds)]) {
+      const storedMessage = await db
+        .select({
+          chatId: messagesTable.chatId,
+          senderId: messagesTable.senderId,
+          type: messagesTable.type,
+          isFromMe: messagesTable.isFromMe,
+          rawData: messagesTable.rawData,
+        })
+        .from(messagesTable)
+        .where(
+          and(
+            eq(messagesTable.instanceId, this.instanceId),
+            inArray(messagesTable.chatId, chatAliases),
+            eq(messagesTable.id, id),
+          ),
+        )
+        .get();
+
+      if (!storedMessage) {
+        throw new Error(`Message ${id} is not stored in this chat`);
+      }
+
+      const rawMessage = getStoredMessage(storedMessage.rawData ?? null, id);
+      const outgoing = storedMessage.isFromMe === 1 || rawMessage?.key.fromMe === true;
+      if (outgoing || !isPlayableMedia(storedMessage.type, rawMessage)) {
+        throw new Error(`Message ${id} is not an incoming audio, voice, or video message`);
+      }
+
+      const remoteJid = rawMessage?.key.remoteJid ?? storedMessage.chatId;
+      assertPlayedReceiptChat(remoteJid);
+      let receiptParticipant: string | undefined;
+      if (remoteJid.endsWith("@g.us")) {
+        const storedSender =
+          rawMessage?.key.participant ||
+          (storedMessage.senderId && storedMessage.senderId !== "me"
+            ? storedMessage.senderId
+            : undefined);
+        receiptParticipant = storedSender || participant;
+        if (!receiptParticipant) {
+          throw new Error(`Sender is missing for group audio or video message ${id}`);
+        }
+      }
+
+      const batchKey = `${remoteJid}\0${receiptParticipant ?? ""}`;
+      const batch = batches.get(batchKey) ?? {
+        jid: remoteJid,
+        ...(receiptParticipant ? { participant: receiptParticipant } : {}),
+        messageIds: [],
+      };
+      batch.messageIds.push(id);
+      batches.set(batchKey, batch);
+    }
+
+    for (const batch of batches.values()) {
+      await this.sendPlayedReceipt(sock, batch.jid, batch.participant, batch.messageIds);
+    }
+  }
+
+  /**
+   * Mark one stored incoming message played.
+   * chatId limits the lookup to that chat and its PN/LID aliases.
+   */
+  async markPlayedMessage(messageId: string, chatId?: string): Promise<void> {
+    const requested = chatId ? this.normalizeJid(chatId) : undefined;
+    if (requested) assertPlayedReceiptChat(requested);
+    const aliases = requested ? await this.getChatJidAliases(requested) : undefined;
+    const rows = await db
+      .select({
+        chatId: messagesTable.chatId,
+        senderId: messagesTable.senderId,
+      })
+      .from(messagesTable)
+      .where(
+        and(
+          eq(messagesTable.instanceId, this.instanceId),
+          eq(messagesTable.id, messageId),
+          eq(messagesTable.isFromMe, 0),
+          aliases ? inArray(messagesTable.chatId, aliases) : undefined,
+        ),
+      )
+      .all();
+    const row = requested
+      ? (rows.find((candidate) => candidate.chatId === requested) ?? rows[0])
+      : rows[0];
+    if (!row) throw new Error(`Message ${messageId} is not stored in this chat`);
+    const participant =
+      row.chatId.endsWith("@g.us") && row.senderId && row.senderId !== "me"
+        ? row.senderId
+        : undefined;
+    await this.markPlayed(row.chatId, [messageId], participant);
+  }
+
+  /**
+   * rc14 sendReceipt omits the receipt timestamp for type "played".
+   * WhatsApp expects that timestamp, so send the receipt node directly when the socket exposes sendNode.
+   */
+  private async sendPlayedReceipt(
+    sock: WASocket,
+    jid: string,
+    participant: string | undefined,
+    messageIds: string[],
+  ): Promise<void> {
+    const receiptSocket = sock as WASocket & {
+      sendNode?: (node: BinaryNode) => Promise<unknown>;
+    };
+    if (typeof receiptSocket.sendNode === "function") {
+      const attrs: BinaryNode["attrs"] = {
+        id: messageIds[0] ?? "",
+        to: jid,
+        type: "played",
+        t: Math.floor(Date.now() / 1000).toString(),
+      };
+      if (participant) attrs.participant = participant;
+      const remainingIds = messageIds.slice(1);
+      const node: BinaryNode = {
+        tag: "receipt",
+        attrs,
+        ...(remainingIds.length > 0
+          ? {
+              content: [
+                {
+                  tag: "list",
+                  attrs: {},
+                  content: remainingIds.map((id) => ({
+                    tag: "item",
+                    attrs: { id },
+                  })),
+                },
+              ],
+            }
+          : {}),
+      };
+      await receiptSocket.sendNode(node);
+      return;
+    }
+
+    await sock.sendReceipt(jid, participant, messageIds, "played");
   }
 
   // ---- Chats ----
@@ -3656,6 +3977,11 @@ export class BaileysAdapter implements ChannelAdapter {
       ephemeralDuration: meta.ephemeralDuration ?? null,
       inviteCode: null,
       createdAt: meta.creation ?? null,
+      isCommunity: meta.isCommunity ?? null,
+      isCommunityAnnounce: meta.isCommunityAnnounce ?? null,
+      linkedParent: meta.linkedParent ?? null,
+      joinApprovalMode: meta.joinApprovalMode ?? null,
+      memberAddMode: meta.memberAddMode ?? null,
     };
   }
 
@@ -3840,6 +4166,340 @@ export class BaileysAdapter implements ChannelAdapter {
 
   // ---- Communities ----
 
+  private async requireCommunity(
+    communityId: string,
+    admin = false,
+  ): Promise<BaileysGroupMetadata> {
+    const jid = normalizeGroupJid(communityId);
+    const sock = this.getSock();
+    const metadata = await sock.groupMetadata(jid);
+    if (metadata.id !== jid || metadata.isCommunity !== true || metadata.linkedParent) {
+      throw new Error("The supplied communityId could not be verified as a WhatsApp community");
+    }
+    if (admin) {
+      const ownJids = await this.getOwnGroupParticipantJids(sock);
+      const role = await this.getOwnGroupRole(metadata.participants ?? [], ownJids);
+      if (!role.isAdmin) throw new Error("Only a community admin can perform this operation");
+    }
+    return metadata;
+  }
+
+  private communityParticipants(participants: string[]): string[] {
+    if (
+      participants.length < 1 ||
+      participants.length > 100 ||
+      participants.some((p) => !isValidStatusRecipient(p))
+    ) {
+      throw new Error(
+        "Invalid community participants; provide 1 to 100 individual phone numbers or JIDs",
+      );
+    }
+    return [...new Set(participants.map((p) => jidNormalizedUser(this.normalizeJid(p))))];
+  }
+
+  private async communityParticipantResults(
+    requested: string[],
+    results: Array<{ jid: string | undefined; status: string }>,
+  ): Promise<CommunityParticipantUpdateResult> {
+    const returned = await Promise.all(
+      results.map(async (result) => ({
+        ...result,
+        identities: await this.getNormalizedGroupIdentities([result.jid]),
+      })),
+    );
+    const normalized = await Promise.all(
+      requested.map(async (participant) => {
+        const identities = await this.getNormalizedGroupIdentities([participant]);
+        const result = returned.find((entry) =>
+          [...entry.identities].some((id) => identities.has(id)),
+        );
+        return {
+          participant,
+          returnedJid: result?.jid ?? null,
+          status: result?.status ?? null,
+          success: result ? result.status === "200" : null,
+        };
+      }),
+    );
+    return {
+      status: normalized.every((r) => r.success === true)
+        ? "success"
+        : normalized.every((r) => r.success === null)
+          ? "unknown"
+          : normalized.every((r) => r.success === false)
+            ? "failed"
+            : "partial",
+      results: normalized,
+    };
+  }
+
+  async createCommunityGroup(
+    communityId: string,
+    name: string,
+    participants: string[],
+  ): Promise<CommunityGroupCreationResult> {
+    this.requireGroupWritesEnabled();
+    const parent = await this.requireCommunity(communityId, true);
+    const jids = participants.length ? this.communityParticipants(participants) : [];
+    const group = await this.getSock().communityCreateGroup(name, jids, parent.id);
+    // Upstream can return null after creation when its follow-up metadata fetch fails.
+    // A known ID must remain available even if local enrichment fails.
+    if (!group) return { status: "unknown", groupId: null, group: null, retrySafe: false };
+    let normalized: GroupMetadata | null = null;
+    try {
+      normalized = await this.normalizeGroupMetadata(group);
+    } catch {
+      logger.warn(
+        { instanceId: this.instanceId, groupId: group.id },
+        "Community group created but metadata enrichment failed",
+      );
+    }
+    return { status: "created", groupId: group.id, group: normalized, retrySafe: false };
+  }
+
+  async updateCommunityName(communityId: string, name: string): Promise<void> {
+    this.requireGroupWritesEnabled();
+    const parent = await this.requireCommunity(communityId, true);
+    await this.getSock().communityUpdateSubject(parent.id, name);
+  }
+
+  async updateCommunityDescription(communityId: string, description: string): Promise<void> {
+    this.requireGroupWritesEnabled();
+    const parent = await this.requireCommunity(communityId, true);
+    await this.getSock().groupUpdateDescription(parent.id, description);
+  }
+
+  async updateCommunityPicture(communityId: string, image: string | null): Promise<void> {
+    this.requireGroupWritesEnabled();
+    const parent = await this.requireCommunity(communityId, true);
+    if (image === null) await this.getSock().removeProfilePicture(parent.id);
+    else {
+      const jpeg = await mediaService.prepareGroupProfilePicture(image);
+      await this.getSock().updateProfilePicture(parent.id, jpeg);
+    }
+  }
+
+  async getCommunityMembers(
+    communityId: string,
+    scope: CommunityMemberScope,
+    groupId?: string,
+  ): Promise<GroupMetadata> {
+    const parent = await this.requireCommunity(communityId);
+    if (scope === "community") return this.normalizeGroupMetadata(parent);
+    const target =
+      scope === "announcements"
+        ? await this.resolveCommunityAnnouncementGroup(parent.id)
+        : normalizeGroupJid(groupId ?? "");
+    const metadata = await this.getSock().groupMetadata(target);
+    if (
+      metadata.id !== target ||
+      metadata.linkedParent !== parent.id ||
+      metadata.isCommunity === true
+    ) {
+      throw new Error("The requested group is not linked to this community");
+    }
+    return this.normalizeGroupMetadata(metadata);
+  }
+
+  async updateCommunityParticipants(
+    communityId: string,
+    participants: string[],
+    action: CommunityParticipantAction,
+    confirmLinkedGroupRemoval = false,
+  ): Promise<CommunityParticipantUpdateResult> {
+    this.requireGroupWritesEnabled();
+    if (action === "remove" && !confirmLinkedGroupRemoval) {
+      throw new Error(
+        "Removing community members also removes them from linked groups; confirmLinkedGroupRemoval=true is required",
+      );
+    }
+    const parent = await this.requireCommunity(communityId, true);
+    const jids = this.communityParticipants(participants);
+    if (action === "remove" || action === "demote") {
+      const protectedIds = await this.getNormalizedGroupIdentities([parent.owner, parent.ownerPn]);
+      for (const participant of parent.participants ?? []) {
+        if (participant.admin !== "superadmin") continue;
+        for (const id of await this.getGroupParticipantIdentities(participant))
+          protectedIds.add(id);
+      }
+      for (const jid of jids) {
+        const ids = await this.getNormalizedGroupIdentities([jid]);
+        if ([...ids].some((id) => protectedIds.has(id))) {
+          throw new Error("The community owner/superadmin cannot be removed or demoted");
+        }
+      }
+    }
+    const result = await this.getSock().communityParticipantsUpdate(parent.id, jids, action);
+    return this.communityParticipantResults(jids, result);
+  }
+
+  async listCommunityJoinRequests(communityId: string): Promise<CommunityJoinRequest[]> {
+    const parent = await this.requireCommunity(communityId, true);
+    const requests = await this.getSock().communityRequestParticipantsList(parent.id);
+    // Only expose known fields; upstream attribute maps can include invitation secrets.
+    return requests.map((r) => ({
+      participant: r.jid ?? null,
+      requestedAt: r.request_time ?? r.t ?? null,
+    }));
+  }
+
+  async handleCommunityJoinRequests(
+    communityId: string,
+    participants: string[],
+    action: "approve" | "reject",
+  ): Promise<CommunityParticipantUpdateResult> {
+    this.requireGroupWritesEnabled();
+    const parent = await this.requireCommunity(communityId, true);
+    const jids = this.communityParticipants(participants);
+    return this.communityParticipantResults(
+      jids,
+      await this.getSock().communityRequestParticipantsUpdate(parent.id, jids, action),
+    );
+  }
+
+  async getCommunityInviteCode(communityId: string, revoke = false): Promise<string> {
+    if (revoke) this.requireGroupWritesEnabled();
+    const parent = await this.requireCommunity(communityId, true);
+    const sock = this.getSock();
+    const code = revoke
+      ? await sock.communityRevokeInvite(parent.id)
+      : await sock.communityInviteCode(parent.id);
+    if (!code)
+      throw new Error(
+        revoke
+          ? "The invitation may have been reset, but WhatsApp returned no code; retrieve it before retrying"
+          : "WhatsApp returned no community invitation code",
+      );
+    return code;
+  }
+
+  async getCommunityInviteInfo(code: string): Promise<GroupMetadata> {
+    const metadata = await this.getSock().groupGetInviteInfo(normalizeGroupInviteCode(code));
+    if (!isValidGroupId(metadata.id) || metadata.isCommunity !== true || metadata.linkedParent) {
+      throw new Error("This invitation could not be verified as a community invitation");
+    }
+    return this.normalizeGroupMetadata(metadata);
+  }
+
+  async joinCommunity(
+    code: string,
+  ): Promise<{ communityId: string | null; status: "joined" | "unknown"; retrySafe: false }> {
+    this.requireGroupWritesEnabled();
+    const normalized = normalizeGroupInviteCode(code);
+    const expected = await this.getCommunityInviteInfo(normalized);
+    const jid = await this.getSock().groupAcceptInvite(normalized);
+    return this.confirmCommunityJoin(expected.jid, jid);
+  }
+
+  async joinCommunityV4(
+    invite: CommunityInviteV4,
+  ): Promise<{ communityId: string | null; status: "joined" | "unknown"; retrySafe: false }> {
+    this.requireGroupWritesEnabled();
+    if (
+      !Number.isSafeInteger(invite.inviteExpiration) ||
+      invite.inviteExpiration <= Date.now() / 1000
+    ) {
+      throw new Error("The community invitation is expired or has an invalid expiration");
+    }
+    const communityId = normalizeGroupJid(invite.communityId);
+    const [inviter] = this.communityParticipants([invite.inviter]);
+    const code = normalizeGroupInviteCode(invite.inviteCode);
+    const expected = await this.getCommunityInviteInfo(code);
+    if (expected.jid !== communityId)
+      throw new Error("The invitation refers to a different community");
+    // Pass the inviter only, not a source message key: do not rewrite a stored invitation message.
+    const result: unknown = await this.getSock().communityAcceptInviteV4(inviter!, {
+      groupJid: communityId,
+      inviteCode: code,
+      inviteExpiration: invite.inviteExpiration,
+    });
+    return this.confirmCommunityJoin(communityId, typeof result === "string" ? result : undefined);
+  }
+
+  private async confirmCommunityJoin(
+    expectedId: string,
+    jid: string | undefined,
+  ): Promise<{ communityId: string | null; status: "joined" | "unknown"; retrySafe: false }> {
+    const communityId = jid && isValidGroupId(jid) ? normalizeGroupJid(jid) : null;
+    let confirmed = false;
+    if (communityId === expectedId) {
+      try {
+        const parent = await this.requireCommunity(communityId);
+        const own = await this.getOwnGroupParticipantJids(this.getSock());
+        for (const member of parent.participants ?? []) {
+          const identities = await this.getGroupParticipantIdentities(member);
+          if ([...identities].some((identity) => own.has(identity))) confirmed = true;
+        }
+      } catch {
+        // Approval may still be pending, or metadata may be unavailable. Do not retry the join.
+      }
+    }
+    return { communityId, status: confirmed ? "joined" : "unknown", retrySafe: false };
+  }
+
+  async revokeCommunityMemberInvite(communityId: string, participant: string): Promise<void> {
+    this.requireGroupWritesEnabled();
+    const parent = await this.requireCommunity(communityId, true);
+    const [jid] = this.communityParticipants([participant]);
+    if (!(await this.getSock().communityRevokeInviteV4(parent.id, jid!))) {
+      throw new Error("WhatsApp did not confirm revocation of the member invitation");
+    }
+  }
+
+  async updateCommunitySetting(communityId: string, setting: CommunitySetting): Promise<void> {
+    this.requireGroupWritesEnabled();
+    const parent = await this.requireCommunity(communityId, true);
+    const sock = this.getSock();
+    switch (setting.setting) {
+      case "edit_info":
+        return sock.communitySettingUpdate(
+          parent.id,
+          setting.value === "admins" ? "locked" : "unlocked",
+        );
+      case "send_messages":
+        return sock.communitySettingUpdate(
+          parent.id,
+          setting.value === "admins" ? "announcement" : "not_announcement",
+        );
+      case "add_members":
+        return sock.communityMemberAddMode(
+          parent.id,
+          setting.value === "admins" ? "admin_add" : "all_member_add",
+        );
+      case "join_approval":
+        return sock.communityJoinApprovalMode(parent.id, setting.value);
+      case "disappearing_messages":
+        return sock.communityToggleEphemeral(parent.id, setting.value);
+    }
+  }
+
+  async resolveCommunityAnnouncementGroup(communityId: string, forWrite = false): Promise<string> {
+    if (forWrite) this.requireGroupWritesEnabled();
+    const hierarchy = await this.getCommunityHierarchy(communityId);
+    const jid = hierarchy.announcementGroupJid;
+    if (!jid)
+      throw new Error(
+        `Community Avisos destination is ${hierarchy.announcementResolution}; no destination was selected`,
+      );
+    const group = await this.getSock().groupMetadata(jid);
+    if (
+      group.id !== jid ||
+      group.linkedParent !== hierarchy.community.jid ||
+      group.isCommunityAnnounce !== true
+    ) {
+      throw new Error("The Avisos group could not be verified; refresh the community hierarchy");
+    }
+    if (forWrite) {
+      const role = await this.getOwnGroupRole(
+        group.participants ?? [],
+        await this.getOwnGroupParticipantJids(this.getSock()),
+      );
+      if (!role.isAdmin)
+        throw new Error("Only an Avisos group admin can send a community announcement");
+    }
+    return jid;
+  }
+
   async createCommunity(subject: string, description = ""): Promise<GroupMetadata | null> {
     this.requireGroupWritesEnabled();
     const sock = this.getSock();
@@ -3849,37 +4509,129 @@ export class BaileysAdapter implements ChannelAdapter {
 
   async listCommunities(): Promise<Record<string, GroupMetadata>> {
     const sock = this.getSock();
-    const communities = await sock.communityFetchAllParticipating();
+    // Both upstream helpers issue the same participating IQ, but rc14's community
+    // helper only parses communities/community nodes. The group parser retains
+    // the parent marker in the standard groups/group response.
+    const groups = await sock.groupFetchAllParticipating();
     const entries = await Promise.all(
-      Object.entries(communities).map(
-        async ([jid, metadata]) => [jid, await this.normalizeGroupMetadata(metadata)] as const,
-      ),
+      Object.entries(groups)
+        .filter(([, metadata]) => metadata.isCommunity === true && !metadata.linkedParent)
+        .map(
+          async ([jid, metadata]) => [jid, await this.normalizeGroupMetadata(metadata)] as const,
+        ),
     );
     return Object.fromEntries(entries);
   }
 
   async getCommunityMetadata(communityId: string): Promise<GroupMetadata> {
+    return this.normalizeGroupMetadata(await this.requireCommunity(communityId));
+  }
+
+  async getCommunityHierarchy(communityId: string): Promise<CommunityHierarchy> {
+    const jid = normalizeGroupJid(communityId);
     const sock = this.getSock();
-    const metadata = await sock.communityMetadata(normalizeGroupJid(communityId));
-    return await this.normalizeGroupMetadata(metadata);
+    // The upstream linked-groups helper treats any group without a parent as a
+    // community. Verify the explicit marker before calling it.
+    const metadata = await sock.groupMetadata(jid);
+    if (metadata.id !== jid || metadata.isCommunity !== true || metadata.linkedParent) {
+      throw new Error("The supplied communityId could not be verified as a WhatsApp community");
+    }
+    const linked = await sock.communityFetchLinkedGroups(jid);
+    if (linked.communityJid !== jid) {
+      throw new Error("WhatsApp returned a different community for the requested hierarchy");
+    }
+    // One bulk query avoids one metadata request per linked group. It can only
+    // classify groups whose metadata is visible to the connected account.
+    const participating = await sock.groupFetchAllParticipating();
+    const knownGroups = new Map(Object.values(participating).map((group) => [group.id, group]));
+    const groups = new Map<string, CommunityLinkedGroup>();
+    let omittedGroupCount = 0;
+    for (const group of linked.linkedGroups) {
+      if (!group.id || !isValidGroupId(group.id)) {
+        omittedGroupCount += 1;
+        continue;
+      }
+      const groupJid = normalizeGroupJid(group.id);
+      if (groupJid === jid) {
+        omittedGroupCount += 1;
+        continue;
+      }
+      const known = knownGroups.get(groupJid);
+      const matchesParent = known?.linkedParent === jid && known.isCommunity !== true;
+      groups.set(groupJid, {
+        jid: groupJid,
+        subject: group.subject ?? "",
+        size: group.size ?? null,
+        creation: group.creation ?? null,
+        owner: group.owner ?? null,
+        isCommunityAnnounce: matchesParent ? (known.isCommunityAnnounce ?? null) : null,
+      });
+    }
+    const visibleGroups = [...groups.values()];
+    const announcements = visibleGroups.filter((group) => group.isCommunityAnnounce === true);
+    return {
+      community: await this.normalizeGroupMetadata(metadata),
+      groups: visibleGroups,
+      announcementGroupJid: announcements.length === 1 ? announcements[0]!.jid : null,
+      announcementResolution:
+        announcements.length === 1
+          ? "identified"
+          : announcements.length > 1
+            ? "ambiguous"
+            : "unavailable",
+      visibility: "server_visible",
+      unresolvedGroupJids: visibleGroups
+        .filter((group) => group.isCommunityAnnounce === null)
+        .map((group) => group.jid),
+      omittedGroupCount,
+    };
   }
 
   async linkGroupToCommunity(groupId: string, communityId: string): Promise<void> {
     this.requireGroupWritesEnabled();
     const sock = this.getSock();
-    await sock.communityLinkGroup(normalizeGroupJid(groupId), normalizeGroupJid(communityId));
+    const parent = await this.requireCommunity(communityId, true);
+    const group = await sock.groupMetadata(normalizeGroupJid(groupId));
+    if (
+      group.id !== normalizeGroupJid(groupId) ||
+      group.isCommunity !== false ||
+      group.isCommunityAnnounce !== false ||
+      group.linkedParent
+    ) {
+      throw new Error("Only an unlinked ordinary group can be linked to a community");
+    }
+    const role = await this.getOwnGroupRole(
+      group.participants ?? [],
+      await this.getOwnGroupParticipantJids(sock),
+    );
+    if (!role.isAdmin)
+      throw new Error("Only an admin of both the community and group can link them");
+    await sock.communityLinkGroup(group.id, parent.id);
   }
 
   async unlinkGroupFromCommunity(groupId: string, communityId: string): Promise<void> {
     this.requireGroupWritesEnabled();
     const sock = this.getSock();
-    await sock.communityUnlinkGroup(normalizeGroupJid(groupId), normalizeGroupJid(communityId));
+    const parent = await this.requireCommunity(communityId, true);
+    const group = await sock.groupMetadata(normalizeGroupJid(groupId));
+    if (
+      group.id !== normalizeGroupJid(groupId) ||
+      group.linkedParent !== parent.id ||
+      group.isCommunity ||
+      group.isCommunityAnnounce !== false
+    ) {
+      throw new Error(
+        "Only a verified ordinary subgroup can be unlinked; Avisos cannot be unlinked",
+      );
+    }
+    await sock.communityUnlinkGroup(group.id, parent.id);
   }
 
   async leaveCommunity(communityId: string): Promise<void> {
     this.requireGroupWritesEnabled();
     const sock = this.getSock();
-    await sock.communityLeave(normalizeGroupJid(communityId));
+    const parent = await this.requireCommunity(communityId);
+    await sock.communityLeave(parent.id);
   }
 
   // ---- Contacts ----
@@ -4302,7 +5054,7 @@ export class BaileysAdapter implements ChannelAdapter {
       .select()
       .from(chatsTable)
       .where(eq(chatsTable.instanceId, this.instanceId))
-      .orderBy(desc(chatsTable.lastMessageAt), desc(chatsTable.updatedAt))
+      .orderBy(sql`${chatsTable.lastMessageAt} DESC NULLS LAST`, desc(chatsTable.updatedAt))
       .all();
     const labelRows = await db
       .select()
@@ -4448,6 +5200,7 @@ export class BaileysAdapter implements ChannelAdapter {
     const oldest = await db
       .select({
         id: messagesTable.id,
+        chatId: messagesTable.chatId,
         senderId: messagesTable.senderId,
         isFromMe: messagesTable.isFromMe,
         timestamp: messagesTable.timestamp,
@@ -4469,16 +5222,10 @@ export class BaileysAdapter implements ChannelAdapter {
         // The normalized database fields below are enough to construct an anchor key.
       }
     }
-    const oldestKey: WAMessageKey = {
-      ...(raw?.key ?? {}),
-      remoteJid: jid,
-      id: oldest.id,
-      fromMe: oldest.isFromMe === 1,
-    };
-    if (jid.endsWith("@g.us") && !oldestKey.fromMe && !oldestKey.participant) {
-      oldestKey.participant = oldest.senderId;
-    } else if (jid.endsWith("@g.us") && oldestKey.fromMe && !oldestKey.participant) {
-      oldestKey.participant = sock.user?.id;
+    const oldestKey = await this.resolveMessageKey(jid, oldest.id, false, oldest);
+    const connectedUserId = sock.user?.id;
+    if (jid.endsWith("@g.us") && oldestKey.fromMe && !oldestKey.participant && connectedUserId) {
+      oldestKey.participant = connectedUserId;
     }
     const oldestTimestamp = messageTimestampToMilliseconds(
       raw?.messageTimestamp ?? oldest.timestamp,
@@ -5997,9 +6744,40 @@ export class BaileysAdapter implements ChannelAdapter {
     }
   }
 
+  private async persistInstanceLifecycle(fields: {
+    status: "connected" | "disconnected";
+    updatedAt: number;
+    lastConnected?: number;
+    lastDisconnected?: number;
+  }): Promise<void> {
+    try {
+      await db
+        .update(instancesTable)
+        .set(fields)
+        .where(eq(instancesTable.id, this.instanceId))
+        .run();
+    } catch (error) {
+      logger.error(
+        { err: error, instanceId: this.instanceId, status: fields.status },
+        "Failed to persist instance connection lifecycle",
+      );
+    }
+  }
+
   private bindEvents(sock: WASocket): void {
-    sock.ev.on("connection.update", async (update) => {
+    let connectionUpdates: Promise<void> = Promise.resolve();
+    const processConnectionUpdate = async (update: BaileysEventMap["connection.update"]) => {
       try {
+        if (this.sock !== null && this.sock !== sock) return;
+        if (
+          update.connection === "close" &&
+          this.sock !== sock &&
+          this.retainedClosedSocket !== null
+        ) {
+          await this.handleReplacedSocketClose(sock, update.lastDisconnect);
+          return;
+        }
+
         const { connection, lastDisconnect, qr } = update;
 
         if (qr) {
@@ -6042,11 +6820,15 @@ export class BaileysAdapter implements ChannelAdapter {
         }
 
         if (connection === "open") {
+          if (this.reconnectSuspended || this.sock !== sock) return;
+          this.retainedClosedSocket = null;
+          this.groupEventSnapshots.clear();
           const connectedAt = Date.now();
           const wasPairing = this.pendingAuthChallenges.size > 0;
           this.status = "connected";
           this.appendNotifyWatermarkMs = await this.readAppendNotifyWatermark(connectedAt);
           const persistedDisconnect = await this.readPersistedDisconnect();
+          if (this.reconnectSuspended || this.sock !== sock) return;
           const offlineSince = this.disconnectedAtMs ?? persistedDisconnect ?? null;
           const offlineDurationMs =
             offlineSince !== null ? Math.max(0, Date.now() - offlineSince) : undefined;
@@ -6059,7 +6841,7 @@ export class BaileysAdapter implements ChannelAdapter {
           await this.clearAuthChallenges();
           this.disconnectEventEmittedSinceOpen = false;
           this.terminalDisconnectEventEmittedSinceOpen = false;
-          this.reconnectAttempt = 0;
+          this.clearReconnectTimer();
           this.consecutiveHealthProbeFailures = 0;
           this.resetHealthWatchdog(sock);
           if (this.presenceMode === "on_activity") {
@@ -6068,6 +6850,13 @@ export class BaileysAdapter implements ChannelAdapter {
             });
           }
           const user = sock.user as { lid?: string; name?: string } | undefined;
+          // Persist before emitting so a fast reconnect records this open even when a later
+          // connection.changed dedupe would treat the previous outage as still open.
+          await this.persistInstanceLifecycle({
+            status: "connected",
+            lastConnected: connectedAt,
+            updatedAt: connectedAt,
+          });
           await this.emit("instance.connected", {
             instanceId: this.instanceId,
             phone: this.ownPhoneJid(sock),
@@ -6091,10 +6880,16 @@ export class BaileysAdapter implements ChannelAdapter {
           const loggedOut = statusCode === DisconnectReason.loggedOut;
           const closedAt = Date.now();
           const priorDisconnectedAt = this.disconnectedAtMs;
+          const recordOutage = this.connectedAtMs !== null;
           const connectedDurationMs =
             this.connectedAtMs !== null ? Math.max(0, closedAt - this.connectedAtMs) : undefined;
           this.connectedAtMs = null;
           if (this.disconnectedAtMs === null) this.disconnectedAtMs = closedAt;
+          await this.persistInstanceLifecycle({
+            status: "disconnected",
+            updatedAt: closedAt,
+            ...(recordOutage ? { lastDisconnected: closedAt } : {}),
+          });
           this.lastDisconnectReason = reason;
           this.lastDisconnectStatusCode = statusCode ?? null;
           await this.clearAuthChallenges(closedAt);
@@ -6108,13 +6903,15 @@ export class BaileysAdapter implements ChannelAdapter {
             "Baileys connection closed",
           );
 
+          this.retainedClosedSocket = sock;
+          this.sock = null;
           let reconnectInMs: number | null = null;
           if (loggedOut) {
+            this.reconnectSuspended = true;
             logger.info({ instanceId: this.instanceId }, "Logged out, clearing auth");
-            this.clearCredsSaveTimer();
             await clearAuthState(this.instanceId);
-            this.sock = null;
-          } else if (this.autoReconnect) {
+            this.clearReconnectTimer();
+          } else if (this.autoReconnect && !this.reconnectSuspended) {
             reconnectInMs = this.scheduleReconnect();
           }
 
@@ -6144,8 +6941,13 @@ export class BaileysAdapter implements ChannelAdapter {
           await this.emit("connection.changed", normalized);
         }
       } catch (err) {
-        logger.error({ err, instanceId: this.instanceId }, "Failed to handle connection update");
+        logger.error({ err, instanceId: this.instanceId }, "Failed to process connection update");
       }
+    };
+    sock.ev.on("connection.update", (update) => {
+      // Keep lifecycle writes and notifications in socket order across database awaits.
+      connectionUpdates = connectionUpdates.then(() => processConnectionUpdate(update));
+      return connectionUpdates;
     });
 
     // creds.update is not buffered — use ev.on directly
@@ -6656,9 +7458,39 @@ export class BaileysAdapter implements ChannelAdapter {
       }
 
       // --- Groups ---
-      if (events["groups.update"]) {
-        const normalized = normalizeGroupsUpdate(this.instanceId, events["groups.update"]);
-        for (const event of normalized) await this.emit("group.updated", event);
+      if (events["groups.update"] || events["groups.upsert"]) {
+        // A creation/sync snapshot and update may describe the same group in one batch.
+        const merged = new Map<string, Partial<BaileysGroupMetadata>>();
+        for (const update of [
+          ...(events["groups.upsert"] ?? []),
+          ...(events["groups.update"] ?? []),
+        ]) {
+          if (update.id) merged.set(update.id, { ...merged.get(update.id), ...update });
+        }
+        const normalized = normalizeGroupsUpdate(this.instanceId, [...merged.values()]);
+        for (const event of normalized) {
+          const previous = this.groupEventSnapshots.get(event.groupId);
+          if (
+            previous &&
+            Object.entries(event.changes).every(([key, value]) => previous[key] === value)
+          )
+            continue;
+          this.groupEventSnapshots.set(event.groupId, { ...previous, ...event.changes });
+          if (this.groupEventSnapshots.size > 10000) {
+            this.groupEventSnapshots.delete(this.groupEventSnapshots.keys().next().value!);
+          }
+          await this.emit("group.updated", event);
+        }
+      }
+      if (events["group.join-request"]) {
+        const request = events["group.join-request"];
+        await this.emit("group.join_request", {
+          instanceId: this.instanceId,
+          groupId: request.id,
+          participant: request.participant,
+          action: request.action,
+          method: request.method ?? null,
+        });
       }
 
       if (events["group-participants.update"]) {
@@ -6798,28 +7630,74 @@ export class BaileysAdapter implements ChannelAdapter {
     });
   }
 
+  private disconnectStatusCode(lastDisconnect: { error?: Error } | undefined): number | undefined {
+    const statusCode = (lastDisconnect?.error as Boom | undefined)?.output?.statusCode;
+    return typeof statusCode === "number" ? statusCode : undefined;
+  }
+
+  private async handleReplacedSocketClose(
+    sock: WASocket,
+    lastDisconnect: { error?: Error } | undefined,
+  ): Promise<void> {
+    if (this.sock !== null || this.retainedClosedSocket !== sock) return;
+    const statusCode = this.disconnectStatusCode(lastDisconnect);
+    if (statusCode !== DisconnectReason.loggedOut) return;
+
+    const closedAt = Date.now();
+    this.reconnectSuspended = true;
+    logger.info({ instanceId: this.instanceId }, "Logged out, clearing auth");
+    await clearAuthState(this.instanceId);
+    this.clearReconnectTimer();
+    this.status = "disconnected";
+    const reason = disconnectReasonName(statusCode);
+    this.lastDisconnectReason = reason;
+    this.lastDisconnectStatusCode = statusCode;
+    await this.clearAuthChallenges(closedAt);
+    if (this.terminalDisconnectEventEmittedSinceOpen) return;
+
+    const priorDisconnectedAt = this.disconnectedAtMs;
+    if (this.disconnectedAtMs === null) this.disconnectedAtMs = closedAt;
+    await this.emit("instance.disconnected", {
+      instanceId: this.instanceId,
+      reason,
+      statusCode,
+      loggedOut: true,
+      willReconnect: false,
+      disconnectedAt: closedAt,
+      ...(priorDisconnectedAt !== null
+        ? { offlineSinceMs: Math.max(0, closedAt - priorDisconnectedAt) }
+        : {}),
+    });
+    this.disconnectEventEmittedSinceOpen = true;
+    this.terminalDisconnectEventEmittedSinceOpen = true;
+  }
+
   private scheduleReconnect(): number | null {
-    if (this.reconnectAttempt >= RECONNECT_MAX_ATTEMPTS) {
+    if (this.reconnectSuspended) return null;
+    this.cancelReconnectTimer();
+
+    const exhausted = this.reconnectAttempt >= RECONNECT_MAX_ATTEMPTS;
+    if (exhausted && !this.authMeId) {
+      // An unpaired session (abandoned QR or pairing code) keeps the bounded retry.
       logger.error(
         {
           instanceId: this.instanceId,
           attempts: this.reconnectAttempt,
           reason: this.lastDisconnectReason,
           statusCode: this.lastDisconnectStatusCode,
-          offlineDurationMs:
-            this.disconnectedAtMs !== null
-              ? Math.max(0, Date.now() - this.disconnectedAtMs)
-              : undefined,
         },
-        "Max reconnect attempts reached",
+        "Max reconnect attempts reached for an unpaired session",
       );
       return null;
     }
+    const delay = exhausted
+      ? RECONNECT_MAX_DELAY_MS
+      : Math.min(
+          RECONNECT_INITIAL_DELAY_MS * Math.pow(2, this.reconnectAttempt),
+          RECONNECT_MAX_DELAY_MS,
+        );
 
-    const delay = Math.min(
-      RECONNECT_INITIAL_DELAY_MS * Math.pow(2, this.reconnectAttempt),
-      RECONNECT_MAX_DELAY_MS,
-    );
+    if (exhausted) this.emitReconnectBackoffExhausted(delay);
 
     this.reconnectAttempt++;
     logger.info(
@@ -6837,14 +7715,9 @@ export class BaileysAdapter implements ChannelAdapter {
       "Scheduling reconnect",
     );
 
-    this.reconnectTimer = setTimeout(async () => {
-      try {
-        this.sock = null;
-        await this.connect();
-      } catch (err) {
-        logger.error({ err, instanceId: this.instanceId }, "Reconnect failed");
-        this.scheduleReconnect();
-      }
+    this.reconnectTimer = setTimeout(() => {
+      this.reconnectTimer = null;
+      void this.runScheduledReconnect();
     }, delay);
     return delay;
   }
@@ -6907,12 +7780,57 @@ export class BaileysAdapter implements ChannelAdapter {
     }
   }
 
-  private clearReconnectTimer(): void {
+  private emitReconnectBackoffExhausted(delayMs: number): void {
+    if (this.reconnectBackoffExhaustedNotified) return;
+    this.reconnectBackoffExhaustedNotified = true;
+    const disconnectedAt = Date.now();
+    const offlineSinceMs =
+      this.disconnectedAtMs !== null
+        ? Math.max(0, disconnectedAt - this.disconnectedAtMs)
+        : undefined;
+    logger.error(
+      {
+        instanceId: this.instanceId,
+        attempts: this.reconnectAttempt,
+        delayMs,
+        reason: this.lastDisconnectReason,
+        statusCode: this.lastDisconnectStatusCode,
+        offlineDurationMs: offlineSinceMs,
+      },
+      "Reconnect backoff exhausted; continuing at max delay",
+    );
+    this.emit("instance.disconnected", {
+      instanceId: this.instanceId,
+      reason: this.lastDisconnectReason ?? "unknown",
+      statusCode: this.lastDisconnectStatusCode,
+      loggedOut: false,
+      willReconnect: true,
+      reconnectInMs: delayMs,
+      disconnectedAt,
+      ...(offlineSinceMs !== undefined ? { offlineSinceMs } : {}),
+    });
+  }
+
+  private async runScheduledReconnect(): Promise<void> {
+    if (this.reconnectSuspended || this.sock) return;
+    try {
+      await this.connect();
+    } catch (error) {
+      logger.error({ err: error, instanceId: this.instanceId }, "Reconnect failed");
+    }
+  }
+
+  private cancelReconnectTimer(): void {
     if (this.reconnectTimer) {
       clearTimeout(this.reconnectTimer);
       this.reconnectTimer = null;
     }
+  }
+
+  private clearReconnectTimer(): void {
+    this.cancelReconnectTimer();
     this.reconnectAttempt = 0;
+    this.reconnectBackoffExhaustedNotified = false;
   }
 
   private clearHealthWatchdog(): void {

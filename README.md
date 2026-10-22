@@ -36,7 +36,7 @@
 
 **WA MCP** is a WhatsApp MCP server built with TypeScript that gives AI agents full access to WhatsApp through the [Model Context Protocol](https://modelcontextprotocol.io). It supports both **Baileys** (WhatsApp Web) and **Meta Cloud API** as dual-channel backends, deployable with **Docker** in a single command.
 
-Your agent connects once and auto-discovers **137 tools**, **10 resources**, and **15 real-time events** — zero configuration, zero REST wrappers, zero glue code.
+Your agent connects once and auto-discovers **155 tools**, **10 resources**, and **22 real-time events** — zero configuration, zero REST wrappers, zero glue code.
 
 ```
 Your AI Agent ←→ MCP Protocol ←→ WA MCP ←→ WhatsApp
@@ -82,7 +82,7 @@ from google.adk.tools.mcp_tool import McpToolset
 
 tools = McpToolset(url="http://localhost:3000/mcp")
 
-# Agent auto-discovers 137 WhatsApp tools
+# Agent auto-discovers 155 WhatsApp tools
 # wa_create_instance, wa_send_text, wa_send_image, ...
 ```
 
@@ -146,7 +146,7 @@ Add to your `claude_desktop_config.json`:
 
 ## 🛠️ Tools
 
-WA MCP exposes **137 tools** across 15 domains. All tools use the `wa_` prefix.
+WA MCP exposes **155 tools** across 16 domains. All tools use the `wa_` prefix.
 
 <details>
 <summary>📋 <strong>Instance Management</strong> (9 tools)</summary>
@@ -166,7 +166,7 @@ WA MCP exposes **137 tools** across 15 domains. All tools use the `wa_` prefix.
 </details>
 
 <details>
-<summary>💬 <strong>Messaging</strong> (31 tools)</summary>
+<summary>💬 <strong>Messaging</strong> (32 tools)</summary>
 
 | Tool                   | Description             |
 | ---------------------- | ----------------------- |
@@ -193,7 +193,7 @@ WA MCP exposes **137 tools** across 15 domains. All tools use the `wa_` prefix.
 | `wa_send_view_once`    | Send view-once media    |
 | `wa_send_presence`     | Show typing / recording / paused |
 | `wa_subscribe_presence` | Subscribe to contact or group presence updates (Baileys) |
-| `wa_send_group_mention_all` | Mention every current group participant (Baileys) |
+| `wa_send_group_mention_all` | Native group @all (Baileys); participant list only if native @all is unavailable |
 | `wa_send_buttons`      | Send reply buttons (Cloud API) or a text fallback (Baileys) |
 | `wa_send_list`         | Send a selectable list (Cloud API) or a text fallback (Baileys) |
 | `wa_send_media_album`  | Send an image album (Baileys) |
@@ -201,6 +201,7 @@ WA MCP exposes **137 tools** across 15 domains. All tools use the `wa_` prefix.
 | `wa_get_message_receipts` | List locally observed per-participant receipts (Baileys) |
 | `wa_get_message_reactions` | List locally observed reactions (Baileys) |
 | `wa_mark_read`         | Mark messages as read   |
+| `wa_mark_played`       | Mark stored incoming audio, voice, or video as played (Baileys; always available) |
 
 </details>
 
@@ -379,7 +380,7 @@ this operation.
 </details>
 
 <details>
-<summary>🏘️ <strong>Business &amp; Communities</strong> (15 tools)</summary>
+<summary>🏘️ <strong>Business &amp; Communities</strong> (16 tools)</summary>
 
 | Tool | Description |
 | ---- | ----------- |
@@ -389,6 +390,7 @@ this operation.
 | `wa_create_community` | Create a community (Baileys, gated write) |
 | `wa_list_communities` | List communities (Baileys) |
 | `wa_get_community_details` | Get community metadata (Baileys) |
+| `wa_get_community_hierarchy` | Read linked groups and resolve Avisos when visible (Baileys, read-only) |
 | `wa_community_link_group` / `wa_community_unlink_group` | Link or unlink a group (Baileys, gated write) |
 | `wa_leave_community` | Leave a community (Baileys, gated write) |
 | `wa_get_catalog` | List catalog products (Baileys) |
@@ -399,6 +401,36 @@ this operation.
 | `wa_get_order_details` | Read order details (Baileys) |
 
 </details>
+
+<details>
+<summary>🏘️ <strong>Community administration</strong> (16 tools)</summary>
+
+| Tool | Description |
+| --- | --- |
+| `wa_community_create_group` | Create directly linked group; preserve unknown outcome. |
+| `wa_community_update_name` | Rename community. |
+| `wa_community_update_description` | Update/clear description. |
+| `wa_community_update_picture` | Public HTTPS/base64; null removes photo. |
+| `wa_community_list_members` | Read community/Avisos/linked-group members and roles. |
+| `wa_community_update_participants` | Add/remove/promote/demote; removal also affects linked groups. |
+| `wa_community_list_join_requests` | Read pending requests; admin required. |
+| `wa_community_handle_join_requests` | Approve/reject with per-member results. |
+| `wa_community_get_invite` | Read invitation; admin required. |
+| `wa_community_reset_invite` | Revoke and replace invitation. |
+| `wa_community_get_invite_info` | Inspect code/link without joining. |
+| `wa_community_join` | Join; verify membership before reporting joined. |
+| `wa_community_join_v4` | Accept an unexpired V4 invitation for the verified parent. |
+| `wa_community_revoke_member_invite` | Revoke one V4 member invitation. |
+| `wa_community_update_settings` | One typed setting/value change on the parent. |
+| `wa_community_send_announcement` | Queue text/image/video/audio/document to verified Avisos. |
+
+</details>
+
+Community management includes the operations below; live validation and upstream limits are tracked separately. `wa_get_community_hierarchy` returns server-visible linked groups,
+including summaries of groups the account may not have joined. It identifies Avisos only from
+explicit community-announcement metadata, never from a group name or admin-only messaging.
+Unknown classifications remain `null`; the result is not a guarantee of a complete community roster.
+See the [community management roadmap](docs/COMMUNITIES.md) for supported operations and remaining work.
 
 Baileys rc14 has no quick-reply list API, and this server does not store quick-reply sync actions locally. Use the WhatsApp Business app to find an existing reply's timestamp before editing or deleting it.
 
@@ -471,8 +503,9 @@ Events are pushed to connected agents via MCP notifications over SSE (Server-Sen
 | `whatsapp/presence.updated`           | Typing / recording / paused / online           |
 | `whatsapp/chat.updated`               | Chat metadata changed                          |
 | `whatsapp/group.updated`              | Group info changed                             |
-| `whatsapp/group.participants_changed` | Member add/remove/promote/demote               |
+| `whatsapp/group.participants_changed` | Member add/remove/promote/demote/modify               |
 | `whatsapp/group.member_label_changed` | A member's group label changed                 |
+| `whatsapp/group.join_request` | Membership request created, revoked or rejected |
 | `whatsapp/contact.updated`            | Contact info changed                           |
 | `whatsapp/connection.changed`         | Instance status change (includes QR as base64) |
 | `whatsapp/call.received`              | Call offer/status updates (`offer`, `reject`, `timeout`, etc.) |
@@ -546,7 +579,21 @@ top level and a `messages` array.
 
 You can add `chatAllowlist` and/or `senderAllowlist` to a multi-destination
 entry to limit which chats or people wake that routine. If both are set, a
-message must match both lists. Set `WA_WEBHOOK_DEBOUNCE_MS` to batch incoming
+message must match both lists. Set `WA_EVENT_WEBHOOK_IGNORE_JIDS` (#140) to a
+comma-separated list of exact JIDs, address wildcards (`@g.us`,
+`@s.whatsapp.net`, `@lid`, `@newsletter`, `@broadcast`, `@c.us`), or one `*` in
+the user part (`5577*@s.whatsapp.net`). `*@domain` is stored as `@domain`.
+Address wildcards match only the chat JID, so `@lid` does not hide a phone
+chat that also has a LID alias and
+`@s.whatsapp.net` does not hide a group message from a phone sender. Exact and
+starred entries still match the chat, the sender, and LID aliases. Matching is
+case-insensitive and ignores a `:device` suffix. A LID-only message is also
+compared with the phone JID stored on that contact. Group sender phone aliases supplied
+by WhatsApp are used even before contacts are stored; list both forms when neither
+an alias nor a contact mapping is available. A trailing comma is ignored. Unset or empty forwards every
+chat. Messages stay stored; only the webhook is skipped. A destination
+`ignoreJids` array is added to that global list. Lifecycle `instance.*` events
+are not filtered. Set `WA_WEBHOOK_DEBOUNCE_MS` to batch incoming
 messages separately by instance and chat. Each new message restarts the window;
 `WA_WEBHOOK_DEBOUNCE_MAX_MS` caps the total wait from the first message. The
 payload keeps the last message's fields at the top level and adds all messages
@@ -563,7 +610,7 @@ is sent to the configured routine URL.
 For more routines, set `WA_EVENT_WEBHOOKS` to a JSON array instead of
 `WA_EVENT_WEBHOOK_URL`. Each entry can set its own `url`, `headers`, `authHeader`,
 `authEnv` (an environment variable name), `authValue`, `secretEnv`, `secret`,
-`events`, `preset`, `chatAllowlist`, `senderAllowlist`, and `debounceMs`.
+`events`, `preset`, `chatAllowlist`, `senderAllowlist`, `ignoreJids`, and `debounceMs`.
 Destination-specific `events` override the shared `WA_EVENT_WEBHOOK_EVENTS`.
 See [Outgoing event webhooks](docs/event-webhooks.md) for a complete example.
 
@@ -590,7 +637,12 @@ Baileys emits `instance.connected` and `instance.disconnected`; Cloud API emits
 them after successful credential verification and on an explicit disconnect.
 The pairing and QR events are Baileys-only. Disconnect events are coalesced to
 the first close after a connection opens, with a terminal `loggedOut` event
-allowed after a reconnecting close.
+allowed after a reconnecting close. When the exponential reconnect schedule
+reaches its cap, one more `instance.disconnected` event is emitted for that
+same outage with `willReconnect: true` and `reconnectInMs` set to 30000.
+Retries continue at that interval until the socket opens, `disconnect()` is
+called, or the session logs out. A session that never paired stops after 10
+attempts.
 
 ```json
 {
@@ -730,6 +782,7 @@ Copy `.env.example` to `.env` and configure:
 | `WA_AUTO_REJECT_CALLS`      | `false`                  | Automatically reject incoming one-to-one Baileys call offers |
 | `WA_STATUS_MAX_RECIPIENTS`  | `256`                    | Maximum recipients per Baileys status; excess recipients are truncated and reported |
 | `WA_AUTO_READ`              | `false`                  | `on_fetch` marks incoming messages read when fetched; `on_receive` marks them read on arrival |
+| `WA_AUTO_MARK_PLAYED`       | `false`                  | After a stored incoming audio message is transcribed, send a played receipt. `wa_mark_played` stays available either way |
 | `WA_MEDIA_CACHE_MAX_MB`     | `500`                    | Media cache size limit                   |
 | `WA_MEDIA_DOWNLOAD_DIR`     | `data/media-downloads`   | Dedicated directory for downloaded files; separate from Baileys session data |
 | `WA_MEDIA_DOWNLOAD_MAX_BYTES` | `26214400` (25 MB)     | Maximum size for received media downloads; base64 mode is capped at 5 MB |
@@ -762,6 +815,7 @@ Copy `.env.example` to `.env` and configure:
 | `WA_EVENT_WEBHOOK_PRESET` | — | `grok-bot` uses compact message and lifecycle payloads with incoming-message filters |
 | `WA_EVENT_WEBHOOK_EVENTS` | `message.received` | Comma-separated events to forward |
 | `WA_EVENT_WEBHOOK_IGNORE_FROM_ME` | `true` | Ignore messages sent by this instance |
+| `WA_EVENT_WEBHOOK_IGNORE_JIDS` | — | Exact JIDs, chat-only `@` wildcards, or one `*` in the user part (#140). Case-insensitive. Unset forwards every chat |
 | `WA_EVENT_WEBHOOK_HEADERS` | — | Additional request headers as a JSON object of string values |
 | `WA_EVENT_WEBHOOK_AUTH_HEADER` / `WA_EVENT_WEBHOOK_AUTH_VALUE` | — | Authentication header name and value; Grok Bot defaults the name to `X-Grok-Bot-Key` when its preset is enabled |
 | `WA_EVENT_WEBHOOK_SECRET` | — | HMAC-SHA256 signing secret; adds timestamp and signature headers |
@@ -937,10 +991,16 @@ the configured interval. Successful probes and inbound message, receipt, or pres
 as healthy; raw websocket frames do not. Two consecutive failed probes end the socket and let automatic
 reconnect handle the connection. If Baileys' event buffer stays active longer than
 `WA_BAILEYS_EVENT_BUFFER_STALL_MS`, the watchdog flushes it to release held events; if it remains
-active at the next check, the socket ends and follows the normal reconnect flow. A Baileys
-`ev.process` batch that throws is logged and discarded. The events in that batch are not replayed;
-later batches are still processed. Connection close and reconnect logs include the disconnect
-reason, status code, and offline duration.
+active at the next check, the socket ends and follows the normal reconnect flow. A non-logout
+close drops the dead socket immediately. Reconnect delays grow from 1s to 30s and then stay at 30s
+until the connection opens, `disconnect()` is called, or WhatsApp logs the session out (a session
+that never paired stops after 10 attempts). The stored
+status remains `disconnected` while no socket is live, and `connecting` only while one is. The
+maintenance health check still retries disconnected instances that have connected before, and it
+also recovers a `connecting` status older than 2 minutes when the adapter has no live socket and the
+instance connected before.
+Connection close and reconnect logs include the disconnect reason, status code, and offline duration.
+A Baileys `ev.process` batch that throws is logged and discarded. The events in that batch are not replayed; later batches are still processed.
 
 `wa_send_sticker` accepts PNG, JPG, GIF, and WebP URLs or base64. PNG/JPG and GIF inputs are
 converted to 512x512 WebP with transparent padding. Static stickers are limited to 100 KB and
@@ -960,7 +1020,16 @@ directory.
 
 `WA_AUTO_READ` accepts `false`, `on_fetch`, or `on_receive`. Invalid values disable automatic
 read receipts and produce a warning. Automatic receipts never delay message delivery or tool
-responses; receipt failures are logged.
+responses; receipt failures are logged. Played receipts are separate. `wa_mark_played` is always
+available and sends a played receipt for stored incoming audio, voice notes (PTT), and video on
+Baileys, including in groups when `participant` or the stored sender is present. Receipts are sent
+only to `@s.whatsapp.net`, `@lid`, and `@g.us` chats, plus optional `@hosted` and `@hosted.lid`
+chats. Status broadcasts and newsletters are rejected. Nothing is marked
+played automatically unless `WA_AUTO_MARK_PLAYED=true`. That flag defaults to `false`. When it is
+`true`, a successful transcription of a stored incoming audio message also sends a played receipt
+for that chat, without delaying the transcription text. The transcription result is kept if that
+receipt fails. `WA_AUTO_MARK_PLAYED` must be `true` or
+`false`; any other value stops startup with an error that names the variable.
 
 `WA_PRESENCE_MODE` accepts `on_activity` or `always`. In `on_activity`, Baileys sends one global
 `unavailable` update after each connection opens, switches to global `available` before an outgoing
@@ -1026,6 +1095,7 @@ uses the account's own JID and known individual contacts.
 See [Audio transcription](docs/audio-transcription.md) for tool examples and event behavior.
 See [Text-to-speech voice notes](docs/tts.md) for setup, voice selection, model options, and cost notes.
 See [Baileys presence](docs/baileys-presence.md) for online status configuration.
+See [Passkey pairing and ARM images](docs/passkey-and-arm.md) for what Baileys rc14 cannot do yet and how the image is published.
 
 ---
 
@@ -1041,6 +1111,12 @@ Services:
 
 - **wa-mcp** — The MCP server on port `3000`
 - **redis** — BullMQ backend with AOF persistence
+
+The GitHub Container Registry image is one manifest list for `linux/amd64` and `linux/arm64`.
+Branch, version, and `sha-*` tags are unchanged: a pull on either machine selects its platform.
+The image build loads the `better-sqlite3` musl prebuild and runs `ffmpeg` on each platform.
+Database path, Baileys auth files, and the `wa-data` volume are unchanged. Details and the passkey
+finding are in [Passkey pairing and ARM images](docs/passkey-and-arm.md).
 
 ### Health Check
 
@@ -1087,7 +1163,7 @@ src/
 ├── index.ts                     # Entry point (HTTP/stdio)
 ├── constants.ts                 # Defaults and limits
 ├── server/mcp.ts                # MCP server setup
-├── tools/                       # 🔧 137 MCP tools (15 files)
+├── tools/                       # 🔧 155 MCP tools (16 files)
 ├── resources/                   # 📖 10 MCP resources (8 files)
 ├── notifications/events.ts      # 📡 15 documented event types
 ├── channels/

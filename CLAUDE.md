@@ -77,11 +77,11 @@ Everything that is not a "send a message" call (edit, delete, react, presence, g
 
 **Baileys specifics** (`baileys.adapter.ts`, ~1250 lines):
 - `sock.ev.process()` handles the buffered event batch; `connection.update` and `creds.update` are bound with `ev.on` because they are not buffered.
-- Auth state is SQLite-backed (`baileys.auth.ts`, `auth_keys` table) — a drop-in replacement for `useMultiFileAuthState`. Logout (`DisconnectReason.loggedOut`) clears it.
+- Auth state is database-backed (`baileys.auth.ts`, `auth_keys` table) — a drop-in replacement for `useMultiFileAuthState`. Logout (`DisconnectReason.loggedOut`) clears it.
 - LID (v7): contacts can arrive as `<id>@lid`. `resolvePn()` maps LID→phone via `sock.signalRepository.lidMapping`; `normalizeLidInMessage()` swaps `remoteJid`/`remoteJidAlt` when LID is primary. The contact cache is keyed by phone JID whenever one is known.
 - Contacts accumulate in an **in-memory** `contactCache` (from `contacts.upsert`, `chats.upsert`, `messaging-history.set`, and incoming `pushName`) and are only flushed to SQLite inside `getContacts()`. So `wa_search_contact` is what materializes them — a fresh instance returns nothing until that runs.
 - `getMessages()` reads the local `messages` table, not WhatsApp. Persistence happens in the `messages.upsert` branch of `bindEvents`.
-- Reconnect is exponential backoff (1s → 30s, 10 attempts) inside the adapter; `MaintenanceService` independently retries `disconnected` instances every 5 min if they have a `lastConnected`.
+- Reconnect is exponential backoff (1s → 30s). After 10 attempts a paired session keeps retrying every 30s until the socket opens, `disconnect()` runs, or the session logs out; an unpaired session stops. Concurrent `connect()` calls share one attempt. A non-logout close clears the dead socket. `MaintenanceService` retries `disconnected` instances every 5 min if they have a `lastConnected`, and recovers a `connecting` row older than 2 min with no live socket (also only with a `lastConnected`).
 
 **Cloud API**: webhooks are served by the **main** HTTP server at `POST /cloud-webhook`, verified with `x-hub-signature-256` against `WA_CLOUD_WEBHOOK_SECRET`, answered 200 immediately (Meta's 5s budget) and processed async. Routing to an instance is by `phone_number_id` via `findCloudAdapterByPhoneNumberId()`.
 
@@ -105,6 +105,8 @@ Everything that is not a "send a message" call (edit, delete, react, presence, g
    Always use `toolSuccess`/`handleToolError` — they sanitize file paths and stack traces out of agent-visible output.
 3. Add the method to `channel.interface.ts`, implement in Baileys, implement or throw-with-the-standard-wording in Cloud API.
 4. Update `README.md` and `docs/API_REFERENCE.md` tables.
+5. Record user-visible features, fixes, and behavior changes in `CHANGELOG.md` under
+   `[Unreleased]` before merging. Include relevant issue/PR links and material limitations.
 
 ## Adding a resource
 
@@ -116,23 +118,32 @@ Tests in `tests/resources.test.ts` guard both rules — one fails if any `src/` 
 
 Domain files are fixed: `instance`, `messaging`, `chat`, `group`, `contact`, `profile`, `status`, `newsletter`, `call`. Registration happens in `server/mcp.ts`.
 
-## Schema changes need three (sometimes four) edits
+## Schema changes support both storage drivers
 
-Migrations are **not** run at startup. `src/db/client.ts` creates tables itself with raw `CREATE TABLE IF NOT EXISTS` SQL. A new table or column therefore needs:
+SQLite remains the default at `WA_DATABASE_PATH`; `WA_DATABASE_URL` selects PostgreSQL.
+All database queries and database-backed services are asynchronous for both drivers: await
+`.get()`, `.all()`, `.run()`, and transactions, including in event callbacks and tests.
 
-1. `src/db/schema.ts` — Drizzle definition (what queries compile against).
-2. `src/db/client.ts` — the matching raw SQL in `initializeDatabase()`.
-3. `npm run db:generate` — a `drizzle/` migration file for anyone running `db:migrate`.
-4. For a column added to a table that already exists in deployed databases, an inline `try { sqlite.exec("ALTER TABLE ... ADD COLUMN ...") } catch {}` **above** `initializeDatabase()` — see the `contacts.lid` precedent in `client.ts`. It must run before index creation.
+Schema changes need:
 
-All tables are keyed by `(instance_id, ...)` and cascade-delete from `instances`.
+1. `src/db/schema.ts` — the Drizzle query definitions.
+2. `src/db/schema-sql.ts` — the shared runtime CREATE SQL; add an additive ALTER for columns
+   on existing tables, before any index that uses them. PostgreSQL widens INTEGER to BIGINT.
+3. `npm run db:generate` — SQLite migrations in `drizzle/`. PostgreSQL does not run these files;
+   startup and `db:migrate` apply the shared schema and record its baseline separately.
+4. Run the database tests against temporary SQLite and disposable PostgreSQL databases. Include
+   new tables in copy verification: application tables are discovered from `schema.ts`, while
+   SQLite/Drizzle migration journals are skipped.
+
+All instance-owned tables cascade-delete from `instances`. Never run test setup against a real
+application database: it creates and drops isolated test schemas.
 
 ## Conventions
 
 - Logging: Pino only, never `console.log`. Use `createChildLogger({ service })` in services/adapters and `createRequestLogger(toolName, instanceId)` in tools. Under stdio transport the logger writes to **stderr** — writing to stdout corrupts the MCP protocol stream. Secrets are redacted via the `redact` list in `utils/logger.ts`; add new secret-bearing field names there.
 - Media inputs are `https://` URLs or base64. `utils/validation.ts` enforces HTTPS-only and blocks private/loopback/metadata IPs (SSRF) plus `file://`/`data:`; size caps live in `constants.ts`. Never relax these to accept `http://` or local paths.
 - Strict TypeScript, no `any`. Prettier: 100 cols, double quotes, trailing commas.
-- Tests (`tests/`) are dependency-free by design: they re-declare in-memory Drizzle schemas rather than importing `src/db/client.ts`, which would create a real file DB. Follow that pattern for new DB-touching tests.
+- Tests (`tests/`) use in-memory schemas or the temporary SQLite database / isolated PostgreSQL schema configured by `tests/setup.ts`. Never bypass that setup to touch a real application database.
 - Conventional Commits.
 
 ## Known drift — verify before trusting the docs

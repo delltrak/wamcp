@@ -1,9 +1,13 @@
+import { safeGroupChanges } from "../utils/group-event-fields.js";
 import { createHash, createHmac } from "node:crypto";
 import { lookup as lookupDns } from "node:dns/promises";
 import { isIP } from "node:net";
 import type { ConnectionOptions } from "node:tls";
 import { Queue, UnrecoverableError, Worker, type Job, type JobsOptions } from "bullmq";
-import { Agent } from "undici";
+import { and, eq, inArray, or } from "drizzle-orm";
+import { Agent, fetch as undiciFetch } from "undici";
+import { db } from "../db/client.js";
+import { contacts } from "../db/schema.js";
 import type { InstanceManager } from "./instance-manager.js";
 import { QUEUE_COMPLETED_AGE_S, QUEUE_FAILED_AGE_S } from "../constants.js";
 import type {
@@ -49,6 +53,9 @@ export interface EventWebhookPayload {
   rawType?: string;
   action?: string;
   groupId?: string;
+  groupChanges?: Record<string, unknown>;
+  participants?: string[];
+  requestMethod?: string | null;
   memberLabel?: string | null;
   eventMessageId?: string;
   responseMessageId?: string;
@@ -554,6 +561,20 @@ export function normalizeEventWebhookPayload(
           memberLabel: memberLabel ?? null,
         }
       : {}),
+    ...(event === "group.updated"
+      ? { groupId: firstString(data.groupId) ?? "", groupChanges: safeGroupChanges(changes) }
+      : {}),
+    ...(event === "group.participants_changed"
+      ? {
+          groupId: firstString(data.groupId) ?? "",
+          participants: Array.isArray(data.participants)
+            ? data.participants.filter((p): p is string => typeof p === "string")
+            : [],
+        }
+      : {}),
+    ...(event === "group.join_request"
+      ? { groupId: firstString(data.groupId) ?? "", requestMethod: firstString(data.method) }
+      : {}),
     ...(eventMessageId ? { eventMessageId } : {}),
     ...(responseMessageId ? { responseMessageId } : {}),
     ...(participant ? { participant } : {}),
@@ -702,12 +723,163 @@ export function normalizeGrokBotInstanceWebhookPayload(
   }
 }
 
-export function shouldSendEventWebhook(
+function addJidCandidate(candidates: string[], value: unknown): void {
+  if (typeof value !== "string") return;
+  const jid = value.trim();
+  if (jid.includes("@")) candidates.push(jid);
+}
+
+/** #140: drop a WhatsApp device suffix (`:12` before `@`) and compare case-insensitively. */
+const JID_DEVICE_SUFFIX = /:\d+(?=@)/;
+
+export function normalizeIgnoreJid(value: string): string {
+  return value.trim().toLowerCase().replace(JID_DEVICE_SUFFIX, "");
+}
+
+/**
+ * JIDs used by WA_EVENT_WEBHOOK_IGNORE_JIDS (#140).
+ * Address wildcards match only chatJids. Exact and starred entries also match identityJids.
+ * Participant arrays are not included.
+ */
+export function eventIgnoreJidSets(payload: ChannelEventPayload[ChannelEvent]): {
+  chatJids: string[];
+  identityJids: string[];
+} {
+  const data = payload as unknown as Record<string, unknown>;
+  const message = isRecord(data.message) ? data.message : {};
+  const association = isRecord(data.association) ? data.association : {};
+  const chatJids: string[] = [];
+  addJidCandidate(chatJids, data.chatId);
+  addJidCandidate(chatJids, data.groupId);
+  addJidCandidate(chatJids, data.newsletterId);
+  addJidCandidate(chatJids, association.chatId);
+  const identityJids: string[] = [];
+  addJidCandidate(identityJids, data.participant);
+  addJidCandidate(identityJids, data.callerId);
+  addJidCandidate(identityJids, data.reactedBy);
+  addJidCandidate(identityJids, data.deletedBy);
+  addJidCandidate(identityJids, data.author);
+  addJidCandidate(identityJids, data.contactId);
+  addJidCandidate(identityJids, data.chatLid);
+  addJidCandidate(identityJids, data.senderLid);
+  addJidCandidate(identityJids, data.fromLid);
+  addJidCandidate(identityJids, data.participantLid);
+  addJidCandidate(identityJids, message.sender);
+  addJidCandidate(identityJids, message.senderLid);
+  addJidCandidate(identityJids, message.senderPn);
+  return { chatJids, identityJids };
+}
+
+/** Chat, sender, and LID fields a JID ignore rule can see. Participant lists are not included. */
+export function eventJidCandidates(payload: ChannelEventPayload[ChannelEvent]): string[] {
+  const { chatJids, identityJids } = eventIgnoreJidSets(payload);
+  return [...chatJids, ...identityJids];
+}
+
+export function jidMatchesIgnorePattern(jid: string, pattern: string): boolean {
+  const normalizedJid = normalizeIgnoreJid(jid);
+  const normalizedPattern = normalizeIgnoreJid(pattern);
+  if (!normalizedJid || !normalizedPattern) return false;
+  if (normalizedPattern.startsWith("@")) return normalizedJid.endsWith(normalizedPattern);
+  const star = normalizedPattern.indexOf("*");
+  if (star === -1) return normalizedJid === normalizedPattern;
+  const prefix = normalizedPattern.slice(0, star);
+  const suffix = normalizedPattern.slice(star + 1);
+  return (
+    normalizedJid.length >= prefix.length + suffix.length &&
+    normalizedJid.startsWith(prefix) &&
+    normalizedJid.endsWith(suffix)
+  );
+}
+
+function phoneJidFromStoredPhone(phone: string): string | undefined {
+  const digits = phone.replace(/\D/g, "");
+  if (!digits) return undefined;
+  return `${digits}@s.whatsapp.net`;
+}
+
+/**
+ * #140: a LID-only message has no phone alias on the event. Use the contact row
+ * (jid, lid, phone) so an exact or starred phone entry can still match.
+ * Address wildcards do not use these aliases.
+ */
+async function lookupStoredJidAliases(
+  instanceId: string,
+  jids: readonly string[],
+): Promise<string[]> {
+  const needles = [
+    ...new Set(
+      jids
+        .map((jid) => normalizeIgnoreJid(jid))
+        .filter(
+          (jid) => jid.endsWith("@lid") || jid.endsWith("@s.whatsapp.net") || jid.endsWith("@c.us"),
+        ),
+    ),
+  ];
+  if (!instanceId || needles.length === 0) return [];
+  try {
+    const rows = await db
+      .select({ jid: contacts.jid, phone: contacts.phone, lid: contacts.lid })
+      .from(contacts)
+      .where(
+        and(
+          eq(contacts.instanceId, instanceId),
+          or(inArray(contacts.jid, needles), inArray(contacts.lid, needles)),
+        ),
+      )
+      .all();
+    const aliases: string[] = [];
+    for (const row of rows) {
+      if (row.jid) aliases.push(row.jid);
+      if (row.lid) aliases.push(row.lid);
+      if (row.phone) {
+        const phoneJid = phoneJidFromStoredPhone(row.phone);
+        if (phoneJid) aliases.push(phoneJid);
+      }
+    }
+    return aliases;
+  } catch {
+    logger.warn("Unable to resolve stored LID mappings for the JID ignore filter");
+    return [];
+  }
+}
+
+export async function eventMatchesIgnoreJids(
+  payload: ChannelEventPayload[ChannelEvent],
+  ignoreJids: readonly string[] | undefined,
+): Promise<boolean> {
+  if (!ignoreJids || ignoreJids.length === 0) return false;
+  const { chatJids, identityJids } = eventIgnoreJidSets(payload);
+  const domainPatterns: string[] = [];
+  const specificPatterns: string[] = [];
+  for (const pattern of ignoreJids) {
+    if (normalizeIgnoreJid(pattern).startsWith("@")) domainPatterns.push(pattern);
+    else specificPatterns.push(pattern);
+  }
+  if (
+    domainPatterns.some((pattern) => chatJids.some((jid) => jidMatchesIgnorePattern(jid, pattern)))
+  ) {
+    return true;
+  }
+  if (specificPatterns.length === 0) return false;
+  const instanceId =
+    typeof (payload as { instanceId?: unknown }).instanceId === "string"
+      ? (payload as { instanceId: string }).instanceId
+      : "";
+  const resolved = await lookupStoredJidAliases(instanceId, [...chatJids, ...identityJids]);
+  return [...chatJids, ...identityJids, ...resolved].some((jid) =>
+    specificPatterns.some((pattern) => jidMatchesIgnorePattern(jid, pattern)),
+  );
+}
+
+export async function shouldSendEventWebhook(
   event: ChannelEvent,
   payload: ChannelEventPayload[ChannelEvent],
   config: Pick<EventWebhookConfig, "events" | "ignoreFromMe"> &
-    Partial<Pick<EventWebhookDestination, "preset" | "chatAllowlist" | "senderAllowlist">>,
-): boolean {
+    Partial<
+      Pick<EventWebhookDestination, "preset" | "chatAllowlist" | "senderAllowlist" | "ignoreJids">
+    >,
+): Promise<boolean> {
   if (!config.events.includes(event)) return false;
   if (
     config.preset === "grok-bot" &&
@@ -750,6 +922,7 @@ export function shouldSendEventWebhook(
   }
 
   if (!event.startsWith("instance.")) {
+    if (await eventMatchesIgnoreJids(payload, config.ignoreJids)) return false;
     if (config.chatAllowlist && !config.chatAllowlist.includes(chatId)) return false;
     if (config.senderAllowlist && !config.senderAllowlist.includes(senderId)) return false;
   }
@@ -980,98 +1153,108 @@ export function registerEventWebhookHandler(
     if (buffer.payloads.length >= MAX_BATCH_SIZE) void flushDestination(destination);
   };
 
-  const removeListener = instanceManager.onAnyEvent(
-    <E extends ChannelEvent>(event: E, instanceId: string, payload: ChannelEventPayload[E]) => {
-      try {
-        for (const destination of config.destinations) {
-          if (!shouldSendEventWebhook(event, payload, destination)) continue;
+  const pendingHandlers = new Set<Promise<void>>();
+  const handleEvent = async <E extends ChannelEvent>(
+    event: E,
+    instanceId: string,
+    payload: ChannelEventPayload[E],
+  ) => {
+    try {
+      for (const destination of config.destinations) {
+        if (!(await shouldSendEventWebhook(event, payload, destination))) continue;
 
-          let webhookPayload:
-            NormalizedEventWebhookPayload | GrokBotWebhookPayload | GrokBotInstanceWebhookPayload;
-          if (destination.preset === "grok-bot" && event === "message.received") {
-            webhookPayload = normalizeGrokBotWebhookPayload(
-              instanceId,
-              payload as ChannelEventPayload["message.received"],
-            );
-          } else if (destination.preset === "grok-bot" && event.startsWith("instance.")) {
-            webhookPayload = normalizeGrokBotInstanceWebhookPayload(
-              event as GrokBotInstanceEvent,
-              instanceId,
-              payload as ChannelEventPayload[ChannelEvent],
-            );
-          } else {
-            webhookPayload = normalizeEventWebhookPayload(
-              event,
-              instanceId,
-              payload as ChannelEventPayload[ChannelEvent],
-            );
-          }
+        let webhookPayload:
+          NormalizedEventWebhookPayload | GrokBotWebhookPayload | GrokBotInstanceWebhookPayload;
+        if (destination.preset === "grok-bot" && event === "message.received") {
+          webhookPayload = normalizeGrokBotWebhookPayload(
+            instanceId,
+            payload as ChannelEventPayload["message.received"],
+          );
+        } else if (destination.preset === "grok-bot" && event.startsWith("instance.")) {
+          webhookPayload = normalizeGrokBotInstanceWebhookPayload(
+            event as GrokBotInstanceEvent,
+            instanceId,
+            payload as ChannelEventPayload[ChannelEvent],
+          );
+        } else {
+          webhookPayload = normalizeEventWebhookPayload(
+            event,
+            instanceId,
+            payload as ChannelEventPayload[ChannelEvent],
+          );
+        }
 
-          if (config.messageDebounceMs > 0) {
-            if (event !== "message.received") {
-              void enqueuePayload(destination, webhookPayload);
-              continue;
-            }
-
-            const messageEvent = payload as ChannelEventPayload["message.received"];
-            const chatId = messageEvent.chatId;
-            if (!chatId) {
-              void enqueuePayload(destination, webhookPayload);
-              continue;
-            }
-
-            let transcription: Promise<string> | undefined;
-            if (messageEvent.message.type === "audio") {
-              try {
-                transcription = transcribeIncomingAudioIfConfigured(
-                  instanceManager,
-                  instanceId,
-                  messageEvent,
-                );
-              } catch {
-                logger.warn(
-                  { instanceId },
-                  "Unable to start incoming audio transcription; outgoing webhook will use the original message",
-                );
-              }
-            }
-
-            const withTranscription = (text: string): BufferedMessagePayload => {
-              const transcribedEvent = {
-                ...messageEvent,
-                message: { ...messageEvent.message, transcription: text },
-              } as unknown as ChannelEventPayload["message.received"];
-              const normalized =
-                destination.preset === "grok-bot"
-                  ? normalizeGrokBotWebhookPayload(instanceId, transcribedEvent)
-                  : normalizeEventWebhookPayload("message.received", instanceId, transcribedEvent);
-              return { ...(normalized as EventWebhookPayload), transcription: text };
-            };
-
-            queueMessagePayload(
-              destination,
-              instanceId,
-              chatId,
-              webhookPayload as BufferedMessagePayload,
-              transcription,
-              withTranscription,
-            );
+        if (config.messageDebounceMs > 0) {
+          if (event !== "message.received") {
+            void enqueuePayload(destination, webhookPayload);
             continue;
           }
 
-          queuePayload(destination, webhookPayload);
+          const messageEvent = payload as ChannelEventPayload["message.received"];
+          const chatId = messageEvent.chatId;
+          if (!chatId) {
+            void enqueuePayload(destination, webhookPayload);
+            continue;
+          }
+
+          let transcription: Promise<string> | undefined;
+          if (messageEvent.message.type === "audio") {
+            try {
+              transcription = transcribeIncomingAudioIfConfigured(
+                instanceManager,
+                instanceId,
+                messageEvent,
+              );
+            } catch {
+              logger.warn(
+                { instanceId },
+                "Unable to start incoming audio transcription; outgoing webhook will use the original message",
+              );
+            }
+          }
+
+          const withTranscription = (text: string): BufferedMessagePayload => {
+            const transcribedEvent = {
+              ...messageEvent,
+              message: { ...messageEvent.message, transcription: text },
+            } as unknown as ChannelEventPayload["message.received"];
+            const normalized =
+              destination.preset === "grok-bot"
+                ? normalizeGrokBotWebhookPayload(instanceId, transcribedEvent)
+                : normalizeEventWebhookPayload("message.received", instanceId, transcribedEvent);
+            return { ...(normalized as EventWebhookPayload), transcription: text };
+          };
+
+          queueMessagePayload(
+            destination,
+            instanceId,
+            chatId,
+            webhookPayload as BufferedMessagePayload,
+            transcription,
+            withTranscription,
+          );
+          continue;
         }
-      } catch {
-        safeFailureNotice();
+
+        queuePayload(destination, webhookPayload);
       }
-    },
-  );
+    } catch {
+      safeFailureNotice();
+    }
+  };
+  const removeListener = instanceManager.onAnyEvent((event, instanceId, payload) => {
+    const pending = handleEvent(event, instanceId, payload);
+    pendingHandlers.add(pending);
+    void pending.finally(() => pendingHandlers.delete(pending));
+    return pending;
+  });
 
   const unsubscribe = (() => {
     removeListener();
     void unsubscribe.flush();
   }) as EventWebhookUnsubscribe;
   unsubscribe.flush = async () => {
+    while (pendingHandlers.size > 0) await Promise.all([...pendingHandlers]);
     for (const batch of messageBuffers.values()) void flushMessageBatch(batch, true);
     for (const destination of config.destinations) void flushDestination(destination);
     while (pendingEnqueues.size > 0) await Promise.all([...pendingEnqueues]);
@@ -1297,10 +1480,12 @@ export async function postEventWebhook(
   destination: EventWebhookDestination,
   payload: EventWebhookBody,
   timeoutMs: number,
-  fetchRequest: typeof fetch = fetch,
+  // Use the client from the same Undici version as Agent: Node's bundled fetch
+  // can still use the legacy dispatcher contract.
+  fetchRequest: typeof fetch | typeof undiciFetch = undiciFetch,
   resolveDns: EventWebhookDnsResolver = resolveWebhookDns,
 ): Promise<void> {
-  let response: Response | undefined;
+  let response: Response | Awaited<ReturnType<typeof undiciFetch>> | undefined;
   let dispatcher: Agent | undefined;
   try {
     const url = new URL(destination.url);
@@ -1332,12 +1517,12 @@ export async function postEventWebhook(
     try {
       response = await fetchRequest(destination.url, {
         method: "POST",
-        headers: createEventWebhookHeaders(body, destination),
+        headers: Object.fromEntries(createEventWebhookHeaders(body, destination)),
         body,
         signal: AbortSignal.timeout(timeoutMs),
         redirect: "error",
         dispatcher,
-      } as RequestInit & { dispatcher: Agent });
+      });
     } catch (error) {
       const diagnostics = readWebhookFailureDiagnostics(error, destination);
       if (isRetryableNetworkError(error)) {

@@ -8,6 +8,7 @@ import type { MessageQueue } from "../services/message-queue.js";
 import { MediaService } from "../services/media.js";
 import { toolSuccess } from "../types/mcp.types.js";
 import { handleToolError } from "../utils/tool-handler.js";
+import { planGroupMentionAll } from "../utils/group-mention.js";
 import { createRequestLogger } from "../utils/logger.js";
 import {
   SendTextSchema,
@@ -33,6 +34,7 @@ import {
   SendViewOnceSchema,
   SendPresenceSchema,
   MarkReadSchema,
+  MarkPlayedSchema,
   SubscribePresenceSchema,
   SendButtonsSchema,
   SendListSchema,
@@ -42,8 +44,6 @@ import {
   GetMessageReceiptsSchema,
   GetMessageReactionsSchema,
 } from "../schemas/messaging.schema.js";
-
-const MAX_GROUP_MENTION_PARTICIPANTS = 1_024;
 
 export function registerMessagingTools(
   server: McpServer,
@@ -727,7 +727,7 @@ Returns: { status: "queued", jobId }`,
     "wa_send_group_mention_all",
     {
       description:
-        "Send a group message with an @all mention. Baileys expands the current group participant list into mentioned JIDs; Cloud API does not support this helper.",
+        "Send a group message with WhatsApp's native @all mention. If native @all is unavailable, Baileys mentions each current participant instead. Notification delivery depends on WhatsApp and recipient settings. Cloud API does not support this helper.",
       inputSchema: SendGroupMentionAllSchema,
     },
     async (params) => {
@@ -739,26 +739,24 @@ Returns: { status: "queued", jobId }`,
         }
         const adapter = instanceManager.getAdapter(params.instanceId);
         const group = await adapter.getGroupMetadata(params.groupId);
-        const mentions = [...new Set(group.participants.map((participant) => participant.jid))];
-        if (mentions.length === 0)
-          throw new Error("Cannot mention all: the group has no participants");
-        if (mentions.length > MAX_GROUP_MENTION_PARTICIPANTS) {
-          throw new Error(
-            `Cannot mention all: the group has more than ${MAX_GROUP_MENTION_PARTICIPANTS} participants`,
-          );
-        }
+        const plan = planGroupMentionAll({
+          text: params.text,
+          nativeSupported: await adapter.supportsNativeGroupMentionAll(),
+          participants: group.participants.map((participant) => participant.jid),
+        });
         const result = await messageQueue.enqueueMessage(
           params.instanceId,
           group.jid,
-          {
-            type: "text",
-            text: `${params.text} @all`,
-            mentions,
-            mentionAll: true,
-          },
+          plan.mode === "native"
+            ? { type: "text", text: plan.text, mentionAll: true }
+            : { type: "text", text: plan.text, mentions: plan.mentions },
           "baileys",
         );
-        return toolSuccess({ ...result, mentionCount: mentions.length });
+        return toolSuccess(
+          plan.mode === "native"
+            ? { ...result, mode: "native" }
+            : { ...result, mode: "participants", mentionCount: plan.mentions.length },
+        );
       } catch (err) {
         return handleToolError("wa_send_group_mention_all", err, params.instanceId);
       }
@@ -930,6 +928,30 @@ Returns: { status: "queued", jobId }`,
         return toolSuccess({ success: true });
       } catch (err) {
         return handleToolError("wa_mark_read", err, params.instanceId);
+      }
+    },
+  );
+
+  server.registerTool(
+    "wa_mark_played",
+    {
+      description:
+        "Send a played receipt for stored incoming audio, voice notes, or video. Always available. Group messages need participant when the sender is not stored. Baileys only. WA_AUTO_MARK_PLAYED=false controls a separate receipt after transcription.",
+      inputSchema: MarkPlayedSchema,
+    },
+    async (params) => {
+      const log = createRequestLogger("wa_mark_played", params.instanceId);
+      const start = Date.now();
+      try {
+        const adapter = instanceManager.getAdapter(params.instanceId);
+        await adapter.markPlayed(params.chatJid, params.messageIds, params.participant);
+        log.info(
+          { duration: Date.now() - start, count: params.messageIds.length },
+          "Media marked played",
+        );
+        return toolSuccess({ success: true, count: params.messageIds.length });
+      } catch (err) {
+        return handleToolError("wa_mark_played", err, params.instanceId);
       }
     },
   );

@@ -50,9 +50,10 @@ export async function migrateSqliteToPostgres(options: {
   client.on("error", (err: Error) => {
     log.error({ err: err.message }, "Postgres copy connection dropped");
   });
-  await client.connect();
-  const source = new Database(snapshot.snapshotPath, { readonly: true, fileMustExist: true });
+  let source: Database.Database | undefined;
   try {
+    await client.connect();
+    source = new Database(snapshot.snapshotPath, { readonly: true, fileMustExist: true });
     await applySchemaSql(async (sql) => {
       await client.query(sql);
     }, "postgres");
@@ -82,9 +83,12 @@ export async function migrateSqliteToPostgres(options: {
     }
     return { tables: counts, skipped };
   } finally {
-    source.close();
-    await client.end();
-    rmSync(snapshot.directory, { recursive: true, force: true });
+    try {
+      source?.close();
+      await client.end();
+    } finally {
+      rmSync(snapshot.directory, { recursive: true, force: true });
+    }
   }
 }
 
@@ -116,11 +120,15 @@ async function snapshotDatabase(
 ): Promise<{ directory: string; snapshotPath: string }> {
   const directory = mkdtempSync(join(tmpdir(), "wamcp-pg-migrate-"));
   const snapshotPath = join(directory, "snapshot.db");
-  const source = new Database(sqlitePath, { readonly: true, fileMustExist: true });
+  let source: Database.Database | undefined;
   try {
+    source = new Database(sqlitePath, { readonly: true, fileMustExist: true });
     await source.backup(snapshotPath);
+  } catch (error) {
+    rmSync(directory, { recursive: true, force: true });
+    throw error;
   } finally {
-    source.close();
+    source?.close();
   }
   return { directory, snapshotPath };
 }

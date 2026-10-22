@@ -1,3 +1,4 @@
+import "dotenv/config";
 import { existsSync } from "node:fs";
 import { resolveDatabaseConfig } from "./config.js";
 import { migrateSqliteToPostgres } from "./sqlite-to-postgres.js";

@@ -481,8 +481,8 @@ describe("chat patch payloads", () => {
     expect(chatModify).not.toHaveBeenCalled();
   });
 
-  it("uses a stored raw key for the read-receipt path when available", async () => {
-    const { adapter, instanceId, socket } = (await makeConnectedAdapter());
+  it("uses stored raw key fields without a participant for one-to-one read receipts", async () => {
+    const { adapter, instanceId, socket } = await makeConnectedAdapter();
     const key: WAMessageKey = {
       remoteJid: LID_JID,
       remoteJidAlt: PN_JID,
@@ -499,7 +499,14 @@ describe("chat patch payloads", () => {
 
     await adapter.markRead(PN_JID, [key.id!]);
 
-    expect(socket.readMessages).toHaveBeenCalledWith([key]);
+    expect(socket.readMessages).toHaveBeenCalledWith([
+      {
+        remoteJid: LID_JID,
+        remoteJidAlt: PN_JID,
+        id: key.id,
+        fromMe: false,
+      },
+    ]);
   });
 
   it("uses safeChatModify for every direct chatModify call site", async () => {
