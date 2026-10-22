@@ -239,6 +239,7 @@ function disconnectReasonName(statusCode: number | undefined): string {
   return name ?? `unknown (${statusCode})`;
 }
 type GlobalPresenceStatus = "available" | "unavailable";
+const PRESENCE_UNAVAILABLE_RETRY_MS = 5_000;
 
 interface ViewOnceAudio {
   audio: Buffer;
@@ -1367,7 +1368,7 @@ export class BaileysAdapter implements ChannelAdapter {
     this.armActivityPresenceTimer(sock);
   }
 
-  private armActivityPresenceTimer(sock: WASocket): void {
+  private armActivityPresenceTimer(sock: WASocket, delayMs = this.presenceIdleMs): void {
     if (
       this.presenceMode !== "on_activity" ||
       this.sock !== sock ||
@@ -1386,8 +1387,13 @@ export class BaileysAdapter implements ChannelAdapter {
         () => (this.activityInFlight.get(sock) ?? 0) > 0,
       ).catch((error: unknown) => {
         this.logGlobalPresenceFailure(error);
+        // Keep retrying idle cleanup even after a pulse has handed presence to activity.
+        if (this.activityPresenceTimer === null) {
+          this.armActivityPresenceTimer(sock, PRESENCE_UNAVAILABLE_RETRY_MS);
+        }
       });
-    }, this.presenceIdleMs);
+    }, delayMs);
+    this.activityPresenceTimer.unref?.();
   }
 
   private async setGlobalPresence(
@@ -1398,9 +1404,9 @@ export class BaileysAdapter implements ChannelAdapter {
     if (this.presenceMode !== "on_activity" || this.sock !== sock || this.status !== "connected") {
       return;
     }
-    if (status === "unavailable" && Date.now() < this.presencePulseHoldUntilMs) {
-      return;
-    }
+    const skipUpdate = () =>
+      shouldSkip?.() || (status === "unavailable" && Date.now() < this.presencePulseHoldUntilMs);
+    if (skipUpdate()) return;
 
     while (this.activityPresenceUpdate) {
       try {
@@ -1409,16 +1415,16 @@ export class BaileysAdapter implements ChannelAdapter {
         // A failed update leaves the cached state unchanged and can be retried below.
       }
       if (this.sock !== sock || this.status !== "connected") return;
-      if (shouldSkip?.()) return;
+      if (skipUpdate()) return;
       if (this.activityPresenceStatus === status) return;
     }
 
-    if (shouldSkip?.()) return;
+    if (skipUpdate()) return;
     if (this.activityPresenceStatus === status) return;
 
     const update = Promise.resolve()
       .then(async () => {
-        if (this.sock !== sock || this.status !== "connected" || shouldSkip?.()) {
+        if (this.sock !== sock || this.status !== "connected" || skipUpdate()) {
           return;
         }
         await sock.sendPresenceUpdate(status);
@@ -1495,19 +1501,41 @@ export class BaileysAdapter implements ChannelAdapter {
     this.presencePulseHoldUntilMs = Date.now() + durationMs;
     try {
       await this.applyPulsePresence(sock, "available");
-      const completed = await this.waitForPresencePulse(durationMs);
+      // A disconnect or explicit unavailable can cancel while the write is pending.
+      if (token !== this.presencePulseToken || this.sock !== sock || this.status !== "connected") {
+        return true;
+      }
+      const remainingMs = this.presencePulseHoldUntilMs - Date.now();
+      const completed = remainingMs <= 0 || (await this.waitForPresencePulse(remainingMs));
       if (token !== this.presencePulseToken || this.sock !== sock || this.status !== "connected") {
         return true;
       }
       this.presencePulseHoldUntilMs = 0;
       if (!completed) return true;
-      if ((this.activityInFlight.get(sock) ?? 0) > 0 || this.activityPresenceTimer !== null) {
-        return true;
-      }
-      try {
-        await this.applyPulsePresence(sock, "unavailable");
-      } catch (error) {
-        this.logGlobalPresenceFailure(error);
+      // Keep cleanup independent of the scheduler slot: by now its window has ended.
+      // Do not start another available pulse merely to retry an unavailable write.
+      while (
+        token === this.presencePulseToken &&
+        this.sock === sock &&
+        this.status === "connected"
+      ) {
+        const activityOwnsPresence = () =>
+          (this.activityInFlight.get(sock) ?? 0) > 0 || this.activityPresenceTimer !== null;
+        if (activityOwnsPresence()) return true;
+        try {
+          await this.applyPulsePresence(sock, "unavailable", activityOwnsPresence);
+          return true;
+        } catch (error) {
+          this.logGlobalPresenceFailure(error);
+          if (
+            token !== this.presencePulseToken ||
+            this.sock !== sock ||
+            this.status !== "connected"
+          ) {
+            return true;
+          }
+          if (!(await this.waitForPresencePulse(PRESENCE_UNAVAILABLE_RETRY_MS))) return true;
+        }
       }
       return true;
     } catch (error) {
@@ -1518,12 +1546,17 @@ export class BaileysAdapter implements ChannelAdapter {
     }
   }
 
-  private async applyPulsePresence(sock: WASocket, status: GlobalPresenceStatus): Promise<void> {
+  private async applyPulsePresence(
+    sock: WASocket,
+    status: GlobalPresenceStatus,
+    shouldSkip?: () => boolean,
+  ): Promise<void> {
     if (this.sock !== sock || this.status !== "connected") {
       throw new Error("Instance not connected");
     }
     if (this.presenceMode === "on_activity") {
-      await this.setGlobalPresence(sock, status);
+      await this.setGlobalPresence(sock, status, shouldSkip);
+      if (shouldSkip?.()) return;
       if (this.activityPresenceStatus !== status) {
         throw new Error("Presence pulse could not update global presence");
       }
@@ -1535,15 +1568,15 @@ export class BaileysAdapter implements ChannelAdapter {
         return;
       }
       await sock.sendPresenceUpdate("available");
-      this.pulseMadeAvailable = true;
+      if (this.sock === sock && this.status === "connected") this.pulseMadeAvailable = true;
       return;
     }
     if (!this.pulseMadeAvailable || this.lastExplicitPresence === "available") {
       this.pulseMadeAvailable = false;
       return;
     }
-    this.pulseMadeAvailable = false;
     await sock.sendPresenceUpdate("unavailable");
+    if (this.sock === sock) this.pulseMadeAvailable = false;
   }
 
   private logGlobalPresenceFailure(error: unknown): void {
@@ -3072,6 +3105,19 @@ export class BaileysAdapter implements ChannelAdapter {
   ): Promise<void> {
     const sock = this.getSock();
     if (presenceStatus === "available" || presenceStatus === "unavailable") {
+      if (this.presenceMode === "always") {
+        // Global presence must not be dropped by the per-chat indicator throttle.
+        // Retain pulse cleanup ownership until the explicit write actually succeeds.
+        await sock.sendPresenceUpdate(presenceStatus);
+        if (this.sock !== sock || this.status !== "connected") return;
+        this.noteExplicitPresence(presenceStatus);
+        if (presenceStatus === "unavailable") {
+          this.presencePulseHoldUntilMs = 0;
+          this.presencePulseToken += 1;
+          this.clearPresencePulseWait(false);
+        }
+        return;
+      }
       this.noteExplicitPresence(presenceStatus);
     }
     if (this.presenceMode === "on_activity" && presenceStatus === "unavailable") {

@@ -640,6 +640,148 @@ describe("BaileysAdapter presence pulse", () => {
     expect(sendPresenceUpdate).not.toHaveBeenCalledWith("unavailable");
   });
 
+  it.each(["on_activity", "always"])(
+    "retries unavailable cleanup in %s after the pulse slot ends",
+    async (mode) => {
+      vi.useFakeTimers();
+      vi.stubEnv("WA_PRESENCE_MODE", mode);
+      vi.stubEnv("WA_MARK_ONLINE_ON_CONNECT", "false");
+      const { adapter, sendPresenceUpdate } = connectedAdapter("pulse-cleanup-retry");
+      sendPresenceUpdate
+        .mockResolvedValueOnce(undefined)
+        .mockRejectedValueOnce(new Error("transient"));
+      let finished = false;
+      const pulse = adapter.runPresencePulse(1_000).then((result) => {
+        finished = true;
+        return result;
+      });
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(finished).toBe(false);
+      await expect(adapter.runPresencePulse(1_000)).resolves.toBe(false);
+      await vi.advanceTimersByTimeAsync(5_000);
+      await expect(pulse).resolves.toBe(true);
+      expect(sendPresenceUpdate.mock.calls.map(([status]) => status)).toEqual([
+        "available",
+        "unavailable",
+        "unavailable",
+      ]);
+      expect(vi.getTimerCount()).toBe(0);
+    },
+  );
+
+  it("retries cleanup after activity takes ownership from the pulse", async () => {
+    vi.useFakeTimers();
+    vi.stubEnv("WA_PRESENCE_MODE", "on_activity");
+    vi.stubEnv("WA_PRESENCE_IDLE_SECONDS", "10");
+    const { adapter, sendPresenceUpdate } = connectedAdapter("pulse-activity-cleanup");
+    const pulse = adapter.runPresencePulse(1_000);
+    await vi.advanceTimersByTimeAsync(0);
+    await adapter.sendPresence(CHAT_JID, "typing");
+    await vi.advanceTimersByTimeAsync(1_000);
+    await expect(pulse).resolves.toBe(true);
+    sendPresenceUpdate.mockRejectedValueOnce(new Error("transient idle failure"));
+    await vi.advanceTimersByTimeAsync(9_000);
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(
+      sendPresenceUpdate.mock.calls.filter(([status]) => status === "unavailable"),
+    ).toHaveLength(2);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("leaves a new explicit available in control while cleanup retries", async () => {
+    vi.useFakeTimers();
+    vi.stubEnv("WA_PRESENCE_MODE", "always");
+    vi.stubEnv("WA_MARK_ONLINE_ON_CONNECT", "false");
+    const { adapter, sendPresenceUpdate } = connectedAdapter("pulse-explicit-cleanup");
+    sendPresenceUpdate
+      .mockResolvedValueOnce(undefined)
+      .mockRejectedValueOnce(new Error("transient"));
+    const pulse = adapter.runPresencePulse(1_000);
+    await vi.advanceTimersByTimeAsync(1_000);
+    await adapter.sendPresence(CHAT_JID, "available");
+    await vi.advanceTimersByTimeAsync(5_000);
+    await expect(pulse).resolves.toBe(true);
+    expect(
+      sendPresenceUpdate.mock.calls.filter(([status]) => status === "unavailable"),
+    ).toHaveLength(1);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("does not throttle explicit unavailable behind a chat indicator during cleanup", async () => {
+    vi.useFakeTimers();
+    vi.stubEnv("WA_PRESENCE_MODE", "always");
+    vi.stubEnv("WA_MARK_ONLINE_ON_CONNECT", "false");
+    const { adapter, sendPresenceUpdate } = connectedAdapter("pulse-explicit-offline");
+    sendPresenceUpdate
+      .mockResolvedValueOnce(undefined)
+      .mockRejectedValueOnce(new Error("transient"));
+    const pulse = adapter.runPresencePulse(1_000);
+    await vi.advanceTimersByTimeAsync(1_000);
+    await adapter.sendPresence(CHAT_JID, "typing");
+    await adapter.sendPresence(CHAT_JID, "unavailable");
+    await vi.advanceTimersByTimeAsync(5_000);
+    await expect(pulse).resolves.toBe(true);
+    expect(
+      sendPresenceUpdate.mock.calls.filter(([status]) => status === "unavailable"),
+    ).toHaveLength(2);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("retains cleanup ownership when an explicit available update fails", async () => {
+    vi.useFakeTimers();
+    vi.stubEnv("WA_PRESENCE_MODE", "always");
+    vi.stubEnv("WA_MARK_ONLINE_ON_CONNECT", "false");
+    const { adapter, sendPresenceUpdate } = connectedAdapter("pulse-explicit-failed");
+    sendPresenceUpdate
+      .mockResolvedValueOnce(undefined)
+      .mockRejectedValueOnce(new Error("transient"));
+    const pulse = adapter.runPresencePulse(1_000);
+    await vi.advanceTimersByTimeAsync(1_000);
+    sendPresenceUpdate.mockRejectedValueOnce(new Error("explicit failure"));
+    await expect(adapter.sendPresence(CHAT_JID, "available")).rejects.toThrow("explicit failure");
+    await vi.advanceTimersByTimeAsync(5_000);
+    await expect(pulse).resolves.toBe(true);
+    expect(
+      sendPresenceUpdate.mock.calls.filter(([status]) => status === "unavailable"),
+    ).toHaveLength(2);
+  });
+
+  it("cancels cleanup retries when disconnected", async () => {
+    vi.useFakeTimers();
+    vi.stubEnv("WA_PRESENCE_MODE", "always");
+    vi.stubEnv("WA_MARK_ONLINE_ON_CONNECT", "false");
+    const { adapter, sendPresenceUpdate } = connectedAdapter("pulse-cleanup-close");
+    sendPresenceUpdate.mockResolvedValueOnce(undefined).mockRejectedValue(new Error("transient"));
+    const pulse = adapter.runPresencePulse(1_000);
+    await vi.advanceTimersByTimeAsync(1_000);
+    await adapter.disconnect();
+    await expect(pulse).resolves.toBe(true);
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(sendPresenceUpdate).toHaveBeenCalledTimes(2);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("does not arm a pulse timer after disconnect during the available update", async () => {
+    vi.useFakeTimers();
+    vi.stubEnv("WA_PRESENCE_MODE", "always");
+    vi.stubEnv("WA_MARK_ONLINE_ON_CONNECT", "false");
+    const { adapter, sendPresenceUpdate } = connectedAdapter("pulse-pending-close");
+    let complete!: () => void;
+    sendPresenceUpdate.mockImplementationOnce(
+      () =>
+        new Promise<void>((resolve) => {
+          complete = resolve;
+        }),
+    );
+    const pulse = adapter.runPresencePulse(60_000);
+    await adapter.disconnect();
+    complete();
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(vi.getTimerCount()).toBe(0);
+    await expect(pulse).resolves.toBe(true);
+  });
+
   it("retries after the available update fails", async () => {
     vi.useFakeTimers();
     vi.stubEnv("WA_PRESENCE_MODE", "always");

@@ -18,7 +18,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- Added an optional Baileys presence pulse, off unless `WA_PRESENCE_PULSE_ENABLED=true`. It goes online a configured number of times inside `WA_PRESENCE_PULSE_WINDOW`, evaluated as wall-clock time in `WA_PRESENCE_PULSE_TZ` (or the process time zone). In `always` mode with `WA_MARK_ONLINE_ON_CONNECT=true` it does not pulse. Otherwise it returns to unavailable only when the pulse itself made the account available. A spring-forward day that can no longer fit the pulses is skipped. Slots that start within 3 minutes of startup are skipped.
+- Added optional daily Baileys presence pulses, disabled by default, with bounded duration,
+  spacing, and a configurable time zone ([#145](https://github.com/delltrak/wamcp/issues/145),
+  [#156](https://github.com/delltrak/wamcp/pull/156)). Failed unavailable updates retry every
+  5 seconds while the same socket remains connected, including after activity takes over.
+  Disconnect cancels pending pulse timers; pulses do not override explicit availability in
+  `always` mode. Restarts replan the day, and DST days that cannot fit the configured window
+  are skipped. Real-account validation remains pending; presence timing offers no guarantee
+  against account restrictions.
 - Added optional webhook JID ignore rules with exact addresses, user-part wildcards and
   chat-only domain patterns ([#140](https://github.com/delltrak/wamcp/issues/140),
   [#159](https://github.com/delltrak/wamcp/pull/159)). Group sender phone aliases from Baileys

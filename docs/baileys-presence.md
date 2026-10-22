@@ -67,3 +67,12 @@ explicitly available, and it sends unavailable at the end only when that pulse i
 made the account available. An explicit `available` request through the presence tool is
 left in place. The pulse does not read or write app state. Cloud API instances have no
 presence channel and are skipped.
+
+
+Failed `unavailable` updates retry every 5 seconds while the same socket remains connected,
+even after the scheduled slot ends. No new pulse starts during cleanup. New activity can
+resume control through its idle timer; disconnect cancels the pending pulse wait and retries.
+Pulse, retry, and scheduler timers do not keep the process alive during shutdown. Presence
+updates remain best-effort: a persistent connection failure can delay the visible offline
+state. Real-account behavior is unverified, and this feature offers no protection against
+account restrictions.

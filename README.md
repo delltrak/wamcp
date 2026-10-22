@@ -990,6 +990,15 @@ unavailable at the end only when that pulse itself made the account available. A
 `available` presence request stays in effect. The pulse uses normal presence updates, not
 app-state writes, and Cloud API instances are skipped.
 
+Failed `unavailable` updates retry every 5 seconds while the same socket remains connected,
+even after the scheduled slot ends. No new pulse starts during cleanup. New activity can
+resume control through its idle timer; disconnect cancels the pending pulse wait and retries.
+Pulse, retry, and scheduler timers do not keep the process alive during shutdown. Presence
+updates remain best-effort: a persistent connection failure can delay the visible offline
+state. Real-account behavior is unverified, and this feature offers no protection against
+account restrictions.
+
+
 `WA_APP_STATE_WRITES_ENABLED` accepts `true` or `false` and defaults to `false`. It enables
 `wa_archive_chat`, `wa_pin_chat`, `wa_mute_chat`, `wa_delete_chat`, `wa_clear_chat`,
 `wa_mark_chat_unread`, `wa_star_message`, `wa_create_label`, `wa_edit_label`, `wa_delete_label`,
