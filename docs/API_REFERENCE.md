@@ -9,7 +9,7 @@
 1. [Overview](#1-overview)
 2. [Tools Reference](#2-tools-reference)
    - [Instance Management](#21-instance-management-9-tools)
-   - [Messaging](#22-messaging-31-tools)
+   - [Messaging](#22-messaging-32-tools)
    - [Chat Management](#23-chat-management-11-tools)
    - [Group Management](#24-group-management-26-tools)
    - [Contact Management](#25-contact-management-8-tools)
@@ -20,7 +20,8 @@
    - [Message Search](#210-message-search-1-tool)
    - [WhatsApp Business Labels](#211-whatsapp-business-labels-8-tools)
    - [WhatsApp Events](#212-whatsapp-events-2-tools)
-   - [Business, Communities, and Catalog](#213-business-communities-and-catalog-15-tools)
+   - [Business, Communities, and Catalog](#213-business-communities-and-catalog-16-tools)
+   - [Community administration](#214-community-administration-16-tools)
 3. [Resources Reference](#3-resources-reference)
 4. [Notifications Reference](#4-notifications-reference)
 5. [Error Handling](#5-error-handling)
@@ -115,7 +116,7 @@ Tools marked **Baileys only** are not available on Cloud API instances.
 
 ## 2. Tools Reference
 
-WA MCP exposes **137 tools** grouped by domain. All tools return MCP-standard responses.
+WA MCP exposes **155 tools** grouped by domain. All tools return MCP-standard responses.
 
 ### Success Response Format
 
@@ -336,7 +337,7 @@ Configure Meta Cloud API credentials for a Cloud API instance. Required before c
 
 ---
 
-### 2.2 Messaging (31 tools)
+### 2.2 Messaging (32 tools)
 
 Tools for sending messages, media, reactions, and managing message state.
 
@@ -367,8 +368,14 @@ Send a text message to a WhatsApp contact or group.
 
 #### `wa_send_group_mention_all`
 
-Send a group text message with an `@all` mention. The server reads current group participants and
-adds them to the message's participant mention list.
+Send a group text message with WhatsApp's native `@all` mention. Baileys sends `mentionAll`, which
+is encoded as `contextInfo.nonJidMentions = 1`, and does not put every participant in
+`mentionedJid`. Notification delivery depends on WhatsApp and recipient settings; generating the
+native mention payload does not verify that a notification appeared on each device.
+`@all` is appended to `text` when the text does not already contain that token.
+
+If the installed Baileys build does not emit `nonJidMentions`, the tool falls back to mentioning
+each current participant through `mentionedJid` (at most 1024 participants).
 
 | Parameter    | Type   | Required | Description |
 | ------------ | ------ | -------- | ----------- |
@@ -376,7 +383,28 @@ adds them to the message's participant mention list.
 | `groupId`    | string | Yes      | Group JID |
 | `text`       | string | Yes      | Message text (max 4096 chars) |
 
-**Channel support:** Baileys only. Cloud API does not support participant mentions.
+**Channel support:** Baileys only. Cloud API does not support participant mentions or native `@all`.
+
+**Response (native):**
+
+```json
+{
+  "status": "queued",
+  "jobId": "job_123",
+  "mode": "native"
+}
+```
+
+**Response (participant fallback):**
+
+```json
+{
+  "status": "queued",
+  "jobId": "job_123",
+  "mode": "participants",
+  "mentionCount": 12
+}
+```
 
 ---
 
@@ -1033,6 +1061,30 @@ Mark specific messages as read in a chat.
 ```json
 {
   "success": true
+}
+```
+
+---
+
+#### `wa_mark_played`
+
+Send WhatsApp's played receipt for stored incoming audio, voice notes (PTT), or video. The tool is always available. Each ID must already be stored for the instance and chat, must be incoming playable media, and group messages need a sender JID from storage or `participant`. `chatJid` must be `@s.whatsapp.net`, `@lid`, or `@g.us` (`@hosted` and `@hosted.lid` are also accepted). Status broadcasts and newsletters are rejected. Set `WA_AUTO_MARK_PLAYED=true` to also send this receipt after a stored incoming audio message is transcribed. That flag defaults to `false`, and the receipt does not delay the transcription text.
+
+| Parameter     | Type     | Required | Description                                                      |
+| ------------- | -------- | -------- | ---------------------------------------------------------------- |
+| `instanceId`  | string   | Yes      | The instance ID                                                  |
+| `chatJid`     | string   | Yes      | Chat JID containing the audio, voice, or video messages          |
+| `messageIds`  | string[] | Yes      | Stored incoming audio, voice-note, or video IDs (1-100)          |
+| `participant` | string   | No       | Sender JID for a group message when storage has no sender        |
+
+**Channel support:** Baileys only. Cloud API does not support played receipts.
+
+**Response:**
+
+```json
+{
+  "success": true,
+  "count": 1
 }
 ```
 
@@ -2614,7 +2666,7 @@ answer the event again to create a new response.
 
 ---
 
-### 2.13 Business, Communities, and Catalog (15 tools)
+### 2.13 Business, Communities, and Catalog (16 tools)
 
 These operations require Baileys. Cloud API calls return unsupported-operation errors. Community
 changes use the group write gate (`WA_GROUP_WRITES_ENABLED=true` or
@@ -2629,6 +2681,7 @@ changes use the group write gate (`WA_GROUP_WRITES_ENABLED=true` or
 | `wa_create_community`        | `instanceId`, `name`, optional `description`                                                                 | Create a community. Gated account/server write.       |
 | `wa_list_communities`        | `instanceId`                                                                                                | List participating communities.                       |
 | `wa_get_community_details`   | `instanceId`, `communityId`                                                                                 | Read community metadata.                              |
+| `wa_get_community_hierarchy` | `instanceId`, `communityId` | Read parent metadata, linked groups, and the identifiable Avisos destination. Read-only. |
 | `wa_community_link_group`    | `instanceId`, `communityId`, `groupId`                                                                       | Link an existing group. Gated write.                 |
 | `wa_community_unlink_group`  | `instanceId`, `communityId`, `groupId`                                                                       | Unlink a group. Gated write.                          |
 | `wa_leave_community`         | `instanceId`, `communityId`                                                                                 | Leave a community. Gated write.                       |
@@ -2639,6 +2692,36 @@ changes use the group write gate (`WA_GROUP_WRITES_ENABLED=true` or
 | `wa_delete_catalog_products` | `instanceId`, `productIds`                                                                                  | Delete products. Gated account/server write.        |
 | `wa_get_order_details`       | `instanceId`, `orderId`, `tokenBase64`                                                                       | Read details using the token from the order message. |
 
+#### Community hierarchy
+
+`wa_get_community_hierarchy` accepts a community parent ID (bare numeric ID or `@g.us` JID).
+It rejects ordinary groups, subgroups, and parents without an explicit community marker.
+It requires a connected Baileys account but does not require either write flag.
+
+Response fields:
+
+| Field | Meaning |
+| --- | --- |
+| `community` | Existing group metadata shape plus `isCommunity`, `isCommunityAnnounce`, `linkedParent`, `joinApprovalMode`, and `memberAddMode`. Missing backend fields are `null`. |
+| `groups` | Deduplicated server-visible linked groups with `jid`, `subject`, `size`, `creation`, `owner`, and nullable `isCommunityAnnounce`. Unavailable counts and timestamps are `null`, not zero. |
+| `announcementGroupJid` | A unique positively identified Avisos JID, or `null`. Never inferred from `announce`, a group name, or list order. |
+| `announcementResolution` | `identified`, `unavailable`, or `ambiguous` (multiple positive matches). |
+| `visibility` | Always `server_visible`; this is not a complete membership or visibility guarantee. |
+| `unresolvedGroupJids` | Groups whose announcement classification is unknown. This does not prove whether the account is a member. |
+| `omittedGroupCount` | Entries with missing/invalid IDs or incorrectly referencing the parent itself. |
+
+The linked-groups query supplies summaries, including groups outside the participating list when
+visible. One bulk participating-groups query provides explicit announcement markers; there is no
+metadata request for each subgroup. Missing or conflicting parent metadata leaves classification
+unknown. A failed query returns an error, not an empty successful list. The upstream helper also
+performs its own parent metadata lookup. Reads are separate requests, not an atomic snapshot.
+
+The five additional metadata fields also appear in existing community detail/list and group detail
+responses. Existing fields retain their meanings. Business tool schemas retain strict validation
+through MCP registration, rejecting extra properties rather than silently stripping them.
+
+See [Community management](COMMUNITIES.md) for the implementation and validation roadmap.
+
 Quick reply create/edit/delete call Baileys `addOrEditQuickReply` or `removeQuickReply`, which use
 `chatModify` → `appPatch` and the app-state preflight described above. They are blocked unless
 `WA_APP_STATE_WRITES_ENABLED=true`. Baileys rc14 has no quick-reply read method, and the server does
@@ -2647,6 +2730,56 @@ to find an existing reply's timestamp before editing or deleting it.
 
 Catalog image URLs are fetched only from public HTTPS hosts; the media helper enforces input-size
 limits before upload.
+
+---
+
+### 2.14 Community administration (16 tools)
+
+All tools below require `instanceId` and Baileys. Administrative writes require the group-write gate
+and a verified community admin. Joining/leaving do not require prior admin status; Avisos sending
+requires an admin of the actual Avisos group. Read-only operations do not enable writes.
+
+| Tool | Additional inputs | Behavior |
+| --- | --- | --- |
+| `wa_community_create_group` | `communityId, name, participants?` | Create directly linked group; preserve unknown outcome. |
+| `wa_community_update_name` | `communityId, name` | Rename community. |
+| `wa_community_update_description` | `communityId, description` | Update/clear description. |
+| `wa_community_update_picture` | `communityId, image` | Public HTTPS/base64; null removes photo. |
+| `wa_community_list_members` | `communityId, scope?, groupId?` | Read community/Avisos/linked-group members and roles. |
+| `wa_community_update_participants` | `communityId, participants, action, confirmLinkedGroupRemoval?` | Add/remove/promote/demote; removal also affects linked groups. |
+| `wa_community_list_join_requests` | `communityId` | Read pending requests; admin required. |
+| `wa_community_handle_join_requests` | `communityId, participants, action` | Approve/reject with per-member results. |
+| `wa_community_get_invite` | `communityId` | Read invitation; admin required. |
+| `wa_community_reset_invite` | `communityId` | Revoke and replace invitation. |
+| `wa_community_get_invite_info` | `invite` | Inspect code/link without joining. |
+| `wa_community_join` | `invite` | Join; verify membership before reporting joined. |
+| `wa_community_join_v4` | `communityId, inviter, inviteCode, inviteExpiration` | Verify parent, reject expiry, accept V4 invitation and confirm membership. |
+| `wa_community_revoke_member_invite` | `communityId, participant` | Revoke one V4 member invitation. |
+| `wa_community_update_settings` | `communityId, change` | One typed setting/value change on the parent. |
+| `wa_community_send_announcement` | `communityId, content` | Queue text/image/video/audio/document to verified Avisos. |
+
+`scope` is `community` (default), `announcements`, or `group`; only `group` accepts and requires
+`groupId`. `action` is `add/remove/promote/demote` for participants and `approve/reject` for requests.
+`confirmLinkedGroupRemoval=true` is mandatory for removal. A mutation returns individual nullable
+acknowledgements plus aggregate `success/partial/failed/unknown`, rather than assuming all succeeded.
+
+`change` is one strict `{setting, value}` object: `edit_info`, `send_messages`, and `add_members`
+accept `admins/all`; `join_approval` accepts `on/off`; `disappearing_messages` accepts
+`0/86400/604800/7776000`. Invalid pairs and extra properties are rejected.
+
+`content` uses `type: text/image/video/audio/document` plus the corresponding fields from the
+existing send tool, without `to` or `instanceId`. Text/image/video/audio accept `quotedMessageId`;
+mention support is inherited from the corresponding send schema. Queuing returns
+`{status: "queued", jobId, to}`. Destination/admin/gate are rechecked by the worker; a changed
+destination fails without retargeting. Announcement jobs have one attempt to avoid duplicate broadcasts.
+
+Creation returns `retrySafe: false`; null metadata may mean the operation already succeeded. Child
+creation preserves `groupId` if later enrichment fails. Joining only returns `joined` after confirming
+own membership; otherwise `unknown`, including pending approval. See [Community management](COMMUNITIES.md)
+for limits, events, safe retry behavior, live validation, and examples.
+
+There is no community-deactivation tool: leaving is not deactivation. This version does not expose
+arbitrary visibility/non-admin subgroup-creation protocol switches.
 
 ---
 
@@ -3163,6 +3296,17 @@ Fired when participants are added, removed, promoted, or demoted in a group.
 
 ---
 
+#### Community/group updates and join requests
+
+`group.updated` includes safe hierarchy/settings fields; duplicate metadata snapshots are suppressed
+until their values change or the connection restarts. Invitation codes are excluded. The corresponding
+webhook includes `groupChanges`. Participant changes include `modify` and a `participants` array.
+
+`whatsapp/group.join_request` carries `{instanceId, groupId, participant, action, method}`. Actions are
+`created`, `revoked`, or `rejected`; methods are `invite_link`, `linked_group_join`, `non_admin_add`, or
+`null` when absent. The webhook uses `requestMethod` for the method field. These events only reflect
+what the backend emits; they do not guarantee notification of every community/invitation change.
+
 ### 4.10 `whatsapp/group.member_label_changed`
 
 Fired when a member's group label changes. The connected account can only set or remove its own
@@ -3321,7 +3465,7 @@ All tool errors return a standard MCP error response:
 
 | Failure                 | Behavior                                                             | Recovery                                                              |
 | ----------------------- | -------------------------------------------------------------------- | --------------------------------------------------------------------- |
-| Instance disconnect     | Auto-reconnect with exponential backoff (1s to 30s max, 10 attempts) | `wa_restart_instance` to retry, or `wa_connect_instance` for fresh QR |
+| Instance disconnect     | Auto-reconnect with exponential backoff (1s to 30s), then every 30s until connected, logged out, or `disconnect()` | Health check retries disconnected instances every 5 min and recovers a `connecting` status older than 2 min with no live socket |
 | Redis down              | Outbound queue stalls, inbound events dropped                        | Server retries Redis connection every 5s, resumes automatically       |
 | SQLite locked           | Write operations retry 3x with 100ms delay                           | Extremely rare with WAL mode. Restart server if persistent.           |
 | Cloud API token expired | All Cloud instance operations fail with 401                          | Call `wa_set_cloud_credentials` with new token                        |
@@ -3384,7 +3528,7 @@ Add to your Claude Desktop MCP configuration:
 }
 ```
 
-Once configured, the client will auto-discover all 137 WA MCP tools and can interact with WhatsApp directly.
+Once configured, the client will auto-discover all 155 WA MCP tools and can interact with WhatsApp directly.
 
 ### 6.3 LangChain (Python)
 
@@ -3397,7 +3541,7 @@ toolkit = MCPToolkit(
 )
 
 tools = toolkit.get_tools()
-# tools now contains all 137 WA MCP tools, ready for any LangChain agent
+# tools now contains all 155 WA MCP tools, ready for any LangChain agent
 ```
 
 ---
@@ -3407,7 +3551,7 @@ tools = toolkit.get_tools()
 | Domain                            | Tools | Channel                              |
 | --------------------------------- | ----- | ------------------------------------ |
 | Instance Management              | 9     | Both (2 Baileys only, 1 Cloud only)  |
-| Messaging                         | 31    | Both                                 |
+| Messaging                         | 32    | Both                                 |
 | Audio Transcription               | 1     | Both                                 |
 | Text-to-speech                    | 3     | Provider-dependent                   |
 | Chat Management                   | 11    | Both                                 |
@@ -3419,9 +3563,10 @@ tools = toolkit.get_tools()
 | Profile Management                | 7     | Both                                 |
 | Status / Stories                  | 4     | Baileys only                         |
 | Newsletter / Channels             | 10    | Baileys only                         |
-| Business, Communities, and Catalog| 15    | Baileys only                         |
+| Business, Communities, and Catalog| 16    | Baileys only                         |
 | Call Management                   | 1     | Baileys only                         |
-| **Total**                         | **137** |                                    |
+| Community administration | 16 | Baileys only |
+| **Total**                         | **155** |                                    |
 
 | Resources     | 10  |
 | ------------- | --- |
