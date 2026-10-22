@@ -25,7 +25,8 @@ import { logger } from "./utils/logger.js";
 import { getAutoReadMode } from "./services/auto-read.js";
 import { loadAutoMarkPlayedConfig } from "./services/auto-mark-played.js";
 import { bootEventWebhook, getEventWebhookStatus } from "./services/event-webhook-config.js";
-import { buildHealthBody } from "./server/health.js";
+import { buildHealthBody, renderHealthBody } from "./server/health.js";
+import { parseBaileysProxyUrl } from "./channels/baileys/proxy.js";
 
 const CLOUD_WEBHOOK_PATH = "/cloud-webhook";
 
@@ -116,7 +117,7 @@ async function startHttp(): Promise<void> {
         webhook: getEventWebhookStatus(),
       });
       res.writeHead(200, { "Content-Type": "application/json" });
-      res.end(JSON.stringify(health));
+      res.end(renderHealthBody(health));
       return;
     }
 
@@ -288,6 +289,7 @@ async function startStdio(): Promise<void> {
 }
 
 async function main(): Promise<void> {
+  parseBaileysProxyUrl(process.env.WA_PROXY_URL);
   logger.info({ transport, version: VERSION }, "Starting WA MCP server");
   bootEventWebhook();
 

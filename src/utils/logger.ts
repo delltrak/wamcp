@@ -4,6 +4,7 @@
 
 import pino from "pino";
 import { SERVER_NAME, DEFAULT_LOG_LEVEL } from "../constants.js";
+import { PROXY_URL_ENV, redactProxyCredentials } from "./proxy-redact.js";
 
 const logLevel = process.env.WA_LOG_LEVEL ?? DEFAULT_LOG_LEVEL;
 const isStdio = process.env.WA_TRANSPORT === "stdio";
@@ -30,6 +31,11 @@ export const logger = pino(
       "req.headers.authorization",
       "req.headers['x-api-key']",
     ],
+    hooks: {
+      streamWrite(line: string): string {
+        return redactProxyCredentials(line, process.env[PROXY_URL_ENV]);
+      },
+    },
   },
   pino.destination(isStdio ? 2 : 1),
 );

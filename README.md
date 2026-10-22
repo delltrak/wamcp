@@ -837,6 +837,7 @@ Copy `.env.example` to `.env` and configure:
 | `WA_BAILEYS_HISTORY_SYNC_MAX_MESSAGES` | `100` | Maximum messages requested per chat by automatic and on-demand history fetches (1–10000) |
 | `WA_DATA_DIR`               | `wa-data` in Compose     | Optional absolute host directory mounted at `/app/data`; unset preserves the existing named volume |
 | `WA_BAILEYS_RATE_LIMIT`     | `20`                     | Messages/min per Baileys instance        |
+| `WA_PROXY_URL` | — | Optional Baileys outbound proxy URL (`socks5`, `socks5h`, `http`, or `https`) with an explicit port. Unset or empty keeps a direct connection |
 | `WA_CLOUD_RATE_LIMIT`       | `80`                     | Messages/min per Cloud API instance      |
 | `WA_MESSAGE_RETENTION_DAYS` | `30`                     | Auto-delete old messages                 |
 | `WA_AUTO_RECONNECT`         | `true`                   | Auto-reconnect on disconnect             |
@@ -908,6 +909,38 @@ Copy `.env.example` to `.env` and configure:
 | `WA_INSTANCE_WEBHOOK_TOOLS_ENABLED` | `false` | Register `wa_set_instance_webhook`, `wa_get_instance_webhook`, and `wa_delete_instance_webhook` |
 | `WA_INSTANCE_WEBHOOK_ALLOWED_HOSTS` | unset | Comma-separated hosts allowed by `wa_set_instance_webhook` |
 | `WA_VERSION_CHECK`          | `true`                   | Daily WhatsApp Web version check         |
+
+### Baileys outbound proxy
+
+`WA_PROXY_URL` is optional. Leave it unset or empty and Baileys connects directly. Set a
+`socks5`, `socks5h`, `http`, or `https` URL with an explicit port to send the WhatsApp WebSocket
+and media transfers through that proxy:
+
+```bash
+WA_PROXY_URL=socks5://user:pass@proxy.example:1080
+```
+
+The URL may include a username and password. Percent-encoded credentials are decoded before the
+SOCKS5 handshake. Those credentials are removed from logs, from errors returned to agents, and
+from `GET /health`. A username or password shorter than 4 characters is removed only when it
+appears in the proxy URL or as a `user:password` pair. Values of 4 to 7 characters are also removed
+as a whole word. Values of 8 or more characters are removed wherever they appear. The value is
+checked when the process starts: only the schemes above are accepted, and a path, query, fragment,
+or missing port is rejected. Explicit default ports (`http://proxy.example:80` and
+`https://proxy.example:443`) are accepted. An invalid value stops startup.
+
+Baileys 7.0.0-rc14 applies the socket `agent` to the WebSocket and `fetchAgent` to media uploads
+made with Node's `https.request`. Media downloads in that release do not read `fetchAgent`. WA MCP
+passes an Undici 8 dispatcher through its `Dispatcher1Wrapper` compatibility adapter into
+`downloadMediaMessage`, which is the download hook rc14 supports, and the socket `options`.
+This preserves the native-fetch contract used by Baileys without replacing global fetch. History-sync and app-state blob downloads
+read that `options.dispatcher` and go through the proxy. With plain `socks5://`, the WebSocket
+resolves DNS locally, and media uploads do the same. Media downloads, history-sync, and app-state
+blob downloads send the hostname to the proxy. Prefer `socks5h://` for remote DNS everywhere. In
+that release, `getHttpStream` drops the request `signal`, so media download timeouts do not apply.
+Link-preview fetching does not run, because `link-preview-js` is an optional peer dependency and
+is not installed. Local proxy fixtures cover routing and cleanup; live WhatsApp connections and
+external proxies have not been tested.
 
 ### Message history and backups
 

@@ -39,6 +39,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Added optional `WA_PROXY_URL` ([#146](https://github.com/delltrak/wamcp/issues/146),
+  [#161](https://github.com/delltrak/wamcp/pull/161)) for a SOCKS5 or HTTP(S) proxy on the
+  Baileys WebSocket and media transfers. The connection stays direct when the variable is unset or empty. Proxy
+  credentials are redacted from logs, tool errors, and `GET /health`. Local fixture checks cover
+  routing and cleanup; live WhatsApp and external-proxy validation remain pending.
 - Added opt-in `wa_set_instance_webhook`, `wa_get_instance_webhook`, and
   `wa_delete_instance_webhook` tools for per-instance event destinations, with global
   replacement or merge and duplicate URL suppression
@@ -114,6 +119,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- ([#146](https://github.com/delltrak/wamcp/issues/146), [#161](https://github.com/delltrak/wamcp/pull/161))
+  Explicit default proxy ports `:80`/`:443` are accepted, and Baileys native-fetch downloads use
+  Undici 8’s compatibility wrapper. Percent-encoded proxy credentials are decoded before the
+  SOCKS5 handshake. A discarded dispatcher is destroyed directly, so a stuck request is aborted, and reconnect does not wait for
+  that cleanup. `disconnect()` logs a warning if that destroy fails. `WA_PROXY_URL` is validated at
+  startup. Usernames and passwords of 4 to 7 characters are redacted as whole words; values of 8 or
+  more characters are removed wherever they appear. Shorter ones are removed only from the proxy URL
+  and from a user:password pair. History-sync and app-state blob downloads use the proxy dispatcher.
+  Baileys rc14 drops download timeout signals; those timeouts remain unsupported.
 - Community discovery, description updates and invitation inspection/acceptance now use the
   Baileys group helpers for standard group responses while verifying explicit community markers.
   Missing creation/join acknowledgements remain unknown instead of reporting confirmed success
