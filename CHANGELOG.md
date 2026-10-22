@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Updated Undici from 7.30.0 to 8.12.3 and paired outgoing webhook requests with its
+  HTTP client, preserving compatibility with the new dispatcher contract on Node 24
+  ([#96](https://github.com/delltrak/wamcp/pull/96)).
 - The Docker runtime stage now runs `ffmpeg -version` on every architecture the image build
   targets, next to the existing `better-sqlite3` prebuild check. Published tags stay a single
   `linux/amd64` + `linux/arm64` manifest list.
