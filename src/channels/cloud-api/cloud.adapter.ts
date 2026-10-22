@@ -8,7 +8,12 @@ import type { ChannelAdapter, ChannelEventHandler } from "../channel.interface.j
 import { and, eq, sql } from "drizzle-orm";
 import { db, sqlite } from "../../db/client.js";
 import { messages as messagesTable } from "../../db/schema.js";
-import { getWebPInfo, mediaResponseToBuffer } from "../../services/media.js";
+import {
+  detectMediaInputFormat,
+  getWebPInfo,
+  MediaService,
+  mediaResponseToBuffer,
+} from "../../services/media.js";
 import { MEDIA_LIMITS } from "../../constants.js";
 import type {
   ConnectionStatus,
@@ -26,6 +31,7 @@ import type {
   Chat,
   Message,
   GroupMetadata,
+  GroupParticipantsExport,
   CommunityHierarchy,
   CommunityInviteV4,
   CommunityParticipantAction,
@@ -54,6 +60,7 @@ import type {
   SendEventOptions,
   CatalogProductCreateInput,
   CatalogProductUpdateInput,
+  NewsletterMediaDownload,
   InstanceRuntimeStatus,
 } from "../../types/channel.types.js";
 import type {
@@ -125,6 +132,8 @@ interface CloudApiPhoneNumberResponse {
   id: string;
   quality_rating?: string;
 }
+
+const mediaService = new MediaService();
 
 export class CloudApiAdapter implements ChannelAdapter {
   private accessToken: string | null = null;
@@ -339,7 +348,8 @@ export class CloudApiAdapter implements ChannelAdapter {
       case "image": {
         const mediaFields: Record<string, unknown> = {};
         if (content.caption) mediaFields.caption = content.caption;
-        const media = this.resolveMediaPayload(content.image, "image", mediaFields);
+        const image = await this.outgoingCloudMedia(content.image, "image", content.compress);
+        const media = this.resolveMediaPayload(image, "image", mediaFields);
         const payload: Record<string, unknown> = {
           recipient_type: "individual",
           to: phone,
@@ -365,7 +375,8 @@ export class CloudApiAdapter implements ChannelAdapter {
         }
         const mediaFields: Record<string, unknown> = {};
         if (content.caption) mediaFields.caption = content.caption;
-        const media = this.resolveMediaPayload(content.video, "video", mediaFields);
+        const video = await this.outgoingCloudMedia(content.video, "video", content.compress);
+        const media = this.resolveMediaPayload(video, "video", mediaFields);
         const payload: Record<string, unknown> = {
           recipient_type: "individual",
           to: phone,
@@ -785,6 +796,10 @@ export class CloudApiAdapter implements ChannelAdapter {
     throw new Error("Group metadata is not supported on Cloud API");
   }
 
+  async exportGroupParticipants(_groupJid: string): Promise<GroupParticipantsExport> {
+    throw new Error("Exporting group participants is not supported on Cloud API");
+  }
+
   assertGroupMemberLabelWritesEnabled(): void {
     throw new Error("Group member labels are not supported on Cloud API");
   }
@@ -1136,6 +1151,15 @@ export class CloudApiAdapter implements ChannelAdapter {
     throw new Error("Channel post history is only available on Baileys instances");
   }
 
+  async downloadNewsletterMedia(
+    _newsletterJid: string,
+    _messageId: string,
+    _maxBytes?: number,
+    _timeoutMs?: number,
+  ): Promise<NewsletterMediaDownload> {
+    throw new Error("Downloading Channel post media is not supported on Cloud API");
+  }
+
   // ---- Business catalog ----
 
   async getCatalog(
@@ -1234,6 +1258,30 @@ export class CloudApiAdapter implements ChannelAdapter {
   }
 
   // ---- Media helpers (public for external use) ----
+
+  private async outgoingCloudMedia(
+    input: string,
+    kind: "image" | "video",
+    compress?: boolean,
+  ): Promise<string> {
+    if (compress !== true) return input;
+    const prepared =
+      kind === "image"
+        ? await mediaService.prepareOutgoingImage(input)
+        : await mediaService.prepareOutgoingVideo(input);
+    if (!prepared.compressed) {
+      if (prepared.input.startsWith("https://")) return prepared.input;
+      // Compression has already validated the source. Cloud sends require an uploaded
+      // media ID, so a base64 fallback must still upload its original bytes and MIME.
+      const source = Buffer.from(prepared.input, "base64");
+      const format = detectMediaInputFormat(source);
+      if (format === "unknown") throw new Error("Unsupported original media format");
+      const mimeType = format === "mp4" ? "video/mp4" : `image/${format}`;
+      return this.uploadMedia(source, mimeType, `${kind}.${format}`);
+    }
+    const fileName = kind === "image" ? "image.jpg" : "video.mp4";
+    return this.uploadMedia(prepared.data, prepared.mimeType, fileName);
+  }
 
   async uploadMedia(file: Buffer, mimeType: string, fileName?: string): Promise<string> {
     const { phoneNumberId, accessToken } = this.getCredentials();

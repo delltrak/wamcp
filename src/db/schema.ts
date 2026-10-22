@@ -389,6 +389,22 @@ export const waVersionCache = sqliteTable("wa_version_cache", {
 });
 
 // ============================================================
+// INSTANCE WEBHOOKS
+// Per-instance outgoing event webhook. Null events inherit the global list.
+// #142: auth_value is stored in plaintext. DDL lives in instance-webhooks-schema.ts.
+// ============================================================
+export const instanceWebhooks = sqliteTable("instance_webhooks", {
+  instanceId: text("instance_id")
+    .primaryKey()
+    .references(() => instances.id, { onDelete: "cascade" }),
+  url: text("url").notNull(),
+  authHeader: text("auth_header"),
+  authValue: text("auth_value"),
+  events: text("events"),
+  updatedAt: integer("updated_at").notNull(),
+});
+
+// ============================================================
 // QUEUE STATS
 // Track outbound message queue state for monitoring
 // ============================================================
