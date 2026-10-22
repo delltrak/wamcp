@@ -245,7 +245,7 @@ export function sanitizeMediaFileName(fileName: string | undefined): string {
   return safeName;
 }
 
-function detectMediaInputFormat(buffer: Buffer): MediaInputFormat {
+export function detectMediaInputFormat(buffer: Buffer): MediaInputFormat {
   if (
     buffer.length >= 6 &&
     ["GIF87a", "GIF89a"].includes(buffer.subarray(0, 6).toString("ascii"))

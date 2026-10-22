@@ -19,6 +19,9 @@ import * as audioTools from "../src/tts/audio.js";
 import { logger } from "../src/utils/logger.js";
 
 const ffmpegAvailable = spawnSync("ffmpeg", ["-version"], { stdio: "ignore" }).status === 0;
+const webpAnimationAvailable = /\blibwebp_anim\b/.test(
+  spawnSync("ffmpeg", ["-hide_banner", "-encoders"], { encoding: "utf8" }).stdout ?? "",
+);
 const ffprobeAvailable = spawnSync("ffprobe", ["-version"], { stdio: "ignore" }).status === 0;
 const compressionEnvKeys = [
   "WA_MEDIA_COMPRESS",
@@ -199,9 +202,9 @@ describe("outgoing media compression settings", () => {
       shouldCompressOutgoingMedia({ compress: false }, { WA_MEDIA_IMAGE_QUALITY: "nope" }),
     ).toBe(false);
     expect(shouldCompressOutgoingMedia({}, { WA_MEDIA_IMAGE_QUALITY: "nope" })).toBe(false);
-    expect(shouldCompressOutgoingMedia({ compress: true }, { WA_MEDIA_IMAGE_QUALITY: "nope" })).toBe(
-      true,
-    );
+    expect(
+      shouldCompressOutgoingMedia({ compress: true }, { WA_MEDIA_IMAGE_QUALITY: "nope" }),
+    ).toBe(true);
     expect(() => shouldCompressOutgoingMedia({}, { WA_MEDIA_COMPRESS: "yes" })).toThrow(
       /Invalid WA_MEDIA_COMPRESS/,
     );
@@ -260,15 +263,17 @@ describe("outgoing media compression settings", () => {
     process.env.WA_MEDIA_VIDEO_CRF = "30";
     const output = fakeMp4();
     let inputPath = "";
-    const runner = vi.spyOn(audioTools, "runFfmpegCommand").mockImplementation(async (chunks, args) => {
-      expect(chunks).toEqual([]);
-      inputPath = String(args[args.indexOf("-i") + 1]);
-      expect(inputPath.endsWith("input.mp4")).toBe(true);
-      expect(args).toContain("-nostdin");
-      expect(args).not.toContain("pipe:0");
-      expect(statSync(inputPath).mode & 0o777).toBe(0o600);
-      return output;
-    });
+    const runner = vi
+      .spyOn(audioTools, "runFfmpegCommand")
+      .mockImplementation(async (chunks, args) => {
+        expect(chunks).toEqual([]);
+        inputPath = String(args[args.indexOf("-i") + 1]);
+        expect(inputPath.endsWith("input.mp4")).toBe(true);
+        expect(args).toContain("-nostdin");
+        expect(args).not.toContain("pipe:0");
+        expect(statSync(inputPath).mode & 0o777).toBe(0o600);
+        return output;
+      });
     const input = Buffer.concat([fakeMp4(), Buffer.alloc(32)]).toString("base64");
 
     await expect(new MediaService().prepareOutgoingVideo(input)).resolves.toEqual({
@@ -288,15 +293,17 @@ describe("outgoing media compression settings", () => {
   it("converts a short MP4 to an animated sticker and can flatten it", async () => {
     const output = webp512();
     const paths: string[] = [];
-    const runner = vi.spyOn(audioTools, "runFfmpegCommand").mockImplementation(async (chunks, args) => {
-      expect(chunks).toEqual([]);
-      const filePath = String(args[args.indexOf("-i") + 1]);
-      expect(filePath.endsWith("input.mp4")).toBe(true);
-      expect(args).toContain("-nostdin");
-      expect(statSync(filePath).mode & 0o777).toBe(0o600);
-      paths.push(filePath);
-      return output;
-    });
+    const runner = vi
+      .spyOn(audioTools, "runFfmpegCommand")
+      .mockImplementation(async (chunks, args) => {
+        expect(chunks).toEqual([]);
+        const filePath = String(args[args.indexOf("-i") + 1]);
+        expect(filePath.endsWith("input.mp4")).toBe(true);
+        expect(args).toContain("-nostdin");
+        expect(statSync(filePath).mode & 0o777).toBe(0o600);
+        paths.push(filePath);
+        return output;
+      });
     const service = new MediaService();
     const input = fakeMp4().toString("base64");
 
@@ -315,32 +322,33 @@ describe("outgoing media compression settings", () => {
     expect(paths.every((filePath) => !existsSync(filePath))).toBe(true);
   });
 
-  it("sends the original image or video when ffmpeg fails", async () => {
-    const warn = vi.spyOn(logger, "warn").mockImplementation(() => undefined);
-    const runner = vi
-      .spyOn(audioTools, "runFfmpegCommand")
-      .mockRejectedValue(new Error("ffmpeg exited with code 183. partial file"));
-    const image = jpeg(40).toString("base64");
-    const video = Buffer.concat([fakeMp4(), Buffer.alloc(32)]).toString("base64");
+  it.each(["ffmpeg exited with code 183. partial file", "ffmpeg output exceeds maximum size"])(
+    "sends the original image or video when ffmpeg fails: %s",
+    async (failure) => {
+      const warn = vi.spyOn(logger, "warn").mockImplementation(() => undefined);
+      const runner = vi.spyOn(audioTools, "runFfmpegCommand").mockRejectedValue(new Error(failure));
+      const image = jpeg(40).toString("base64");
+      const video = Buffer.concat([fakeMp4(), Buffer.alloc(32)]).toString("base64");
 
-    await expect(new MediaService().prepareOutgoingImage(image)).resolves.toEqual({
-      compressed: false,
-      input: image,
-    });
-    await expect(new MediaService().prepareOutgoingVideo(video)).resolves.toEqual({
-      compressed: false,
-      input: video,
-    });
-    expect(runner).toHaveBeenCalledTimes(2);
-    expect(warn).toHaveBeenCalledWith(
-      expect.objectContaining({ kind: "image" }),
-      "ffmpeg media compression failed; sending the original",
-    );
-    expect(warn).toHaveBeenCalledWith(
-      expect.objectContaining({ kind: "video" }),
-      "ffmpeg media compression failed; sending the original",
-    );
-  });
+      await expect(new MediaService().prepareOutgoingImage(image)).resolves.toEqual({
+        compressed: false,
+        input: image,
+      });
+      await expect(new MediaService().prepareOutgoingVideo(video)).resolves.toEqual({
+        compressed: false,
+        input: video,
+      });
+      expect(runner).toHaveBeenCalledTimes(2);
+      expect(warn).toHaveBeenCalledWith(
+        expect.objectContaining({ kind: "image" }),
+        "ffmpeg media compression failed; sending the original",
+      );
+      expect(warn).toHaveBeenCalledWith(
+        expect.objectContaining({ kind: "video" }),
+        "ffmpeg media compression failed; sending the original",
+      );
+    },
+  );
 
   it("sends the original image when ffmpeg does not return a JPEG", async () => {
     const warn = vi.spyOn(logger, "warn").mockImplementation(() => undefined);
@@ -360,9 +368,9 @@ describe("outgoing media compression settings", () => {
   it("still rejects invalid quality when an image is actually compressed", async () => {
     process.env.WA_MEDIA_IMAGE_QUALITY = "nope";
     const runner = vi.spyOn(audioTools, "runFfmpegCommand");
-    await expect(new MediaService().prepareOutgoingImage(jpeg(8).toString("base64"))).rejects.toThrow(
-      /Invalid WA_MEDIA_IMAGE_QUALITY/,
-    );
+    await expect(
+      new MediaService().prepareOutgoingImage(jpeg(8).toString("base64")),
+    ).rejects.toThrow(/Invalid WA_MEDIA_IMAGE_QUALITY/);
     expect(runner).not.toHaveBeenCalled();
   });
 
@@ -386,9 +394,9 @@ describe("outgoing media compression settings", () => {
 
     const opaque = pngWithColorType(2);
     runner.mockResolvedValue(jpeg(1));
-    await expect(new MediaService().prepareOutgoingImage(opaque.toString("base64"))).resolves.toMatchObject(
-      { compressed: true, mimeType: "image/jpeg" },
-    );
+    await expect(
+      new MediaService().prepareOutgoingImage(opaque.toString("base64")),
+    ).resolves.toMatchObject({ compressed: true, mimeType: "image/jpeg" });
     expect(runner).toHaveBeenCalledTimes(1);
   });
 
@@ -544,6 +552,60 @@ describe("adapters apply compression only when the queued message asks for it", 
     expect(sendMessage.mock.calls[1]?.[1]).toMatchObject({ image: compressed });
   });
 
+  it.each([
+    { kind: "image" as const, data: jpeg(40), mime: "image/jpeg" },
+    { kind: "image" as const, data: pngWithColorType(6), mime: "image/png" },
+    { kind: "video" as const, data: fakeMp4(), mime: "video/mp4" },
+  ])(
+    "uploads the original base64 $mime when compression falls back",
+    async ({ kind, data, mime }) => {
+      const input = data.toString("base64");
+      vi.spyOn(
+        MediaService.prototype,
+        kind === "image" ? "prepareOutgoingImage" : "prepareOutgoingVideo",
+      ).mockResolvedValue({ compressed: false, input });
+      const upload = vi
+        .spyOn(CloudApiAdapter.prototype, "uploadMedia")
+        .mockResolvedValue("original-media-id");
+      const fetchMock = vi.fn(
+        async () => ({ ok: true, json: async () => ({ messages: [{ id: "sent" }] }) }) as Response,
+      );
+      vi.stubGlobal("fetch", fetchMock);
+      const adapter = new CloudApiAdapter("inst_cloud_fallback");
+      await adapter.setCredentials({ accessToken: "test-token", phoneNumberId: "phone-123" });
+      await adapter.sendMessage(
+        "5511888888888",
+        kind === "image"
+          ? { type: "image", image: input, compress: true }
+          : { type: "video", video: input, compress: true },
+      );
+      expect(upload).toHaveBeenCalledWith(data, mime, expect.any(String));
+      expect(JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body))).toMatchObject({
+        [kind]: { id: "original-media-id" },
+      });
+    },
+  );
+
+  it("preserves HTTPS links when compression falls back", async () => {
+    const input = "https://example.com/original.png";
+    vi.spyOn(MediaService.prototype, "prepareOutgoingImage").mockResolvedValue({
+      compressed: false,
+      input,
+    });
+    const upload = vi.spyOn(CloudApiAdapter.prototype, "uploadMedia");
+    const fetchMock = vi.fn(
+      async () => ({ ok: true, json: async () => ({ messages: [{ id: "sent" }] }) }) as Response,
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const adapter = new CloudApiAdapter("inst_cloud_link");
+    await adapter.setCredentials({ accessToken: "test-token", phoneNumberId: "phone-123" });
+    await adapter.sendMessage("5511888888888", { type: "image", image: input, compress: true });
+    expect(upload).not.toHaveBeenCalled();
+    expect(JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body))).toMatchObject({
+      image: { link: input },
+    });
+  });
+
   it("uploads a compressed video before the Cloud API send", async () => {
     const compressed = fakeMp4();
     vi.spyOn(MediaService.prototype, "prepareOutgoingVideo").mockResolvedValue({
@@ -595,33 +657,36 @@ describe.skipIf(!ffmpegAvailable || !ffprobeAvailable)(
       restoreCompressionEnv(original);
     });
 
-    it("converts a short MP4 into a 512x512 animated WebP within the sticker limit", async () => {
-      const mp4 = execFileSync("ffmpeg", [
-        "-v",
-        "error",
-        "-f",
-        "lavfi",
-        "-i",
-        "testsrc2=duration=0.5:size=40x24:rate=8",
-        "-pix_fmt",
-        "yuv420p",
-        "-c:v",
-        "libx264",
-        "-preset",
-        "ultrafast",
-        "-movflags",
-        "+frag_keyframe+empty_moov",
-        "-f",
-        "mp4",
-        "pipe:1",
-      ]);
-    const sticker = await new MediaService().prepareSticker(mp4.toString("base64"));
-    const info = getWebPInfo(sticker.data);
+    it.skipIf(!webpAnimationAvailable)(
+      "converts a short MP4 into a 512x512 animated WebP within the sticker limit",
+      async () => {
+        const mp4 = execFileSync("ffmpeg", [
+          "-v",
+          "error",
+          "-f",
+          "lavfi",
+          "-i",
+          "testsrc2=duration=0.5:size=40x24:rate=8",
+          "-pix_fmt",
+          "yuv420p",
+          "-c:v",
+          "libx264",
+          "-preset",
+          "ultrafast",
+          "-movflags",
+          "+frag_keyframe+empty_moov",
+          "-f",
+          "mp4",
+          "pipe:1",
+        ]);
+        const sticker = await new MediaService().prepareSticker(mp4.toString("base64"));
+        const info = getWebPInfo(sticker.data);
 
-    expect(sticker.animated).toBe(true);
-    expect(info).toMatchObject({ animated: true, width: 512, height: 512 });
-    expect(sticker.data.length).toBeLessThanOrEqual(500 * 1024);
-  });
+        expect(sticker.animated).toBe(true);
+        expect(info).toMatchObject({ animated: true, width: 512, height: 512 });
+        expect(sticker.data.length).toBeLessThanOrEqual(500 * 1024);
+      },
+    );
 
     it("makes a large image and video smaller while keeping them playable", async () => {
       clearCompressionEnv();
@@ -709,7 +774,7 @@ describe.skipIf(!ffmpegAvailable || !ffprobeAvailable)(
       expect(videoStream?.width).toBeLessThanOrEqual(720);
     });
 
-    it("converts an MP4 whose moov atom follows mdat", async () => {
+    it.skipIf(!webpAnimationAvailable)("converts an MP4 whose moov atom follows mdat", async () => {
       clearCompressionEnv();
       const stickerSource = moovAtEndMp4({ size: "64x48", duration: "0.4", rate: "8" });
       expect(topLevelAtomOffset(stickerSource, "moov")).toBeGreaterThan(

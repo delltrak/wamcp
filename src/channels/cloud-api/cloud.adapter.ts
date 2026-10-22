@@ -8,7 +8,12 @@ import type { ChannelAdapter, ChannelEventHandler } from "../channel.interface.j
 import { and, eq, sql } from "drizzle-orm";
 import { db, sqlite } from "../../db/client.js";
 import { messages as messagesTable } from "../../db/schema.js";
-import { getWebPInfo, MediaService, mediaResponseToBuffer } from "../../services/media.js";
+import {
+  detectMediaInputFormat,
+  getWebPInfo,
+  MediaService,
+  mediaResponseToBuffer,
+} from "../../services/media.js";
 import { MEDIA_LIMITS } from "../../constants.js";
 import type {
   ConnectionStatus,
@@ -1249,7 +1254,16 @@ export class CloudApiAdapter implements ChannelAdapter {
       kind === "image"
         ? await mediaService.prepareOutgoingImage(input)
         : await mediaService.prepareOutgoingVideo(input);
-    if (!prepared.compressed) return prepared.input;
+    if (!prepared.compressed) {
+      if (prepared.input.startsWith("https://")) return prepared.input;
+      // Compression has already validated the source. Cloud sends require an uploaded
+      // media ID, so a base64 fallback must still upload its original bytes and MIME.
+      const source = Buffer.from(prepared.input, "base64");
+      const format = detectMediaInputFormat(source);
+      if (format === "unknown") throw new Error("Unsupported original media format");
+      const mimeType = format === "mp4" ? "video/mp4" : `image/${format}`;
+      return this.uploadMedia(source, mimeType, `${kind}.${format}`);
+    }
     const fileName = kind === "image" ? "image.jpg" : "video.mp4";
     return this.uploadMedia(prepared.data, prepared.mimeType, fileName);
   }
