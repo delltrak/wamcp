@@ -1657,6 +1657,24 @@ export class BaileysAdapter implements ChannelAdapter {
     return Buffer.from(input, "base64");
   }
 
+  private async outgoingImage(
+    input: string,
+    compress?: boolean,
+  ): Promise<{ url: string } | Buffer> {
+    if (compress !== true) return this.resolveMedia(input);
+    const prepared = await mediaService.prepareOutgoingImage(input);
+    return prepared.compressed ? prepared.data : this.resolveMedia(prepared.input);
+  }
+
+  private async outgoingVideo(
+    input: string,
+    compress?: boolean,
+  ): Promise<{ url: string } | Buffer> {
+    if (compress !== true) return this.resolveMedia(input);
+    const prepared = await mediaService.prepareOutgoingVideo(input);
+    return prepared.compressed ? prepared.data : this.resolveMedia(prepared.input);
+  }
+
   private generateVCard(name: string, phone: string): string {
     const cleaned = phone.replace(/[^0-9]/g, "");
     const escapedName = name
@@ -2177,14 +2195,17 @@ export class BaileysAdapter implements ChannelAdapter {
         }
         break;
       case "image":
-        msg = { image: this.resolveMedia(content.image), caption: content.caption };
+        msg = {
+          image: await this.outgoingImage(content.image, content.compress),
+          caption: content.caption,
+        };
         if (content.quotedMessageId) {
           opts.quoted = this.getQuotedMessage(jid, content.quotedMessageId);
         }
         break;
       case "video":
         msg = {
-          video: this.resolveMedia(content.video),
+          video: await this.outgoingVideo(content.video, content.compress),
           caption: content.caption,
           ...(content.gifPlayback ? { gifPlayback: true } : {}),
           ...(content.ptv ? { ptv: true } : {}),
