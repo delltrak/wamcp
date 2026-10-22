@@ -1,3 +1,4 @@
+import { InstanceNotFoundError, InstanceNotInitializedError } from "../utils/instance-errors.js";
 // ============================================================
 // WA MCP — Instance Manager (Core Orchestrator)
 // ============================================================
@@ -138,13 +139,30 @@ export class InstanceManager {
 
   async connectInstance(id: string): Promise<void> {
     const adapter = this.ensureAdapter(id);
+    try {
+      await adapter.connect();
+    } finally {
+      this.syncStoredStatus(id, adapter);
+    }
+  }
 
-    db.update(instances)
-      .set({ status: "connecting", updatedAt: Date.now() })
-      .where(eq(instances.id, id))
-      .run();
+  /** True when the in-memory adapter owns a socket that is not a cleared disconnect. */
+  hasLiveSocket(id: string): boolean {
+    const managed = this.adapters.get(id);
+    if (!managed) return false;
+    if (managed.adapter.hasLiveSocket) return managed.adapter.hasLiveSocket();
+    const status = managed.adapter.getStatus();
+    return status === "connected" || status === "connecting" || status === "qr_pending";
+  }
 
-    await adapter.connect();
+  private syncStoredStatus(id: string, adapter: ChannelAdapter): void {
+    const adapterStatus = adapter.getStatus();
+    const live = this.hasLiveSocket(id);
+    const status =
+      !live && (adapterStatus === "connecting" || adapterStatus === "connected")
+        ? "disconnected"
+        : adapterStatus;
+    db.update(instances).set({ status, updatedAt: Date.now() }).where(eq(instances.id, id)).run();
   }
 
   async disconnectInstance(id: string): Promise<void> {
@@ -194,7 +212,7 @@ export class InstanceManager {
   getAdapter(id: string): ChannelAdapter {
     const managed = this.adapters.get(id);
     if (!managed) {
-      throw new Error(`Instance ${id} not found or not initialized`);
+      throw new InstanceNotInitializedError(id);
     }
     return managed.adapter;
   }
@@ -232,7 +250,7 @@ export class InstanceManager {
       })
       .from(instances);
     const rows = id ? select.where(eq(instances.id, id)).all() : select.all();
-    if (id && rows.length === 0) throw new Error(`Instance ${id} not found`);
+    if (id && rows.length === 0) throw new InstanceNotFoundError(id);
 
     return rows.map((row) => {
       const managed = this.adapters.get(row.id);
@@ -261,7 +279,7 @@ export class InstanceManager {
   private getInstanceFromDb(id: string): InstanceEntity {
     const row = db.select().from(instances).where(eq(instances.id, id)).get();
     if (!row) {
-      throw new Error(`Instance ${id} not found`);
+      throw new InstanceNotFoundError(id);
     }
     return row as InstanceEntity;
   }
@@ -301,6 +319,8 @@ export class InstanceManager {
           const connectedPayload = payload as ChannelEventPayload["instance.connected"];
           db.update(instances)
             .set({
+              status: "connected",
+              lastConnected: connectedPayload.connectedAt,
               ...(connectedPayload.phone ? { phoneNumber: connectedPayload.phone } : {}),
               updatedAt: connectedPayload.connectedAt,
             })

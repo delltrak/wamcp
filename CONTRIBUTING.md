@@ -121,7 +121,9 @@ chore: update dependencies
 1. Fork the repository and create a branch from `main`
 2. Make your changes following the code style above
 3. Run `npx tsc --noEmit` to ensure no type errors
-4. Update documentation if you added new tools, resources, or events
+4. Update documentation if you added new tools, resources, or events. Record user-visible
+   features, fixes, and behavior changes in `CHANGELOG.md` under `[Unreleased]` before merging,
+   including relevant issue/PR links and any material limitations.
 5. Open a pull request using the PR template
 6. Wait for review — maintainers may request changes
 
