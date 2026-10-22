@@ -1,13 +1,14 @@
 import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { createServer, type Socket } from "node:net";
+import { get as httpsGet } from "node:https";
 import { Readable } from "node:stream";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { WAMessage } from "@whiskeysockets/baileys";
 import { HttpsProxyAgent } from "https-proxy-agent";
 import pino from "pino";
 import { SocksProxyAgent } from "socks-proxy-agent";
-import { fetch as undiciFetch, ProxyAgent, type Dispatcher } from "undici";
+import { fetch as undiciFetch, Dispatcher1Wrapper, ProxyAgent, type Dispatcher } from "undici";
 import { sqlite } from "../src/db/client.js";
 import { buildHealthBody, renderHealthBody } from "../src/server/health.js";
 import {
@@ -228,6 +229,11 @@ describe("Baileys proxy URL validation", () => {
     ["socks5h://user:p%40ss@proxy.example:1080", "socks5h://user:p%40ss@proxy.example:1080"],
     ["http://user@proxy.example:8080", "http://user@proxy.example:8080"],
     ["https://proxy.example:8443", "https://proxy.example:8443"],
+    ["http://proxy.example:80", "http://proxy.example:80"],
+    ["https://proxy.example:443", "https://proxy.example:443"],
+    ["http://user:p%40ss@[::1]:80/", "http://user:p%40ss@[::1]:80"],
+    ["HTTPS://Proxy.Example:443/", "https://proxy.example:443"],
+    ["http://proxy.example:00080", "http://proxy.example:80"],
     ["socks5://[::1]:1080", "socks5://[::1]:1080"],
     ["HTTP://Proxy.Example:8080/", "http://proxy.example:8080"],
     ["socks5://user:@proxy.example:1080", "socks5://user:@proxy.example:1080"],
@@ -501,6 +507,55 @@ describe("Baileys proxy agents", () => {
     }
   });
 
+  it.each(["websocket", "upload", "download"] as const)(
+    "sends the destination hostname to a SOCKS5h proxy for %s",
+    async (consumer) => {
+      const proxy = await listen<string>((socket, done) => {
+        let stage = 0;
+        let pending = Buffer.alloc(0);
+        socket.on("data", (chunk: Buffer) => {
+          pending = Buffer.concat([pending, chunk]);
+          if (stage === 0) {
+            const length = 2 + (pending[1] ?? 0);
+            if (pending.length < length) return;
+            pending = pending.subarray(length);
+            stage = 1;
+            socket.write(Buffer.from([5, 0]));
+          }
+          if (stage === 1 && pending.length >= 5) {
+            const length = pending[4] ?? 0;
+            if (pending.length < 7 + length) return;
+            done(pending[3] === 3 ? pending.subarray(5, 5 + length).toString() : "not a hostname");
+            // Explicit refusal ends the handshake without relying on the client's
+            // connect timeout after an abrupt TCP close.
+            socket.end(Buffer.from([5, 5, 0, 1, 127, 0, 0, 1, 0, 0]));
+          }
+        });
+      });
+      const agents = createBaileysProxyAgents(`socks5h://127.0.0.1:${proxy.port}`);
+      const target = "https://unresolvable.invalid/media";
+      const request =
+        consumer === "download"
+          ? fetch(target, mediaDownloadOptions(undefined, agents.dispatcher).options).catch(
+              () => undefined,
+            )
+          : new Promise<void>((resolve) => {
+              const request = httpsGet(target, {
+                agent: consumer === "websocket" ? agents.agent : agents.fetchAgent,
+              });
+              request.on("error", () => resolve());
+              request.setTimeout(2000, () => request.destroy());
+            });
+      try {
+        expect(await proxy.done).toBe("unresolvable.invalid");
+        await request;
+      } finally {
+        await closeBaileysProxyAgents(agents);
+        await proxy.close();
+      }
+    },
+  );
+
   it("rejects a stuck request and closes its proxy socket", async () => {
     const proxy = await silentProxy();
     const agents = createBaileysProxyAgents(`http://127.0.0.1:${proxy.port}`);
@@ -521,6 +576,42 @@ describe("Baileys proxy agents", () => {
         expect(proxy.connections()).toBe(before);
       });
     } finally {
+      await proxy.close();
+    }
+  });
+
+  it("downloads through Baileys native fetch using the installed Undici dispatcher", async () => {
+    const { getHttpStream } =
+      await vi.importActual<typeof import("@whiskeysockets/baileys")>("@whiskeysockets/baileys");
+    const proxy = await listen<string>((socket, done) => {
+      let received = "";
+      let connected = false;
+      socket.on("data", (chunk: Buffer) => {
+        received += chunk.toString();
+        if (!received.includes("\r\n\r\n")) return;
+        if (!connected && received.startsWith("CONNECT ")) {
+          done(received);
+          received = "";
+          connected = true;
+          socket.write("HTTP/1.1 200 Connection Established\r\n\r\n");
+        } else {
+          done(received);
+          socket.end("HTTP/1.1 200 OK\r\nContent-Length: 5\r\nConnection: close\r\n\r\nmedia");
+        }
+      });
+    });
+    const agents = createBaileysProxyAgents(`http://127.0.0.1:${proxy.port}`);
+    try {
+      const stream = await getHttpStream(
+        "http://download.invalid/media",
+        mediaDownloadOptions(undefined, agents.dispatcher).options,
+      );
+      const chunks: Buffer[] = [];
+      for await (const chunk of stream) chunks.push(Buffer.from(chunk));
+      expect(Buffer.concat(chunks).toString()).toBe("media");
+      expect(await proxy.done).toContain("GET http://download.invalid/media HTTP/1.1");
+    } finally {
+      await closeBaileysProxyAgents(agents);
       await proxy.close();
     }
   });
@@ -693,7 +784,7 @@ describe("BaileysAdapter proxy wiring", () => {
       await adapter.connect();
       expect(performance.now() - started).toBeLessThan(500);
       expect(mocks.makeWASocket).toHaveBeenCalledTimes(2);
-      expect(socketOptions().options).toEqual({ dispatcher: expect.any(ProxyAgent) });
+      expect(socketOptions().options).toEqual({ dispatcher: expect.any(Dispatcher1Wrapper) });
       expect(await pending).toBe("rejected");
       await vi.waitFor(() => {
         expect(proxy.closed()).toBeGreaterThan(closedBefore);
@@ -702,6 +793,21 @@ describe("BaileysAdapter proxy wiring", () => {
     } finally {
       await proxy.close();
     }
+  });
+
+  it("releases proxy agents even when the socket throws during disconnect", async () => {
+    vi.stubEnv("WA_PROXY_URL", proxyUrl("http", 8080));
+    const adapter = await connectAdapter();
+    const agents = (
+      adapter as unknown as { proxyAgents: ReturnType<typeof createBaileysProxyAgents> }
+    ).proxyAgents;
+    const destroy = vi.spyOn(agents.dispatcher, "destroy");
+    socket.end.mockImplementationOnce(() => {
+      throw new Error("socket end failed");
+    });
+    await expect(adapter.disconnect()).rejects.toThrow("socket end failed");
+    expect(destroy).toHaveBeenCalled();
+    expect((adapter as unknown as { proxyAgents: unknown }).proxyAgents).toBeUndefined();
   });
 
   it("logs a warning when disconnect fails to destroy the proxy dispatcher", async () => {
@@ -743,8 +849,7 @@ describe("BaileysAdapter proxy wiring", () => {
     expect(socks.fetchAgent).toBeInstanceOf(SocksProxyAgent);
     expect(socks.agent).not.toBe(socks.fetchAgent);
     expect(socks.options).toEqual({
-      dispatcher: (activeAdapter as unknown as { proxyAgents?: { dispatcher: Dispatcher } })
-        .proxyAgents?.dispatcher,
+      dispatcher: expect.any(Dispatcher1Wrapper),
     });
     await activeAdapter?.disconnect();
     activeAdapter = undefined;
@@ -830,7 +935,7 @@ describe("BaileysAdapter proxy wiring", () => {
     await adapter.downloadMessageAudio(audioId);
     for (const call of mocks.downloadMediaMessage.mock.calls) {
       const proxied = call[2] as { options?: { dispatcher?: unknown; signal?: AbortSignal } };
-      expect(proxied.options?.dispatcher).toBeInstanceOf(ProxyAgent);
+      expect(proxied.options?.dispatcher).toBeInstanceOf(Dispatcher1Wrapper);
       expect(proxied.options).not.toHaveProperty("signal");
     }
     expect(mocks.downloadMediaMessage).toHaveBeenCalledTimes(2);

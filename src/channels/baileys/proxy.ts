@@ -8,7 +8,7 @@
 import type { Agent as HttpsAgent } from "node:https";
 import { HttpsProxyAgent } from "https-proxy-agent";
 import { SocksProxyAgent } from "socks-proxy-agent";
-import { ProxyAgent, type Dispatcher } from "undici";
+import { Dispatcher1Wrapper, ProxyAgent, type Dispatcher } from "undici";
 import { PROXY_URL_ENV, redactError, redactProxyUrl } from "../../utils/proxy-redact.js";
 
 export { PROXY_URL_ENV };
@@ -99,10 +99,13 @@ export function parseBaileysProxyUrl(raw: string | undefined): string | undefine
   }
   if (parsed.protocol !== `${scheme}:`)
     throw invalidProxy("scheme must be socks5, socks5h, http, or https");
-  if (parsed.host.toLowerCase() !== `${host}:${portText}`.toLowerCase()) {
+  if (parsed.hostname.toLowerCase() !== host.toLowerCase()) {
     throw invalidProxy("hostname or port is invalid");
   }
-  if (Number(parsed.port) !== port) throw invalidProxy("port must be an integer from 1 to 65535");
+  // WHATWG URL strips explicit default ports. The raw port above is authoritative;
+  // still reject any mismatch after parsing and preserve it in the returned URL.
+  const parsedPort = parsed.port || (scheme === "http" ? "80" : scheme === "https" ? "443" : "");
+  if (Number(parsedPort) !== port) throw invalidProxy("port must be an integer from 1 to 65535");
 
   const expectedUser = user ?? "";
   const expectedPass = pass ?? "";
@@ -114,10 +117,10 @@ export function parseBaileysProxyUrl(raw: string | undefined): string | undefine
   if (parsedPass !== decodedPass) throw invalidProxy("password is invalid");
 
   const userinfo = user === undefined ? "" : pass === undefined ? `${user}@` : `${user}:${pass}@`;
-  return `${scheme}://${userinfo}${parsed.host}`;
+  return `${scheme}://${userinfo}${parsed.hostname}:${port}`;
 }
 
-/** undici 7.30 accepts socks5, not socks5h. Its SOCKS5 client still sends the hostname. */
+/** undici 8 accepts socks5, not socks5h. Its SOCKS5 client still sends the hostname. */
 export function proxyDispatcherUrl(proxyUrl: string): string {
   return proxyUrl.startsWith("socks5h:") ? `socks5:${proxyUrl.slice("socks5h:".length)}` : proxyUrl;
 }
@@ -156,7 +159,7 @@ export async function closeBaileysProxyAgents(
     agents.agent.destroy();
     agents.fetchAgent.destroy();
   } finally {
-    // undici 7.30 does not abort an in-flight request when destroy() follows close().
+    // Abort in-flight requests immediately instead of waiting for graceful close().
     await agents.dispatcher.destroy();
   }
 }
@@ -168,6 +171,8 @@ export function mediaDownloadOptions(
   if (timeoutMs === undefined && !dispatcher) return {};
   const options: RequestInit & { dispatcher?: Dispatcher } = {};
   if (timeoutMs !== undefined) options.signal = AbortSignal.timeout(timeoutMs);
-  if (dispatcher) options.dispatcher = dispatcher;
+  // Baileys rc14 calls Node's native fetch, which still uses Undici's v1 handler
+  // contract. Adapt only this consumer; never replace the process-wide fetch.
+  if (dispatcher) options.dispatcher = new Dispatcher1Wrapper(dispatcher);
   return { options };
 }

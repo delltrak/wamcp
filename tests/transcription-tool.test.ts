@@ -13,6 +13,7 @@ const ENV_KEYS = [
   "WA_TRANSCRIPTION_LANGUAGE",
   "WA_TRANSCRIPTION_MAX_MB",
   "WA_TRANSCRIPTION_TIMEOUT_MS",
+  "WA_AUTO_MARK_PLAYED",
 ] as const;
 const originalEnv = new Map(ENV_KEYS.map((key) => [key, process.env[key]]));
 
@@ -88,5 +89,57 @@ describe("wa_transcribe_audio", () => {
     const file = (init.body as FormData).get("file") as File;
     expect(file.type).toBe("audio/mpeg");
     expect(file.name).toBe("audio.mp3");
+  });
+
+  it("marks a stored message played only when auto mark is enabled", async () => {
+    process.env.WA_TRANSCRIPTION_ENABLED = "true";
+    process.env.WA_TRANSCRIPTION_API_KEY = "unit-test-key";
+    process.env.WA_AUTO_MARK_PLAYED = "false";
+
+    const fetchMock = vi.fn(
+      async () => new Response(JSON.stringify({ text: "voice text" }), { status: 200 }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const markPlayedMessage = vi.fn(async () => undefined);
+    const downloadMessageAudio = vi.fn(async () => ({
+      data: Buffer.from("audio bytes"),
+      mimeType: "audio/ogg",
+    }));
+    const manager = {
+      getAdapter: () => ({ downloadMessageAudio, markPlayedMessage }),
+    } as unknown as InstanceManager;
+
+    let handler: TranscriptionHandler | undefined;
+    const server = {
+      registerTool: (_name: string, _config: unknown, callback: TranscriptionHandler) => {
+        handler = callback;
+      },
+    } as unknown as McpServer;
+    registerTranscriptionTools(server, manager);
+
+    const disabled = (await handler!({
+      instanceId: "inst_audio",
+      messageId: "voice-1",
+    })) as { isError?: boolean };
+    expect(disabled.isError).toBeUndefined();
+    expect(markPlayedMessage).not.toHaveBeenCalled();
+
+    process.env.WA_AUTO_MARK_PLAYED = "true";
+    let releaseReceipt: () => void = () => undefined;
+    markPlayedMessage.mockImplementationOnce(
+      () =>
+        new Promise<void>((resolve) => {
+          releaseReceipt = resolve;
+        }),
+    );
+    const enabled = (await handler!({
+      instanceId: "inst_audio",
+      messageId: "voice-1",
+    })) as { isError?: boolean; content: Array<{ text: string }> };
+    expect(enabled.isError).toBeUndefined();
+    expect(enabled.content[0]?.text).toContain("voice text");
+    expect(markPlayedMessage).toHaveBeenCalledWith("voice-1", undefined);
+    releaseReceipt();
+    await Promise.resolve();
   });
 });
