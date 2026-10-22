@@ -14,9 +14,10 @@ import {
 } from "./constants.js";
 import { InstanceManager } from "./services/instance-manager.js";
 import { MessageQueue } from "./services/message-queue.js";
-import { EventWebhookService } from "./services/event-webhook.js";
+import { EventWebhookService, getRecentWebhookDeliveries } from "./services/event-webhook.js";
 import { MaintenanceService } from "./services/maintenance.js";
 import { createMcpServer } from "./server/mcp.js";
+import { isBaileysInstancePaired } from "./channels/baileys/baileys.auth.js";
 import { verifyWebhookSignature } from "./channels/cloud-api/cloud.auth.js";
 import { normalizeWebhookPayload } from "./channels/cloud-api/cloud.events.js";
 import type { MetaWebhookPayload } from "./channels/cloud-api/cloud.events.js";
@@ -28,6 +29,15 @@ import { loadPresencePulseConfig, PresencePulseScheduler } from "./services/pres
 import { loadAutoMarkPlayedConfig } from "./services/auto-mark-played.js";
 import { bootEventWebhook, getEventWebhookStatus } from "./services/event-webhook-config.js";
 import { buildHealthBody, renderHealthBody } from "./server/health.js";
+import { DashboardEventLog } from "./server/dashboard-activity.js";
+import {
+  assertDashboardTransport,
+  cloudWebhookFlags,
+  loadDashboardConfig,
+  type DashboardConfig,
+} from "./server/dashboard-config.js";
+import { createDashboardHandler } from "./server/dashboard.js";
+import { renderQrDataUrl } from "./server/dashboard-qr.js";
 import { parseBaileysProxyUrl } from "./channels/baileys/proxy.js";
 
 const CLOUD_WEBHOOK_PATH = "/cloud-webhook";
@@ -113,11 +123,29 @@ async function initServices() {
   return { instanceManager, messageQueue, eventWebhook, maintenance, presencePulse, autoReply };
 }
 
-async function startHttp(): Promise<void> {
+async function startHttp(dashboardConfig: DashboardConfig): Promise<void> {
   const { instanceManager, messageQueue, eventWebhook, maintenance, presencePulse, autoReply } =
     await initServices();
   const mcpSessions = new McpHttpSessionManager(instanceManager, messageQueue, eventWebhook);
   const startTime = Date.now();
+  const dashboardEvents = new DashboardEventLog();
+  if (dashboardConfig.enabled) {
+    instanceManager.onAnyEvent((event, instanceId, payload) => {
+      dashboardEvents.record(event, instanceId, payload);
+    });
+  }
+  const handleDashboard = createDashboardHandler({
+    config: dashboardConfig,
+    startedAt: startTime,
+    instances: instanceManager,
+    isPaired: isBaileysInstancePaired,
+    webhookStatus: () => getEventWebhookStatus(),
+    deliveries: getRecentWebhookDeliveries,
+    events: dashboardEvents,
+    cloudWebhook: () => cloudWebhookFlags(),
+    renderQr: renderQrDataUrl,
+    version: VERSION,
+  });
 
   const httpServer = createServer(async (req: IncomingMessage, res: ServerResponse) => {
     const url = new URL(req.url ?? "/", `http://localhost:${port}`);
@@ -226,6 +254,8 @@ async function startHttp(): Promise<void> {
       return;
     }
 
+    if (await handleDashboard(req, res, url)) return;
+
     res.writeHead(404, { "Content-Type": "application/json" });
     res.end(JSON.stringify({ error: "Not found" }));
   });
@@ -314,6 +344,8 @@ async function startStdio(): Promise<void> {
 }
 
 async function main(): Promise<void> {
+  const dashboardConfig = loadDashboardConfig();
+  assertDashboardTransport(dashboardConfig, transport);
   parseBaileysProxyUrl(process.env.WA_PROXY_URL);
   logger.info({ transport, version: VERSION }, "Starting WA MCP server");
   bootEventWebhook();
@@ -321,7 +353,7 @@ async function main(): Promise<void> {
   if (transport === "stdio") {
     await startStdio();
   } else {
-    await startHttp();
+    await startHttp(dashboardConfig);
   }
 }
 

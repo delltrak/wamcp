@@ -7,6 +7,7 @@
 ## Table of Contents
 
 1. [Overview](#1-overview)
+   - [Operations dashboard](#operations-dashboard)
 2. [Tools Reference](#2-tools-reference)
    - [Instance Management](#21-instance-management-9-tools)
    - [Messaging](#22-messaging-32-tools)
@@ -48,6 +49,16 @@ Authorization: Bearer wamcp_sk_your_key
 ```
 
 The key is configured via the `WA_API_KEY` environment variable on the server.
+
+### Operations dashboard
+
+`GET /dashboard` redirects to `GET /dashboard/`, an optional browser page on the same HTTP server. It is absent unless `WA_DASHBOARD_ENABLED=true`. Enabling it also requires `WA_TRANSPORT=http` and `WA_DASHBOARD_USERS` (`user:password`, or several entries separated by commas). Each password must be at least 12 characters. A request without a matching `Authorization: Basic` header returns `401` and `WWW-Authenticate`. Wrong credentials also return `401`. With the flag off, `/dashboard` is a normal `404`. Basic authentication repeats the password on every request; terminate TLS in front of the server before exposing the page. Failures are counted per address and username, and again per address across usernames. Eight wrong `Authorization` headers in 15 minutes each return `401`. Further guesses return `429` without `WWW-Authenticate`. A correct login does not clear failures. While an address or username is limited, the password is checked at most once per 60 seconds; anyone who shares the address can take that check, and any other guess, including the right password, is `429` before the password is compared. A username that signed in during the last 15 minutes skips the address total and the process-wide cap until that username fails again. Eight failures of that same username still limit it. The process rejects further failed password checks after 60 in a minute. Successful checks are not counted. During a distributed attack, a correct login from a username that has not signed in during the last 15 minutes can also return `429`. A request that omits `Authorization` is not counted. The counter uses the socket address, with IPv6 grouped by `/64`.
+
+The page shows instance connection state, last connect and disconnect time, disconnect reason, pending pairing method (not the code or QR secret unless pairing is in progress), webhook configuration, dropped event names, and recent delivery successes and failures. It does not show webhook URLs, header names, header values, tokens, or signing secrets. Cloud webhook settings are reported only as configured or not configured. The page calls `api/overview` and `api/instances/{instanceId}/pairing` relative to its own URL.
+
+The page is read-only except `POST /dashboard/api/instances/{instanceId}/pairing`, which starts pairing for an existing unpaired Baileys instance. It does not create instances. The body must be `Content-Type: application/json`, including when it is empty. A `Sec-Fetch-Site: cross-site` header, an `Origin: null` value, or an `Origin` that does not match `Host` is rejected with `403` before any connect. An explicit port 80 matches an `http` origin that omits the port, and 443 matches `https` the same way. Behind nginx, set `proxy_set_header Host $host;` so `Host` is the name the browser used. The default `$proxy_host` is the upstream and makes that check fail. `X-Forwarded-Proto` is not trusted; the scheme is compared only when the socket to this process is TLS. The route refuses a non-Baileys instance, any instance whose stored Baileys credentials are registered, any credential object that does not explicitly set `registered` to `false`, and any instance whose state is `connected`. That refusal does not connect, request a pairing code, or read a QR. The dashboard does not log out, delete, restart, or send messages, and it does not change `WA_DATABASE_PATH`, the auth store, or Docker volumes.
+
+`GET /dashboard/api/overview` returns the same redacted status as JSON for the signed-in operator.
 
 ### Channel Types
 

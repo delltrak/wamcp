@@ -141,6 +141,7 @@ Add to your `claude_desktop_config.json`:
 | 🔁  | **Auto-reconnect**     | Automatic reconnection with exponential backoff.                                                          |
 | 🗃️  | **Persistent**         | SQLite storage for sessions, messages, contacts, groups.                                                  |
 | 🐳  | **Single container**   | `docker compose up` — only Redis as external dependency.                                                  |
+| 🖥️  | **Operations dashboard** | Optional read-only `/dashboard` page for status, webhook health, and pairing an existing unpaired instance. Off by default. |
 
 ---
 
@@ -839,6 +840,8 @@ Copy `.env.example` to `.env` and configure:
 | --------------------------- | ------------------------ | ---------------------------------------- |
 | `WA_TRANSPORT`              | `http`                   | `http` (Streamable HTTP) or `stdio`      |
 | `WA_MCP_API_KEY`            | —                        | Bearer token auth. Unset = no auth (dev) |
+| `WA_DASHBOARD_ENABLED`      | `false`                  | Serve `GET /dashboard`. Requires `WA_TRANSPORT=http` and `WA_DASHBOARD_USERS` |
+| `WA_DASHBOARD_USERS`        | —                        | Required when the dashboard is enabled. Comma-separated `user:password` entries |
 | `WA_MCP_PORT`               | `3000`                   | HTTP server port                         |
 | `WA_REDIS_URL`              | `redis://localhost:6379` | Redis for BullMQ queues                  |
 | `WA_LOG_LEVEL`              | `info`                   | `debug` \| `info` \| `warn` \| `error`   |
@@ -1272,6 +1275,25 @@ See [Passkey pairing and ARM images](docs/passkey-and-arm.md) for what Baileys r
 
 ---
 
+## Operations dashboard
+
+`WA_DASHBOARD_ENABLED` defaults to `false`. Set it to `true` only with `WA_TRANSPORT=http` and `WA_DASHBOARD_USERS`. The value is one `user:password` pair, or several pairs separated by commas. Each password must be at least 12 characters. Passwords may contain colons and cannot contain commas. Leading and trailing spaces are trimmed.
+
+```bash
+WA_DASHBOARD_ENABLED=true
+WA_DASHBOARD_USERS=operator:replace-with-a-long-password
+```
+
+Open `http://<host>:3000/dashboard`. The browser asks for that username and password. Without them the server returns `401`. When the flag is off, `/dashboard` does not exist and returns `404`, the same as any other unknown path. Basic authentication repeats the password on every request, so terminate TLS in front of the server before exposing the page. The process does not redirect to HTTPS by itself. Failures are counted per address and username, and again per address across usernames. Eight wrong `Authorization` headers in 15 minutes return `401`. Further guesses return `429`. A correct login does not clear failures, so polling does not give an attacker on the same address a new set of guesses. While an address or username is limited, the password is checked at most once per 60 seconds. Anyone who shares that address, including an attacker, can take that one check. Other guesses are rejected before the password is compared. A username that signed in during the last 15 minutes skips the address total and the process-wide cap until that username fails again. Eight failures of that same username still limit it. The process rejects further failed password checks after 60 in a minute. Successful checks are not counted. During a distributed attack, a correct login from a username that has not signed in during the last 15 minutes can also return `429`. A request with no `Authorization` header is the browser login challenge and is not counted. The limit uses the socket address, with IPv6 grouped by `/64`, so clients that share a proxy share that counter.
+
+The page shows connection health, each instance's state, last connect and disconnect, webhook configuration, dropped events, recent delivery successes and failures, and recent channel events. It does not show webhook URLs, tokens, header values, or signing secrets. Cloud webhook settings appear only as yes/no configured flags. Its API calls are relative to the page URL, so the same handler can be mounted under a path prefix.
+
+The only write action is `POST /dashboard/api/instances/{instanceId}/pairing` for an existing Baileys instance that has never registered. The dashboard does not create instances. An instance whose stored credentials are already registered, whose credential record does not say `registered: false`, or whose state is `connected`, is left untouched: the dashboard does not connect it, request a pairing code, or load a QR. Pairing requires `Content-Type: application/json` even when the body is empty, and the server rejects a cross-site `Sec-Fetch-Site` or an `Origin` that does not match `Host`. Port 80 matches an `http` origin with no port, and port 443 matches `https` the same way. When nginx proxies the page, set `proxy_set_header Host $host;`. The default `$proxy_host` is the upstream address, so the browser origin does not match and pairing returns 403. `X-Forwarded-Proto` is not trusted. The scheme is compared only when the socket to this process is TLS; a TLS terminator that speaks plain HTTP to the process skips that check. It also does not send messages, log out, delete, or restart instances. `WA_DATABASE_PATH`, the Baileys auth keys, and the Compose volume stay where they are.
+
+**HTTP routing integration.** This branch serves the dashboard at `/dashboard` and uses the socket address for login limits. Integration with [#137](https://github.com/delltrak/wamcp/pull/137) must mount the handler at `basePath + "/dashboard"` through the shared listener and use its trusted-proxy client address while retaining IPv6 `/64` login buckets.
+
+---
+
 ## 🐳 Docker
 
 ### Production
@@ -1336,6 +1358,7 @@ src/
 ├── index.ts                     # Entry point (HTTP/stdio)
 ├── constants.ts                 # Defaults and limits
 ├── server/mcp.ts                # MCP server setup
+├── server/dashboard.ts          # Optional operations dashboard
 ├── tools/                       # 🔧 158 MCP tools (16 files)
 ├── resources/                   # 📖 10 MCP resources (8 files)
 ├── notifications/events.ts      # 📡 15 documented event types

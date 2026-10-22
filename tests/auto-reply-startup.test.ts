@@ -45,6 +45,9 @@ vi.mock("../src/services/event-webhook.js", () => ({
     start() {}
   },
 }));
+vi.mock("../src/channels/baileys/baileys.auth.js", () => ({
+  isBaileysInstancePaired: () => false,
+}));
 vi.mock("../src/services/maintenance.js", () => ({
   MaintenanceService: class {
     async start() {}

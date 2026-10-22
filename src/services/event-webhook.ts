@@ -1769,6 +1769,91 @@ export async function processEventWebhookJob(
   await deliver(destination, job.payload, timeoutMs);
 }
 
+const MAX_WEBHOOK_DELIVERIES = 30;
+const SAFE_DELIVERY_ID = /^[A-Za-z0-9_-]{1,64}$/;
+const SAFE_DELIVERY_EVENT = /^[a-z][a-z0-9._-]{0,63}$/i;
+const SAFE_DELIVERY_CODE = /^[A-Za-z0-9_.-]{1,80}$/;
+
+export interface WebhookDeliveryActivity {
+  at: number;
+  destinationId: string;
+  event: string;
+  outcome: "delivered" | "failed";
+  attempt: number | null;
+  httpStatus: number | null;
+  errorCode: string | null;
+}
+
+const webhookDeliveries: WebhookDeliveryActivity[] = [];
+
+function webhookActivityEvent(payload: unknown): string {
+  if (!payload || typeof payload !== "object") return "event";
+  const record = payload as Record<string, unknown>;
+  if (typeof record.event === "string" && SAFE_DELIVERY_EVENT.test(record.event))
+    return record.event;
+  if (Array.isArray(record.events)) return "batch";
+  if (Array.isArray(record.messages)) return "message.received";
+  return "event";
+}
+
+/** Remember a redacted delivery outcome for the operations dashboard. Never stores URLs or payloads. */
+export function noteWebhookJobOutcome(
+  outcome: "delivered" | "failed",
+  job:
+    | {
+        attemptsMade?: number;
+        data?: { destinationId?: string; payload?: unknown };
+      }
+    | null
+    | undefined,
+  error?: unknown,
+  destination?: EventWebhookDestination,
+): void {
+  try {
+    const rawId = job?.data?.destinationId;
+    const attemptsMade = job?.attemptsMade;
+    let attempt: number | null = null;
+    if (typeof attemptsMade === "number" && Number.isFinite(attemptsMade)) {
+      const normalized = Math.max(1, Math.floor(attemptsMade));
+      if (normalized <= 100) attempt = normalized;
+    }
+    let httpStatus: number | null = null;
+    let errorCode: string | null = null;
+    if (outcome === "failed") {
+      const data = eventWebhookFailureLogData(attemptsMade, error, destination);
+      if (typeof data.httpStatus === "number" && data.httpStatus >= 100 && data.httpStatus <= 599) {
+        httpStatus = data.httpStatus;
+      }
+      if (typeof data.errorCode === "string" && SAFE_DELIVERY_CODE.test(data.errorCode)) {
+        errorCode = data.errorCode;
+      }
+    }
+    webhookDeliveries.unshift({
+      at: Date.now(),
+      destinationId:
+        typeof rawId === "string" && SAFE_DELIVERY_ID.test(rawId) ? rawId : "destination",
+      event: webhookActivityEvent(job?.data?.payload),
+      outcome,
+      attempt,
+      httpStatus,
+      errorCode,
+    });
+    if (webhookDeliveries.length > MAX_WEBHOOK_DELIVERIES) {
+      webhookDeliveries.length = MAX_WEBHOOK_DELIVERIES;
+    }
+  } catch {
+    // Delivery history must not change webhook delivery.
+  }
+}
+
+export function getRecentWebhookDeliveries(): WebhookDeliveryActivity[] {
+  return webhookDeliveries.map((entry) => ({ ...entry }));
+}
+
+export function clearRecentWebhookDeliveries(): void {
+  webhookDeliveries.length = 0;
+}
+
 /** Dedicated BullMQ queue for outgoing normalized channel events. */
 export class EventWebhookService {
   private readonly config: EventWebhookConfig;
@@ -1809,12 +1894,16 @@ export class EventWebhookService {
         settings: { backoffStrategy: eventWebhookBackoffStrategy(this.config.retryDelayMs) },
       },
     );
+    this.worker.on("completed", (job) => {
+      noteWebhookJobOutcome("delivered", job);
+    });
     this.worker.on("failed", (job, error) => {
       const destination = job ? this.destinationMap().get(job.data.destinationIdentity) : undefined;
       logger.warn(
         eventWebhookFailureLogData(job?.attemptsMade, error, destination),
         "Outgoing event webhook delivery attempt failed",
       );
+      noteWebhookJobOutcome("failed", job, error, destination);
     });
     this.worker.on("error", () => {
       logger.error("Outgoing event webhook worker encountered an error");
