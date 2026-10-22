@@ -22,6 +22,7 @@ import {
   RECONNECT_INITIAL_DELAY_MS,
   RECONNECT_MAX_DELAY_MS,
   RECONNECT_MAX_ATTEMPTS,
+  CONNECTING_STUCK_AFTER_MS,
   DEDUP_TTL_HOURS,
   PRUNE_MESSAGES_CRON,
   PRUNE_DEDUP_CRON,
@@ -107,6 +108,7 @@ describe("Constants", () => {
     expect(RECONNECT_INITIAL_DELAY_MS).toBeGreaterThan(0);
     expect(RECONNECT_MAX_DELAY_MS).toBeGreaterThan(RECONNECT_INITIAL_DELAY_MS);
     expect(RECONNECT_MAX_ATTEMPTS).toBeGreaterThan(0);
+    expect(CONNECTING_STUCK_AFTER_MS).toBe(120_000);
   });
 
   it("DEDUP_TTL_HOURS is positive", () => {
