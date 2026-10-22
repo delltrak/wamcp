@@ -13,12 +13,14 @@ import {
   isValidTimeZone,
   nextOccurrence,
   parseScheduleRequest,
+  parseRfc3339,
   zonedParts,
   zonedWallTimeToEpoch,
 } from "../src/services/schedule-clock.js";
 import { readSchedulerConfig } from "../src/services/schedule-config.js";
 import { claimNextScheduleSql } from "../src/services/schedule-store.js";
 import { MessageScheduler, SCHEDULE_PERMANENT_CODE } from "../src/services/scheduler.js";
+import type { OutboundJobState } from "../src/services/message-queue.js";
 import { registerScheduleTools } from "../src/tools/schedule.tools.js";
 import type { ChannelType, MessageContent } from "../src/types/channel.types.js";
 
@@ -58,15 +60,24 @@ function harness(options: {
   const sent: Array<{ to: string; content: MessageContent; channel: ChannelType }> = [];
   const sqlite = openDatabase(options.path);
   const enqueue = vi.fn(
-    async (_instanceId: string, to: string, content: MessageContent, channel: ChannelType) => {
+    async (
+      _instanceId: string,
+      to: string,
+      content: MessageContent,
+      channel: ChannelType,
+      jobId: string,
+    ) => {
       sent.push({ to, content, channel });
-      return { jobId: `job-${sent.length}` };
+      return { jobId };
     },
   );
+  const getJobState = vi.fn(async (): Promise<OutboundJobState> => ({ state: "completed" }));
+  const resolveChannel = vi.fn(() => "baileys" as ChannelType);
   const scheduler = new MessageScheduler({
     sqlite,
+    getJobState,
     enqueue,
-    resolveChannel: () => "baileys",
+    resolveChannel,
     instanceExists: (instanceId) => {
       if (instanceId !== INSTANCE_ID) throw new Error(`Instance ${instanceId} not found`);
     },
@@ -78,10 +89,27 @@ function harness(options: {
     },
     rateLimitFor: options.rateLimit === undefined ? undefined : () => options.rateLimit ?? 1,
   });
-  return { scheduler, sent, enqueue, sqlite };
+  return { scheduler, sent, enqueue, sqlite, getJobState, resolveChannel };
 }
 
 describe("schedule clock", () => {
+  it.each([
+    "2026-02-30T09:00:00Z",
+    "2025-02-29T09:00:00-03:00",
+    "2026-04-31T09:00:00+05:30",
+    "2026-01-01T24:00:00Z",
+  ])("rejects a normalized invalid calendar timestamp: %s", (value) => {
+    expect(() => parseRfc3339(value, "scheduledAt")).toThrow(/Invalid scheduledAt/);
+    expect(() => parseRfc3339(value, "endAt")).toThrow(/Invalid endAt/);
+  });
+
+  it.each(["2024-02-29T23:59:59.123456789-03:00", "2026-04-30T23:59:59+05:30"])(
+    "accepts real calendar dates with offsets: %s",
+    (value) => {
+      expect(parseRfc3339(value, "scheduledAt")).toBe(Date.parse(value));
+    },
+  );
+
   it("uses America/Bahia as the default timezone", () => {
     expect(DEFAULT_SCHEDULER_TIMEZONE).toBe("America/Bahia");
   });
@@ -536,6 +564,7 @@ describe("scheduled sends", () => {
     const enabled = new MessageScheduler({
       sqlite: disabled.sqlite,
       enqueue: disabled.enqueue,
+      getJobState: disabled.getJobState,
       resolveChannel: () => "baileys",
       now: () => now,
       config: { enabled: true, missedPolicy: "send", maxActive: 100 },
@@ -834,7 +863,7 @@ describe("scheduled sends", () => {
 
   it("retries an error that only mentions not found, and fails a permanent code", async () => {
     let now = Date.parse("2026-10-20T12:00:00Z");
-    const { scheduler, sent, enqueue } = harness({ now: () => now, missedPolicy: "skip" });
+    const { scheduler, sent, resolveChannel } = harness({ now: () => now, missedPolicy: "skip" });
     const created = scheduler.create({
       instanceId: INSTANCE_ID,
       to: "5500000000001",
@@ -842,7 +871,9 @@ describe("scheduled sends", () => {
       content: { type: "text", text: "retry me" },
     });
     now = Date.parse("2026-10-21T12:00:00Z");
-    enqueue.mockRejectedValue(new Error("contact not found"));
+    resolveChannel.mockImplementation(() => {
+      throw new Error("contact not found");
+    });
     await scheduler.tick();
     expect(sent).toEqual([]);
     let listed = scheduler.list({ instanceId: INSTANCE_ID }).schedules[0];
@@ -853,12 +884,188 @@ describe("scheduled sends", () => {
     now += 30_000;
     const permanent = new Error("recipient rejected");
     Object.assign(permanent, { code: SCHEDULE_PERMANENT_CODE });
-    enqueue.mockRejectedValue(permanent);
+    resolveChannel.mockImplementation(() => {
+      throw permanent;
+    });
     await scheduler.tick();
     listed = scheduler.list({ instanceId: INSTANCE_ID }).schedules[0];
     expect(listed?.id).toBe(created.id);
     expect(listed?.status).toBe("failed");
     expect(sent).toEqual([]);
+  });
+
+  it("keeps queue acceptance pending and counts only completed sends", async () => {
+    let now = Date.parse("2026-10-20T12:00:00Z");
+    const { scheduler, enqueue, getJobState } = harness({ now: () => now });
+    getJobState.mockResolvedValue({ state: "pending" });
+    scheduler.create({
+      instanceId: INSTANCE_ID,
+      to: "5500000000001",
+      scheduledAt: "2026-10-21T12:00:00Z",
+      content: { type: "text", text: "pending" },
+    });
+    now = Date.parse("2026-10-21T12:00:00Z");
+    await scheduler.tick();
+    expect(scheduler.list({ instanceId: INSTANCE_ID }).schedules[0]).toMatchObject({
+      status: "running",
+      occurrenceCount: 0,
+    });
+    now += 60 * 60_000;
+    await scheduler.tick();
+    expect(scheduler.list({ instanceId: INSTANCE_ID }).schedules[0]?.status).toBe("running");
+    getJobState.mockResolvedValue({ state: "completed" });
+    await scheduler.tick();
+    await scheduler.tick();
+    expect(scheduler.list({ instanceId: INSTANCE_ID }).schedules[0]).toMatchObject({
+      status: "completed",
+      occurrenceCount: 1,
+    });
+    expect(enqueue).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(["once", "daily"] as const)(
+    "does not count exhausted delivery retries for %s",
+    async (recurrence) => {
+      let now = Date.parse("2026-10-20T12:00:00Z");
+      const { scheduler, enqueue, getJobState } = harness({ now: () => now });
+      getJobState.mockResolvedValue({ state: "pending" });
+      scheduler.create({
+        instanceId: INSTANCE_ID,
+        to: "5500000000001",
+        recurrence,
+        occurrenceLimit: 1,
+        scheduledAt: "2026-10-21T12:00:00Z",
+        content: { type: "text", text: "failure" },
+      });
+      now = Date.parse("2026-10-21T12:00:00Z");
+      await scheduler.tick();
+      getJobState.mockResolvedValue({ state: "failed", error: "adapter exhausted retries" });
+      await scheduler.tick();
+      const listed = scheduler.list({ instanceId: INSTANCE_ID }).schedules[0];
+      expect(listed).toMatchObject({
+        status: recurrence === "once" ? "failed" : "active",
+        occurrenceCount: 0,
+        lastError: "adapter exhausted retries",
+      });
+      expect(enqueue).toHaveBeenCalledTimes(1);
+      if (recurrence === "daily") {
+        now += 24 * 60 * 60_000;
+        getJobState.mockResolvedValue({ state: "completed" });
+        await scheduler.tick();
+        expect(scheduler.list({ instanceId: INSTANCE_ID }).schedules[0]).toMatchObject({
+          status: "completed",
+          occurrenceCount: 1,
+        });
+      }
+    },
+  );
+
+  it("reconciles a persisted queue result after restart without submitting another message", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "wamcp-reconcile-"));
+    const path = join(dir, "schedules.db");
+    let now = Date.parse("2026-10-20T12:00:00Z");
+    const original = harness({ now: () => now, path });
+    original.getJobState.mockResolvedValue({ state: "pending" });
+    original.scheduler.create({
+      instanceId: INSTANCE_ID,
+      to: "5500000000001",
+      scheduledAt: "2026-10-21T12:00:00Z",
+      content: { type: "text", text: "restart" },
+    });
+    now = Date.parse("2026-10-21T12:00:00Z");
+    await original.scheduler.tick();
+    const persistedId = original.scheduler.list({ instanceId: INSTANCE_ID }).schedules[0]
+      ?.lastJobId;
+    expect(original.enqueue.mock.calls[0]?.[4]).toBe(persistedId);
+    original.sqlite.close();
+    const restarted = harness({ now: () => now, path });
+    now += 24 * 60 * 60_000;
+    await restarted.scheduler.tick();
+    expect(restarted.scheduler.list({ instanceId: INSTANCE_ID }).schedules[0]).toMatchObject({
+      status: "completed",
+      occurrenceCount: 1,
+    });
+    expect(restarted.getJobState).toHaveBeenCalledWith(INSTANCE_ID, persistedId, "baileys");
+    expect(restarted.enqueue).not.toHaveBeenCalled();
+    restarted.sqlite.close();
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("reconciles ambiguous enqueue errors without adding a duplicate job", async () => {
+    let now = Date.parse("2026-10-20T12:00:00Z");
+    const { scheduler, enqueue, getJobState } = harness({ now: () => now });
+    scheduler.create({
+      instanceId: INSTANCE_ID,
+      to: "5500000000001",
+      scheduledAt: "2026-10-21T12:00:00Z",
+      content: { type: "text", text: "ambiguous" },
+    });
+    enqueue.mockRejectedValue(new Error("Redis connection closed after acceptance"));
+    getJobState.mockResolvedValue({ state: "missing" });
+    now = Date.parse("2026-10-21T12:00:00Z");
+    await scheduler.tick();
+    await scheduler.tick();
+    expect(scheduler.list({ instanceId: INSTANCE_ID }).schedules[0]?.status).toBe("running");
+    getJobState.mockResolvedValue({ state: "completed" });
+    await scheduler.tick();
+    expect(scheduler.list({ instanceId: INSTANCE_ID }).schedules[0]).toMatchObject({
+      status: "completed",
+      occurrenceCount: 1,
+    });
+    expect(enqueue).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not resend a lost Redis job after its lease expires", async () => {
+    let now = Date.parse("2026-10-20T12:00:00Z");
+    const { scheduler, enqueue, getJobState } = harness({ now: () => now });
+    scheduler.create({
+      instanceId: INSTANCE_ID,
+      to: "5500000000001",
+      scheduledAt: "2026-10-21T12:00:00Z",
+      content: { type: "text", text: "missing" },
+    });
+    getJobState.mockResolvedValue({ state: "missing" });
+    now = Date.parse("2026-10-21T12:00:00Z");
+    await scheduler.tick();
+    now += 60 * 60_000;
+    await scheduler.tick();
+    expect(scheduler.list({ instanceId: INSTANCE_ID }).schedules[0]).toMatchObject({
+      status: "failed",
+      occurrenceCount: 0,
+    });
+    expect(enqueue).toHaveBeenCalledTimes(1);
+  });
+
+  it("reconciles a completed job only once across two scheduler processes", async () => {
+    let now = Date.parse("2026-10-20T12:00:00Z");
+    const { scheduler, sqlite, enqueue, getJobState } = harness({ now: () => now });
+    getJobState.mockResolvedValue({ state: "pending" });
+    scheduler.create({
+      instanceId: INSTANCE_ID,
+      to: "5500000000001",
+      scheduledAt: "2026-10-21T12:00:00Z",
+      content: { type: "text", text: "race" },
+    });
+    now = Date.parse("2026-10-21T12:00:00Z");
+    await scheduler.tick();
+    const removeJob = vi.fn(async () => {});
+    const other = new MessageScheduler({
+      sqlite,
+      enqueue,
+      getJobState,
+      removeJob,
+      now: () => now,
+      resolveChannel: () => "baileys",
+      config: { enabled: true, missedPolicy: "send", maxActive: 100 },
+    });
+    getJobState.mockResolvedValue({ state: "completed" });
+    await Promise.all([scheduler.tick(), other.tick()]);
+    expect(scheduler.list({ instanceId: INSTANCE_ID }).schedules[0]).toMatchObject({
+      status: "completed",
+      occurrenceCount: 1,
+    });
+    expect(enqueue).toHaveBeenCalledTimes(1);
+    expect(removeJob.mock.calls.length).toBeLessThanOrEqual(1);
   });
 
   it("waits for an in-flight tick before stop resolves", async () => {

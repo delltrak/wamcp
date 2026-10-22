@@ -21,6 +21,13 @@ const logger = createChildLogger({ service: "message-queue" });
 
 export type OutboundJob =
   | {
+      kind: "community-announcement";
+      instanceId: string;
+      communityId: string;
+      to: string;
+      content: MessageContent;
+    }
+  | {
       instanceId: string;
       to: string;
       content: MessageContent;
@@ -43,6 +50,12 @@ export interface EnqueueResult {
   status: "queued";
   jobId: string;
 }
+
+export type OutboundJobState =
+  | { state: "pending" }
+  | { state: "completed" }
+  | { state: "missing" }
+  | { state: "failed"; error: string };
 
 export interface QueueStats {
   waiting: number;
@@ -108,7 +121,18 @@ export class MessageQueue {
         const data = job.data as OutboundJob;
         const adapter = this.getAdapter(data.instanceId);
         try {
-          if (data.kind === "group-member-label") {
+          if (data.kind === "community-announcement") {
+            const target = await adapter.resolveCommunityAnnouncementGroup(data.communityId, true);
+            if (target !== data.to) {
+              throw new UnrecoverableError(
+                "The community Avisos destination changed; enqueue a new announcement after review",
+              );
+            }
+            if ("quotedMessageId" in data.content && data.content.quotedMessageId) {
+              adapter.validateQuotedMessage?.(target, data.content.quotedMessageId);
+            }
+            await adapter.sendMessage(target, data.content);
+          } else if (data.kind === "group-member-label") {
             await adapter.updateGroupMemberLabel(data.groupId, data.memberLabel);
           } else if (data.kind === "album") {
             await adapter.sendMediaAlbum(data.to, data.images);
@@ -144,12 +168,41 @@ export class MessageQueue {
     return queue;
   }
 
+  /** Resolve before enqueueing and revalidate in the worker; never retarget silently. */
+  async enqueueCommunityAnnouncement(
+    instanceId: string,
+    communityId: string,
+    content: MessageContent,
+  ): Promise<EnqueueResult & { to: string }> {
+    if (!this.getAdapter) throw new Error("Adapter resolver not set");
+    const adapter = this.getAdapter(instanceId);
+    const to = await adapter.resolveCommunityAnnouncementGroup(communityId, true);
+    if ("quotedMessageId" in content && content.quotedMessageId) {
+      adapter.validateQuotedMessage?.(to, content.quotedMessageId);
+    }
+    const data: OutboundJob = {
+      kind: "community-announcement",
+      instanceId,
+      communityId,
+      to,
+      content,
+    };
+    // A send timeout can happen after delivery. Avoid automatic duplicate broadcasts.
+    const job = await this.getOrCreateQueue(instanceId, "baileys").add(
+      "community-announcement",
+      data,
+      { attempts: 1 },
+    );
+    return { status: "queued", jobId: job.id ?? "", to };
+  }
+
   /** Enqueue an outbound message */
   async enqueueMessage(
     instanceId: string,
     to: string,
     content: MessageContent,
     channel: "baileys" | "cloud" = "baileys",
+    jobId?: string,
   ): Promise<EnqueueResult> {
     if ("quotedMessageId" in content && content.quotedMessageId && this.getAdapter) {
       this.getAdapter(instanceId).validateQuotedMessage?.(to, content.quotedMessageId);
@@ -157,8 +210,35 @@ export class MessageQueue {
 
     const queue = this.getOrCreateQueue(instanceId, channel);
     const jobData: OutboundJob = { instanceId, to, content };
-    const job = await queue.add("send", jobData);
+    // Retain scheduled results until the scheduler observes them after a restart.
+    const job = await queue.add(
+      "send",
+      jobData,
+      jobId ? { jobId, removeOnComplete: false, removeOnFail: false } : undefined,
+    );
     return { status: "queued", jobId: job.id ?? "" };
+  }
+
+  /** Reading a persisted scheduled job also starts its worker after a restart. */
+  async getMessageJobState(
+    instanceId: string,
+    jobId: string,
+    channel: ChannelType,
+  ): Promise<OutboundJobState> {
+    const job = await this.getOrCreateQueue(instanceId, channel).getJob(jobId);
+    if (!job) return { state: "missing" };
+    const state = await job.getState();
+    if (state === "completed") return { state: "completed" };
+    if (state === "failed")
+      return { state: "failed", error: job.failedReason || "Outbound message failed" };
+    if (state === "unknown") return { state: "missing" };
+    return { state: "pending" };
+  }
+
+  /** Called only after a terminal outcome has been committed to SQLite. */
+  async removeScheduledJob(instanceId: string, jobId: string, channel: ChannelType): Promise<void> {
+    const job = await this.getOrCreateQueue(instanceId, channel).getJob(jobId);
+    if (job) await job.remove();
   }
 
   /** Enqueue a bounded Baileys album through the same per-instance rate limiter as messages. */

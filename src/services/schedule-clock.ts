@@ -77,7 +77,24 @@ export function defaultTimeZone(): string {
 
 export function parseRfc3339(value: string, label: string): number {
   const trimmed = value.trim();
-  if (!RFC3339.test(trimmed)) {
+  const match = RFC3339.exec(trimmed);
+  if (!match) {
+    throw new Error(`Invalid ${label}; expected an RFC3339 timestamp`);
+  }
+  // Date.parse normalizes February 30 and 24:00 into another calendar day.
+  // Validate the civil fields before applying the supplied numeric offset.
+  const [year, month, day, hour, minute, second] = match.slice(1, 7).map(Number);
+  const calendar = new Date(0);
+  calendar.setUTCFullYear(year, month - 1, day);
+  calendar.setUTCHours(hour, minute, second, 0);
+  if (
+    calendar.getUTCFullYear() !== year ||
+    calendar.getUTCMonth() !== month - 1 ||
+    calendar.getUTCDate() !== day ||
+    calendar.getUTCHours() !== hour ||
+    calendar.getUTCMinutes() !== minute ||
+    calendar.getUTCSeconds() !== second
+  ) {
     throw new Error(`Invalid ${label}; expected an RFC3339 timestamp`);
   }
   const parsed = Date.parse(trimmed);

@@ -7,27 +7,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Updated Undici from 7.30.0 to 8.12.3 and paired outgoing webhook requests with its
+  HTTP client, preserving compatibility with the new dispatcher contract on Node 24
+  ([#96](https://github.com/delltrak/wamcp/pull/96)).
+- The Docker runtime stage now runs `ffmpeg -version` on every architecture the image build
+  targets, next to the existing `better-sqlite3` prebuild check. Published tags stay a single
+  `linux/amd64` + `linux/arm64` manifest list.
+
 ### Added
 
-- Added scheduled and recurring sends (`wa_schedule_message`, `wa_list_scheduled`,
-  `wa_pause_scheduled`, `wa_resume_scheduled`, `wa_cancel_scheduled`). Rows live in the existing
-  SQLite database. `WA_SCHEDULER_ENABLED=false` by default, so nothing is sent until it is turned
-  on. Pause and cancel still work while it is off. `WA_SCHEDULER_MISSED_POLICY=skip` (or `send`)
-  controls occurrences missed while the process is down. A catch-up backlog is queued no faster
-  than the outbound rate limit. `WA_SCHEDULER_MAX_ACTIVE` (default 100) caps schedules per
-  instance, and `scheduledAt` must fall within a year. The timezone is an IANA name, default
-  `America/Bahia`, stored in canonical form. Names that resolve to `UTC` are stored as `UTC`,
-  including `UTC`, `GMT`, `UCT`, `Zulu`, `Etc/UTC`, and `Etc/GMT`. Offsets, abbreviations such as
-  `EST`, and `Etc/*` zones that do not resolve to `UTC` are rejected. The first weekly or monthly
-  run is the first matching slot at or after `scheduledAt`. Due sends use the existing outbound
-  rate limiter. A row that was on time when the limiter held it is not later skipped. Sends that
-  share a due time are claimed in `next_run_at`, `created_at`, then insert-sequence order.
-  Scheduled-send queries use positional `?` parameters. Millisecond timestamps are `BIGINT`
-  in `SCHEDULED_MESSAGES_TABLE_DDL`. `SCHEDULED_MESSAGES_UPGRADE_SQL` adds `seq` on older
-  tables and belongs with the additive columns that run before the shared schema.
-  `SCHEDULED_MESSAGES_INDEX_DDL` runs after that upgrade. `seq` only breaks ties; it is not
-  unique. A claim updates a row only while it is still `active`.
-
+- Added five tools for one-shot and daily, weekly, or monthly scheduled sends
+  ([#139](https://github.com/delltrak/wamcp/issues/139), [#136](https://github.com/delltrak/wamcp/pull/136)).
+  Schedules persist in the existing SQLite database; `WA_SCHEDULER_ENABLED=false` by default.
+  Each schedule uses an IANA timezone (default `America/Bahia`), a one-year initial horizon,
+  and optional end/occurrence limits. Invalid RFC3339 calendar dates are rejected.
+  Pause and cancel remain available with the gate off. Missed occurrences follow `skip` or `send`.
+  Sends use the existing outbound limiter; only completed queue jobs count as successful
+  occurrences. Persisted job identities reconcile success/failure across restarts, and shutdown
+  waits for an active tick. Ambiguous or missing queue outcomes are never submitted again.
+  Failed recurring occurrences advance without consuming the success limit. This does not
+  guarantee exactly-once delivery across provider timeouts; real-account validation is pending.
+- Added optional webhook JID ignore rules with exact addresses, user-part wildcards and
+  chat-only domain patterns ([#140](https://github.com/delltrak/wamcp/issues/140),
+  [#159](https://github.com/delltrak/wamcp/pull/159)). Group sender phone aliases from Baileys
+  are retained for filtering even before contact mappings are stored. Message storage and
+  lifecycle events are unaffected; real-account validation remains pending.
+- Added `wa_mark_played` for stored incoming audio, voice notes, and video on Baileys
+  ([#143](https://github.com/delltrak/wamcp/issues/143), [#155](https://github.com/delltrak/wamcp/pull/155)).
+  Receipts are limited to user, hosted, and group chats. `WA_AUTO_MARK_PLAYED` defaults to
+  `false` and optionally sends the receipt after transcription without delaying its result.
+  Cloud API does not support played receipts; real-account receipt behavior remains unverified.
+- Added community hierarchy discovery and 16 administration tools for linked-group creation,
+  name/description/picture editing, scoped member lists, member/admin changes, join requests,
+  invitations (including V4), community settings, and queued text/media announcements to Avisos
+  ([#166](https://github.com/delltrak/wamcp/issues/166), [#167](https://github.com/delltrak/wamcp/pull/167)).
+  Administrative writes retain the existing write gates and permission checks; member removal
+  requires confirmation because it also affects linked groups. Cloud API explicitly rejects
+  unsupported community operations.
+- Added community metadata and join-request events to MCP notifications and outgoing webhooks,
+  with safe metadata filtering and snapshot deduplication. Avisos sends resolve the destination
+  from explicit hierarchy metadata and revalidate permissions and destination in the queue worker.
+  Real-account validation remains pending; community deactivation and visibility/non-admin
+  subgroup-creation controls are not implemented because upstream support is unverified.
 - Added Baileys instance lifecycle webhooks for connection, disconnect, pairing-code, and QR events,
   plus the read-only `wa_get_instance_status` tool. Pairing and QR challenge data is omitted from
   webhook payloads and status output.
@@ -53,6 +76,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Community discovery, description updates and invitation inspection/acceptance now use the
+  Baileys group helpers for standard group responses while verifying explicit community markers.
+  Missing creation/join acknowledgements remain unknown instead of reporting confirmed success
+  or triggering automatic retries. Provider resource-not-found errors are no longer mislabeled
+  as missing MCP instances.
+- Baileys message operations now resolve full stored keys, including group authorship and ownership.
+- Fast Baileys reconnects now persist `status`, `last_connected`, and `last_disconnected`.
+  Each socket open stores `connected` and `last_connected`. A close that ends that open stores
+  `disconnected` and `last_disconnected`, including automatic reconnects after `408` and `428`.
+  Repeated closes that never reach open still keep the original outage start, and a close from a
+  replaced socket does not move either timestamp. `wa_get_instance_status` and `GET /health` read
+  those stored values. Lifecycle webhook emission is unchanged.
+- Baileys keeps reconnecting after a non-logout close such as `unavailableService` (503). The
+  current socket is cleared, retries continue every 30s after the exponential cap for a paired
+  session, and only one reconnect timer and one connect attempt are pending. A session that never
+  paired keeps the bounded 10-attempt retry. The stored status stays `disconnected` until a live socket exists, and
+  the health check recovers a `connecting` row older than 2 minutes with no live socket when the
+  instance connected before. When the
+  backoff cap is reached, one additional `instance.disconnected` event is sent with
+  `willReconnect: true` and `reconnectInMs: 30000`.
 - App-state writes now run through a per-instance queue with configurable spacing and a resync
   preflight that requires a retrievable current key, a positive collection version, a 128-byte hash,
   and no Baileys-reported sync, decode, missing-key, or hash-verification failure. Successful writes
@@ -97,6 +140,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- `wa_send_group_mention_all` now sends Baileys' native group `@all` (`mentionAll`, encoded as
+  `contextInfo.nonJidMentions`) and does not list every participant. If that flag is unavailable,
+  the tool still mentions each current participant individually
+  ([#105](https://github.com/delltrak/wamcp/issues/105), [#114](https://github.com/delltrak/wamcp/pull/114)).
+  Notification delivery depends on WhatsApp and recipient settings; real-device notification
+  behavior has not been verified.
 - Gate private disappearing-message timers and all Baileys group creation, settings, membership,
   picture, invite, join, and join-request changes behind `WA_APP_STATE_WRITES_ENABLED`.
 - Added `WA_MARK_ONLINE_ON_CONNECT` to control whether Baileys marks the linked account online

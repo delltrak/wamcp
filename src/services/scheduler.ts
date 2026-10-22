@@ -6,6 +6,7 @@
 
 import { randomUUID } from "node:crypto";
 import Database from "better-sqlite3";
+import type { OutboundJobState } from "./message-queue.js";
 import {
   DEFAULT_BAILEYS_RATE_LIMIT,
   DEFAULT_CLOUD_RATE_LIMIT,
@@ -54,6 +55,7 @@ export type ScheduleEnqueue = (
   to: string,
   content: MessageContent,
   channel: ChannelType,
+  jobId: string,
 ) => Promise<{ jobId: string }>;
 
 export interface CreateScheduleInput {
@@ -108,6 +110,12 @@ export interface TickResult {
 export interface MessageSchedulerOptions {
   sqlite: Database.Database;
   enqueue: ScheduleEnqueue;
+  getJobState: (
+    instanceId: string,
+    jobId: string,
+    channel: ChannelType,
+  ) => Promise<OutboundJobState>;
+  removeJob?: (instanceId: string, jobId: string, channel: ChannelType) => Promise<void>;
   resolveChannel: (instanceId: string) => ChannelType;
   instanceExists?: (instanceId: string) => void;
   now?: () => number;
@@ -125,6 +133,8 @@ export interface MessageSchedulerOptions {
 export class MessageScheduler {
   private readonly store: ScheduleStore;
   private readonly enqueue: ScheduleEnqueue;
+  private readonly getJobState: MessageSchedulerOptions["getJobState"];
+  private readonly removeJob?: MessageSchedulerOptions["removeJob"];
   private readonly resolveChannel: (instanceId: string) => ChannelType;
   private readonly instanceExists?: (instanceId: string) => void;
   private readonly now: () => number;
@@ -138,6 +148,8 @@ export class MessageScheduler {
   constructor(options: MessageSchedulerOptions) {
     this.store = new ScheduleStore(options.sqlite, options.driver ?? "sqlite");
     this.enqueue = options.enqueue;
+    this.getJobState = options.getJobState;
+    this.removeJob = options.removeJob;
     this.resolveChannel = options.resolveChannel;
     this.instanceExists = options.instanceExists;
     this.now = options.now ?? (() => Date.now());
@@ -273,9 +285,8 @@ export class MessageScheduler {
   private async runTick(): Promise<TickResult> {
     if (!this.settings().enabled) return { dispatched: 0, skipped: 0 };
     const result: TickResult = { dispatched: 0, skipped: 0 };
-    for (const expired of await this.store.listExpiredLeases(this.now())) {
-      await this.advanceWithoutSend(expired, INTERRUPTED_REASON, "failed");
-      result.skipped += 1;
+    for (const running of await this.store.listRunning()) {
+      await this.reconcile(running);
     }
     const blocked = new Set<string>();
     for (let count = 0; count < SCHEDULER_MAX_PER_TICK; count++) {
@@ -307,6 +318,7 @@ export class MessageScheduler {
       );
       return "skipped";
     }
+    let dispatchStarted = false;
     try {
       if (!this.hasDispatchBudget(job.instanceId)) {
         await this.releaseClaim(job);
@@ -324,11 +336,15 @@ export class MessageScheduler {
       }
       const channel = this.resolveChannel(job.instanceId);
       const content = parsePayload(job.payloadJson);
-      const queued = await this.enqueue(job.instanceId, job.recipient, content, channel);
+      const jobId = `${job.id}-${job.leaseToken}`;
+      if (!(await this.store.setJobId(job.id, job.leaseToken, jobId))) return "skipped";
+      job.lastJobId = jobId;
+      dispatchStarted = true;
       this.noteDispatch(job.instanceId);
-      await this.markSent(job, queued.jobId);
+      await this.enqueue(job.instanceId, job.recipient, content, channel, jobId);
+      await this.reconcile(job);
       logger.info(
-        { scheduleId: job.id, instanceId: job.instanceId, jobId: queued.jobId },
+        { scheduleId: job.id, instanceId: job.instanceId, jobId },
         "Scheduled send queued",
       );
       return "sent";
@@ -336,6 +352,15 @@ export class MessageScheduler {
       const message = err instanceof Error ? err.message : String(err);
       if (isPermanent(err)) {
         await this.advanceWithoutSend(job, message, "failed");
+        return "skipped";
+      }
+      if (dispatchStarted) {
+        // Queue.add can fail after Redis accepted the job. Reconcile the persisted
+        // identity on a later tick; enqueueing a fresh job could send twice.
+        logger.warn(
+          { scheduleId: job.id, err: message },
+          "Scheduled send outcome pending reconciliation",
+        );
         return "skipped";
       }
       const attempts = job.attempts + 1;
@@ -356,7 +381,40 @@ export class MessageScheduler {
     }
   }
 
-  private async markSent(job: ScheduleRecord, jobId: string): Promise<void> {
+  private async reconcile(job: ScheduleRecord): Promise<void> {
+    if (!job.lastJobId) {
+      if (job.leaseUntil != null && job.leaseUntil <= this.now()) {
+        await this.advanceWithoutSend(job, INTERRUPTED_REASON, "failed");
+      }
+      return;
+    }
+    const channel = this.resolveChannel(job.instanceId);
+    const outcome = await this.getJobState(job.instanceId, job.lastJobId, channel);
+    if (outcome.state === "pending") return;
+    if (outcome.state === "missing") {
+      if (job.leaseUntil != null && job.leaseUntil <= this.now()) {
+        await this.advanceWithoutSend(
+          job,
+          "outbound job missing; delivery outcome unknown",
+          "failed",
+        );
+      }
+      return;
+    }
+    const changed =
+      outcome.state === "completed"
+        ? await this.markSent(job, job.lastJobId)
+        : await this.advanceWithoutSend(job, outcome.error, "failed");
+    if (changed && this.removeJob) {
+      try {
+        await this.removeJob(job.instanceId, job.lastJobId, channel);
+      } catch (err) {
+        logger.warn({ scheduleId: job.id, err }, "Could not remove reconciled scheduled job");
+      }
+    }
+  }
+
+  private async markSent(job: ScheduleRecord, jobId: string): Promise<boolean> {
     const now = this.now();
     const count = job.occurrenceCount + 1;
     const spec = specOf(job);
@@ -370,7 +428,7 @@ export class MessageScheduler {
         nextRunAt = next;
       }
     }
-    await this.store.finish({
+    return await this.store.finish({
       id: job.id,
       leaseToken: job.leaseToken,
       status,
@@ -389,10 +447,10 @@ export class MessageScheduler {
     job: ScheduleRecord,
     reason: string,
     terminalStatus: ScheduleStatus,
-  ): Promise<void> {
+  ): Promise<boolean> {
     const now = this.now();
     if (job.recurrence === "once") {
-      await this.store.finish({
+      return await this.store.finish({
         id: job.id,
         leaseToken: job.leaseToken,
         status: terminalStatus,
@@ -404,11 +462,10 @@ export class MessageScheduler {
         attempts: 0,
         now,
       });
-      return;
     }
     const next = nextOccurrence(specOf(job), now);
     if (next == null) {
-      await this.store.finish({
+      return await this.store.finish({
         id: job.id,
         leaseToken: job.leaseToken,
         status: "completed",
@@ -420,9 +477,8 @@ export class MessageScheduler {
         attempts: 0,
         now,
       });
-      return;
     }
-    await this.store.finish({
+    return await this.store.finish({
       id: job.id,
       leaseToken: job.leaseToken,
       status: "active",
@@ -513,8 +569,7 @@ export class MessageScheduler {
     // The row was not late when it was picked up. Waiting for the outbound
     // limiter must not turn that wait into a missed run.
     const nextRunAt = Math.max(job.nextRunAt, now);
-    if (await this.store.release(job.id, job.leaseToken, now, nextRunAt)) return;
-    await this.store.setStatus(job.instanceId, job.id, ["running"], "active", now);
+    await this.store.release(job.id, job.leaseToken, now, nextRunAt);
   }
 }
 
@@ -522,6 +577,7 @@ export function createIdleScheduler(): MessageScheduler {
   return new MessageScheduler({
     sqlite: new Database(":memory:"),
     enqueue: async () => ({ jobId: "idle" }),
+    getJobState: async () => ({ state: "missing" }),
     resolveChannel: () => "baileys",
     config: { enabled: false, missedPolicy: "skip", maxActive: DEFAULT_SCHEDULER_MAX_ACTIVE },
   });

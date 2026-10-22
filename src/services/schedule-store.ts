@@ -193,14 +193,21 @@ export class ScheduleStore {
     return result.changes > 0;
   }
 
-  listExpiredLeases(now: number): Awaitable<ScheduleRecord[]> {
+  listRunning(): Awaitable<ScheduleRecord[]> {
     const rows = this.sqlite
-      .prepare(
-        `SELECT * FROM scheduled_messages
-         WHERE status = 'running' AND lease_until IS NOT NULL AND lease_until <= ?`,
-      )
-      .all(now) as ScheduleRow[];
+      .prepare("SELECT * FROM scheduled_messages WHERE status = 'running'")
+      .all() as ScheduleRow[];
     return rows.map(mapRow);
+  }
+
+  /** Persist the outbound identity before Redis can accept the job. */
+  setJobId(id: string, leaseToken: string | null, jobId: string): Awaitable<boolean> {
+    const result = this.sqlite
+      .prepare(
+        "UPDATE scheduled_messages SET last_job_id = ? WHERE id = ? AND status = 'running' AND lease_token = ?",
+      )
+      .run(jobId, id, leaseToken);
+    return result.changes > 0;
   }
 
   setStatus(
@@ -345,7 +352,7 @@ export function claimNextScheduleSql(
       : "";
   const lockSql = dialect === "postgres" ? " FOR UPDATE SKIP LOCKED" : "";
   return `UPDATE scheduled_messages
-         SET status = 'running', lease_token = ?, lease_until = ?, updated_at = ?
+         SET status = 'running', lease_token = ?, lease_until = ?, updated_at = ?, last_job_id = NULL
          WHERE id = (
            SELECT id FROM scheduled_messages
            WHERE status = 'active' AND next_run_at <= ?

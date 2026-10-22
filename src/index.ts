@@ -23,6 +23,7 @@ import type { MetaWebhookPayload } from "./channels/cloud-api/cloud.events.js";
 import { installShutdownHandlers, SHUTDOWN_TIMEOUT_MS } from "./utils/shutdown.js";
 import { logger } from "./utils/logger.js";
 import { getAutoReadMode } from "./services/auto-read.js";
+import { loadAutoMarkPlayedConfig } from "./services/auto-mark-played.js";
 import { bootEventWebhook, type EventWebhookStatus } from "./services/event-webhook-config.js";
 import { buildHealthBody } from "./server/health.js";
 import { sqlite } from "./db/client.js";
@@ -70,6 +71,7 @@ function checkApiKey(req: IncomingMessage, res: ServerResponse): boolean {
 }
 
 async function initServices() {
+  loadAutoMarkPlayedConfig();
   getAutoReadMode();
 
   // Initialize services
@@ -90,8 +92,12 @@ async function initServices() {
 
   const scheduler = new MessageScheduler({
     sqlite,
-    enqueue: (instanceId, to, content, channel) =>
-      messageQueue.enqueueMessage(instanceId, to, content, channel),
+    enqueue: (instanceId, to, content, channel, jobId) =>
+      messageQueue.enqueueMessage(instanceId, to, content, channel, jobId),
+    getJobState: (instanceId, jobId, channel) =>
+      messageQueue.getMessageJobState(instanceId, jobId, channel),
+    removeJob: (instanceId, jobId, channel) =>
+      messageQueue.removeScheduledJob(instanceId, jobId, channel),
     resolveChannel: (instanceId) => instanceManager.getInstanceChannel(instanceId),
     instanceExists: (instanceId) => {
       instanceManager.getInstance(instanceId);
