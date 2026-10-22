@@ -18,10 +18,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- Added opt-in HTTP authentication and routing for remote MCP clients. `WA_MCP_OAUTH_ENABLED=false`
-  embeds an OAuth 2.1 authorization-code server with PKCE, discovery metadata, and dynamic client
+- Added opt-in HTTP authentication and routing for remote MCP clients. `WA_MCP_OAUTH_ENABLED=true`
+  enables an OAuth 2.1 authorization-code server with PKCE, discovery metadata, and dynamic client
   registration. `WA_BASIC_AUTH` accepts multiple users, `WA_BASE_PATH` prefixes the HTTP routes, and
-  the existing `WA_MCP_API_KEY` behavior is unchanged when the new settings are left unset.
+  the existing `WA_MCP_API_KEY` behavior is unchanged when the new settings are left unset
+  ([#150](https://github.com/delltrak/wamcp/issues/150), [#137](https://github.com/delltrak/wamcp/pull/137)).
+  Validation uses local HTTP clients; real remote-client authorization remains unverified.
 - Added optional webhook JID ignore rules with exact addresses, user-part wildcards and
   chat-only domain patterns ([#140](https://github.com/delltrak/wamcp/issues/140),
   [#159](https://github.com/delltrak/wamcp/pull/159)). Group sender phone aliases from Baileys
@@ -68,6 +70,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   configured or the event set is empty.
 
 ### Fixed
+
+- OAuth replay detection retains consumed code and refresh-token hashes while their family has
+  a live refresh grant, including after the original refresh token expires
+  ([#137](https://github.com/delltrak/wamcp/pull/137)).
 
 - Basic Auth password checks no longer block the event loop, and failed sign-in attempts on
   `POST /oauth/authorize` and on Basic authentication for `/mcp` back off per address and per user.

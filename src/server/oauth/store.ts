@@ -596,10 +596,28 @@ export class OAuthStore {
       .prepare(
         `DELETE FROM oauth_authorization_codes
          WHERE (used_at IS NULL AND expires_at <= ?)
-            OR (used_at IS NOT NULL AND created_at <= ?)`,
+            OR (used_at IS NOT NULL AND created_at <= ? AND NOT EXISTS (
+              SELECT 1 FROM oauth_tokens AS active
+              WHERE active.family_id = oauth_authorization_codes.family_id
+                AND active.token_type = 'refresh'
+                AND active.revoked_at IS NULL AND active.expires_at > ?
+            ))`,
       )
-      .run(nowSec, nowSec - REFRESH_TTL_SECONDS);
-    this.db.prepare("DELETE FROM oauth_tokens WHERE expires_at <= ?").run(nowSec);
+      .run(nowSec, nowSec - REFRESH_TTL_SECONDS, nowSec);
+    // Rotation extends the family beyond any single refresh token's lifetime.
+    // Keep consumed refresh hashes until that family no longer has a live grant,
+    // otherwise replay after the original expiry would not revoke its descendants.
+    this.db
+      .prepare(
+        `DELETE FROM oauth_tokens WHERE expires_at <= ?
+           AND (token_type != 'refresh' OR NOT EXISTS (
+             SELECT 1 FROM oauth_tokens AS active
+             WHERE active.family_id = oauth_tokens.family_id
+               AND active.token_type = 'refresh'
+               AND active.revoked_at IS NULL AND active.expires_at > ?
+           ))`,
+      )
+      .run(nowSec, nowSec);
   }
 
   private deleteUnusedClients(cutoffSec: number): void {

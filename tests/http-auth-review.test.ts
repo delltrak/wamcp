@@ -612,6 +612,80 @@ describe("access token rotation and user revocation", () => {
     store.close();
   });
 
+  it.each(["code", "refresh"])(
+    "retains %s replay detection while the token family is active",
+    (replay) => {
+      const store = openOAuthStore(":memory:");
+      try {
+        const client = clientRecord([REDIRECT], "web");
+        store.registerClient(client, "203.0.113.7");
+        const { verifier, challenge } = pkce();
+        const now = new Date("2026-10-20T00:00:00Z");
+        const code = store.issueAuthorizationCode(
+          {
+            clientId: client.id,
+            subject: "alice",
+            redirectUri: REDIRECT,
+            codeChallenge: challenge,
+            resource: RESOURCE,
+            scope: "mcp",
+          },
+          now,
+        );
+        const exchange = {
+          clientId: client.id,
+          code,
+          redirectUri: REDIRECT,
+          codeVerifier: verifier,
+          resource: RESOURCE,
+        };
+        const issued = store.exchangeAuthorizationCode(exchange, now);
+        const later = new Date(now.getTime() + 29 * 24 * 60 * 60 * 1000);
+        const rotated = store.rotateRefreshToken(
+          { clientId: client.id, refreshToken: issued.refreshToken, resource: RESOURCE },
+          later,
+        );
+        const afterOriginalExpiry = new Date(now.getTime() + 31 * 24 * 60 * 60 * 1000);
+        const current = store.rotateRefreshToken(
+          { clientId: client.id, refreshToken: rotated.refreshToken, resource: RESOURCE },
+          afterOriginalExpiry,
+        );
+        expect(
+          store.validateAccessToken(current.accessToken, RESOURCE, afterOriginalExpiry),
+        ).toBeDefined();
+        expect(() =>
+          replay === "code"
+            ? store.exchangeAuthorizationCode(exchange, afterOriginalExpiry)
+            : store.rotateRefreshToken(
+                { clientId: client.id, refreshToken: issued.refreshToken, resource: RESOURCE },
+                afterOriginalExpiry,
+              ),
+        ).toThrow(OAuthFlowError);
+        expect(
+          store.validateAccessToken(current.accessToken, RESOURCE, afterOriginalExpiry),
+        ).toBeUndefined();
+        expect(() =>
+          store.rotateRefreshToken(
+            { clientId: client.id, refreshToken: current.refreshToken, resource: RESOURCE },
+            afterOriginalExpiry,
+          ),
+        ).toThrow(OAuthFlowError);
+        const afterFamilyExpiry = new Date(now.getTime() + 62 * 24 * 60 * 60 * 1000);
+        store.registerClient(
+          {
+            ...clientRecord([REDIRECT], "web"),
+            createdAt: Math.floor(afterFamilyExpiry.getTime() / 1000),
+          },
+          "203.0.113.7",
+        );
+        expect(store.authorizationCodeCount()).toBe(0);
+        expect(JSON.parse(store.inspectionSnapshot()).tokens).toEqual([]);
+      } finally {
+        store.close();
+      }
+    },
+  );
+
   it("invalidates unused authorization codes when the user is revoked", () => {
     const store = openOAuthStore(":memory:");
     const client = clientRecord([REDIRECT], "web");
