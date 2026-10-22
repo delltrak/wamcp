@@ -29,6 +29,34 @@
       "when": 1792440653809,
       "tag": "0003_yummy_harry_osborn",
       "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "6",
+      "when": 1792467039964,
+      "tag": "0004_instance_webhooks",
+      "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "6",
+      "when": 1792468215206,
+      "tag": "0005_auto_reply_cooldowns",
+      "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "6",
+      "when": 1792468215207,
+      "tag": "0006_group_history_sends",
+      "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "6",
+      "when": 1792468215208,
+      "tag": "0007_scheduled_messages",
+      "breakpoints": true
     }
   ]
 }

@@ -39,6 +39,15 @@ jobs:
       - name: Type check
         run: npx tsc --noEmit
 
+      # Exercise real media conversion on one matrix leg; other runtimes still run
+      # the complete unit suite and codec-aware tests when codecs are available.
+      - name: Install media conversion codecs
+        if: matrix.node-version == '26.x'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y ffmpeg
+          ffmpeg -hide_banner -encoders 2>/dev/null | grep -q libwebp_anim
+
       - name: Test
         run: npm test
 

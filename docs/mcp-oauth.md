@@ -92,11 +92,15 @@ With `WA_BASE_PATH=/wamcp` and issuer `https://wa.example.com/wamcp`, applicatio
 https://wa.example.com/wamcp/mcp
 https://wa.example.com/wamcp/health
 https://wa.example.com/wamcp/cloud-webhook
+https://wa.example.com/wamcp/chatwoot/webhook
+https://wa.example.com/wamcp/dashboard
 https://wa.example.com/wamcp/oauth/register
 https://wa.example.com/wamcp/oauth/authorize
 https://wa.example.com/wamcp/oauth/token
 https://wa.example.com/wamcp/oauth/revoke
 ```
+
+Dashboard access retains its separate `WA_DASHBOARD_USERS` credentials and pairing CSRF checks. Its login limiter uses the same trusted-proxy and IPv6 `/64` address rules. OAuth storage remains separate from the application database and its migration sequence.
 
 RFC 8414 and RFC 9728 insert the path after the well-known prefix. The reverse proxy must route these root paths to WA MCP as well:
 

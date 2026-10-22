@@ -178,6 +178,20 @@ export const processedMessages = sqliteTable(
   (table) => [primaryKey({ columns: [table.instanceId, table.messageId] })],
 );
 
+// Direct-add stubs already turned into a group-history DM. Kept without a TTL so a
+// reconnect can redeliver the same stub without sending the digest again.
+export const groupHistorySends = sqliteTable(
+  "group_history_sends",
+  {
+    instanceId: text("instance_id")
+      .notNull()
+      .references(() => instances.id, { onDelete: "cascade" }),
+    messageId: text("message_id").notNull(),
+    sentAt: integer("sent_at").notNull(),
+  },
+  (table) => [primaryKey({ columns: [table.instanceId, table.messageId] })],
+);
+
 // ============================================================
 // CONTACTS
 // Cached contact information
@@ -362,6 +376,76 @@ export const pendingPollVotes = sqliteTable(
 );
 
 // ============================================================
+// SCHEDULED MESSAGES
+// One-shot and recurring outbound sends. Lives in the existing database file.
+// Runtime DDL declares millisecond timestamps and seq as BIGINT (64-bit on
+// both SQLite and Postgres). Drizzle's SQLite integer column is that same
+// 64-bit storage; migration 0007 spells those columns as bigint.
+// ============================================================
+export const scheduledMessages = sqliteTable(
+  "scheduled_messages",
+  {
+    id: text("id").primaryKey(),
+    instanceId: text("instance_id")
+      .notNull()
+      .references(() => instances.id, { onDelete: "cascade" }),
+    recipient: text("recipient").notNull(),
+    messageType: text("message_type", {
+      enum: ["text", "image", "video", "audio", "document", "sticker"],
+    }).notNull(),
+    payloadJson: text("payload_json").notNull(),
+    timezone: text("timezone").notNull(),
+    recurrence: text("recurrence", {
+      enum: ["once", "daily", "weekly", "monthly"],
+    }).notNull(),
+    scheduledAt: integer("scheduled_at").notNull(),
+    nextRunAt: integer("next_run_at").notNull(),
+    weekdaysJson: text("weekdays_json"),
+    dayOfMonth: integer("day_of_month"),
+    endAt: integer("end_at"),
+    occurrenceLimit: integer("occurrence_limit"),
+    occurrenceCount: integer("occurrence_count").notNull().default(0),
+    attempts: integer("attempts").notNull().default(0),
+    status: text("status", {
+      enum: ["active", "paused", "running", "completed", "cancelled", "failed", "skipped"],
+    }).notNull(),
+    leaseToken: text("lease_token"),
+    leaseUntil: integer("lease_until"),
+    lastRunAt: integer("last_run_at"),
+    lastJobId: text("last_job_id"),
+    lastError: text("last_error"),
+    createdAt: integer("created_at").notNull(),
+    updatedAt: integer("updated_at").notNull(),
+    seq: integer("seq").notNull().default(0),
+  },
+  (table) => [
+    index("idx_scheduled_messages_due_v2").on(
+      table.status,
+      table.nextRunAt,
+      table.createdAt,
+      table.seq,
+    ),
+    index("idx_scheduled_messages_instance").on(table.instanceId, table.status),
+  ],
+);
+
+// ============================================================
+// AUTO-REPLY COOLDOWNS
+// Last automatic reply per contact, shared across PN/LID aliases.
+// ============================================================
+export const autoReplyCooldowns = sqliteTable(
+  "auto_reply_cooldowns",
+  {
+    instanceId: text("instance_id")
+      .notNull()
+      .references(() => instances.id, { onDelete: "cascade" }),
+    contactKey: text("contact_key").notNull(),
+    lastReplyAt: integer("last_reply_at").notNull(),
+  },
+  (table) => [primaryKey({ columns: [table.instanceId, table.contactKey] })],
+);
+
+// ============================================================
 // VERSION CACHE
 // WhatsApp Web version auto-update (daily check)
 // ============================================================
@@ -370,6 +454,22 @@ export const waVersionCache = sqliteTable("wa_version_cache", {
   versionJson: text("version_json").notNull(),
   fetchedAt: integer("fetched_at").notNull(),
   isLatest: integer("is_latest").notNull().default(1),
+});
+
+// ============================================================
+// INSTANCE WEBHOOKS
+// Per-instance outgoing event webhook. Null events inherit the global list.
+// #142: auth_value is stored in plaintext. DDL lives in instance-webhooks-schema.ts.
+// ============================================================
+export const instanceWebhooks = sqliteTable("instance_webhooks", {
+  instanceId: text("instance_id")
+    .primaryKey()
+    .references(() => instances.id, { onDelete: "cascade" }),
+  url: text("url").notNull(),
+  authHeader: text("auth_header"),
+  authValue: text("auth_value"),
+  events: text("events"),
+  updatedAt: integer("updated_at").notNull(),
 });
 
 // ============================================================

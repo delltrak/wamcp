@@ -335,6 +335,7 @@ describe("outgoing event webhook events", () => {
       text: "hello",
       timestamp: 1_700_000_000,
       isForwarded: false,
+      isFromMe: false,
     });
   });
 
@@ -1832,7 +1833,12 @@ describe("outgoing event webhook delivery", () => {
     };
 
     await expect(
-      processEventWebhookJob(job, new Map([[destination.id, destination]]), 1_000, delivery),
+      processEventWebhookJob(
+        job,
+        new Map([[eventWebhookDestinationIdentity(destination), destination]]),
+        1_000,
+        delivery,
+      ),
     ).rejects.toThrow("Event webhook destination does not match this service configuration");
     expect(delivery).not.toHaveBeenCalled();
   });

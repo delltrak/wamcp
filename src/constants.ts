@@ -61,6 +61,23 @@ export const HEALTH_CHECK_INTERVAL_MS = 300_000; // 5 minutes
 /** A stored `connecting` status with no live socket is recovered after this age. */
 export const CONNECTING_STUCK_AFTER_MS = 120_000;
 
+// Scheduled sends. The worker stays off until WA_SCHEDULER_ENABLED=true.
+export const DEFAULT_SCHEDULER_TIMEZONE = "America/Bahia";
+export const DEFAULT_SCHEDULER_MISSED_POLICY = "skip";
+/** Active, paused, and running rows per instance. Override with WA_SCHEDULER_MAX_ACTIVE. */
+export const DEFAULT_SCHEDULER_MAX_ACTIVE = 100;
+/** scheduledAt, and the first matching slot, must fall inside this window. */
+export const SCHEDULER_MAX_HORIZON_MS = 365 * 24 * 60 * 60 * 1000;
+export const SCHEDULER_POLL_MS = 5_000;
+/** Due times older than this are missed runs. A short restart still sends. */
+export const SCHEDULER_ON_TIME_SLACK_MS = 120_000;
+export const SCHEDULER_LEASE_MS = 120_000;
+export const SCHEDULER_MAX_ATTEMPTS = 5;
+export const SCHEDULER_RETRY_DELAY_MS = 30_000;
+export const SCHEDULER_MAX_PER_TICK = 50;
+/** Matches the BullMQ outbound limiter window (messages per minute). */
+export const SCHEDULER_RATE_WINDOW_MS = 60_000;
+
 // Instance ID prefix
 export const INSTANCE_ID_PREFIX = "inst_";
 
@@ -81,6 +98,7 @@ export const MEDIA_LIMITS = {
 // MCP endpoint
 export const MCP_ENDPOINT = "/mcp";
 export const HEALTH_ENDPOINT = "/health";
+export const CHATWOOT_WEBHOOK_PATH = "/chatwoot/webhook";
 
 // Max base64 media size (bytes)
 export const MAX_BASE64_MEDIA_BYTES = 100 * 1024 * 1024; // 100 MB

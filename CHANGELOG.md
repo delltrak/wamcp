@@ -7,7 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- MP4 sticker conversion and video compression read the source from a private temporary file, so an
+  MP4 with the `moov` atom after `mdat` decodes. Image and video compression sends the original and
+  logs a warning when ffmpeg fails. PNG files with transparency are not re-encoded to JPEG. Image
+  edge, JPEG quality, and video edge and CRF are validated only when a message is compressed.
+  Cloud API uploads the original base64 bytes with their detected MIME type when compression
+  fails or offers no size reduction; original HTTPS links remain links
+  ([#133](https://github.com/delltrak/wamcp/pull/133)).
+
+### Added
+
+- `wa_send_sticker` accepts PNG, JPG, GIF, WebP, and short MP4 input and converts it to 512x512 WebP.
+  GIF and MP4 sources stay animated, MP4 stickers are capped at 10 seconds, and WhatsApp's 100 KB
+  static and 500 KB animated limits still apply. `wa_send_image` and `wa_send_video` can compress
+  before sending when `compress` is true or `WA_MEDIA_COMPRESS=true` (default `false`). `hd: true`
+  sends the original media. Image edge and JPEG quality, and video edge and CRF, are configurable
+  ([#144](https://github.com/delltrak/wamcp/issues/144), [#133](https://github.com/delltrak/wamcp/pull/133)).
+  Conversion is checked with local ffmpeg; delivery and rendering on real WhatsApp accounts
+  remain unverified.
+
 ### Changed
+
+- Added the optional Chatwoot API inbox bridge and local n8n community nodes
+  ([#152](https://github.com/delltrak/wamcp/issues/152), [#135](https://github.com/delltrak/wamcp/pull/135)).
+  The n8n trigger requires a fresh HMAC signature and emits only verified raw JSON; credential
+  tests authenticate through MCP and close the session without calling tools. Chatwoot contact
+  conflicts retry exact normalized phones, and conversation reuse requires matching instance/chat
+  metadata. HTTP clients use the installed Undici dispatcher. Synthetic/local HTTP validation
+  only; real Chatwoot, n8n, and WhatsApp delivery remain unverified, and n8n is not published to npm.
 
 - Updated Undici from 7.30.0 to 8.12.3 and paired outgoing webhook requests with its
   HTTP client, preserving compatibility with the new dispatcher contract on Node 24
@@ -23,7 +52,88 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   registration. `WA_BASIC_AUTH` accepts multiple users, `WA_BASE_PATH` prefixes the HTTP routes, and
   the existing `WA_MCP_API_KEY` behavior is unchanged when the new settings are left unset
   ([#150](https://github.com/delltrak/wamcp/issues/150), [#137](https://github.com/delltrak/wamcp/pull/137)).
+  Dashboard and Chatwoot routes follow the same base path; dashboard login limits honor trusted
+  proxies and IPv6 `/64` buckets while retaining separate credentials and pairing CSRF checks.
   Validation uses local HTTP clients; real remote-client authorization remains unverified.
+- Added five tools for one-shot and daily, weekly, or monthly scheduled sends
+  ([#139](https://github.com/delltrak/wamcp/issues/139), [#136](https://github.com/delltrak/wamcp/pull/136)).
+  Schedules persist in the existing SQLite database; `WA_SCHEDULER_ENABLED=false` by default.
+  Each schedule uses an IANA timezone (default `America/Bahia`), a one-year initial horizon,
+  and optional end/occurrence limits. Invalid RFC3339 calendar dates are rejected.
+  Pause and cancel remain available with the gate off. Missed occurrences follow `skip` or `send`.
+  Sends use the existing outbound limiter; only completed queue jobs count as successful
+  occurrences. Persisted job identities reconcile success/failure across restarts, and shutdown
+  waits for an active tick. Ambiguous or missing queue outcomes are never submitted again.
+  Failed recurring occurrences advance without consuming the success limit. This does not
+  guarantee exactly-once delivery across provider timeouts; real-account validation is pending.
+- Added an operations dashboard at `/dashboard`, disabled by default and protected by
+  separate Basic credentials, login throttling, CSP, and same-origin JSON mutation checks
+  ([#149](https://github.com/delltrak/wamcp/issues/149),
+  [#154](https://github.com/delltrak/wamcp/pull/154)). It shows redacted connection and webhook
+  status and can start pairing only for an existing unpaired Baileys instance. Stored
+  credentials that are empty, malformed, or omit a boolean `registered` fail closed.
+  It has no instance creation, logout, deletion, message sending, or credential reset action.
+  TLS termination is required for remote access; activity and login limits are process-local,
+  and real-account pairing remains unverified.
+- Added gated `wa_send_group_history_to_member` and opt-in automatic history digests for
+  direct-add stubs authored by this account ([#106](https://github.com/delltrak/wamcp/issues/106),
+  [#116](https://github.com/delltrak/wamcp/pull/116)). This Baileys-only workaround sends at most
+  five text chunks from 25–100 requested local messages. Current PN/LID membership, disappearing
+  timers, and unchanged shareable source messages are rechecked at delivery. Received edits, revocations,
+  and deletions are persisted with privacy restrictions preserved; view-once, individually disappearing, and unverifiable raw messages
+  are excluded. Automatic claims survive restart but can leave partial sends after an ambiguous
+  enqueue/crash; queue acceptance is not delivery, and pending workers resume lazily after restart.
+  Live-account behavior remains unverified, and approved joins encoded as own direct-add stubs
+  cannot be distinguished upstream.
+- Added an optional fixed auto-reply, off unless `WA_AUTO_REPLY_ENABLED=true`
+  ([#147](https://github.com/delltrak/wamcp/issues/147), [#158](https://github.com/delltrak/wamcp/pull/158)).
+  Recent incoming content is queued with per-contact/group cooldowns, per-instance limits,
+  PN/LID ignore aliases, and self/echo guards. The listener starts before reconnecting instances.
+  Pending enqueues block concurrent replies; cooldowns persist only after enqueue succeeds,
+  and failures release the reservation and rate slot for retry. Groups are opt-in.
+  Cooldowns track queue acceptance, not delivery; a crash between enqueue and persistence can
+  permit another reply. Multi-process coordination and real-account behavior remain unverified.
+- Added optional daily Baileys presence pulses, disabled by default, with bounded duration,
+  spacing, and a configurable time zone ([#145](https://github.com/delltrak/wamcp/issues/145),
+  [#156](https://github.com/delltrak/wamcp/pull/156)). Failed unavailable updates retry every
+  5 seconds while the same socket remains connected, including after activity takes over.
+  Disconnect cancels pending pulse timers; pulses do not override explicit availability in
+  `always` mode. Restarts replan the day, and DST days that cannot fit the configured window
+  are skipped. Real-account validation remains pending; presence timing offers no guarantee
+  against account restrictions.
+- Added optional `WA_PROXY_URL` ([#146](https://github.com/delltrak/wamcp/issues/146),
+  [#161](https://github.com/delltrak/wamcp/pull/161)) for a SOCKS5 or HTTP(S) proxy on the
+  Baileys WebSocket and media transfers. The connection stays direct when the variable is unset or empty. Proxy
+  credentials are redacted from logs, tool errors, and `GET /health`. Local fixture checks cover
+  routing and cleanup; live WhatsApp and external-proxy validation remain pending.
+- Added opt-in `wa_set_instance_webhook`, `wa_get_instance_webhook`, and
+  `wa_delete_instance_webhook` tools for per-instance event destinations, with global
+  replacement or merge and duplicate URL suppression
+  ([#142](https://github.com/delltrak/wamcp/issues/142), [#160](https://github.com/delltrak/wamcp/pull/160)).
+  Instance-only routing retains the shared HMAC secret and JID filters; reads and delivery
+  reject invalid stored URL/auth settings, and worker/batch identities isolate colliding IDs.
+  Deleted destinations invalidate queued delivery configuration. Authentication values remain
+  plaintext in SQLite and are omitted from tool results, logs and health. One configured
+  instance satisfies the process-wide required-webhook check; live webhook delivery remains
+  unverified, and unmatched URLs with differing global HMAC secrets remain unsigned.
+- Added opt-in Baileys webhooks and MCP notifications for group roster joins, label associations,
+  and newsletter membership, posts, and mute changes
+  ([#141](https://github.com/delltrak/wamcp/issues/141), [#157](https://github.com/delltrak/wamcp/pull/157)).
+  Grok Bot keeps these events separate from message batches. Newsletter post deduplication includes
+  the channel and suppresses stored append replays. Phone follow/mute notifications remain
+  best-effort; local newsletter history still has its existing instance/message-ID collision
+  limitation, and real-account validation remains pending.
+- Added read-only group-participant CSV export and Channel post media download
+  ([#148](https://github.com/delltrak/wamcp/issues/148), [#134](https://github.com/delltrak/wamcp/pull/134)).
+  CSV exports retain PN/LID identities, escape spreadsheet formulas, use private permissions, and
+  remove exports older than 24 hours on the next export. Saved-name lookup is capped at 5,000
+  identities and reports truncation. Export directories must not be symbolic links.
+  Channel downloads use rc14 `message_updates` with `since`/`after`, preserving numeric ID
+  precision; fallback lookup is capped at 100 posts. Raw and encrypted downloads are restricted to
+  the WhatsApp media CDN with redirects refused, a 60-second media timeout, and the configured
+  file size cap. Raw bytes require a matching SHA-256. Cloud API rejects both tools; real-account
+  validation remains pending.
+
 - Added optional webhook JID ignore rules with exact addresses, user-part wildcards and
   chat-only domain patterns ([#140](https://github.com/delltrak/wamcp/issues/140),
   [#159](https://github.com/delltrak/wamcp/pull/159)). Group sender phone aliases from Baileys
@@ -122,6 +232,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   one slot for a recent sign-in, and a rejected attempt still counts. The credential key is linked
   into place so it is never read empty. Back up `oauth.db.mac` with `oauth.db`; losing the key
   signs every session out.
+- ([#146](https://github.com/delltrak/wamcp/issues/146), [#161](https://github.com/delltrak/wamcp/pull/161))
+  Explicit default proxy ports `:80`/`:443` are accepted, and Baileys native-fetch downloads use
+  Undici 8’s compatibility wrapper. Percent-encoded proxy credentials are decoded before the
+  SOCKS5 handshake. A discarded dispatcher is destroyed directly, so a stuck request is aborted, and reconnect does not wait for
+  that cleanup. `disconnect()` logs a warning if that destroy fails. `WA_PROXY_URL` is validated at
+  startup. Usernames and passwords of 4 to 7 characters are redacted as whole words; values of 8 or
+  more characters are removed wherever they appear. Shorter ones are removed only from the proxy URL
+  and from a user:password pair. History-sync and app-state blob downloads use the proxy dispatcher.
+  Baileys rc14 drops download timeout signals; those timeouts remain unsupported.
 - Community discovery, description updates and invitation inspection/acceptance now use the
   Baileys group helpers for standard group responses while verifying explicit community markers.
   Missing creation/join acknowledgements remain unknown instead of reporting confirmed success
@@ -186,6 +305,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Chatwoot maps an attachment that exceeds the remaining reply budget to `attachment_budget`
+  when the pinned download rejects it for size. Shutdown drains those replies before closing
+  the outbound queue and answers `503` to new webhooks. A full delivery-id cache returns `503`
+  instead of dropping a live id. `private: "true"` is treated as a private note.
+- Chatwoot replies accept `@lid` chats again, ignore `@newsletter` destinations with HTTP 200,
+  and return `422` when the instance does not exist before accepting the webhook. A background
+  download or queue failure posts a private note. Attachments past the 16 MB budget are reported
+  instead of dropped quietly. Shutdown waits up to 5 seconds for those replies.
+- The n8n WA MCP Trigger now requires Webhook Secret. An unsigned delivery is answered HTTP 401
+  and does not start a workflow. Existing flows that left the secret empty stop receiving events
+  until the node secret matches `WA_EVENT_WEBHOOK_SECRET`.
+- `WA_CHATWOOT_ALLOW_LEGACY_SECRET` defaults to `false`. `?secret=` and the older Chatwoot secret
+  headers are ignored unless it is `true`. `WA_CHATWOOT_BLOCK_GROUP_REPLIES` defaults to `false`
+  and drops agent replies whose destination is a group.
 - `wa_send_group_mention_all` now sends Baileys' native group `@all` (`mentionAll`, encoded as
   `contextInfo.nonJidMentions`) and does not list every participant. If that flag is unavailable,
   the tool still mentions each current participant individually
