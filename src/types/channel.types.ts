@@ -439,6 +439,33 @@ export interface GroupMetadata {
   ephemeralDuration: number | null;
   inviteCode: string | null;
   createdAt: number | null;
+  /** null means the backend did not supply this information. */
+  isCommunity?: boolean | null;
+  isCommunityAnnounce?: boolean | null;
+  linkedParent?: string | null;
+  joinApprovalMode?: boolean | null;
+  memberAddMode?: boolean | null;
+}
+
+export interface CommunityLinkedGroup {
+  jid: string;
+  subject: string;
+  size: number | null;
+  creation: number | null;
+  owner: string | null;
+  isCommunityAnnounce: boolean | null;
+}
+
+export interface CommunityHierarchy {
+  community: GroupMetadata;
+  groups: CommunityLinkedGroup[];
+  /** Only a unique, positively identified announcement group is returned. */
+  announcementGroupJid: string | null;
+  announcementResolution: "identified" | "unavailable" | "ambiguous";
+  /** The server may hide groups that this account cannot see. */
+  visibility: "server_visible";
+  unresolvedGroupJids: string[];
+  omittedGroupCount: number;
 }
 
 export interface GroupParticipant {

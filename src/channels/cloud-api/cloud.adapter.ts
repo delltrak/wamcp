@@ -26,6 +26,7 @@ import type {
   Chat,
   Message,
   GroupMetadata,
+  CommunityHierarchy,
   ChatModification,
   GroupModification,
   ParticipantAction,
@@ -838,6 +839,10 @@ export class CloudApiAdapter implements ChannelAdapter {
 
   async getCommunityMetadata(_communityId: string): Promise<GroupMetadata> {
     throw new Error("Community management is only available on Baileys instances");
+  }
+
+  async getCommunityHierarchy(_communityId: string): Promise<CommunityHierarchy> {
+    throw new Error("Community hierarchy is not supported on Cloud API; use a Baileys instance");
   }
 
   async linkGroupToCommunity(_groupId: string, _communityId: string): Promise<void> {

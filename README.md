@@ -36,7 +36,7 @@
 
 **WA MCP** is a WhatsApp MCP server built with TypeScript that gives AI agents full access to WhatsApp through the [Model Context Protocol](https://modelcontextprotocol.io). It supports both **Baileys** (WhatsApp Web) and **Meta Cloud API** as dual-channel backends, deployable with **Docker** in a single command.
 
-Your agent connects once and auto-discovers **137 tools**, **10 resources**, and **15 real-time events** — zero configuration, zero REST wrappers, zero glue code.
+Your agent connects once and auto-discovers **138 tools**, **10 resources**, and **15 real-time events** — zero configuration, zero REST wrappers, zero glue code.
 
 ```
 Your AI Agent ←→ MCP Protocol ←→ WA MCP ←→ WhatsApp
@@ -82,7 +82,7 @@ from google.adk.tools.mcp_tool import McpToolset
 
 tools = McpToolset(url="http://localhost:3000/mcp")
 
-# Agent auto-discovers 137 WhatsApp tools
+# Agent auto-discovers 138 WhatsApp tools
 # wa_create_instance, wa_send_text, wa_send_image, ...
 ```
 
@@ -146,7 +146,7 @@ Add to your `claude_desktop_config.json`:
 
 ## 🛠️ Tools
 
-WA MCP exposes **137 tools** across 15 domains. All tools use the `wa_` prefix.
+WA MCP exposes **138 tools** across 15 domains. All tools use the `wa_` prefix.
 
 <details>
 <summary>📋 <strong>Instance Management</strong> (9 tools)</summary>
@@ -379,7 +379,7 @@ this operation.
 </details>
 
 <details>
-<summary>🏘️ <strong>Business &amp; Communities</strong> (15 tools)</summary>
+<summary>🏘️ <strong>Business &amp; Communities</strong> (16 tools)</summary>
 
 | Tool | Description |
 | ---- | ----------- |
@@ -389,6 +389,7 @@ this operation.
 | `wa_create_community` | Create a community (Baileys, gated write) |
 | `wa_list_communities` | List communities (Baileys) |
 | `wa_get_community_details` | Get community metadata (Baileys) |
+| `wa_get_community_hierarchy` | Read linked groups and resolve Avisos when visible (Baileys, read-only) |
 | `wa_community_link_group` / `wa_community_unlink_group` | Link or unlink a group (Baileys, gated write) |
 | `wa_leave_community` | Leave a community (Baileys, gated write) |
 | `wa_get_catalog` | List catalog products (Baileys) |
@@ -399,6 +400,12 @@ this operation.
 | `wa_get_order_details` | Read order details (Baileys) |
 
 </details>
+
+Community support is partial. `wa_get_community_hierarchy` returns server-visible linked groups,
+including summaries of groups the account may not have joined. It identifies Avisos only from
+explicit community-announcement metadata, never from a group name or admin-only messaging.
+Unknown classifications remain `null`; the result is not a guarantee of a complete community roster.
+See the [community management roadmap](docs/COMMUNITIES.md) for supported operations and remaining work.
 
 Baileys rc14 has no quick-reply list API, and this server does not store quick-reply sync actions locally. Use the WhatsApp Business app to find an existing reply's timestamp before editing or deleting it.
 
@@ -1000,7 +1007,7 @@ src/
 ├── index.ts                     # Entry point (HTTP/stdio)
 ├── constants.ts                 # Defaults and limits
 ├── server/mcp.ts                # MCP server setup
-├── tools/                       # 🔧 137 MCP tools (15 files)
+├── tools/                       # 🔧 138 MCP tools (15 files)
 ├── resources/                   # 📖 10 MCP resources (8 files)
 ├── notifications/events.ts      # 📡 15 documented event types
 ├── channels/

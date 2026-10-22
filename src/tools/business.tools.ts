@@ -16,6 +16,7 @@ import {
   CreateCommunitySchema,
   ListCommunitiesSchema,
   GetCommunityDetailsSchema,
+  GetCommunityHierarchySchema,
   LinkCommunityGroupSchema,
   UnlinkCommunityGroupSchema,
   LeaveCommunitySchema,
@@ -42,7 +43,9 @@ function registerBusinessTool<S extends z.ZodObject>(
   inputSchema: S,
   action: (adapter: ChannelAdapter, params: z.infer<S>) => Promise<unknown>,
 ): void {
-  server.registerTool(name, { description, inputSchema: inputSchema.shape }, async (rawParams) => {
+  // Keep the Zod object intact: passing .shape loses strict unknown-key validation.
+  const schema: z.ZodObject = inputSchema;
+  server.registerTool(name, { description, inputSchema: schema }, async (rawParams) => {
     const params = rawParams as z.infer<S> & { instanceId: string };
     const log = createRequestLogger(name, params.instanceId);
     const start = Date.now();
@@ -115,6 +118,15 @@ export function registerBusinessTools(server: McpServer, instanceManager: Instan
     "Get community metadata through a Baileys w:g2 IQ query.",
     GetCommunityDetailsSchema,
     (adapter, params) => adapter.getCommunityMetadata(params.communityId),
+  );
+
+  registerBusinessTool(
+    server,
+    instanceManager,
+    "wa_get_community_hierarchy",
+    "Read a community and its server-visible linked groups, including groups the account may not have joined. Resolve the Avisos announcement group only when its explicit metadata is available. Null classification means unknown, not a regular group. Read-only; Baileys only.",
+    GetCommunityHierarchySchema,
+    (adapter, params) => adapter.getCommunityHierarchy(params.communityId),
   );
 
   registerBusinessTool(

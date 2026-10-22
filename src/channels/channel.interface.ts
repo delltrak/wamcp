@@ -21,6 +21,7 @@ import type {
   Chat,
   Message,
   GroupMetadata,
+  CommunityHierarchy,
   ChatModification,
   GroupModification,
   ParticipantAction,
@@ -169,6 +170,7 @@ export interface ChannelAdapter {
   createCommunity(subject: string, description?: string): Promise<GroupMetadata | null>;
   listCommunities(): Promise<Record<string, GroupMetadata>>;
   getCommunityMetadata(communityId: string): Promise<GroupMetadata>;
+  getCommunityHierarchy(communityId: string): Promise<CommunityHierarchy>;
   linkGroupToCommunity(groupId: string, communityId: string): Promise<void>;
   unlinkGroupFromCommunity(groupId: string, communityId: string): Promise<void>;
   leaveCommunity(communityId: string): Promise<void>;

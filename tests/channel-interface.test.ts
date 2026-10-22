@@ -61,6 +61,7 @@ const CHANNEL_ADAPTER_METHODS: (keyof ChannelAdapter)[] = [
   "createCommunity",
   "listCommunities",
   "getCommunityMetadata",
+  "getCommunityHierarchy",
   "linkGroupToCommunity",
   "unlinkGroupFromCommunity",
   "leaveCommunity",

@@ -20,7 +20,7 @@
    - [Message Search](#210-message-search-1-tool)
    - [WhatsApp Business Labels](#211-whatsapp-business-labels-8-tools)
    - [WhatsApp Events](#212-whatsapp-events-2-tools)
-   - [Business, Communities, and Catalog](#213-business-communities-and-catalog-15-tools)
+   - [Business, Communities, and Catalog](#213-business-communities-and-catalog-16-tools)
 3. [Resources Reference](#3-resources-reference)
 4. [Notifications Reference](#4-notifications-reference)
 5. [Error Handling](#5-error-handling)
@@ -110,7 +110,7 @@ Tools marked **Baileys only** are not available on Cloud API instances.
 
 ## 2. Tools Reference
 
-WA MCP exposes **137 tools** grouped by domain. All tools return MCP-standard responses.
+WA MCP exposes **138 tools** grouped by domain. All tools return MCP-standard responses.
 
 ### Success Response Format
 
@@ -2591,7 +2591,7 @@ answer the event again to create a new response.
 
 ---
 
-### 2.13 Business, Communities, and Catalog (15 tools)
+### 2.13 Business, Communities, and Catalog (16 tools)
 
 These operations require Baileys. Cloud API calls return unsupported-operation errors. Community
 changes use the group write gate (`WA_GROUP_WRITES_ENABLED=true` or
@@ -2606,6 +2606,7 @@ changes use the group write gate (`WA_GROUP_WRITES_ENABLED=true` or
 | `wa_create_community`        | `instanceId`, `name`, optional `description`                                                                 | Create a community. Gated account/server write.       |
 | `wa_list_communities`        | `instanceId`                                                                                                | List participating communities.                       |
 | `wa_get_community_details`   | `instanceId`, `communityId`                                                                                 | Read community metadata.                              |
+| `wa_get_community_hierarchy` | `instanceId`, `communityId` | Read parent metadata, linked groups, and the identifiable Avisos destination. Read-only. |
 | `wa_community_link_group`    | `instanceId`, `communityId`, `groupId`                                                                       | Link an existing group. Gated write.                 |
 | `wa_community_unlink_group`  | `instanceId`, `communityId`, `groupId`                                                                       | Unlink a group. Gated write.                          |
 | `wa_leave_community`         | `instanceId`, `communityId`                                                                                 | Leave a community. Gated write.                       |
@@ -2615,6 +2616,36 @@ changes use the group write gate (`WA_GROUP_WRITES_ENABLED=true` or
 | `wa_update_catalog_product`  | `instanceId`, `productId`, product fields and `images`                                                       | Replace fields/images. Gated write.                  |
 | `wa_delete_catalog_products` | `instanceId`, `productIds`                                                                                  | Delete products. Gated account/server write.        |
 | `wa_get_order_details`       | `instanceId`, `orderId`, `tokenBase64`                                                                       | Read details using the token from the order message. |
+
+#### Community hierarchy
+
+`wa_get_community_hierarchy` accepts a community parent ID (bare numeric ID or `@g.us` JID).
+It rejects ordinary groups, subgroups, and parents without an explicit community marker.
+It requires a connected Baileys account but does not require either write flag.
+
+Response fields:
+
+| Field | Meaning |
+| --- | --- |
+| `community` | Existing group metadata shape plus `isCommunity`, `isCommunityAnnounce`, `linkedParent`, `joinApprovalMode`, and `memberAddMode`. Missing backend fields are `null`. |
+| `groups` | Deduplicated server-visible linked groups with `jid`, `subject`, `size`, `creation`, `owner`, and nullable `isCommunityAnnounce`. Unavailable counts and timestamps are `null`, not zero. |
+| `announcementGroupJid` | A unique positively identified Avisos JID, or `null`. Never inferred from `announce`, a group name, or list order. |
+| `announcementResolution` | `identified`, `unavailable`, or `ambiguous` (multiple positive matches). |
+| `visibility` | Always `server_visible`; this is not a complete membership or visibility guarantee. |
+| `unresolvedGroupJids` | Groups whose announcement classification is unknown. This does not prove whether the account is a member. |
+| `omittedGroupCount` | Entries with missing/invalid IDs or incorrectly referencing the parent itself. |
+
+The linked-groups query supplies summaries, including groups outside the participating list when
+visible. One bulk participating-groups query provides explicit announcement markers; there is no
+metadata request for each subgroup. Missing or conflicting parent metadata leaves classification
+unknown. A failed query returns an error, not an empty successful list. The upstream helper also
+performs its own parent metadata lookup. Reads are separate requests, not an atomic snapshot.
+
+The five additional metadata fields also appear in existing community detail/list and group detail
+responses. Existing fields retain their meanings. Business tool schemas retain strict validation
+through MCP registration, rejecting extra properties rather than silently stripping them.
+
+See [Community management](COMMUNITIES.md) for the implementation and validation roadmap.
 
 Quick reply create/edit/delete call Baileys `addOrEditQuickReply` or `removeQuickReply`, which use
 `chatModify` → `appPatch` and the app-state preflight described above. They are blocked unless
@@ -3361,7 +3392,7 @@ Add to your Claude Desktop MCP configuration:
 }
 ```
 
-Once configured, the client will auto-discover all 137 WA MCP tools and can interact with WhatsApp directly.
+Once configured, the client will auto-discover all 138 WA MCP tools and can interact with WhatsApp directly.
 
 ### 6.3 LangChain (Python)
 
@@ -3374,7 +3405,7 @@ toolkit = MCPToolkit(
 )
 
 tools = toolkit.get_tools()
-# tools now contains all 137 WA MCP tools, ready for any LangChain agent
+# tools now contains all 138 WA MCP tools, ready for any LangChain agent
 ```
 
 ---
@@ -3396,9 +3427,9 @@ tools = toolkit.get_tools()
 | Profile Management                | 7     | Both                                 |
 | Status / Stories                  | 4     | Baileys only                         |
 | Newsletter / Channels             | 10    | Baileys only                         |
-| Business, Communities, and Catalog| 15    | Baileys only                         |
+| Business, Communities, and Catalog| 16    | Baileys only                         |
 | Call Management                   | 1     | Baileys only                         |
-| **Total**                         | **137** |                                    |
+| **Total**                         | **138** |                                    |
 
 | Resources     | 10  |
 | ------------- | --- |

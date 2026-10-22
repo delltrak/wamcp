@@ -60,6 +60,8 @@ import type {
   Message,
   GroupSummary,
   GroupMetadata,
+  CommunityHierarchy,
+  CommunityLinkedGroup,
   CreateGroupFromGroupResponse,
   ChatModification,
   GroupModification,
@@ -147,7 +149,7 @@ import { createChildLogger } from "../../utils/logger.js";
 import { scheduleBaileysMessagesRead } from "../../services/auto-read.js";
 import { QuotedMessageResolutionError } from "../../utils/quoted-message.js";
 import { isValidStatusRecipient } from "../../utils/validation.js";
-import { normalizeGroupJid } from "../../utils/group-jid.js";
+import { isValidGroupId, normalizeGroupJid } from "../../utils/group-jid.js";
 import { MediaService } from "../../services/media.js";
 import {
   isOggContainer,
@@ -3635,6 +3637,11 @@ export class BaileysAdapter implements ChannelAdapter {
       ephemeralDuration: meta.ephemeralDuration ?? null,
       inviteCode: null,
       createdAt: meta.creation ?? null,
+      isCommunity: meta.isCommunity ?? null,
+      isCommunityAnnounce: meta.isCommunityAnnounce ?? null,
+      linkedParent: meta.linkedParent ?? null,
+      joinApprovalMode: meta.joinApprovalMode ?? null,
+      memberAddMode: meta.memberAddMode ?? null,
     };
   }
 
@@ -3841,6 +3848,66 @@ export class BaileysAdapter implements ChannelAdapter {
     const sock = this.getSock();
     const metadata = await sock.communityMetadata(normalizeGroupJid(communityId));
     return this.normalizeGroupMetadata(metadata);
+  }
+
+  async getCommunityHierarchy(communityId: string): Promise<CommunityHierarchy> {
+    const jid = normalizeGroupJid(communityId);
+    const sock = this.getSock();
+    // The upstream linked-groups helper treats any group without a parent as a
+    // community. Verify the explicit marker before calling it.
+    const metadata = await sock.groupMetadata(jid);
+    if (metadata.id !== jid || metadata.isCommunity !== true || metadata.linkedParent) {
+      throw new Error("The supplied communityId could not be verified as a WhatsApp community");
+    }
+    const linked = await sock.communityFetchLinkedGroups(jid);
+    if (linked.communityJid !== jid) {
+      throw new Error("WhatsApp returned a different community for the requested hierarchy");
+    }
+    // One bulk query avoids one metadata request per linked group. It can only
+    // classify groups whose metadata is visible to the connected account.
+    const participating = await sock.groupFetchAllParticipating();
+    const knownGroups = new Map(Object.values(participating).map((group) => [group.id, group]));
+    const groups = new Map<string, CommunityLinkedGroup>();
+    let omittedGroupCount = 0;
+    for (const group of linked.linkedGroups) {
+      if (!group.id || !isValidGroupId(group.id)) {
+        omittedGroupCount += 1;
+        continue;
+      }
+      const groupJid = normalizeGroupJid(group.id);
+      if (groupJid === jid) {
+        omittedGroupCount += 1;
+        continue;
+      }
+      const known = knownGroups.get(groupJid);
+      const matchesParent = known?.linkedParent === jid && known.isCommunity !== true;
+      groups.set(groupJid, {
+        jid: groupJid,
+        subject: group.subject ?? "",
+        size: group.size ?? null,
+        creation: group.creation ?? null,
+        owner: group.owner ?? null,
+        isCommunityAnnounce: matchesParent ? (known.isCommunityAnnounce ?? null) : null,
+      });
+    }
+    const visibleGroups = [...groups.values()];
+    const announcements = visibleGroups.filter((group) => group.isCommunityAnnounce === true);
+    return {
+      community: await this.normalizeGroupMetadata(metadata),
+      groups: visibleGroups,
+      announcementGroupJid: announcements.length === 1 ? announcements[0]!.jid : null,
+      announcementResolution:
+        announcements.length === 1
+          ? "identified"
+          : announcements.length > 1
+            ? "ambiguous"
+            : "unavailable",
+      visibility: "server_visible",
+      unresolvedGroupJids: visibleGroups
+        .filter((group) => group.isCommunityAnnounce === null)
+        .map((group) => group.jid),
+      omittedGroupCount,
+    };
   }
 
   async linkGroupToCommunity(groupId: string, communityId: string): Promise<void> {
