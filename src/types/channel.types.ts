@@ -417,6 +417,8 @@ export interface Message {
   mediaMimetype?: string | null;
   mediaFileName?: string | null;
   mediaSize?: number | null;
+  mediaCaption?: string | null;
+  caption?: string | null;
   mimeType?: string | null;
   fileName?: string | null;
   size?: number | null;
@@ -427,6 +429,13 @@ export interface Message {
   isForwarded: boolean;
   status: MessageDeliveryStatus;
   timestamp: number;
+  /** True when the stored raw message is view-once. The digest must not copy it. */
+  viewOnce?: boolean;
+  /** Disappearing-message content, even if the chat timer was subsequently disabled. */
+  ephemeral?: boolean;
+  /** Stored raw payload could not be checked for history-sharing restrictions. */
+  historySharingBlocked?: boolean;
+  pushName?: string | null;
   starred?: boolean;
   labels?: BusinessLabel[];
 }
@@ -695,6 +704,9 @@ export interface NormalizedGroupParticipantsEvent {
   groupId: string;
   action: ParticipantAction | "modify";
   participants: string[];
+  participantAliases?: string[][];
+  author?: string | null;
+  authorPn?: string | null;
 }
 
 export interface NormalizedContactUpdateEvent {

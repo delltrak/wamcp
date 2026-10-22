@@ -43,6 +43,13 @@
       "when": 1792468215206,
       "tag": "0005_auto_reply_cooldowns",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "6",
+      "when": 1792468215207,
+      "tag": "0006_group_history_sends",
+      "breakpoints": true
     }
   ]
 }

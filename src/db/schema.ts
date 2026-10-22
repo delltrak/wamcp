@@ -178,6 +178,20 @@ export const processedMessages = sqliteTable(
   (table) => [primaryKey({ columns: [table.instanceId, table.messageId] })],
 );
 
+// Direct-add stubs already turned into a group-history DM. Kept without a TTL so a
+// reconnect can redeliver the same stub without sending the digest again.
+export const groupHistorySends = sqliteTable(
+  "group_history_sends",
+  {
+    instanceId: text("instance_id")
+      .notNull()
+      .references(() => instances.id, { onDelete: "cascade" }),
+    messageId: text("message_id").notNull(),
+    sentAt: integer("sent_at").notNull(),
+  },
+  (table) => [primaryKey({ columns: [table.instanceId, table.messageId] })],
+);
+
 // ============================================================
 // CONTACTS
 // Cached contact information

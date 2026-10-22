@@ -36,7 +36,7 @@
 
 **WA MCP** is a WhatsApp MCP server built with TypeScript that gives AI agents full access to WhatsApp through the [Model Context Protocol](https://modelcontextprotocol.io). It supports both **Baileys** (WhatsApp Web) and **Meta Cloud API** as dual-channel backends, deployable with **Docker** in a single command.
 
-Your agent connects once and auto-discovers **157 tools**, **10 resources**, and **22 real-time events** — zero configuration, zero REST wrappers, zero glue code. Three instance webhook tools are added when `WA_INSTANCE_WEBHOOK_TOOLS_ENABLED=true`.
+Your agent connects once and auto-discovers **158 tools**, **10 resources**, and **22 real-time events** — zero configuration, zero REST wrappers, zero glue code. Three instance webhook tools are added when `WA_INSTANCE_WEBHOOK_TOOLS_ENABLED=true`.
 
 ```
 Your AI Agent ←→ MCP Protocol ←→ WA MCP ←→ WhatsApp
@@ -82,7 +82,7 @@ from google.adk.tools.mcp_tool import McpToolset
 
 tools = McpToolset(url="http://localhost:3000/mcp")
 
-# Agent auto-discovers 157 WhatsApp tools
+# Agent auto-discovers 158 WhatsApp tools
 # wa_create_instance, wa_send_text, wa_send_image, ...
 ```
 
@@ -146,7 +146,7 @@ Add to your `claude_desktop_config.json`:
 
 ## 🛠️ Tools
 
-WA MCP exposes **157 tools** across 16 domains. All tools use the `wa_` prefix.
+WA MCP exposes **158 tools** across 16 domains. All tools use the `wa_` prefix.
 `WA_INSTANCE_WEBHOOK_TOOLS_ENABLED=true` adds the three #142 instance webhook tools.
 
 <details>
@@ -282,7 +282,7 @@ WA MCP exposes **157 tools** across 16 domains. All tools use the `wa_` prefix.
 </details>
 
 <details>
-<summary>👥 <strong>Groups</strong> (27 tools)</summary>
+<summary>👥 <strong>Groups</strong> (28 tools)</summary>
 
 | Tool                           | Description                   |
 | ------------------------------ | ----------------------------- |
@@ -295,6 +295,7 @@ WA MCP exposes **157 tools** across 16 domains. All tools use the `wa_` prefix.
 | `wa_create_group`              | Create group                  |
 | `wa_create_group_from_group`   | Create a group from another group's members |
 | `wa_group_add_participants`    | Add members                   |
+| `wa_send_group_history_to_member` | Send recent local group history to a member's DM (Baileys, gated, queued) |
 | `wa_group_remove_participants` | Remove members                |
 | `wa_group_promote`             | Promote to admin              |
 | `wa_group_demote`              | Demote from admin             |
@@ -313,6 +314,14 @@ WA MCP exposes **157 tools** across 16 domains. All tools use the `wa_` prefix.
 | `wa_group_remove_picture`      | Remove group picture (Baileys) |
 | `wa_group_join_approval_mode`  | Set join-request approval mode (Baileys, gated write) |
 | `wa_group_member_add_mode`     | Set who can add members (Baileys, gated write) |
+
+Group-history digests require current PN/LID membership and skip revoked, view-once,
+disappearing, and unverifiable stored messages. The worker revalidates membership and source
+content before each chunk. `chunksSent` means queued, not delivered. Automatic join sharing
+is off by default, uses durable stub claims, and may remain partial after a crash or enqueue
+failure. Pending outbound jobs resume lazily after restart when the instance's worker starts.
+See [delivery limits](docs/API_REFERENCE.md#24-group-management-28-tools); live-account
+validation remains pending.
 
 </details>
 
@@ -847,6 +856,8 @@ Copy `.env.example` to `.env` and configure:
 | `WA_BAILEYS_EVENT_BUFFER_STALL_MS` | `60000` | Time a Baileys event buffer may remain active after connect before the watchdog flushes it |
 | `WA_APP_STATE_WRITES_ENABLED` | `false`                 | Enable protected Baileys app-state patches and remaining gated account/server changes |
 | `WA_GROUP_WRITES_ENABLED` | `false` | Enable Baileys group, community, and Channel server writes without enabling app-state patches |
+| `WA_GROUP_HISTORY_ON_JOIN` | `false` | Automatically DM a new member a local group-history digest after a `GROUP_PARTICIPANT_ADD` stub authored by this account; requires `WA_GROUP_WRITES_ENABLED=true`. Only `true` or `false` |
+| `WA_GROUP_HISTORY_ON_JOIN_COUNT` | `50` | Integer count of local messages in automatic digests, clamped to `25`–`100`. Any other value fails startup |
 | `WA_APP_STATE_MIN_INTERVAL_MS` | `1500` | Minimum delay between app-state write attempts per instance; accepts `0` to disable spacing |
 | `WA_PRESENCE_MODE` | `on_activity` | Baileys presence policy: `on_activity` marks online around sends and typing/recording indicators; `always` preserves the legacy behavior |
 | `WA_PRESENCE_IDLE_SECONDS` | `30` | Seconds after activity before Baileys presence returns to unavailable; must be a positive integer no greater than `2147483` |
@@ -1203,6 +1214,33 @@ group/server operations that share that gate; member-label tools specifically re
 catalog reads, order reads, blocklist, and About calls remain available.
 Normal message sends, read receipts, and app-state reads/resyncs remain available as well.
 
+`wa_send_group_history_to_member` is a workaround for Baileys rc14's lack of WhatsApp's native
+recent-history sharing for new group members. It reads up to 100 latest local messages, skips
+revoked, view-once, individually disappearing, and unverifiable raw rows (widening the read until that many shareable messages remain or 1,000
+rows are scanned), truncates each line to 400 characters, and queues at most 5 chunks. When
+more than one chunk is queued they are numbered `(2/4)`. If the cap is reached, the oldest
+messages are left out with a `…mais N` note and the newest are sent in chronological order. The participant must be a current member, matched by phone
+number (PN) or LID in group metadata; the direct message goes to the PN when one is known. A group
+whose `ephemeralDuration` is greater than 0 is refused so disappearing messages are not copied into
+a permanent chat. If a later chunk fails to enqueue, the response still reports the `chunksSent`
+already accepted. Each queued delivery rechecks current membership and unchanged source content;
+received revocations, deletions, and edits are persisted before those checks. Queue acceptance does
+not confirm delivery. See the delivery and restart limits above and in the API reference.
+
+`WA_GROUP_HISTORY_ON_JOIN=true` enables the same digest and also requires
+`WA_GROUP_WRITES_ENABLED=true`. Both variables are strict: `WA_GROUP_HISTORY_ON_JOIN` accepts only
+`true` or `false`, and `WA_GROUP_HISTORY_ON_JOIN_COUNT` must be an integer (clamped to 25–100).
+Any other value fails startup. rc14 does not buffer `group-participants.update`, so that event
+arrives before the buffered `messages.upsert` and cannot be correlated with it. Automatic sends
+use `messages.upsert` (`notify` or offline `append`, not `messaging-history.set`): `messageStubType` `GROUP_PARTICIPANT_ADD`, `key.participant` or
+`participantAlt` equal to this account's LID or PN, and targets in `messageStubParameters`. The
+stub id is stored in `group_history_sends` before the direct messages are queued, so a copy
+delivered again after reconnect is not sent twice. Invite stubs
+(`GROUP_PARTICIPANT_INVITE`) and `GROUP_PARTICIPANT_ADD_REQUEST_JOIN` are ignored, as are other
+admins' stubs and self-targets. rc14's participant update has no reason, and an `add` notification
+is stored as `GROUP_PARTICIPANT_ADD`. An approved join request that arrives as that stub, authored
+by this account, cannot be distinguished from a direct add and will be sent.
+
 For `wa_mark_chat_unread`, archive, delete, and clear ranges, the adapter uses up to three recent
 stored raw message keys, keeps their original PN/LID addressing, and converts their timestamps to
 Unix seconds. The patch index uses the newest raw key's `remoteJid` so it matches that address.
@@ -1298,7 +1336,7 @@ src/
 ├── index.ts                     # Entry point (HTTP/stdio)
 ├── constants.ts                 # Defaults and limits
 ├── server/mcp.ts                # MCP server setup
-├── tools/                       # 🔧 157 MCP tools (16 files)
+├── tools/                       # 🔧 158 MCP tools (16 files)
 ├── resources/                   # 📖 10 MCP resources (8 files)
 ├── notifications/events.ts      # 📡 15 documented event types
 ├── channels/

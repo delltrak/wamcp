@@ -6,6 +6,7 @@ import { safeGroupChanges } from "../../utils/group-event-fields.js";
 
 import {
   getContentType,
+  WAMessageStubType,
   normalizeMessageContent,
   type BaileysEventMap,
   type WAMessage,
@@ -130,6 +131,51 @@ export function unwrapMessageContent(
 
 function messageContent(msg: WAMessage): MessageRecord | undefined {
   return unwrapMessageContent(msg.message);
+}
+
+const VIEW_ONCE_KEYS = new Set([
+  "viewOnceMessage",
+  "viewOnceMessageV2",
+  "viewOnceMessageV2Extension",
+]);
+
+/** True when the raw Baileys message is view-once, including when a wrapper hides the flag. */
+export function isViewOnceMessage(message: { message?: unknown } | null | undefined): boolean {
+  return containsViewOnce(message?.message, 0);
+}
+
+function containsViewOnce(value: unknown, depth: number): boolean {
+  if (typeof value !== "object" || value === null) return false;
+  if (depth > 16) return true;
+  if (Array.isArray(value)) return value.some((item) => containsViewOnce(item, depth + 1));
+  const record = value as Record<string, unknown>;
+  if (record.viewOnce === true) return true;
+  for (const [key, child] of Object.entries(record)) {
+    if (key === "contextInfo" || key === "quotedMessage") continue;
+    if (VIEW_ONCE_KEYS.has(key)) return true;
+    if (containsViewOnce(child, depth + 1)) return true;
+  }
+  return false;
+}
+
+/** Inspect original wrappers/context before normalization discards disappearing-message metadata. */
+export function isEphemeralMessage(
+  message: { message?: unknown; ephemeralDuration?: unknown } | null | undefined,
+): boolean {
+  if (Number(message?.ephemeralDuration) > 0) return true;
+  const contains = (value: unknown, depth: number): boolean => {
+    if (typeof value !== "object" || value === null) return false;
+    // Unknown deeply wrapped content must not be treated as safe to copy permanently.
+    if (depth > 16) return true;
+    if (Array.isArray(value)) return value.some((item) => contains(item, depth + 1));
+    const record = value as Record<string, unknown>;
+    if (Number(record.expiration) > 0 || Number(record.ephemeralDuration) > 0) return true;
+    return Object.entries(record).some(
+      ([key, child]) =>
+        key !== "quotedMessage" && (key === "ephemeralMessage" || contains(child, depth + 1)),
+    );
+  };
+  return contains(message?.message, 0);
 }
 
 /** Read WhatsApp's forwarded marker from the content field that carries contextInfo. */
@@ -798,7 +844,9 @@ export function normalizeMessagesUpdate(
   updates: WAMessageUpdate[],
 ): NormalizedMessageUpdateEvent[] {
   return updates
-    .filter((u) => u.update.status !== undefined)
+    .filter(
+      (u) => u.update.status !== undefined || u.update.messageStubType === WAMessageStubType.REVOKE,
+    )
     .map((u) => {
       const statusMap: Record<number, MessageDeliveryStatus> = {
         0: "received",
@@ -813,7 +861,10 @@ export function normalizeMessagesUpdate(
         instanceId,
         chatId: u.key.remoteJid ?? "",
         messageId: u.key.id ?? "",
-        status: statusMap[u.update.status ?? 0] ?? "received",
+        status:
+          u.update.messageStubType === WAMessageStubType.REVOKE
+            ? "revoked"
+            : (statusMap[u.update.status ?? 0] ?? "received"),
       };
     });
 }
@@ -923,13 +974,24 @@ export function normalizeGroupParticipantsUpdate(
     modify: "modify",
   };
 
+  const participants = data.participants.map((participant) =>
+    typeof participant === "string" ? participant : participant.id,
+  );
+
   return {
     instanceId,
     groupId: data.id,
     action: actionMap[data.action] ?? "add",
-    participants: data.participants.map((participant) =>
-      typeof participant === "string" ? participant : participant.id,
-    ),
+    participants,
+    participantAliases: data.participants.map((participant, index) => {
+      if (typeof participant === "string") return [participant];
+      const aliases = [participant.id, participant.phoneNumber, participant.lid].filter(
+        (identity): identity is string => typeof identity === "string" && identity.length > 0,
+      );
+      return aliases.length ? aliases : [participants[index]!];
+    }),
+    ...(typeof data.author === "string" ? { author: data.author } : {}),
+    ...(typeof data.authorPn === "string" ? { authorPn: data.authorPn } : {}),
   };
 }
 
