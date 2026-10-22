@@ -24,6 +24,8 @@ export interface InstanceEntity {
   updatedAt: number;
   lastConnected: number | null;
   lastDisconnected: number | null;
+  lastDisconnectReason: string | null;
+  lastDisconnectStatusCode: number | null;
 }
 
 // Auth key entity

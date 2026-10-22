@@ -321,6 +321,12 @@ export interface GroupResponse {
   inviteCode?: string;
 }
 
+export interface CreateGroupFromGroupResponse {
+  groupId: string;
+  addedCount: number;
+  failedParticipants: string[];
+}
+
 export interface GroupSummary {
   jid: string;
   subject: string;
@@ -441,6 +447,16 @@ export interface GroupParticipant {
   phone: string | null;
   isAdmin: boolean;
   isSuperAdmin: boolean;
+  memberLabel?: string;
+}
+
+export interface NormalizedGroupMemberLabelEvent {
+  instanceId: string;
+  groupId: string;
+  participant: string;
+  memberLabel: string | null;
+  action: "set" | "removed";
+  timestamp: number;
 }
 
 export interface PrivacySettings {
@@ -600,6 +616,56 @@ export interface NormalizedConnectionEvent {
   pairingCode?: string;
 }
 
+export type InstanceAuthMethod = "pairing_code" | "qr";
+
+export interface InstanceConnectedEvent {
+  instanceId: string;
+  phone: string | null;
+  lid: string | null;
+  pushName: string | null;
+  connectedAt: number;
+  wasPairing: boolean;
+}
+
+export interface InstanceDisconnectedEvent {
+  instanceId: string;
+  reason: string;
+  statusCode: number | null;
+  loggedOut: boolean;
+  willReconnect: boolean;
+  reconnectInMs?: number;
+  disconnectedAt: number;
+  offlineSinceMs?: number;
+}
+
+export interface InstanceAuthChallengeGeneratedEvent {
+  instanceId: string;
+  method: InstanceAuthMethod;
+  generatedAt: number;
+  expiresAt: number;
+}
+
+export interface InstanceAuthChallengeExpiredEvent {
+  instanceId: string;
+  method: InstanceAuthMethod;
+  generatedAt: number;
+  expiredAt: number;
+}
+
+export interface InstanceRuntimeStatus {
+  phone: string | null;
+  lid: string | null;
+  pushName: string | null;
+  disconnectReason: string | null;
+  disconnectStatusCode: number | null;
+  pendingChallenge: {
+    method: InstanceAuthMethod;
+    generatedAt: number;
+    expiresAt: number;
+  } | null;
+  presenceMode: string | null;
+}
+
 export interface NormalizedCallEvent {
   instanceId: string;
   chatId: string;
@@ -654,8 +720,15 @@ export const CHANNEL_EVENTS = [
   "chat.updated",
   "group.updated",
   "group.participants_changed",
+  "group.member_label_changed",
   "contact.updated",
   "connection.changed",
+  "instance.connected",
+  "instance.disconnected",
+  "instance.pairing_code_generated",
+  "instance.qr_generated",
+  "instance.pairing_expired",
+  "instance.qr_expired",
   "call.received",
   "label.updated",
   "event.response",
@@ -674,8 +747,15 @@ export type ChannelEventPayload = {
   "chat.updated": NormalizedChatUpdateEvent;
   "group.updated": NormalizedGroupUpdateEvent;
   "group.participants_changed": NormalizedGroupParticipantsEvent;
+  "group.member_label_changed": NormalizedGroupMemberLabelEvent;
   "contact.updated": NormalizedContactUpdateEvent;
   "connection.changed": NormalizedConnectionEvent;
+  "instance.connected": InstanceConnectedEvent;
+  "instance.disconnected": InstanceDisconnectedEvent;
+  "instance.pairing_code_generated": InstanceAuthChallengeGeneratedEvent;
+  "instance.qr_generated": InstanceAuthChallengeGeneratedEvent;
+  "instance.pairing_expired": InstanceAuthChallengeExpiredEvent;
+  "instance.qr_expired": InstanceAuthChallengeExpiredEvent;
   "call.received": NormalizedCallEvent;
   "label.updated": NormalizedLabelUpdateEvent;
   "event.response": NormalizedEventResponseEvent;

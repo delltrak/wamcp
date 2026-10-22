@@ -12,6 +12,7 @@ import {
   eventWebhookDestinationIdentity,
   eventWebhookFailureLogData,
   eventWebhookJobOptions,
+  normalizeGrokBotInstanceWebhookPayload,
   normalizeGrokBotWebhookPayload,
   normalizeEventWebhookPayload,
   parseEventWebhookRetryAfter,
@@ -257,6 +258,14 @@ describe("outgoing event webhook config", () => {
       ignoreFromMe: true,
     });
   });
+
+  it("accepts group member label events without changing webhook defaults or presets", () => {
+    const labels = configuredWebhook({ WA_EVENT_WEBHOOK_EVENTS: "group.member_label_changed" });
+    expect(labels.destinations[0]?.events).toEqual(["group.member_label_changed"]);
+
+    const grokBot = configuredWebhook({ WA_EVENT_WEBHOOK_PRESET: "grok-bot" });
+    expect(grokBot.destinations[0]?.events).toEqual(["message.received"]);
+  });
 });
 
 describe("outgoing event webhook events", () => {
@@ -282,6 +291,36 @@ describe("outgoing event webhook events", () => {
     expect(shouldSendEventWebhook("message.received", incomingMessage(true), includeSelf)).toBe(
       true,
     );
+  });
+
+  it("sends lifecycle events when chat and sender allowlists are configured", () => {
+    const destination = loadEventWebhookConfig({
+      WA_EVENT_WEBHOOKS: JSON.stringify([
+        {
+          id: "lifecycle",
+          url: "https://hooks.example.test/lifecycle",
+          events: ["instance.disconnected"],
+          chatAllowlist: ["allowed-chat"],
+          senderAllowlist: ["allowed-sender"],
+        },
+      ]),
+    }).destinations[0]!;
+    const disconnected: ChannelEventPayload["instance.disconnected"] = {
+      instanceId: "inst_1234abcd",
+      reason: "logged out",
+      statusCode: 401,
+      loggedOut: true,
+      willReconnect: false,
+      disconnectedAt: 1_800_000_123_000,
+    };
+
+    expect(shouldSendEventWebhook("instance.disconnected", disconnected, destination)).toBe(true);
+    expect(
+      shouldSendEventWebhook("message.received", incomingMessage(), {
+        ...destination,
+        events: ["message.received"],
+      }),
+    ).toBe(false);
   });
 
   it("normalizes message.received to the documented JSON fields", () => {
@@ -324,6 +363,30 @@ describe("outgoing event webhook events", () => {
       participant: "5511777777777@s.whatsapp.net",
       status: "GOING",
       extraGuestCount: 1,
+    });
+  });
+
+  it("forwards group member label events with the label and group identifiers", () => {
+    const payload: ChannelEventPayload["group.member_label_changed"] = {
+      instanceId: "inst_fixture",
+      groupId: "120363000000000000@g.us",
+      participant: "participant-placeholder@lid",
+      memberLabel: "Group coordinator",
+      action: "set",
+      timestamp: 1_700_000_000,
+    };
+    const config = configuredWebhook({ WA_EVENT_WEBHOOK_EVENTS: "group.member_label_changed" });
+
+    expect(shouldSendEventWebhook("group.member_label_changed", payload, config)).toBe(true);
+    expect(
+      normalizeEventWebhookPayload("group.member_label_changed", payload.instanceId, payload),
+    ).toMatchObject({
+      event: "group.member_label_changed",
+      groupId: payload.groupId,
+      participant: payload.participant,
+      memberLabel: payload.memberLabel,
+      action: "set",
+      timestamp: payload.timestamp,
     });
   });
 
@@ -479,6 +542,293 @@ describe("outgoing event webhook events", () => {
       message: { ...grokMessage.message, mediaUrl: "data:application/octet-stream;base64,AAAA" },
     };
     expect(normalizeGrokBotWebhookPayload("inst_1234abcd", binaryUrl)).not.toHaveProperty("media");
+  });
+
+  it("keeps the Grok Bot message body and incoming-message filters unchanged", async () => {
+    let eventHandler: EventHandler | undefined;
+    const instanceManager = {
+      onAnyEvent: (handler: EventHandler) => {
+        eventHandler = handler;
+        return () => undefined;
+      },
+    } as unknown as InstanceManager;
+    const destination = loadEventWebhookConfig({
+      WA_EVENT_WEBHOOKS: JSON.stringify([
+        {
+          id: "grok",
+          url: "https://hooks.example.test/grok",
+          preset: "grok-bot",
+          events: ["message.received", "instance.connected"],
+        },
+      ]),
+    });
+    const enqueue = vi.fn<(_: EventWebhookJob) => Promise<unknown>>(() => Promise.resolve());
+    const unsubscribe = registerEventWebhookHandler(instanceManager, destination, enqueue);
+    const incoming = {
+      ...incomingMessage(),
+      chatId: "5500000000000@s.whatsapp.net",
+      message: { ...incomingMessage().message, sender: "5500000000000@s.whatsapp.net" },
+    };
+
+    eventHandler?.("message.received", "inst_1234abcd", incoming);
+    eventHandler?.("message.received", "inst_1234abcd", {
+      ...incoming,
+      message: { ...incoming.message, isFromMe: true },
+    });
+    eventHandler?.("message.received", "inst_1234abcd", {
+      ...incoming,
+      chatId: "status@broadcast",
+    });
+    eventHandler?.("instance.connected", "inst_1234abcd", {
+      instanceId: "inst_1234abcd",
+      phone: null,
+      lid: null,
+      pushName: null,
+      connectedAt: 1_800_000_000_000,
+      wasPairing: false,
+    });
+    await vi.waitFor(() => expect(enqueue).toHaveBeenCalledTimes(2));
+
+    expect(enqueue.mock.calls[0]?.[0].payload).toEqual(
+      normalizeGrokBotWebhookPayload("inst_1234abcd", incoming),
+    );
+    expect(enqueue.mock.calls[0]?.[0].payload).toEqual({
+      instanceId: "inst_1234abcd",
+      chatId: "5500000000000@s.whatsapp.net",
+      chatName: null,
+      senderId: "5500000000000@s.whatsapp.net",
+      senderName: null,
+      isGroup: false,
+      type: "text",
+      text: "hello",
+      timestamp: 1_700_000_000,
+      messageId: "wamid.abc123",
+      isForwarded: false,
+    });
+    expect(enqueue.mock.calls[1]?.[0].payload).toMatchObject({
+      event: "instance.connected",
+      text: "WhatsApp conectado",
+    });
+
+    unsubscribe();
+    await unsubscribe.flush();
+  });
+
+  it("queues safe compact Grok Bot bodies for configured instance lifecycle events", async () => {
+    let eventHandler: EventHandler | undefined;
+    const instanceManager = {
+      onAnyEvent: (handler: EventHandler) => {
+        eventHandler = handler;
+        return () => undefined;
+      },
+    } as unknown as InstanceManager;
+    const config = loadEventWebhookConfig({
+      WA_EVENT_WEBHOOK_URL: "https://hooks.example.test/grok",
+      WA_EVENT_WEBHOOK_PRESET: "grok-bot",
+      WA_EVENT_WEBHOOK_EVENTS:
+        "instance.connected,instance.disconnected,instance.pairing_code_generated,instance.qr_generated,instance.pairing_expired,instance.qr_expired",
+    });
+    const enqueue = vi.fn<(_: EventWebhookJob) => Promise<unknown>>(() => Promise.resolve());
+    const unsubscribe = registerEventWebhookHandler(instanceManager, config, enqueue);
+
+    eventHandler?.("instance.connected", "inst_1234abcd", {
+      instanceId: "inst_1234abcd",
+      phone: null,
+      lid: null,
+      pushName: null,
+      connectedAt: 1_800_000_000_000,
+      wasPairing: true,
+    });
+    eventHandler?.("instance.disconnected", "inst_1234abcd", {
+      instanceId: "inst_1234abcd",
+      reason: "loggedOut",
+      statusCode: 401,
+      loggedOut: true,
+      willReconnect: false,
+      disconnectedAt: 1_800_000_001_000,
+    });
+    eventHandler?.("instance.pairing_code_generated", "inst_1234abcd", {
+      instanceId: "inst_1234abcd",
+      method: "pairing_code",
+      generatedAt: 1_800_000_002_000,
+      expiresAt: 1_800_000_062_000,
+      pairingCode: "fixture-pairing-code",
+      qr: "fixture-qr-string",
+      credentials: { token: "fixture-credential" },
+    } as never);
+    eventHandler?.("instance.qr_generated", "inst_1234abcd", {
+      instanceId: "inst_1234abcd",
+      method: "qr",
+      generatedAt: 1_800_000_003_000,
+      expiresAt: 1_800_000_063_000,
+      pairingCode: "fixture-pairing-code",
+      qr: "fixture-qr-string",
+    } as never);
+    eventHandler?.("instance.pairing_expired", "inst_1234abcd", {
+      instanceId: "inst_1234abcd",
+      method: "pairing_code",
+      generatedAt: 1_800_000_004_000,
+      expiredAt: 1_800_000_064_000,
+    });
+    eventHandler?.("instance.qr_expired", "inst_1234abcd", {
+      instanceId: "inst_1234abcd",
+      method: "qr",
+      generatedAt: 1_800_000_005_000,
+      expiredAt: 1_800_000_065_000,
+    });
+    await vi.waitFor(() => expect(enqueue).toHaveBeenCalledTimes(6));
+
+    const payloads = enqueue.mock.calls.map(([job]) => job.payload);
+    expect(payloads).toEqual([
+      {
+        event: "instance.connected",
+        instanceId: "inst_1234abcd",
+        text: "WhatsApp conectado",
+        timestamp: 1_800_000_000_000,
+        status: "connected",
+        wasPairing: true,
+      },
+      {
+        event: "instance.disconnected",
+        instanceId: "inst_1234abcd",
+        text: "WhatsApp desconectado (loggedOut)",
+        timestamp: 1_800_000_001_000,
+        reason: "loggedOut",
+        statusCode: 401,
+        status: "disconnected",
+        loggedOut: true,
+        willReconnect: false,
+      },
+      {
+        event: "instance.pairing_code_generated",
+        instanceId: "inst_1234abcd",
+        text: "Código de pareamento gerado",
+        timestamp: 1_800_000_002_000,
+        method: "pairing_code",
+        expiresAt: 1_800_000_062_000,
+      },
+      {
+        event: "instance.qr_generated",
+        instanceId: "inst_1234abcd",
+        text: "QR gerado",
+        timestamp: 1_800_000_003_000,
+        method: "qr",
+        expiresAt: 1_800_000_063_000,
+      },
+      {
+        event: "instance.pairing_expired",
+        instanceId: "inst_1234abcd",
+        text: "Código de pareamento expirado",
+        timestamp: 1_800_000_064_000,
+        method: "pairing_code",
+      },
+      {
+        event: "instance.qr_expired",
+        instanceId: "inst_1234abcd",
+        text: "QR expirado",
+        timestamp: 1_800_000_065_000,
+        method: "qr",
+      },
+    ]);
+    const serialized = JSON.stringify(payloads);
+    expect(serialized).not.toContain("fixture-pairing-code");
+    expect(serialized).not.toContain("fixture-qr-string");
+    expect(serialized).not.toContain("fixture-credential");
+    expect(
+      normalizeGrokBotInstanceWebhookPayload("instance.connected", "inst_1234abcd", {
+        instanceId: "inst_1234abcd",
+        phone: null,
+        lid: null,
+        pushName: null,
+        connectedAt: 1_800_000_000_000,
+        wasPairing: false,
+      }),
+    ).toMatchObject({ text: "WhatsApp conectado", event: "instance.connected" });
+
+    unsubscribe();
+    await unsubscribe.flush();
+  });
+
+  it("batches Grok Bot lifecycle events as events and splits mixed message/lifecycle batches", async () => {
+    vi.useFakeTimers();
+    let eventHandler: EventHandler | undefined;
+    const instanceManager = {
+      onAnyEvent: (handler: EventHandler) => {
+        eventHandler = handler;
+        return () => {
+          eventHandler = undefined;
+        };
+      },
+    } as unknown as InstanceManager;
+    const config = configuredWebhook({
+      WA_EVENT_WEBHOOK_PRESET: "grok-bot",
+      WA_EVENT_WEBHOOK_EVENTS: "message.received,instance.connected,instance.disconnected",
+      WA_EVENT_WEBHOOK_DEBOUNCE_MS: "1000",
+    });
+    const enqueue = vi.fn<(_: EventWebhookJob) => Promise<unknown>>(() => Promise.resolve());
+    const unsubscribe = registerEventWebhookHandler(instanceManager, config, enqueue);
+    const connected = {
+      instanceId: "inst_1234abcd",
+      phone: null,
+      lid: null,
+      pushName: null,
+      connectedAt: 1_800_000_000_000,
+      wasPairing: false,
+    };
+    const disconnected = {
+      instanceId: "inst_1234abcd",
+      reason: "loggedOut",
+      statusCode: 401,
+      loggedOut: true,
+      willReconnect: false,
+      disconnectedAt: 1_800_000_001_000,
+    };
+    const firstMessage = incomingMessage();
+    const secondMessage = {
+      ...incomingMessage(),
+      message: { ...incomingMessage().message, id: "wamid.second", content: "second" },
+    };
+
+    eventHandler?.("instance.connected", "inst_1234abcd", connected);
+    eventHandler?.("instance.disconnected", "inst_1234abcd", disconnected);
+    eventHandler?.("message.received", "inst_1234abcd", firstMessage);
+    eventHandler?.("message.received", "inst_1234abcd", secondMessage);
+    eventHandler?.("instance.connected", "inst_1234abcd", connected);
+    eventHandler?.("instance.disconnected", "inst_1234abcd", disconnected);
+    await vi.advanceTimersByTimeAsync(1000);
+
+    expect(enqueue).toHaveBeenCalledTimes(3);
+    expect(enqueue.mock.calls.map(([job]) => job.payload)).toEqual([
+      {
+        events: [
+          normalizeGrokBotInstanceWebhookPayload("instance.connected", "inst_1234abcd", connected),
+          normalizeGrokBotInstanceWebhookPayload(
+            "instance.disconnected",
+            "inst_1234abcd",
+            disconnected,
+          ),
+        ],
+      },
+      {
+        messages: [
+          normalizeGrokBotWebhookPayload("inst_1234abcd", firstMessage),
+          normalizeGrokBotWebhookPayload("inst_1234abcd", secondMessage),
+        ],
+      },
+      {
+        events: [
+          normalizeGrokBotInstanceWebhookPayload("instance.connected", "inst_1234abcd", connected),
+          normalizeGrokBotInstanceWebhookPayload(
+            "instance.disconnected",
+            "inst_1234abcd",
+            disconnected,
+          ),
+        ],
+      },
+    ]);
+
+    unsubscribe();
+    await unsubscribe.flush();
   });
 
   it("does not let queue failures escape the channel event handler", async () => {

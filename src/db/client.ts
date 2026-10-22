@@ -40,7 +40,9 @@ function initializeDatabase(): void {
       created_at      INTEGER NOT NULL,
       updated_at      INTEGER NOT NULL,
       last_connected  INTEGER,
-      last_disconnected INTEGER
+      last_disconnected INTEGER,
+      last_disconnect_reason TEXT,
+      last_disconnect_status_code INTEGER
     );
 
     CREATE TABLE IF NOT EXISTS auth_keys (
@@ -145,6 +147,16 @@ function initializeDatabase(): void {
       created_at      INTEGER,
       updated_at      INTEGER NOT NULL,
       PRIMARY KEY (instance_id, jid)
+    );
+
+    CREATE TABLE IF NOT EXISTS group_member_labels (
+      instance_id     TEXT NOT NULL REFERENCES instances(id) ON DELETE CASCADE,
+      group_jid       TEXT NOT NULL,
+      participant_jid TEXT NOT NULL,
+      member_label    TEXT,
+      label_timestamp INTEGER NOT NULL,
+      updated_at      INTEGER NOT NULL,
+      PRIMARY KEY (instance_id, group_jid, participant_jid)
     );
 
     CREATE TABLE IF NOT EXISTS chats (
@@ -253,6 +265,18 @@ try {
 
 try {
   sqlite.exec(`ALTER TABLE messages ADD COLUMN starred INTEGER NOT NULL DEFAULT 0`);
+} catch {
+  // column already exists or table doesn't exist yet — ignore
+}
+
+try {
+  sqlite.exec(`ALTER TABLE instances ADD COLUMN last_disconnect_reason TEXT`);
+} catch {
+  // column already exists or table doesn't exist yet — ignore
+}
+
+try {
+  sqlite.exec(`ALTER TABLE instances ADD COLUMN last_disconnect_status_code INTEGER`);
 } catch {
   // column already exists or table doesn't exist yet — ignore
 }

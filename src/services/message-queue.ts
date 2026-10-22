@@ -4,7 +4,7 @@
 
 import { Queue, UnrecoverableError, Worker, type Job } from "bullmq";
 import type { ChannelAdapter } from "../channels/channel.interface.js";
-import type { MessageContent } from "../types/channel.types.js";
+import type { ChannelType, MessageContent } from "../types/channel.types.js";
 import {
   DEFAULT_BAILEYS_RATE_LIMIT,
   DEFAULT_CLOUD_RATE_LIMIT,
@@ -31,6 +31,12 @@ export type OutboundJob =
       instanceId: string;
       to: string;
       images: Array<{ image: string; caption?: string }>;
+    }
+  | {
+      kind: "group-member-label";
+      instanceId: string;
+      groupId: string;
+      memberLabel: string | null;
     };
 
 export interface EnqueueResult {
@@ -102,7 +108,9 @@ export class MessageQueue {
         const data = job.data as OutboundJob;
         const adapter = this.getAdapter(data.instanceId);
         try {
-          if (data.kind === "album") {
+          if (data.kind === "group-member-label") {
+            await adapter.updateGroupMemberLabel(data.groupId, data.memberLabel);
+          } else if (data.kind === "album") {
             await adapter.sendMediaAlbum(data.to, data.images);
           } else {
             await adapter.sendMessage(data.to, data.content);
@@ -166,6 +174,25 @@ export class MessageQueue {
     const jobData: OutboundJob = { kind: "album", instanceId, to, images };
     // A partial album cannot be safely retried without duplicating already-sent images.
     const job = await queue.add("album", jobData, { attempts: 1 });
+    return { status: "queued", jobId: job.id ?? "" };
+  }
+
+  /** Queue a group member label update on the instance's rate-limited worker. */
+  async enqueueGroupMemberLabel(
+    instanceId: string,
+    groupId: string,
+    memberLabel: string | null,
+    channel: ChannelType = "baileys",
+  ): Promise<EnqueueResult> {
+    if (channel !== "baileys") {
+      throw new Error("Group member labels are not supported on Cloud API");
+    }
+    if (!this.getAdapter) throw new Error("Adapter resolver not set");
+    this.getAdapter(instanceId).assertGroupMemberLabelWritesEnabled();
+
+    const queue = this.getOrCreateQueue(instanceId, channel);
+    const jobData: OutboundJob = { kind: "group-member-label", instanceId, groupId, memberLabel };
+    const job = await queue.add("group-member-label", jobData);
     return { status: "queued", jobId: job.id ?? "" };
   }
 

@@ -10,6 +10,7 @@ import { CloudApiAdapter } from "../src/channels/cloud-api/cloud.adapter.js";
 import type { ContactStore } from "../src/services/contact-store.js";
 import type { InstanceManager } from "../src/services/instance-manager.js";
 import type { MessageQueue } from "../src/services/message-queue.js";
+import { GroupMemberLabelStore } from "../src/services/group-member-label-store.js";
 import { MediaService } from "../src/services/media.js";
 import { GetGroupInfoSchema, UpdateGroupPictureSchema } from "../src/schemas/group.schema.js";
 import { registerGroupTools } from "../src/tools/group.tools.js";
@@ -28,6 +29,7 @@ const OWN_PN = "5511999990000@s.whatsapp.net";
 const OWN_LID = "1999990000@lid";
 const GROUP_JID = "120363000000000000@g.us";
 const initialAppStateWritesEnabled = process.env.WA_APP_STATE_WRITES_ENABLED;
+const initialGroupWritesEnabled = process.env.WA_GROUP_WRITES_ENABLED;
 
 beforeEach(() => {
   process.env.WA_APP_STATE_WRITES_ENABLED = "true";
@@ -38,11 +40,16 @@ afterEach(() => {
   vi.unstubAllGlobals();
   if (initialAppStateWritesEnabled === undefined) delete process.env.WA_APP_STATE_WRITES_ENABLED;
   else process.env.WA_APP_STATE_WRITES_ENABLED = initialAppStateWritesEnabled;
+  if (initialGroupWritesEnabled === undefined) delete process.env.WA_GROUP_WRITES_ENABLED;
+  else process.env.WA_GROUP_WRITES_ENABLED = initialGroupWritesEnabled;
 });
 
-function createAdapter(overrides: Record<string, unknown> = {}) {
+function createAdapter(
+  overrides: Record<string, unknown> = {},
+  groupMemberLabelStore?: GroupMemberLabelStore,
+) {
   const contactStore = { getContacts: vi.fn(() => []) } as unknown as ContactStore;
-  const adapter = new BaileysAdapter("group-test", contactStore);
+  const adapter = new BaileysAdapter("group-test", contactStore, groupMemberLabelStore);
   const sock = {
     user: { id: OWN_PN, lid: OWN_LID },
     signalRepository: {
@@ -58,7 +65,12 @@ function createAdapter(overrides: Record<string, unknown> = {}) {
   return { adapter, sock };
 }
 
-function registerTools(adapter: BaileysAdapter | CloudApiAdapter): Map<string, RegisteredTool> {
+function registerTools(
+  adapter: BaileysAdapter | CloudApiAdapter,
+  messageQueue: MessageQueue = {
+    enqueueGroupMemberLabel: vi.fn(async () => ({ status: "queued", jobId: "LABEL-JOB" })),
+  } as unknown as MessageQueue,
+): Map<string, RegisteredTool> {
   const tools = new Map<string, RegisteredTool>();
   const server = {
     registerTool: (name: string, options: unknown, handler: unknown) => {
@@ -68,8 +80,11 @@ function registerTools(adapter: BaileysAdapter | CloudApiAdapter): Map<string, R
       });
     },
   } as unknown as McpServer;
-  const instanceManager = { getAdapter: () => adapter } as unknown as InstanceManager;
-  registerGroupTools(server, instanceManager, {} as MessageQueue);
+  const instanceManager = {
+    getAdapter: () => adapter,
+    getInstanceChannel: () => (adapter instanceof CloudApiAdapter ? "cloud" : "baileys"),
+  } as unknown as InstanceManager;
+  registerGroupTools(server, instanceManager, messageQueue);
   return tools;
 }
 
@@ -149,7 +164,16 @@ describe("WhatsApp group tools", () => {
       { id: "5511888880000@s.whatsapp.net" },
     ]);
     const groupMetadataCall = vi.fn(async () => metadata);
-    const { adapter } = createAdapter({ groupMetadata: groupMetadataCall });
+    const groupMemberLabelStore = {
+      getForGroup: () => [
+        {
+          participantJid: "1999990000@lid",
+          memberLabel: "Group coordinator",
+          labelTimestamp: 1_700_000_001,
+        },
+      ],
+    } as unknown as GroupMemberLabelStore;
+    const { adapter } = createAdapter({ groupMetadata: groupMetadataCall }, groupMemberLabelStore);
 
     const tool = registerTools(adapter).get("wa_get_group_info");
     if (!tool) throw new Error("Get group info tool was not registered");
@@ -190,6 +214,7 @@ describe("WhatsApp group tools", () => {
         phone: "5511999990000",
         isAdmin: true,
         isSuperAdmin: true,
+        memberLabel: "Group coordinator",
       },
       {
         jid: "5511888880000@s.whatsapp.net",
@@ -199,6 +224,75 @@ describe("WhatsApp group tools", () => {
         isSuperAdmin: false,
       },
     ]);
+  });
+
+  it("queues validated set and remove operations for the connected account", async () => {
+    process.env.WA_GROUP_WRITES_ENABLED = "true";
+    const queue = {
+      enqueueGroupMemberLabel: vi.fn(async () => ({ status: "queued", jobId: "LABEL-JOB" })),
+    } as unknown as MessageQueue;
+    const { adapter } = createAdapter();
+    const tools = registerTools(adapter, queue);
+    const setTool = tools.get("wa_group_set_member_label");
+    const removeTool = tools.get("wa_group_remove_member_label");
+    if (!setTool || !removeTool) throw new Error("Member label tools were not registered");
+
+    await expect(
+      invoke(setTool, {
+        instanceId: "group-test",
+        groupId: "120363000000000000",
+        memberLabel: "  Group coordinator  ",
+      }),
+    ).resolves.toMatchObject({
+      content: [{ text: JSON.stringify({ status: "queued", jobId: "LABEL-JOB" }) }],
+    });
+    await invoke(removeTool, {
+      instanceId: "group-test",
+      groupId: "120363000000000000",
+    });
+
+    expect(queue.enqueueGroupMemberLabel).toHaveBeenNthCalledWith(
+      1,
+      "group-test",
+      "120363000000000000",
+      "Group coordinator",
+      "baileys",
+    );
+    expect(queue.enqueueGroupMemberLabel).toHaveBeenNthCalledWith(
+      2,
+      "group-test",
+      "120363000000000000",
+      null,
+      "baileys",
+    );
+    expect(() =>
+      setTool.inputSchema.parse({
+        instanceId: "group-test",
+        groupId: "120363000000000000",
+        memberLabel: "L".repeat(31),
+      }),
+    ).toThrow();
+  });
+
+  it("keeps member label writes disabled unless WA_GROUP_WRITES_ENABLED is true", async () => {
+    delete process.env.WA_GROUP_WRITES_ENABLED;
+    process.env.WA_APP_STATE_WRITES_ENABLED = "true";
+    const queue = {
+      enqueueGroupMemberLabel: vi.fn(async () => ({ status: "queued", jobId: "LABEL-JOB" })),
+    } as unknown as MessageQueue;
+    const { adapter } = createAdapter();
+    const setTool = registerTools(adapter, queue).get("wa_group_set_member_label");
+    if (!setTool) throw new Error("Set member label tool was not registered");
+
+    const response = await invoke(setTool, {
+      instanceId: "group-test",
+      groupId: "120363000000000000",
+      memberLabel: "Group coordinator",
+    });
+
+    expect(response.isError).toBe(true);
+    expect(response.content[0]?.text).toContain("WA_GROUP_WRITES_ENABLED=true");
+    expect(queue.enqueueGroupMemberLabel).not.toHaveBeenCalled();
   });
 
   it("updates the picture from URL and base64 input using the converted JPEG", async () => {

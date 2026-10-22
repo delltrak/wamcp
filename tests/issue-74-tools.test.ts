@@ -27,6 +27,8 @@ const COMMUNITY_JID = "120363000000000000@g.us";
 const GROUP_JID = "120363000000000001@g.us";
 const NEWSLETTER_JID = "123456789012345@newsletter";
 const initialAppStateWritesEnabled = process.env.WA_APP_STATE_WRITES_ENABLED;
+const initialGroupWritesEnabled = process.env.WA_GROUP_WRITES_ENABLED;
+const initialAppStateMinInterval = process.env.WA_APP_STATE_MIN_INTERVAL_MS;
 
 function makeNewsletterFetchResponse(): BinaryNode {
   return {
@@ -93,22 +95,46 @@ afterEach(() => {
   vi.restoreAllMocks();
   if (initialAppStateWritesEnabled === undefined) delete process.env.WA_APP_STATE_WRITES_ENABLED;
   else process.env.WA_APP_STATE_WRITES_ENABLED = initialAppStateWritesEnabled;
+  if (initialGroupWritesEnabled === undefined) delete process.env.WA_GROUP_WRITES_ENABLED;
+  else process.env.WA_GROUP_WRITES_ENABLED = initialGroupWritesEnabled;
+  if (initialAppStateMinInterval === undefined) delete process.env.WA_APP_STATE_MIN_INTERVAL_MS;
+  else process.env.WA_APP_STATE_MIN_INTERVAL_MS = initialAppStateMinInterval;
 });
 
 beforeEach(() => {
   process.env.WA_APP_STATE_WRITES_ENABLED = "true";
+  delete process.env.WA_GROUP_WRITES_ENABLED;
+  process.env.WA_APP_STATE_MIN_INTERVAL_MS = "0";
 });
 
 function makeSocket(overrides: Record<string, unknown> = {}) {
+  const appStateVersion = { version: 3, hash: new Uint8Array(128), indexValueMap: {} };
+  const keyStore = {
+    get: vi.fn(async (type: string, ids: string[]) => {
+      if (type === "app-state-sync-key") {
+        return { [ids[0]!]: { keyData: new Uint8Array(32) } };
+      }
+      if (type === "app-state-sync-version") return { [ids[0]!]: appStateVersion };
+      return {};
+    }),
+    set: vi.fn(async () => {}),
+  };
   const socket = {
     user: { id: CONTACT_JID },
+    ws: { isOpen: true },
+    authState: { creds: { myAppStateKeyId: "synthetic-app-state-key" }, keys: keyStore },
+    resyncAppState: vi.fn().mockResolvedValue(undefined),
     sendMessage: vi.fn(async () => ({
       key: { id: "synthetic-message-id", remoteJid: CONTACT_JID, fromMe: true },
       message: { videoMessage: { ptv: true } },
       messageTimestamp: 1_700_000_000,
     })),
-    addOrEditQuickReply: vi.fn(async () => undefined),
-    removeQuickReply: vi.fn(async () => undefined),
+    addOrEditQuickReply: vi.fn(async () => {
+      appStateVersion.version += 1;
+    }),
+    removeQuickReply: vi.fn(async () => {
+      appStateVersion.version += 1;
+    }),
     fetchBlocklist: vi.fn(async () => [CONTACT_JID, undefined, "5511888888888@s.whatsapp.net"]),
     fetchStatus: vi.fn(async () => [{ id: CONTACT_JID, status: "Available" }]),
     communityCreate: vi.fn(async () => ({ id: COMMUNITY_JID, subject: "Community" })),
@@ -746,7 +772,9 @@ describe("issue #74 tools", () => {
     "blocks $toolName before socket access when account/server writes are disabled",
     async ({ toolName, params, run, socketMethod }) => {
       const previous = process.env.WA_APP_STATE_WRITES_ENABLED;
+      const previousGroup = process.env.WA_GROUP_WRITES_ENABLED;
       delete process.env.WA_APP_STATE_WRITES_ENABLED;
+      delete process.env.WA_GROUP_WRITES_ENABLED;
       try {
         vi.spyOn(MediaService.prototype, "prepareGroupProfilePicture").mockResolvedValue(
           Buffer.from("jpeg"),
@@ -755,9 +783,14 @@ describe("issue #74 tools", () => {
 
         const socket = makeSocket();
         const adapter = makeAdapter(socket);
-        await expect(run(adapter)).rejects.toThrow(
-          "WhatsApp account, server, and app-state writes are disabled",
-        );
+        const expectedFlag =
+          toolName === "wa_set_disappearing_messages" ||
+          toolName === "wa_create_catalog_product" ||
+          toolName === "wa_update_catalog_product" ||
+          toolName === "wa_delete_catalog_products"
+            ? "WA_APP_STATE_WRITES_ENABLED=true"
+            : "WA_GROUP_WRITES_ENABLED=true";
+        await expect(run(adapter)).rejects.toThrow(expectedFlag);
         expect(socket[socketMethod]).not.toHaveBeenCalled();
 
         const result = await invoke(registerTools(adapter), toolName, params);
@@ -776,6 +809,8 @@ describe("issue #74 tools", () => {
       } finally {
         if (previous === undefined) delete process.env.WA_APP_STATE_WRITES_ENABLED;
         else process.env.WA_APP_STATE_WRITES_ENABLED = previous;
+        if (previousGroup === undefined) delete process.env.WA_GROUP_WRITES_ENABLED;
+        else process.env.WA_GROUP_WRITES_ENABLED = previousGroup;
       }
     },
   );

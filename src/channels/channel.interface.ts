@@ -9,6 +9,7 @@ import type {
   MessageContent,
   MessageResponse,
   GroupResponse,
+  CreateGroupFromGroupResponse,
   GroupSummary,
   NumberExistsResponse,
   BusinessProfile,
@@ -40,6 +41,7 @@ import type {
   CatalogProductCreateInput,
   CatalogProductUpdateInput,
   NewsletterPostsPage,
+  InstanceRuntimeStatus,
 } from "../types/channel.types.js";
 import type {
   CatalogCollection,
@@ -65,6 +67,7 @@ export interface ChannelAdapter {
   connect(): Promise<void>;
   disconnect(): Promise<void>;
   getStatus(): ConnectionStatus;
+  getLifecycleStatus?(): InstanceRuntimeStatus;
 
   // ---- Authentication ----
   getQrCode(): Promise<string | null>;
@@ -132,6 +135,12 @@ export interface ChannelAdapter {
   // ---- Groups ----
   listGroups(): Promise<GroupSummary[]>;
   createGroup(name: string, participants: string[]): Promise<GroupResponse>;
+  createGroupFromGroup(
+    sourceGroupId: string,
+    name: string,
+    includeParticipants?: string[],
+    excludeParticipants?: string[],
+  ): Promise<CreateGroupFromGroupResponse>;
   modifyGroup(groupId: string, modification: GroupModification): Promise<void>;
   modifyParticipants(
     groupId: string,
@@ -139,6 +148,8 @@ export interface ChannelAdapter {
     action: ParticipantAction,
   ): Promise<void>;
   getGroupMetadata(groupId: string): Promise<GroupMetadata>;
+  assertGroupMemberLabelWritesEnabled(): void;
+  updateGroupMemberLabel(groupId: string, memberLabel: string | null): Promise<void>;
   updateGroupPicture(groupId: string, image: string): Promise<void>;
   removeGroupPicture(groupId: string): Promise<void>;
   getGroupInviteCode(groupId: string): Promise<string>;
@@ -226,7 +237,13 @@ export interface ChannelAdapter {
     chatId: string,
     count: number,
     timeoutMs?: number,
-  ): Promise<{ requested: number; stored: number; timedOut: boolean }>;
+  ): Promise<{
+    requested: number;
+    limit: number;
+    capped: boolean;
+    stored: number;
+    timedOut: boolean;
+  }>;
   downloadMessageAudio(
     messageId: string,
     maxBytes?: number,

@@ -8,10 +8,10 @@
 
 1. [Overview](#1-overview)
 2. [Tools Reference](#2-tools-reference)
-   - [Instance Management](#21-instance-management-8-tools)
+   - [Instance Management](#21-instance-management-9-tools)
    - [Messaging](#22-messaging-31-tools)
    - [Chat Management](#23-chat-management-11-tools)
-   - [Group Management](#24-group-management-23-tools)
+   - [Group Management](#24-group-management-26-tools)
    - [Contact Management](#25-contact-management-8-tools)
    - [Profile Management](#26-profile-management-7-tools)
    - [Status / Stories](#27-status--stories-4-tools)
@@ -72,32 +72,37 @@ Tools marked **Baileys only** are not available on Cloud API instances.
 - **Automatic read receipts** -- `WA_AUTO_READ=false` (default), `on_fetch` to mark incoming
   messages read when a tool or resource returns them, or `on_receive` to mark them read when they
   arrive. Invalid values disable the feature and log a warning.
-- **Baileys account, server, and app-state writes** -- `WA_APP_STATE_WRITES_ENABLED=false` by
-  default. Set it to `true` to enable `wa_archive_chat`, `wa_pin_chat`, `wa_mute_chat`,
-  `wa_delete_chat`, `wa_clear_chat`, `wa_mark_chat_unread`, `wa_star_message`, `wa_create_label`,
-  `wa_edit_label`, `wa_delete_label`, `wa_add_chat_label`, `wa_remove_chat_label`,
-  `wa_add_message_label`, `wa_remove_message_label`, `wa_update_profile_name`,
-  `wa_create_quick_reply`, `wa_edit_quick_reply`, `wa_delete_quick_reply`,
-  `wa_create_community`, `wa_community_link_group`, `wa_community_unlink_group`,
-  `wa_leave_community`, `wa_newsletter_follow`, `wa_newsletter_unfollow`, `wa_create_newsletter`,
-  `wa_newsletter_update_name`,
-  `wa_newsletter_update_description`, `wa_newsletter_update_picture`, `wa_newsletter_react`,
-  `wa_create_catalog_product`, `wa_update_catalog_product`, `wa_delete_catalog_products`,
-  `wa_group_join_approval_mode`, `wa_group_member_add_mode`, `wa_set_disappearing_messages`,
-  `wa_create_group`, `wa_group_update_subject`, `wa_group_update_description`,
-  `wa_group_update_settings`, `wa_group_leave`, `wa_group_revoke_invite`, `wa_group_toggle_ephemeral`,
-  `wa_group_join`, `wa_group_add_participants`, `wa_group_remove_participants`, `wa_group_promote`,
-  `wa_group_demote`, `wa_group_update_picture`, `wa_group_remove_picture`, and
-  `wa_group_handle_request`. The flag covers account/server changes even when Baileys uses IQ or MEX
-  queries instead of an app-state patch. `wa_update_privacy` is gated only for the
-  `defaultDisappearingMode` setting; other privacy updates remain available. These changes can get
-  the linked device removed. Read-only calls and normal message sends are not gated.
-- **Protocol classification for issue #74 operations** -- `wa_set_disappearing_messages` sends a
-  `sendMessage` protocol control message and is gated because it changes account state;
-  blocklist/About are reads; communities use `w:g2` IQs;
-  Channel metadata/posts/reactions use newsletter/MEX queries or message nodes; group modes use IQs;
-  catalog operations use IQ/MEX queries; and PTV sends a video message with `ptv: true`. Only quick
-  reply create/edit/delete use `chatModify` → `appPatch` and are gated above.
+- **Baileys app-state writes** -- `WA_APP_STATE_WRITES_ENABLED=false` by default. It enables
+  `wa_archive_chat`, `wa_pin_chat`, `wa_mute_chat`, `wa_delete_chat`, `wa_clear_chat`,
+  `wa_mark_chat_unread`, `wa_star_message`, all business-label tools, `wa_update_profile_name`, the three
+  quick-reply tools, catalog product writes, private disappearing timers, default
+  disappearing-mode privacy changes, and existing group/server operations that share the
+  app-state write gate. Per instance, app-state writes are serialized and spaced by
+  `WA_APP_STATE_MIN_INTERVAL_MS` (default `1500`). Before dispatch, the adapter checks the open,
+  authenticated socket, the current app-state key and its stored key, and resyncs the target
+  collection. It refuses to patch if Baileys reports a sync/decode/key/hash failure or if the
+  collection lacks a positive version and 128-byte hash. After a successful patch it resyncs once
+  and warns if the version did not advance; failed patches are not automatically retried.
+- **Group, community, and Channel server writes** -- `WA_GROUP_WRITES_ENABLED=false` by default.
+  It enables group creation, membership/settings, invite and join-request changes, community
+  changes, and Channel follow/management calls. The inspected Baileys methods use group/community
+  IQs, newsletter MEX calls, or message queries; they do not call `appPatch`. It also gates queued
+  group member-label protocol messages, which can only set or remove the connected account's own
+  label. This flag does not enable chat, profile, business-label, quick-reply, or catalog writes.
+  Setting `WA_APP_STATE_WRITES_ENABLED=true` continues to enable app-state and the existing
+  group/server writes that share that gate; member-label tools specifically require
+  `WA_GROUP_WRITES_ENABLED=true`.
+- **Message keys for chat patches** -- Unread, archive, delete, and clear operations use up to three
+  recent stored raw message keys with numeric Unix-second timestamps. The collection index uses the
+  latest raw key's `remoteJid`, preserving the PN/LID address used by that message. Invalid rows are
+  skipped, and the patch is refused if no usable message remains. Star/unstar also requires the raw
+  stored key. These writes remain disabled by default.
+- **Issue #71** -- [Baileys PR #2456](https://github.com/WhiskeySockets/Baileys/pull/2456) changed
+  sync to skip undecryptable records rather than abort the whole collection. In rc14, resync can log and return after a collection is parked or records are
+  skipped, while `appPatch` continues with the local version and hash. A patch encoded on a partial
+  or stale base can desynchronize the account. The preflight reduces that risk but cannot prove
+  server state in every case. Test enabled writes on a disposable WhatsApp number first; no
+  real-number check has been performed for this change.
 - **Real WhatsApp checks** -- Run real integration tests only with a throwaway number. Automated
   tests use mocked sockets and do not connect to WhatsApp.
 
@@ -105,7 +110,7 @@ Tools marked **Baileys only** are not available on Cloud API instances.
 
 ## 2. Tools Reference
 
-WA MCP exposes **133 tools** grouped by domain. All tools return MCP-standard responses.
+WA MCP exposes **137 tools** grouped by domain. All tools return MCP-standard responses.
 
 ### Success Response Format
 
@@ -136,7 +141,7 @@ WA MCP exposes **133 tools** grouped by domain. All tools return MCP-standard re
 
 ---
 
-### 2.1 Instance Management (8 tools)
+### 2.1 Instance Management (9 tools)
 
 Tools for creating, connecting, and managing WhatsApp instances.
 
@@ -1199,14 +1204,14 @@ List locally cached chats. Each entry includes the active Business labels associ
 
 #### `wa_mark_chat_unread`
 
-Mark a chat unread. The adapter passes recent stored messages in Baileys' required reverse-chronological `lastMessages` range.
+Mark a chat unread. The adapter passes up to three recent stored raw message keys in Baileys' reverse-chronological `lastMessages` range, with numeric Unix-second timestamps and the same PN/LID address in the patch index as the latest raw key.
 
 | Parameter | Type | Required | Description |
 | --------- | ---- | -------- | ----------- |
 | `instanceId` | string | Yes | The instance ID |
 | `chatId` | string | Yes | Chat JID to mark unread |
 
-**Channel support:** Baileys only. A chat without a locally stored message cannot provide Baileys' required message range.
+**Channel support:** Baileys only. Invalid raw message rows are skipped; the write is refused if no valid stored raw key and timestamp are available.
 
 ---
 
@@ -1221,7 +1226,7 @@ Star or unstar a message in a chat.
 | `messageId` | string | Yes | Stored message ID |
 | `star` | boolean | Yes | `true` to star; `false` to unstar |
 
-**Channel support:** Baileys only. The local message record retains the starred state after Baileys confirms the operation.
+**Channel support:** Baileys only. The stored raw message key is required and supplies the PN/LID address and sender fields. The local message record retains the starred state after Baileys confirms the operation.
 
 ---
 
@@ -1256,15 +1261,22 @@ is blocked unless `WA_APP_STATE_WRITES_ENABLED=true`.
 
 ---
 
-### 2.4 Group Management (23 tools)
+### 2.4 Group Management (26 tools)
 
 Tools for creating and managing WhatsApp groups.
 
 Group creation, settings, membership changes, join-request decisions, picture updates, invite-link
-revocations, group joins, and group or private disappearing-message changes are blocked unless
-`WA_APP_STATE_WRITES_ENABLED=true`. Group listing, metadata and pending-request reads, and
-invite-code reads remain available while the flag is disabled. Sending a group-invitation card uses
-the regular message-send path and remains available while the flag is disabled.
+revocations, group joins, and creating a group from another group's members are blocked unless
+`WA_GROUP_WRITES_ENABLED=true` or `WA_APP_STATE_WRITES_ENABLED=true`. Group changes use Baileys
+group IQ methods. Group listing, metadata, pending-request reads, and invite-code reads remain
+available while both flags are disabled. Private disappearing-message changes still require
+`WA_APP_STATE_WRITES_ENABLED=true`;
+group disappearing-message changes use the group write gate. Sending a group-invitation card uses
+the regular message-send path and remains available while both flags are disabled.
+
+Member labels use Baileys protocol messages and require `WA_GROUP_WRITES_ENABLED=true`. WhatsApp
+member labels are self-assigned: these tools can only set or remove the connected account's own
+label, not another participant's label. Updates are queued and rate limited per instance.
 
 #### `wa_list_groups`
 
@@ -1298,7 +1310,9 @@ superadmin. Baileys compares the account's PN and LID identities when determinin
 #### `wa_get_group_info`
 
 Get group metadata and its participants. Participant roles are `admin`, `superadmin`, or `member`;
-phone numbers are included when available, including when a LID can be resolved to a PN.
+phone numbers are included when available, including when a LID can be resolved to a PN. A
+`memberLabel` is included when a label has been observed in a group protocol message and persisted
+locally.
 
 | Parameter    | Type   | Required | Description                        |
 | ------------ | ------ | -------- | ---------------------------------- |
@@ -1329,11 +1343,46 @@ phone numbers are included when available, including when a LID can be resolved 
       "phone": "5511999990000",
       "role": "superadmin",
       "isAdmin": true,
-      "isSuperAdmin": true
+      "isSuperAdmin": true,
+      "memberLabel": "Group coordinator"
     }
   ]
 }
 ```
+
+---
+
+#### `wa_group_set_member_label`
+
+Set a member label for the connected account in a group. WhatsApp member labels are self-assigned;
+Baileys does not provide a target participant argument. The request is queued on the instance's
+outbound worker and uses the `WA_BAILEYS_RATE_LIMIT` limit.
+
+| Parameter     | Type   | Required | Description                          |
+| ------------- | ------ | -------- | ------------------------------------ |
+| `instanceId`  | string | Yes      | The instance ID                      |
+| `groupId`     | string | Yes      | Group JID or bare numeric group ID   |
+| `memberLabel` | string | Yes      | Label for this account, 1–30 characters |
+
+**Channel support:** Baileys only. Requires `WA_GROUP_WRITES_ENABLED=true`.
+
+**Response:** `{ "status": "queued", "jobId": "..." }`
+
+---
+
+#### `wa_group_remove_member_label`
+
+Remove the connected account's own member label from a group. This cannot remove another
+participant's label. The request is queued and rate limited per instance.
+
+| Parameter    | Type   | Required | Description                        |
+| ------------ | ------ | -------- | ---------------------------------- |
+| `instanceId` | string | Yes      | The instance ID                    |
+| `groupId`    | string | Yes      | Group JID or bare numeric group ID |
+
+**Channel support:** Baileys only. Requires `WA_GROUP_WRITES_ENABLED=true`.
+
+**Response:** `{ "status": "queued", "jobId": "..." }`
 
 ---
 
@@ -1414,6 +1463,38 @@ Create a new WhatsApp group with a name and initial participants.
 ```json
 {
   "groupId": "120363...@g.us"
+}
+```
+
+---
+
+#### `wa_create_group_from_group`
+
+Create a new WhatsApp group using members from a source group. If `includeParticipants` is supplied,
+only matching source members are kept; `excludeParticipants` removes matching members afterward.
+PN and LID identities are matched consistently, duplicate identities are collapsed, and the connected
+account is removed because WhatsApp adds the creator automatically. At least one other participant
+must remain. WhatsApp allows up to 1,024 members including the creator, so at most 1,023 source
+participants can be passed to group creation ([WhatsApp Help Center](https://faq.whatsapp.com/3242937609289432/?cms_platform=web&locale=pt_PT)).
+
+| Parameter              | Type     | Required | Description                                      |
+| ---------------------- | -------- | -------- | ------------------------------------------------ |
+| `instanceId`            | string   | Yes      | The instance ID                                  |
+| `sourceGroupId`         | string   | Yes      | Source group JID or bare numeric group ID        |
+| `name`                  | string   | Yes      | New group name (max 100 characters)              |
+| `includeParticipants`   | string[] | No       | Phone numbers or JIDs to keep from the source    |
+| `excludeParticipants`   | string[] | No       | Phone numbers or JIDs to omit from the new group |
+
+**Channel support:** Baileys only. Cloud API does not support group management.
+
+**Response:** The new group ID, the number of members added, and participant JIDs not present in
+Baileys' returned participant metadata when that metadata is available.
+
+```json
+{
+  "groupId": "120363000000000010@g.us",
+  "addedCount": 2,
+  "failedParticipants": []
 }
 ```
 
@@ -1743,8 +1824,8 @@ List pending requests to join a group, including the requester JID and Baileys r
 
 #### `wa_group_join_approval_mode`
 
-Enable or disable admin approval for group join requests. This account/server change is blocked
-unless `WA_APP_STATE_WRITES_ENABLED=true`, even though Baileys sends it through an IQ query.
+Enable or disable admin approval for group join requests. This group IQ change is blocked unless
+`WA_GROUP_WRITES_ENABLED=true` or `WA_APP_STATE_WRITES_ENABLED=true`.
 
 | Parameter    | Type          | Required | Description                 |
 | ------------ | ------------- | -------- | --------------------------- |
@@ -1758,8 +1839,8 @@ unless `WA_APP_STATE_WRITES_ENABLED=true`, even though Baileys sends it through 
 
 #### `wa_group_member_add_mode`
 
-Set who can add members to a group. This account/server change is blocked unless
-`WA_APP_STATE_WRITES_ENABLED=true`, even though Baileys sends it through an IQ query.
+Set who can add members to a group. This group IQ change is blocked unless
+`WA_GROUP_WRITES_ENABLED=true` or `WA_APP_STATE_WRITES_ENABLED=true`.
 
 | Parameter    | Type                            | Required | Description                |
 | ------------ | ------------------------------- | -------- | -------------------------- |
@@ -2269,8 +2350,8 @@ Tools for interacting with WhatsApp Channels (Newsletters). **Baileys only.**
 
 #### `wa_newsletter_follow`
 
-Follow a WhatsApp Channel/Newsletter. This account/server change is blocked unless
-`WA_APP_STATE_WRITES_ENABLED=true`.
+Follow a WhatsApp Channel/Newsletter. This MEX server call is blocked unless
+`WA_GROUP_WRITES_ENABLED=true` or `WA_APP_STATE_WRITES_ENABLED=true`.
 
 | Parameter    | Type   | Required | Description                      |
 | ------------ | ------ | -------- | -------------------------------- |
@@ -2291,8 +2372,8 @@ Follow a WhatsApp Channel/Newsletter. This account/server change is blocked unle
 
 #### `wa_newsletter_unfollow`
 
-Unfollow a WhatsApp Channel/Newsletter. This account/server change is blocked unless
-`WA_APP_STATE_WRITES_ENABLED=true`.
+Unfollow a WhatsApp Channel/Newsletter. This MEX server call is blocked unless
+`WA_GROUP_WRITES_ENABLED=true` or `WA_APP_STATE_WRITES_ENABLED=true`.
 
 | Parameter    | Type   | Required | Description                        |
 | ------------ | ------ | -------- | ---------------------------------- |
@@ -2332,10 +2413,11 @@ Send a message to a WhatsApp Channel/Newsletter (must be admin).
 }
 ```
 
-Channel create/update, post-reaction, community, catalog-write, and group-mode operations change
-account or server state and are blocked unless `WA_APP_STATE_WRITES_ENABLED=true`, regardless of
-whether Baileys sends them through newsletter/MEX queries, IQs, or message nodes. Cloud API returns
-a clear unsupported-operation error. Metadata and post-fetch calls are read-only.
+Channel create/update and post-reaction operations use MEX calls or message queries; community
+operations use IQs. They are blocked unless `WA_GROUP_WRITES_ENABLED=true` or
+`WA_APP_STATE_WRITES_ENABLED=true`. Catalog writes remain behind `WA_APP_STATE_WRITES_ENABLED`;
+read-only metadata and post-fetch calls remain available. Cloud API returns a clear
+unsupported-operation error for these Baileys-only operations.
 
 | Tool                               | Inputs                                             | Description                                      |
 | ---------------------------------- | -------------------------------------------------- | ------------------------------------------------ |
@@ -2512,7 +2594,8 @@ answer the event again to create a new response.
 ### 2.13 Business, Communities, and Catalog (15 tools)
 
 These operations require Baileys. Cloud API calls return unsupported-operation errors. Community
-changes and catalog product writes change account/server state and are blocked unless
+changes use the group write gate (`WA_GROUP_WRITES_ENABLED=true` or
+`WA_APP_STATE_WRITES_ENABLED=true`). Catalog product writes require
 `WA_APP_STATE_WRITES_ENABLED=true`; read-only listing and order tools remain available.
 
 | Tool                         | Inputs                                                                                                       | Description                                           |
@@ -2534,7 +2617,7 @@ changes and catalog product writes change account/server state and are blocked u
 | `wa_get_order_details`       | `instanceId`, `orderId`, `tokenBase64`                                                                       | Read details using the token from the order message. |
 
 Quick reply create/edit/delete call Baileys `addOrEditQuickReply` or `removeQuickReply`, which use
-`chatModify` → `appPatch`. They fail before the socket is touched unless
+`chatModify` → `appPatch` and the app-state preflight described above. They are blocked unless
 `WA_APP_STATE_WRITES_ENABLED=true`. Baileys rc14 has no quick-reply read method, and the server does
 not store quick reply sync actions locally, so there is no list tool. Use the WhatsApp Business app
 to find an existing reply's timestamp before editing or deleting it.
@@ -3057,7 +3140,32 @@ Fired when participants are added, removed, promoted, or demoted in a group.
 
 ---
 
-### 4.10 `whatsapp/contact.updated`
+### 4.10 `whatsapp/group.member_label_changed`
+
+Fired when a member's group label changes. The connected account can only set or remove its own
+label through the provided tools; changes by other group members are also reported when observed by
+Baileys. The event is available to `WA_EVENT_WEBHOOK_EVENTS` without changing existing defaults or
+the `grok-bot` preset.
+
+**Payload:**
+
+```json
+{
+  "_meta": { "notificationType": "whatsapp/group.member_label_changed" },
+  "instanceId": "inst_example",
+  "groupId": "120363000000000000@g.us",
+  "participant": "participant-placeholder@lid",
+  "memberLabel": "Group coordinator",
+  "action": "set",
+  "timestamp": 1700000000
+}
+```
+
+For a removal, `action` is `removed` and `memberLabel` is `null`.
+
+---
+
+### 4.11 `whatsapp/contact.updated`
 
 Fired when a contact's information changes.
 
@@ -3076,7 +3184,7 @@ Fired when a contact's information changes.
 
 ---
 
-### 4.11 `whatsapp/connection.changed`
+### 4.12 `whatsapp/connection.changed`
 
 Fired when an instance's connection status changes. Also carries QR code and pairing code data during authentication.
 
@@ -3098,7 +3206,7 @@ When `status` is `"connecting"`, `qrCode` may contain a base64-encoded QR code i
 
 ---
 
-### 4.12 `whatsapp/call.received`
+### 4.13 `whatsapp/call.received`
 
 Fired for call offers and later call-state updates. `status` can be `offer`, `ringing`, `preaccept`,
 `transport`, `relaylatency`, `timeout`, `reject`, `accept`, or `terminate`. Use `callId` and
@@ -3126,7 +3234,7 @@ Outgoing event webhooks use the same `call.received` filter and include `callId`
 
 ---
 
-### 4.13 `whatsapp/label.updated`
+### 4.14 `whatsapp/label.updated`
 
 Fired when Baileys reports a label edit or a chat/message label association change.
 
@@ -3134,7 +3242,7 @@ Fired when Baileys reports a label edit or a chat/message label association chan
 
 ---
 
-### 4.14 `whatsapp/event.response`
+### 4.15 `whatsapp/event.response`
 
 Fired when a Baileys event RSVP is decrypted and stored. A response recovered after its event
 message or LID mapping becomes available emits this event at that time.
@@ -3253,7 +3361,7 @@ Add to your Claude Desktop MCP configuration:
 }
 ```
 
-Once configured, Claude will auto-discover all 133 WA MCP tools and can interact with WhatsApp directly.
+Once configured, the client will auto-discover all 137 WA MCP tools and can interact with WhatsApp directly.
 
 ### 6.3 LangChain (Python)
 
@@ -3266,7 +3374,7 @@ toolkit = MCPToolkit(
 )
 
 tools = toolkit.get_tools()
-# tools now contains all 133 WA MCP tools, ready for any LangChain agent
+# tools now contains all 137 WA MCP tools, ready for any LangChain agent
 ```
 
 ---
@@ -3275,7 +3383,7 @@ tools = toolkit.get_tools()
 
 | Domain                            | Tools | Channel                              |
 | --------------------------------- | ----- | ------------------------------------ |
-| Instance Management              | 8     | Both (2 Baileys only, 1 Cloud only)  |
+| Instance Management              | 9     | Both (2 Baileys only, 1 Cloud only)  |
 | Messaging                         | 31    | Both                                 |
 | Audio Transcription               | 1     | Both                                 |
 | Text-to-speech                    | 3     | Provider-dependent                   |
@@ -3283,15 +3391,15 @@ tools = toolkit.get_tools()
 | Message Search                    | 1     | Both                                 |
 | WhatsApp Business Labels          | 8     | Baileys                              |
 | WhatsApp Events                   | 2     | Baileys                              |
-| Group Management                  | 23    | Baileys                              |
+| Group Management                  | 26    | Baileys                              |
 | Contact Management                | 8     | Both                                 |
 | Profile Management                | 7     | Both                                 |
 | Status / Stories                  | 4     | Baileys only                         |
 | Newsletter / Channels             | 10    | Baileys only                         |
 | Business, Communities, and Catalog| 15    | Baileys only                         |
 | Call Management                   | 1     | Baileys only                         |
-| **Total**                         | **133** |                                    |
+| **Total**                         | **137** |                                    |
 
 | Resources     | 10  |
 | ------------- | --- |
-| Notifications | 13  |
+| Notifications | 15  |

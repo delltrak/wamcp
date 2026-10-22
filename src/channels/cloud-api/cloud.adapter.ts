@@ -15,6 +15,7 @@ import type {
   MessageContent,
   MessageResponse,
   GroupResponse,
+  CreateGroupFromGroupResponse,
   GroupSummary,
   NumberExistsResponse,
   BusinessProfile,
@@ -45,6 +46,7 @@ import type {
   SendEventOptions,
   CatalogProductCreateInput,
   CatalogProductUpdateInput,
+  InstanceRuntimeStatus,
 } from "../../types/channel.types.js";
 import type {
   CatalogCollection,
@@ -121,6 +123,8 @@ export class CloudApiAdapter implements ChannelAdapter {
   private phoneNumberId: string | null = null;
   private businessId: string | null = null;
   private status: ConnectionStatus = "disconnected";
+  private displayPhoneNumber: string | null = null;
+  private lastDisconnectAt: number | null = null;
 
   private readonly listeners = new Map<ChannelEvent, Set<ChannelEventHandler<ChannelEvent>>>();
 
@@ -216,13 +220,22 @@ export class CloudApiAdapter implements ChannelAdapter {
     try {
       // Verify credentials by fetching phone number info
       const url = `${GRAPH_API_BASE}/${this.phoneNumberId}`;
-      await this.request<CloudApiPhoneNumberResponse>(url);
+      const phoneInfo = await this.request<CloudApiPhoneNumberResponse>(url);
       this.status = "connected";
+      this.displayPhoneNumber = phoneInfo.display_phone_number;
       logger.info({ instanceId: this.instanceId }, "Cloud API connected");
 
       this.emit("connection.changed", {
         instanceId: this.instanceId,
         status: "open",
+      });
+      this.emit("instance.connected", {
+        instanceId: this.instanceId,
+        phone: this.displayPhoneNumber,
+        lid: null,
+        pushName: null,
+        connectedAt: Date.now(),
+        wasPairing: false,
       });
     } catch (err) {
       this.status = "disconnected";
@@ -233,7 +246,17 @@ export class CloudApiAdapter implements ChannelAdapter {
 
   async disconnect(): Promise<void> {
     this.status = "disconnected";
+    this.lastDisconnectAt = Date.now();
     logger.info({ instanceId: this.instanceId }, "Cloud API disconnected");
+
+    this.emit("instance.disconnected", {
+      instanceId: this.instanceId,
+      reason: "Disconnected",
+      statusCode: null,
+      loggedOut: false,
+      willReconnect: false,
+      disconnectedAt: this.lastDisconnectAt,
+    });
 
     this.emit("connection.changed", {
       instanceId: this.instanceId,
@@ -243,6 +266,18 @@ export class CloudApiAdapter implements ChannelAdapter {
 
   getStatus(): ConnectionStatus {
     return this.status;
+  }
+
+  getLifecycleStatus(): InstanceRuntimeStatus {
+    return {
+      phone: this.status === "connected" ? this.displayPhoneNumber : null,
+      lid: null,
+      pushName: null,
+      disconnectReason: this.lastDisconnectAt === null ? null : "Disconnected",
+      disconnectStatusCode: null,
+      pendingChallenge: null,
+      presenceMode: null,
+    };
   }
 
   // ---- Authentication ----
@@ -705,6 +740,15 @@ export class CloudApiAdapter implements ChannelAdapter {
     throw new Error("Group management is not supported on Cloud API");
   }
 
+  async createGroupFromGroup(
+    _sourceGroupId: string,
+    _name: string,
+    _includeParticipants?: string[],
+    _excludeParticipants?: string[],
+  ): Promise<CreateGroupFromGroupResponse> {
+    throw new Error("Creating a group from another group is not supported on Cloud API");
+  }
+
   async modifyGroup(_groupId: string, _modification: GroupModification): Promise<void> {
     throw new Error("Group management is not supported on Cloud API");
   }
@@ -719,6 +763,14 @@ export class CloudApiAdapter implements ChannelAdapter {
 
   async getGroupMetadata(_groupId: string): Promise<GroupMetadata> {
     throw new Error("Group metadata is not supported on Cloud API");
+  }
+
+  assertGroupMemberLabelWritesEnabled(): void {
+    throw new Error("Group member labels are not supported on Cloud API");
+  }
+
+  async updateGroupMemberLabel(_groupId: string, _memberLabel: string | null): Promise<void> {
+    throw new Error("Group member labels are not supported on Cloud API");
   }
 
   async updateGroupPicture(_groupId: string, _image: string): Promise<void> {
@@ -1042,7 +1094,13 @@ export class CloudApiAdapter implements ChannelAdapter {
     _chatId: string,
     _count: number,
     _timeoutMs?: number,
-  ): Promise<{ requested: number; stored: number; timedOut: boolean }> {
+  ): Promise<{
+    requested: number;
+    limit: number;
+    capped: boolean;
+    stored: number;
+    timedOut: boolean;
+  }> {
     throw new Error("On-demand message history is only available on Baileys instances");
   }
 

@@ -32,6 +32,8 @@ export const instances = sqliteTable("instances", {
   updatedAt: integer("updated_at").notNull(),
   lastConnected: integer("last_connected"),
   lastDisconnected: integer("last_disconnected"),
+  lastDisconnectReason: text("last_disconnect_reason"),
+  lastDisconnectStatusCode: integer("last_disconnect_status_code"),
 });
 
 // ============================================================
@@ -228,6 +230,25 @@ export const groupsCache = sqliteTable(
     updatedAt: integer("updated_at").notNull(),
   },
   (table) => [primaryKey({ columns: [table.instanceId, table.jid] })],
+);
+
+// ============================================================
+// GROUP MEMBER LABELS
+// Latest labels observed from WhatsApp group protocol messages
+// ============================================================
+export const groupMemberLabels = sqliteTable(
+  "group_member_labels",
+  {
+    instanceId: text("instance_id")
+      .notNull()
+      .references(() => instances.id, { onDelete: "cascade" }),
+    groupJid: text("group_jid").notNull(),
+    participantJid: text("participant_jid").notNull(),
+    memberLabel: text("member_label"),
+    labelTimestamp: integer("label_timestamp").notNull(),
+    updatedAt: integer("updated_at").notNull(),
+  },
+  (table) => [primaryKey({ columns: [table.instanceId, table.groupJid, table.participantJid] })],
 );
 
 // ============================================================

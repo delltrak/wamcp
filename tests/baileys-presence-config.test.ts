@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { randomUUID } from "node:crypto";
+import { proto } from "@whiskeysockets/baileys";
 import { sqlite } from "../src/db/client.js";
 
 const mocks = vi.hoisted(() => ({
@@ -88,6 +89,44 @@ describe("Baileys markOnlineOnConnect configuration", () => {
     expect(mocks.makeWASocket).toHaveBeenCalledWith(
       expect.objectContaining({ markOnlineOnConnect: true }),
     );
+    await adapter.disconnect();
+  });
+
+  it("requests full history when the instance has no stored messages", async () => {
+    const adapter = await connectOpenAdapter();
+    const options = mocks.makeWASocket.mock.calls.at(-1)?.[0] as {
+      syncFullHistory: boolean;
+      shouldSyncHistoryMessage: (message: {
+        syncType: proto.HistorySync.HistorySyncType;
+      }) => boolean;
+    };
+
+    expect(options.syncFullHistory).toBe(true);
+    expect(
+      options.shouldSyncHistoryMessage({ syncType: proto.HistorySync.HistorySyncType.FULL }),
+    ).toBe(true);
+    expect(
+      options.shouldSyncHistoryMessage({ syncType: proto.HistorySync.HistorySyncType.RECENT }),
+    ).toBe(true);
+    await adapter.disconnect();
+  });
+
+  it("does not request full history when the instance already has messages", async () => {
+    const adapter = await connectOpenAdapter(true);
+    const options = mocks.makeWASocket.mock.calls.at(-1)?.[0] as {
+      syncFullHistory: boolean;
+      shouldSyncHistoryMessage: (message: {
+        syncType: proto.HistorySync.HistorySyncType;
+      }) => boolean;
+    };
+
+    expect(options.syncFullHistory).toBe(false);
+    expect(
+      options.shouldSyncHistoryMessage({ syncType: proto.HistorySync.HistorySyncType.FULL }),
+    ).toBe(false);
+    expect(
+      options.shouldSyncHistoryMessage({ syncType: proto.HistorySync.HistorySyncType.RECENT }),
+    ).toBe(true);
     await adapter.disconnect();
   });
 
@@ -475,7 +514,7 @@ describe("Baileys markOnlineOnConnect configuration", () => {
     );
   });
 
-  async function connectOpenAdapter(): Promise<BaileysAdapter> {
+  async function connectOpenAdapter(seedStoredMessage = false): Promise<BaileysAdapter> {
     const instanceId = `presence-${randomUUID()}`;
     activeInstanceId = instanceId;
     sqlite
@@ -483,6 +522,20 @@ describe("Baileys markOnlineOnConnect configuration", () => {
         "INSERT INTO instances (id, name, channel, status, created_at, updated_at) VALUES (?, ?, 'baileys', 'connected', 1, 1)",
       )
       .run(instanceId, "Presence test");
+    if (seedStoredMessage) {
+      sqlite
+        .prepare(
+          `INSERT INTO messages
+           (id, instance_id, chat_id, sender_id, type, timestamp)
+           VALUES (?, ?, ?, ?, 'text', 1)`,
+        )
+        .run(
+          "existing-history-message",
+          instanceId,
+          "5500000000001@s.whatsapp.net",
+          "5500000000002@s.whatsapp.net",
+        );
+    }
     const adapter = new BaileysAdapter(instanceId);
     activeAdapter = adapter;
     await adapter.connect();

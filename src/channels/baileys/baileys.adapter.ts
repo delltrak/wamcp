@@ -26,6 +26,7 @@ import makeWASocket, {
   type MinimalMessage,
   type WAMessageKey,
   type WAUrlInfo,
+  type SignalDataTypeMap,
   type CatalogCollection,
   type GetCatalogOptions,
   type NewsletterMetadata,
@@ -36,6 +37,9 @@ import makeWASocket, {
   type BinaryNode,
   jidNormalizedUser,
   ALL_WA_PATCH_NAMES,
+  chatModificationToAppPatch,
+  type ChatModification as BaileysChatModification,
+  type WAPatchName,
 } from "@whiskeysockets/baileys";
 import { randomUUID } from "node:crypto";
 import { Boom } from "@hapi/boom";
@@ -56,6 +60,7 @@ import type {
   Message,
   GroupSummary,
   GroupMetadata,
+  CreateGroupFromGroupResponse,
   ChatModification,
   GroupModification,
   ParticipantAction,
@@ -78,10 +83,13 @@ import type {
   MessageSearchOptions,
   SendEventOptions,
   NormalizedLabelUpdateEvent,
+  NormalizedGroupMemberLabelEvent,
   CatalogProductCreateInput,
   CatalogProductUpdateInput,
   NewsletterPost,
   NewsletterPostsPage,
+  InstanceAuthMethod,
+  InstanceRuntimeStatus,
 } from "../../types/channel.types.js";
 import { useSqliteAuthState, clearAuthState } from "./baileys.auth.js";
 import { normalizePrivacySettings } from "./privacy.js";
@@ -127,10 +135,12 @@ import {
 } from "./baileys.events.js";
 import {
   DEFAULT_AUTO_RECONNECT,
+  DEFAULT_BAILEYS_HISTORY_SYNC_MAX_MESSAGES,
   RECONNECT_INITIAL_DELAY_MS,
   RECONNECT_MAX_DELAY_MS,
   RECONNECT_MAX_ATTEMPTS,
   MAX_BASE64_MEDIA_BYTES,
+  MAX_GROUP_PARTICIPANTS,
   MEDIA_LIMITS,
 } from "../../constants.js";
 import { createChildLogger } from "../../utils/logger.js";
@@ -150,6 +160,8 @@ import {
   type ContactPnResolver,
   type ContactSyncRecord,
 } from "../../services/contact-store.js";
+import { AppStateResyncLogObserver, observeAppStateResyncLogs } from "./app-state-write-safety.js";
+import { GroupMemberLabelStore } from "../../services/group-member-label-store.js";
 
 const logger = createChildLogger({ service: "baileys-adapter" });
 const mediaService = new MediaService();
@@ -159,6 +171,7 @@ const DEFAULT_APPEND_NOTIFY_MAX_PER_BATCH = 100;
 const DEFAULT_BAILEYS_HEALTH_WATCHDOG_MS = 180_000;
 const DEFAULT_BAILEYS_EVENT_BUFFER_STALL_MS = 60_000;
 const DEFAULT_PRESENCE_IDLE_SECONDS = 30;
+const DEFAULT_APP_STATE_MIN_INTERVAL_MS = 1_500;
 const MAX_NODE_TIMEOUT_MS = 2_147_483_647;
 const MAX_PRESENCE_IDLE_SECONDS = Math.floor(MAX_NODE_TIMEOUT_MS / 1000);
 const BAILEYS_EVENT_BUFFER_STALL_RECHECK_MS = 1_000;
@@ -168,6 +181,7 @@ const APPEND_NOTIFY_CLOCK_SKEW_MS = 5 * 60_000;
 const BAILEYS_KEEP_ALIVE_INTERVAL_MS = 25_000;
 const STATUS_BROADCAST_JID = "status@broadcast";
 const MAX_MARK_READ_MESSAGE_IDS = 100;
+const MAX_APP_STATE_LAST_MESSAGES = 3;
 const MAX_PRESENCE_SUBSCRIPTIONS = 100;
 const PRESENCE_UPDATE_MIN_INTERVAL_MS = 2_000;
 const MAX_TRACKED_PRESENCE_CHATS = 1_000;
@@ -175,15 +189,87 @@ const MAX_EVENT_RESPONSE_DECRYPT_ATTEMPTS = 16;
 const MAX_POLL_VOTE_DECRYPT_ATTEMPTS = 16;
 const MAX_LINK_PREVIEW_THUMBNAIL_BYTES = 512 * 1024;
 const APP_STATE_WRITES_DISABLED_ERROR =
-  "WhatsApp account, server, and app-state writes are disabled because changes can get this linked device removed (see issue #71). Set WA_APP_STATE_WRITES_ENABLED=true to enable at your own risk.";
+  "WhatsApp account, server, and app-state writes are disabled. Set WA_APP_STATE_WRITES_ENABLED=true to enable them.";
+const GROUP_WRITES_DISABLED_ERROR =
+  "WhatsApp group, community, and Channel writes are disabled. Set WA_GROUP_WRITES_ENABLED=true or WA_APP_STATE_WRITES_ENABLED=true to enable them.";
+
+interface AppStateWriteQueue {
+  tail: Promise<void>;
+  lastStartedAt: number | null;
+}
+
+const appStateWriteQueues = new Map<string, AppStateWriteQueue>();
+
+export class AppStateNotSyncedError extends Error {
+  readonly code = "app_state_not_synced";
+
+  constructor(
+    readonly collection: WAPatchName,
+    readonly reason: string,
+  ) {
+    super(`App-state collection '${collection}' is not verified in sync: ${reason}`);
+    this.name = "AppStateNotSyncedError";
+  }
+}
 
 type PresenceMode = "on_activity" | "always";
+interface PendingAuthChallenge {
+  generatedAt: number;
+  expiresAt: number;
+  timer: ReturnType<typeof setTimeout>;
+}
+
+const AUTH_CHALLENGE_TTL_MS = 60_000;
+
+function disconnectReasonName(statusCode: number | undefined): string {
+  if (typeof statusCode !== "number") return "unknown";
+  const name = Object.entries(DisconnectReason).find(
+    ([key, value]) => !/^\d+$/.test(key) && value === statusCode,
+  )?.[0];
+  return name ?? `unknown (${statusCode})`;
+}
 type GlobalPresenceStatus = "available" | "unavailable";
 
 interface ViewOnceAudio {
   audio: Buffer;
   mimeType: string;
   ptt: boolean;
+}
+
+interface StoredAppStateMessage {
+  key: WAMessageKey;
+  messageTimestamp: number;
+}
+
+function getStoredMessage(rawData: string | null, id: string): WAMessage | undefined {
+  if (!rawData) return undefined;
+  try {
+    const message = JSON.parse(rawData, BufferJSON.reviver) as WAMessage;
+    const key = message.key;
+    if (
+      key?.id !== id ||
+      typeof key.remoteJid !== "string" ||
+      key.remoteJid.trim().length === 0 ||
+      typeof key.fromMe !== "boolean" ||
+      (key.participant !== undefined && typeof key.participant !== "string")
+    ) {
+      return undefined;
+    }
+    return message;
+  } catch {
+    return undefined;
+  }
+}
+
+function storedMessageTimestampSeconds(
+  rowTimestamp: number,
+  rawMessageTimestamp: WAMessage["messageTimestamp"],
+): number | undefined {
+  for (const value of [rowTimestamp, rawMessageTimestamp]) {
+    const timestampMs = messageTimestampToMilliseconds(value, Number.NaN);
+    if (Number.isFinite(timestampMs) && timestampMs > 0) return Math.floor(timestampMs / 1000);
+  }
+  return undefined;
 }
 
 function parseAudioDataUri(input: string): { data: Buffer; contentType?: string } {
@@ -515,6 +601,29 @@ function groupPictureFailure(error: unknown, operation: "update" | "remove"): Er
   return error instanceof Error ? error : new Error(message);
 }
 
+function isMissingGroupError(error: unknown): boolean {
+  const errorObject =
+    typeof error === "object" && error !== null ? (error as Record<string, unknown>) : undefined;
+  const output = errorObject?.output;
+  const statusCode =
+    typeof output === "object" && output !== null && "statusCode" in output
+      ? (output as Record<string, unknown>).statusCode
+      : errorObject?.statusCode;
+  const message = error instanceof Error ? error.message : String(error);
+
+  return (
+    statusCode === 404 ||
+    /item-not-found|group (?:was )?not found|group does not exist/i.test(message)
+  );
+}
+
+function hasMatchingIdentity(left: Set<string>, right: Set<string>): boolean {
+  for (const identity of left) {
+    if (right.has(identity)) return true;
+  }
+  return false;
+}
+
 function parseBooleanEnv(value: string | undefined, key: string, fallback: boolean): boolean {
   if (value === undefined || value.trim() === "") return fallback;
   if (value.trim().toLowerCase() === "true") return true;
@@ -539,6 +648,23 @@ function parsePositiveIntegerEnv(
         ? "a positive integer"
         : `a positive integer no greater than ${maximum}`;
     throw new Error(`Invalid ${key}; expected ${expectation}`);
+  }
+  return parsed;
+}
+
+function parseNonNegativeIntegerEnv(
+  value: string | undefined,
+  key: string,
+  fallback: number,
+  maximum = MAX_NODE_TIMEOUT_MS,
+): number {
+  if (value === undefined || value.trim() === "") return fallback;
+  if (!/^\d+$/.test(value.trim())) {
+    throw new Error(`Invalid ${key}; expected a non-negative integer`);
+  }
+  const parsed = Number(value.trim());
+  if (!Number.isSafeInteger(parsed) || parsed < 0 || parsed > maximum) {
+    throw new Error(`Invalid ${key}; expected a non-negative integer no greater than ${maximum}`);
   }
   return parsed;
 }
@@ -758,11 +884,19 @@ function hasForwardableContent(message: WAMessage, allowEmptyStoredProto = false
 interface HistoryFetchWaiter {
   chatId: string;
   requested: number;
+  limit: number;
+  capped: boolean;
   stored: number;
   peerDataRequestSessionId?: string;
   receivedMatchingHistorySet: boolean;
   seenMessageIds: Set<string>;
-  resolve: (result: { requested: number; stored: number; timedOut: boolean }) => void;
+  resolve: (result: {
+    requested: number;
+    limit: number;
+    capped: boolean;
+    stored: number;
+    timedOut: boolean;
+  }) => void;
   reject: (error: unknown) => void;
   timer: ReturnType<typeof setTimeout>;
 }
@@ -784,6 +918,7 @@ function labelOperationError(error: unknown): Error {
 export class BaileysAdapter implements ChannelAdapter {
   private sock: WASocket | null = null;
   private readonly contactStore: ContactStore;
+  private readonly groupMemberLabelStore: GroupMemberLabelStore;
   private status: ConnectionStatus = "disconnected";
   private qrCode: string | null = null;
   private pairingPhone: string | null = null;
@@ -798,6 +933,9 @@ export class BaileysAdapter implements ChannelAdapter {
 
   private readonly autoReconnect: boolean;
   private readonly appStateWritesEnabled: boolean;
+  private readonly groupWritesEnabled: boolean;
+  private readonly appStateWriteMinIntervalMs: number;
+  private readonly appStateResyncLogObserver = new AppStateResyncLogObserver();
   private readonly presenceMode: PresenceMode;
   private readonly presenceIdleMs: number;
   private readonly markOnlineOnConnect: boolean;
@@ -813,6 +951,10 @@ export class BaileysAdapter implements ChannelAdapter {
   private readonly listeners = new Map<ChannelEvent, Set<ChannelEventHandler<ChannelEvent>>>();
   private pendingSocketEventProcessing: Promise<void> = Promise.resolve();
   private activeHistoryFetch: HistoryFetchWaiter | null = null;
+  private readonly automaticHistoryRecoveryChats = new Set<string>();
+  private readonly automaticHistoryRecoveryQueue = new Set<string>();
+  private automaticHistoryRecoveryRunning = false;
+  private readonly historySyncMaxMessages: number;
   private readonly messageDedup = new DedupService();
   private readonly appendNotifyWindowMs: number;
   private readonly appendNotifyMaxPerBatch: number;
@@ -827,19 +969,40 @@ export class BaileysAdapter implements ChannelAdapter {
   private appendNotifyWatermarkMs: number | null = null;
   private lastDisconnectReason: string | null = null;
   private lastDisconnectStatusCode: number | null = null;
+  private readonly pendingAuthChallenges = new Map<InstanceAuthMethod, PendingAuthChallenge>();
+  private disconnectEventEmittedSinceOpen = true;
+  private terminalDisconnectEventEmittedSinceOpen = false;
   private consecutiveHealthProbeFailures = 0;
   private healthActivityGeneration = 0;
 
   constructor(
     private readonly instanceId: string,
     contactStore?: ContactStore,
+    groupMemberLabelStore?: GroupMemberLabelStore,
   ) {
     this.contactStore = contactStore ?? new ContactStore(instanceId, db);
+    this.groupMemberLabelStore = groupMemberLabelStore ?? new GroupMemberLabelStore(instanceId, db);
     this.autoReconnect = process.env.WA_AUTO_RECONNECT !== "false" && DEFAULT_AUTO_RECONNECT;
+    this.historySyncMaxMessages = parsePositiveIntegerEnv(
+      process.env.WA_BAILEYS_HISTORY_SYNC_MAX_MESSAGES,
+      "WA_BAILEYS_HISTORY_SYNC_MAX_MESSAGES",
+      DEFAULT_BAILEYS_HISTORY_SYNC_MAX_MESSAGES,
+      10_000,
+    );
     this.appStateWritesEnabled = parseBooleanEnv(
       process.env.WA_APP_STATE_WRITES_ENABLED,
       "WA_APP_STATE_WRITES_ENABLED",
       false,
+    );
+    this.groupWritesEnabled = parseBooleanEnv(
+      process.env.WA_GROUP_WRITES_ENABLED,
+      "WA_GROUP_WRITES_ENABLED",
+      false,
+    );
+    this.appStateWriteMinIntervalMs = parseNonNegativeIntegerEnv(
+      process.env.WA_APP_STATE_MIN_INTERVAL_MS,
+      "WA_APP_STATE_MIN_INTERVAL_MS",
+      DEFAULT_APP_STATE_MIN_INTERVAL_MS,
     );
     this.presenceMode = parsePresenceMode(process.env.WA_PRESENCE_MODE);
     this.presenceIdleMs =
@@ -896,6 +1059,206 @@ export class BaileysAdapter implements ChannelAdapter {
 
   private requireAppStateWritesEnabled(): void {
     if (!this.appStateWritesEnabled) throw new Error(APP_STATE_WRITES_DISABLED_ERROR);
+  }
+
+  private requireGroupWritesEnabled(): void {
+    if (!this.appStateWritesEnabled && !this.groupWritesEnabled) {
+      throw new Error(GROUP_WRITES_DISABLED_ERROR);
+    }
+  }
+
+  private refuseAppStateWrite(collection: WAPatchName, reason: string): never {
+    logger.warn(
+      { instanceId: this.instanceId, collection, reason },
+      "Refusing app-state write because the collection is not verified in sync",
+    );
+    throw new AppStateNotSyncedError(collection, reason);
+  }
+
+  private async readAppStateVersion(
+    sock: WASocket,
+    collection: WAPatchName,
+  ): Promise<{ version: number; hashLength: number } | undefined> {
+    const states = await sock.authState.keys.get("app-state-sync-version", [collection]);
+    const state = states[collection];
+    if (!state || !Number.isSafeInteger(state.version)) return undefined;
+    return {
+      version: state.version,
+      hashLength: state.hash instanceof Uint8Array ? state.hash.byteLength : -1,
+    };
+  }
+
+  /**
+   * Serialize one Baileys app-state write per account and verify collection state before dispatch.
+   * WAMCP callers are modifyChat (archive/unarchive/pin/unpin/mute/unmute/delete/clear),
+   * markChatUnread, starMessage, updateProfileName, createQuickReply, editQuickReply,
+   * deleteQuickReply, createLabel, editLabel, deleteLabel, setChatLabel, and setMessageLabel.
+   * Baileys addOrEditContact is not currently called by WAMCP; any future use must go through this
+   * helper.
+   */
+  private async runSafeAppStateWrite<T>(
+    sock: WASocket,
+    collection: WAPatchName,
+    write: () => Promise<T>,
+  ): Promise<T> {
+    this.requireAppStateWritesEnabled();
+
+    let queue = appStateWriteQueues.get(this.instanceId);
+    if (!queue) {
+      queue = { tail: Promise.resolve(), lastStartedAt: null };
+      appStateWriteQueues.set(this.instanceId, queue);
+    }
+    const previous = queue.tail;
+    let release!: () => void;
+    queue.tail = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    await previous;
+
+    try {
+      if (queue.lastStartedAt !== null) {
+        const remainingMs = this.appStateWriteMinIntervalMs - (Date.now() - queue.lastStartedAt);
+        if (remainingMs > 0) {
+          await new Promise<void>((resolve) => setTimeout(resolve, remainingMs));
+        }
+      }
+      queue.lastStartedAt = Date.now();
+
+      if (this.sock !== sock || this.status !== "connected" || !sock.ws.isOpen) {
+        return this.refuseAppStateWrite(collection, "the socket is not open and connected");
+      }
+      if (!sock.user?.id || !sock.authState?.creds) {
+        return this.refuseAppStateWrite(collection, "the socket is not authenticated");
+      }
+
+      const appStateKeyId = sock.authState.creds.myAppStateKeyId;
+      if (typeof appStateKeyId !== "string" || appStateKeyId.length === 0) {
+        return this.refuseAppStateWrite(collection, "the current app-state key ID is missing");
+      }
+
+      let appStateSyncKey;
+      try {
+        const keys = await sock.authState.keys.get("app-state-sync-key", [appStateKeyId]);
+        appStateSyncKey = keys[appStateKeyId];
+      } catch {
+        return this.refuseAppStateWrite(collection, "the current app-state key could not be read");
+      }
+      if (!appStateSyncKey) {
+        return this.refuseAppStateWrite(collection, "the current app-state key is unavailable");
+      }
+
+      const resync = await this.appStateResyncLogObserver.capture(collection, () =>
+        sock.resyncAppState([collection], false),
+      );
+      if (!resync.ok) return this.refuseAppStateWrite(collection, resync.reason);
+
+      let before: { version: number; hashLength: number } | undefined;
+      try {
+        before = await this.readAppStateVersion(sock, collection);
+      } catch {
+        return this.refuseAppStateWrite(
+          collection,
+          "the collection sync version could not be read",
+        );
+      }
+      if (!before || before.version <= 0 || before.hashLength !== 128) {
+        return this.refuseAppStateWrite(
+          collection,
+          "the collection has no valid positive version and 128-byte hash",
+        );
+      }
+
+      if (this.sock !== sock || this.status !== "connected" || !sock.ws.isOpen) {
+        return this.refuseAppStateWrite(collection, "the socket closed during the sync preflight");
+      }
+
+      const observation = this.appStateResyncLogObserver.arm(collection, true);
+      const keyStore = sock.authState.keys;
+      const originalGet = keyStore.get;
+      let result: T;
+      try {
+        keyStore.get = async <T extends keyof SignalDataTypeMap>(type: T, ids: string[]) => {
+          const values = await originalGet(type, ids);
+          if (type === "app-state-sync-version" && ids.includes(collection)) {
+            const state = (values as Record<string, SignalDataTypeMap["app-state-sync-version"]>)[
+              collection
+            ];
+            const hashLength = state?.hash instanceof Uint8Array ? state.hash.byteLength : -1;
+            if (
+              !state ||
+              !Number.isSafeInteger(state.version) ||
+              state.version <= 0 ||
+              hashLength !== 128
+            ) {
+              this.refuseAppStateWrite(
+                collection,
+                "the collection has no valid positive version and 128-byte hash after its internal resync",
+              );
+            }
+          }
+          return values;
+        };
+        try {
+          result = await write();
+        } catch (error) {
+          const failureReason = observation.failureReason();
+          if (failureReason) return this.refuseAppStateWrite(collection, failureReason);
+          throw error;
+        }
+      } finally {
+        keyStore.get = originalGet;
+        observation.disarm();
+      }
+
+      const postResync = await this.appStateResyncLogObserver.capture(collection, () =>
+        sock.resyncAppState([collection], false),
+      );
+      let after: { version: number; hashLength: number } | undefined;
+      try {
+        after = await this.readAppStateVersion(sock, collection);
+      } catch {
+        // The patch already succeeded; report an unverifiable follow-up without retrying it.
+      }
+      if (!postResync.ok || !after || after.version <= before.version || after.hashLength !== 128) {
+        logger.warn(
+          {
+            instanceId: this.instanceId,
+            collection,
+            reason: !postResync.ok
+              ? postResync.reason
+              : !after
+                ? "collection version unavailable after the write"
+                : after.version <= before.version
+                  ? "collection version did not advance"
+                  : "collection hash is not 128 bytes after the write",
+          },
+          "App-state write succeeded but its post-write sync did not verify",
+        );
+      }
+      return result;
+    } finally {
+      release();
+    }
+  }
+
+  private async runSafeChatModification<T>(
+    sock: WASocket,
+    modification: BaileysChatModification,
+    jid: string,
+    write: () => Promise<T>,
+  ): Promise<T> {
+    const { type } = chatModificationToAppPatch(modification, jid);
+    return this.runSafeAppStateWrite(sock, type, write);
+  }
+
+  private async safeChatModify(
+    sock: WASocket,
+    modification: BaileysChatModification,
+    jid: string,
+  ): Promise<void> {
+    await this.runSafeChatModification(sock, modification, jid, () =>
+      sock.chatModify(modification, jid),
+    );
   }
 
   private getSock(): WASocket {
@@ -1026,6 +1389,84 @@ export class BaileysAdapter implements ChannelAdapter {
     if (input.includes("@")) return input;
     const cleaned = input.replace(/[^0-9]/g, "");
     return `${cleaned}@s.whatsapp.net`;
+  }
+
+  private async getChatJidAliases(input: string): Promise<string[]> {
+    const aliases = new Set<string>();
+    const add = (jid: string | null | undefined): void => {
+      if (!jid) return;
+      aliases.add(jid);
+      aliases.add(jidNormalizedUser(jid));
+    };
+    const jid = jidNormalizedUser(this.normalizeJid(input));
+    add(jid);
+
+    const lidMapping = this.sock?.signalRepository?.lidMapping;
+    try {
+      if (jid.endsWith("@lid") && lidMapping?.getPNForLID) {
+        add(await lidMapping.getPNForLID(jid));
+      } else if (jid.endsWith("@s.whatsapp.net") && lidMapping?.getLIDForPN) {
+        add(await lidMapping.getLIDForPN(jid));
+      }
+    } catch {
+      // Keep the supplied PN/LID identity when no mapping is available.
+    }
+    return [...aliases];
+  }
+
+  private async getAppStateLastMessages(
+    chatId: string,
+    operation: string,
+  ): Promise<{ jid: string; lastMessages: MinimalMessage[] }> {
+    const requestedJid = jidNormalizedUser(this.normalizeJid(chatId));
+    const chatAliases = await this.getChatJidAliases(requestedJid);
+    const rows = db
+      .select({
+        id: messagesTable.id,
+        chatId: messagesTable.chatId,
+        timestamp: messagesTable.timestamp,
+        rawData: messagesTable.rawData,
+      })
+      .from(messagesTable)
+      .where(
+        and(
+          eq(messagesTable.instanceId, this.instanceId),
+          inArray(messagesTable.chatId, chatAliases),
+        ),
+      )
+      .orderBy(desc(messagesTable.timestamp), desc(messagesTable.id))
+      .limit(50)
+      .all();
+
+    const validMessages: StoredAppStateMessage[] = [];
+    for (const row of rows) {
+      const stored = getStoredMessage(row.rawData, row.id);
+      if (!stored?.key) continue;
+      if (
+        stored.key.remoteJid!.endsWith("@g.us") &&
+        !stored.key.fromMe &&
+        !stored.key.participant
+      ) {
+        continue;
+      }
+      const timestamp = storedMessageTimestampSeconds(row.timestamp, stored.messageTimestamp);
+      if (timestamp === undefined) continue;
+      validMessages.push({ key: stored.key, messageTimestamp: timestamp });
+    }
+
+    const patchJid = validMessages[0]?.key.remoteJid;
+    if (!patchJid) {
+      throw new Error(
+        `Cannot ${operation} chat '${requestedJid}' because no valid stored message key and timestamp are available`,
+      );
+    }
+
+    // Keep the patch index and its message range on the same PN/LID address used by the latest
+    // stored WAMessage key. Older rows with a different address are omitted from this small range.
+    const lastMessages = validMessages
+      .filter((message) => message.key.remoteJid === patchJid)
+      .slice(0, MAX_APP_STATE_LAST_MESSAGES);
+    return { jid: patchJid, lastMessages };
   }
 
   private normalizeStatusRecipient(input: string): string | null {
@@ -1286,6 +1727,7 @@ export class BaileysAdapter implements ChannelAdapter {
     this.authMeLid = state.creds.me?.lid;
 
     const { version } = await getWaVersion();
+    const requestFullHistory = !this.hasStoredMessages();
 
     const sock = makeWASocket({
       version,
@@ -1294,10 +1736,15 @@ export class BaileysAdapter implements ChannelAdapter {
         keys: makeCacheableSignalKeyStore(state.keys, logger),
       },
       printQRInTerminal: false,
-      logger: logger.child({ instanceId: this.instanceId }),
+      logger: observeAppStateResyncLogs(
+        logger.child({ instanceId: this.instanceId }),
+        this.appStateResyncLogObserver,
+      ),
       generateHighQualityLinkPreview: true,
       keepAliveIntervalMs: BAILEYS_KEEP_ALIVE_INTERVAL_MS,
-      syncFullHistory: true,
+      syncFullHistory: requestFullHistory,
+      shouldSyncHistoryMessage: ({ syncType }) =>
+        syncType !== proto.HistorySync.HistorySyncType.FULL || requestFullHistory,
       markOnlineOnConnect: this.markOnlineOnConnect,
       getMessage: async (key: WAMessageKey): Promise<proto.IMessage | undefined> => {
         if (!key.id) return undefined;
@@ -1342,17 +1789,131 @@ export class BaileysAdapter implements ChannelAdapter {
     this.clearReconnectTimer();
     this.clearHealthWatchdog();
     this.clearEventBufferStallWatchdog();
+    this.clearAuthChallenges(Date.now());
     this.resetActivityPresence();
     this.pendingCalls.clear();
     if (this.sock) {
       this.sock.end(undefined);
       this.sock = null;
     }
+    this.automaticHistoryRecoveryQueue.clear();
+    this.finishHistoryFetch(true);
     this.status = "disconnected";
   }
 
   getStatus(): ConnectionStatus {
     return this.status;
+  }
+
+  getLifecycleStatus(): InstanceRuntimeStatus {
+    const connected = this.status === "connected";
+    const sock = connected ? this.sock : null;
+    const user = sock?.user as { id?: string; lid?: string; name?: string } | undefined;
+    const pending = [...this.pendingAuthChallenges.entries()].sort(
+      ([, left], [, right]) => right.generatedAt - left.generatedAt,
+    )[0];
+
+    return {
+      phone: connected ? this.ownPhoneJid(sock) : null,
+      lid: connected ? this.ownLid(user) : null,
+      pushName: connected && typeof user?.name === "string" ? user.name : null,
+      disconnectReason: this.lastDisconnectReason,
+      disconnectStatusCode: this.lastDisconnectStatusCode,
+      pendingChallenge: pending
+        ? {
+            method: pending[0],
+            generatedAt: pending[1].generatedAt,
+            expiresAt: pending[1].expiresAt,
+          }
+        : null,
+      presenceMode: this.presenceMode,
+    };
+  }
+
+  private ownPhoneJid(sock: WASocket | null): string | null {
+    const user = sock?.user as { id?: string } | undefined;
+    const candidates = [this.authMeId, user?.id];
+    const phoneJid = candidates.find(
+      (value): value is string => typeof value === "string" && value.endsWith("@s.whatsapp.net"),
+    );
+    return phoneJid ? jidNormalizedUser(phoneJid) : null;
+  }
+
+  private ownLid(user: { lid?: string } | undefined): string | null {
+    const candidates = [this.authMeLid, user?.lid];
+    return (
+      candidates.find(
+        (value): value is string => typeof value === "string" && value.endsWith("@lid"),
+      ) ?? null
+    );
+  }
+
+  private emitAuthChallengeGenerated(method: InstanceAuthMethod): void {
+    const existing = this.pendingAuthChallenges.get(method);
+    const generatedAt = Date.now();
+    if (existing) this.expireAuthChallenge(method, existing.generatedAt, generatedAt);
+
+    const expiresAt = generatedAt + AUTH_CHALLENGE_TTL_MS;
+    const timer = setTimeout(() => {
+      this.expireAuthChallenge(method, generatedAt, Date.now());
+    }, AUTH_CHALLENGE_TTL_MS);
+    this.pendingAuthChallenges.set(method, { generatedAt, expiresAt, timer });
+
+    if (method === "pairing_code") {
+      this.emit("instance.pairing_code_generated", {
+        instanceId: this.instanceId,
+        method,
+        generatedAt,
+        expiresAt,
+      });
+    } else {
+      this.emit("instance.qr_generated", {
+        instanceId: this.instanceId,
+        method,
+        generatedAt,
+        expiresAt,
+      });
+    }
+  }
+
+  private expireAuthChallenge(
+    method: InstanceAuthMethod,
+    generatedAt: number,
+    expiredAt: number,
+  ): void {
+    const pending = this.pendingAuthChallenges.get(method);
+    if (!pending || pending.generatedAt !== generatedAt) return;
+
+    clearTimeout(pending.timer);
+    this.pendingAuthChallenges.delete(method);
+    if (method === "pairing_code") {
+      this.pairingCodeValue = null;
+      this.emit("instance.pairing_expired", {
+        instanceId: this.instanceId,
+        method,
+        generatedAt,
+        expiredAt,
+      });
+    } else {
+      this.qrCode = null;
+      this.emit("instance.qr_expired", {
+        instanceId: this.instanceId,
+        method,
+        generatedAt,
+        expiredAt,
+      });
+    }
+  }
+
+  private clearAuthChallenges(expiredAt?: number): void {
+    for (const [method, pending] of this.pendingAuthChallenges) {
+      if (expiredAt === undefined) {
+        clearTimeout(pending.timer);
+        this.pendingAuthChallenges.delete(method);
+      } else {
+        this.expireAuthChallenge(method, pending.generatedAt, expiredAt);
+      }
+    }
   }
 
   // ---- Authentication ----
@@ -1374,8 +1935,13 @@ export class BaileysAdapter implements ChannelAdapter {
     // QR event already fired before this call — request pairing code immediately
     if (this.qrCode && this.sock) {
       await new Promise((r) => setTimeout(r, 1000));
-      const code = await this.sock.requestPairingCode(phone);
-      this.pairingCodeValue = code ?? null;
+      const sock = this.sock;
+      if (!sock || this.status !== "qr_pending") return null;
+      const code = await sock.requestPairingCode(phone);
+      if (this.sock !== sock || this.status !== "qr_pending") return null;
+      const pairingCode = code ?? null;
+      if (pairingCode) this.emitAuthChallengeGenerated("pairing_code");
+      this.pairingCodeValue = pairingCode;
       return this.pairingCodeValue;
     }
 
@@ -1854,30 +2420,38 @@ export class BaileysAdapter implements ChannelAdapter {
   async starMessage(chatId: string, messageId: string, star: boolean): Promise<void> {
     this.requireAppStateWritesEnabled();
     const sock = this.getSock();
-    const jid = this.normalizeJid(chatId);
+    const chatAliases = await this.getChatJidAliases(chatId);
     const stored = db
-      .select({ fromMe: messagesTable.isFromMe })
+      .select({ chatId: messagesTable.chatId, rawData: messagesTable.rawData })
       .from(messagesTable)
       .where(
         and(
           eq(messagesTable.instanceId, this.instanceId),
-          eq(messagesTable.chatId, jid),
+          inArray(messagesTable.chatId, chatAliases),
           eq(messagesTable.id, messageId),
         ),
       )
       .get();
-    if (!stored) throw new Error(`Message '${messageId}' was not found in chat '${jid}'`);
-
-    await sock.chatModify(
-      { star: { messages: [{ id: messageId, fromMe: stored.fromMe === 1 }], star } },
-      jid,
-    );
+    if (!stored) {
+      throw new Error(
+        `Message '${messageId}' was not found in chat '${this.normalizeJid(chatId)}'`,
+      );
+    }
+    const message = getStoredMessage(stored.rawData, messageId);
+    const key = message?.key;
+    if (!key?.remoteJid || typeof key.fromMe !== "boolean") {
+      throw new Error(
+        `Cannot star message '${messageId}' because its stored raw message key is unavailable`,
+      );
+    }
+    const starMessageKey = { ...key, id: messageId, fromMe: key.fromMe };
+    await this.safeChatModify(sock, { star: { messages: [starMessageKey], star } }, key.remoteJid);
     db.update(messagesTable)
       .set({ starred: star ? 1 : 0 })
       .where(
         and(
           eq(messagesTable.instanceId, this.instanceId),
-          eq(messagesTable.chatId, jid),
+          eq(messagesTable.chatId, stored.chatId),
           eq(messagesTable.id, messageId),
         ),
       )
@@ -2346,21 +2920,30 @@ export class BaileysAdapter implements ChannelAdapter {
     }
     const sock = this.getSock();
     const jid = this.normalizeJid(chatId);
-    const isGroup = jid.endsWith("@g.us");
+    const chatAliases = await this.getChatJidAliases(jid);
     const keys = [...new Set(messageIds)].flatMap((id) => {
-      if (!isGroup) return [{ remoteJid: jid, id }];
-
       const storedMessage = db
-        .select({ senderId: messagesTable.senderId, isFromMe: messagesTable.isFromMe })
+        .select({
+          senderId: messagesTable.senderId,
+          isFromMe: messagesTable.isFromMe,
+          rawData: messagesTable.rawData,
+        })
         .from(messagesTable)
         .where(
           and(
             eq(messagesTable.instanceId, this.instanceId),
-            eq(messagesTable.chatId, jid),
+            inArray(messagesTable.chatId, chatAliases),
             eq(messagesTable.id, id),
           ),
         )
         .get();
+
+      const rawKey = getStoredMessage(storedMessage?.rawData ?? null, id)?.key;
+      if (rawKey?.remoteJid) {
+        return [rawKey];
+      }
+
+      if (!jid.endsWith("@g.us")) return [{ remoteJid: jid, id }];
       const messageParticipant = storedMessage?.senderId || participant;
 
       if (!messageParticipant || messageParticipant === "me") {
@@ -2390,86 +2973,59 @@ export class BaileysAdapter implements ChannelAdapter {
   async modifyChat(chatId: string, modification: ChatModification): Promise<void> {
     this.requireAppStateWritesEnabled();
     const sock = this.getSock();
-    const jid = this.normalizeJid(chatId);
+    let jid = this.normalizeJid(chatId);
+    let patch: BaileysChatModification;
 
     switch (modification.action) {
-      case "archive":
-        await sock.chatModify({ archive: true, lastMessages: [] }, jid);
+      case "archive": {
+        const range = await this.getAppStateLastMessages(chatId, "archive");
+        jid = range.jid;
+        patch = { archive: true, lastMessages: range.lastMessages };
         break;
-      case "unarchive":
-        await sock.chatModify({ archive: false, lastMessages: [] }, jid);
+      }
+      case "unarchive": {
+        const range = await this.getAppStateLastMessages(chatId, "unarchive");
+        jid = range.jid;
+        patch = { archive: false, lastMessages: range.lastMessages };
         break;
+      }
       case "pin":
-        await sock.chatModify({ pin: true }, jid);
+        patch = { pin: true };
         break;
       case "unpin":
-        await sock.chatModify({ pin: false }, jid);
+        patch = { pin: false };
         break;
       case "mute":
-        await sock.chatModify(
-          { mute: modification.muteUntil ?? Date.now() + 8 * 60 * 60 * 1000 },
-          jid,
-        );
+        patch = { mute: modification.muteUntil ?? Date.now() + 8 * 60 * 60 * 1000 };
         break;
       case "unmute":
-        await sock.chatModify({ mute: null }, jid);
+        patch = { mute: null };
         break;
-      case "delete":
-        await sock.chatModify({ delete: true, lastMessages: [] }, jid);
+      case "delete": {
+        const range = await this.getAppStateLastMessages(chatId, "delete");
+        jid = range.jid;
+        patch = { delete: true, lastMessages: range.lastMessages };
         break;
-      case "clear":
-        await sock.chatModify({ clear: true, lastMessages: [] }, jid);
+      }
+      case "clear": {
+        const range = await this.getAppStateLastMessages(chatId, "clear");
+        jid = range.jid;
+        patch = { clear: true, lastMessages: range.lastMessages };
         break;
+      }
     }
+    await this.safeChatModify(sock, patch, jid);
   }
 
   async markChatUnread(chatId: string): Promise<void> {
     this.requireAppStateWritesEnabled();
     const sock = this.getSock();
-    const jid = this.normalizeJid(chatId);
-    const rows = db
-      .select({
-        id: messagesTable.id,
-        chatId: messagesTable.chatId,
-        senderId: messagesTable.senderId,
-        isFromMe: messagesTable.isFromMe,
-        timestamp: messagesTable.timestamp,
-        rawData: messagesTable.rawData,
-      })
-      .from(messagesTable)
-      .where(and(eq(messagesTable.instanceId, this.instanceId), eq(messagesTable.chatId, jid)))
-      .orderBy(desc(messagesTable.timestamp), desc(messagesTable.id))
-      .limit(50)
-      .all();
-    if (rows.length === 0) {
-      throw new Error(`Cannot mark chat '${jid}' unread because it has no stored messages`);
-    }
-
-    const lastMessages: MinimalMessage[] = rows.map((row) => {
-      let raw: WAMessage | undefined;
-      if (row.rawData) {
-        try {
-          raw = JSON.parse(row.rawData, BufferJSON.reviver) as WAMessage;
-        } catch {
-          // Reconstruct the minimum Baileys key from the normalized row.
-        }
-      }
-      const key: WAMessageKey = {
-        ...(raw?.key ?? {}),
-        remoteJid: jid,
-        id: row.id,
-        fromMe: row.isFromMe === 1,
-      };
-      if (jid.endsWith("@g.us") && !key.fromMe && !key.participant) {
-        key.participant = row.senderId;
-      }
-      return {
-        key,
-        messageTimestamp: row.timestamp,
-      };
-    });
-
-    await sock.chatModify({ markRead: false, lastMessages }, jid);
+    const range = await this.getAppStateLastMessages(chatId, "mark unread");
+    await this.safeChatModify(
+      sock,
+      { markRead: false, lastMessages: range.lastMessages },
+      range.jid,
+    );
   }
 
   private async requireBusinessLabelSupport(sock: WASocket, methods: string[]): Promise<string> {
@@ -2606,13 +3162,16 @@ export class BaileysAdapter implements ChannelAdapter {
     const sock = this.getSock();
     const jid = await this.requireBusinessLabelSupport(sock, ["addLabel"]);
     const label: BusinessLabel = { id: randomUUID(), name, color, deleted: false };
+    const action = {
+      id: label.id,
+      name: label.name,
+      color: label.color,
+      deleted: false,
+    };
     try {
-      await sock.addLabel(jid, {
-        id: label.id,
-        name: label.name,
-        color: label.color,
-        deleted: false,
-      });
+      await this.runSafeChatModification(sock, { addLabel: action }, jid, () =>
+        sock.addLabel(jid, action),
+      );
     } catch (error) {
       throw labelOperationError(error);
     }
@@ -2624,8 +3183,11 @@ export class BaileysAdapter implements ChannelAdapter {
     this.requireAppStateWritesEnabled();
     const sock = this.getSock();
     const jid = await this.requireBusinessLabelSupport(sock, ["addLabel"]);
+    const action = { id, ...update, deleted: false };
     try {
-      await sock.addLabel(jid, { id, ...update, deleted: false });
+      await this.runSafeChatModification(sock, { addLabel: action }, jid, () =>
+        sock.addLabel(jid, action),
+      );
     } catch (error) {
       throw labelOperationError(error);
     }
@@ -2649,8 +3211,11 @@ export class BaileysAdapter implements ChannelAdapter {
     this.requireAppStateWritesEnabled();
     const sock = this.getSock();
     const jid = await this.requireBusinessLabelSupport(sock, ["addLabel"]);
+    const action = { id, deleted: true };
     try {
-      await sock.addLabel(jid, { id, deleted: true });
+      await this.runSafeChatModification(sock, { addLabel: action }, jid, () =>
+        sock.addLabel(jid, action),
+      );
     } catch (error) {
       throw labelOperationError(error);
     }
@@ -2673,9 +3238,13 @@ export class BaileysAdapter implements ChannelAdapter {
     const sock = this.getSock();
     const jid = this.normalizeJid(chatId);
     await this.requireBusinessLabelSupport(sock, [add ? "addChatLabel" : "removeChatLabel"]);
+    const modification: BaileysChatModification = add
+      ? { addChatLabel: { labelId } }
+      : { removeChatLabel: { labelId } };
     try {
-      if (add) await sock.addChatLabel(jid, labelId);
-      else await sock.removeChatLabel(jid, labelId);
+      await this.runSafeChatModification(sock, modification, jid, () =>
+        add ? sock.addChatLabel(jid, labelId) : sock.removeChatLabel(jid, labelId),
+      );
     } catch (error) {
       throw labelOperationError(error);
     }
@@ -2692,9 +3261,15 @@ export class BaileysAdapter implements ChannelAdapter {
     const sock = this.getSock();
     const jid = this.normalizeJid(chatId);
     await this.requireBusinessLabelSupport(sock, [add ? "addMessageLabel" : "removeMessageLabel"]);
+    const modification: BaileysChatModification = add
+      ? { addMessageLabel: { labelId, messageId } }
+      : { removeMessageLabel: { labelId, messageId } };
     try {
-      if (add) await sock.addMessageLabel(jid, messageId, labelId);
-      else await sock.removeMessageLabel(jid, messageId, labelId);
+      await this.runSafeChatModification(sock, modification, jid, () =>
+        add
+          ? sock.addMessageLabel(jid, messageId, labelId)
+          : sock.removeMessageLabel(jid, messageId, labelId),
+      );
     } catch (error) {
       throw labelOperationError(error);
     }
@@ -2704,7 +3279,10 @@ export class BaileysAdapter implements ChannelAdapter {
   async createQuickReply(input: { shortcut: string; message: string }): Promise<void> {
     this.requireAppStateWritesEnabled();
     const sock = this.getSock();
-    await sock.addOrEditQuickReply({ shortcut: input.shortcut, message: input.message });
+    const quickReply = { shortcut: input.shortcut, message: input.message };
+    await this.runSafeChatModification(sock, { quickReply }, "", () =>
+      sock.addOrEditQuickReply(quickReply),
+    );
   }
 
   async editQuickReply(input: {
@@ -2714,17 +3292,23 @@ export class BaileysAdapter implements ChannelAdapter {
   }): Promise<void> {
     this.requireAppStateWritesEnabled();
     const sock = this.getSock();
-    await sock.addOrEditQuickReply({
+    const quickReply = {
       shortcut: input.shortcut,
       message: input.message,
       timestamp: input.timestamp,
-    });
+    };
+    await this.runSafeChatModification(sock, { quickReply }, "", () =>
+      sock.addOrEditQuickReply(quickReply),
+    );
   }
 
   async deleteQuickReply(timestamp: string): Promise<void> {
     this.requireAppStateWritesEnabled();
     const sock = this.getSock();
-    await sock.removeQuickReply(timestamp);
+    const quickReply = { timestamp, deleted: true };
+    await this.runSafeChatModification(sock, { quickReply }, "", () =>
+      sock.removeQuickReply(timestamp),
+    );
   }
 
   async setDisappearingMessages(
@@ -2747,15 +3331,109 @@ export class BaileysAdapter implements ChannelAdapter {
   // ---- Groups ----
 
   async createGroup(name: string, participants: string[]): Promise<GroupResponse> {
-    this.requireAppStateWritesEnabled();
+    this.requireGroupWritesEnabled();
     const sock = this.getSock();
     const jids = participants.map((p) => this.normalizeJid(p));
     const result = await sock.groupCreate(name, jids);
     return { groupId: result.id, inviteCode: undefined };
   }
 
+  async createGroupFromGroup(
+    sourceGroupId: string,
+    name: string,
+    includeParticipants?: string[],
+    excludeParticipants?: string[],
+  ): Promise<CreateGroupFromGroupResponse> {
+    this.requireGroupWritesEnabled();
+    const sock = this.getSock();
+    const sourceJid = normalizeGroupJid(sourceGroupId);
+
+    let source: BaileysGroupMetadata;
+    try {
+      source = await sock.groupMetadata(sourceJid);
+    } catch (error) {
+      if (isMissingGroupError(error)) {
+        throw new Error(`Source group does not exist: ${sourceJid}`, { cause: error });
+      }
+      throw error;
+    }
+    if (!source?.id) throw new Error(`Source group does not exist: ${sourceJid}`);
+
+    const filterIdentities = async (members: string[] | undefined): Promise<Set<string> | null> => {
+      if (!members) return null;
+      const identities = new Set<string>();
+      for (const member of members) {
+        for (const identity of await this.getChatJidAliases(member)) identities.add(identity);
+      }
+      return identities;
+    };
+    const includeIdentities = await filterIdentities(includeParticipants);
+    const excludeIdentities = await filterIdentities(excludeParticipants);
+    const ownIdentities = await this.getOwnGroupParticipantJids(sock);
+    const seenParticipants = new Set<string>();
+    const selected: Array<{ jid: string; identities: Set<string> }> = [];
+
+    for (const participant of source.participants ?? []) {
+      const identities = await this.getGroupParticipantIdentities(participant);
+      if (includeIdentities && !hasMatchingIdentity(identities, includeIdentities)) continue;
+      if (hasMatchingIdentity(identities, ownIdentities)) continue;
+      if (excludeIdentities && hasMatchingIdentity(identities, excludeIdentities)) continue;
+
+      const jid =
+        [...identities].find((identity) => identity.endsWith("@s.whatsapp.net")) ??
+        [participant.id, participant.phoneNumber, participant.lid]
+          .filter((identity): identity is string => !!identity)
+          .map((identity) => jidNormalizedUser(identity))
+          .find((identity) => identity.endsWith("@lid"));
+      if (!jid) continue;
+
+      const dedupeKey =
+        [...identities].find((identity) => identity.endsWith("@s.whatsapp.net")) ?? jid;
+      if (seenParticipants.has(dedupeKey)) continue;
+      seenParticipants.add(dedupeKey);
+      selected.push({ jid, identities });
+    }
+
+    if (selected.length === 0) {
+      throw new Error(
+        "Cannot create a group because no source participants remain after filtering",
+      );
+    }
+    if (selected.length > MAX_GROUP_PARTICIPANTS - 1) {
+      throw new Error(
+        `Cannot create a group with more than ${MAX_GROUP_PARTICIPANTS - 1} participants; the creator is added automatically and WhatsApp allows up to ${MAX_GROUP_PARTICIPANTS} members`,
+      );
+    }
+
+    const created = await sock.groupCreate(
+      name,
+      selected.map(({ jid }) => jid),
+    );
+    if (!created.id) throw new Error("Baileys created the group without returning its ID");
+
+    const returnedParticipants = created.participants ?? [];
+    const returnedIdentities = await Promise.all(
+      returnedParticipants.map((participant) => this.getGroupParticipantIdentities(participant)),
+    );
+    const failedParticipants =
+      returnedParticipants.length > 0
+        ? selected
+            .filter(
+              ({ identities }) =>
+                !returnedIdentities.some((returned) => hasMatchingIdentity(identities, returned)),
+            )
+            .map(({ jid }) => jid)
+        : [];
+
+    return {
+      groupId: created.id,
+      addedCount: selected.length - failedParticipants.length,
+      failedParticipants,
+    };
+  }
+
   async modifyGroup(groupId: string, modification: GroupModification): Promise<void> {
-    this.requireAppStateWritesEnabled();
+    this.requireGroupWritesEnabled();
     const sock = this.getSock();
     const jid = normalizeGroupJid(groupId);
 
@@ -2796,7 +3474,7 @@ export class BaileysAdapter implements ChannelAdapter {
     participants: string[],
     action: ParticipantAction,
   ): Promise<void> {
-    this.requireAppStateWritesEnabled();
+    this.requireGroupWritesEnabled();
     const sock = this.getSock();
     const jid = normalizeGroupJid(groupId);
     const jids = participants.map((p) => this.normalizeJid(p));
@@ -2835,7 +3513,79 @@ export class BaileysAdapter implements ChannelAdapter {
     return this.normalizeGroupMetadata(meta);
   }
 
+  assertGroupMemberLabelWritesEnabled(): void {
+    if (!this.groupWritesEnabled) {
+      throw new Error(
+        "WhatsApp group member label writes are disabled. Set WA_GROUP_WRITES_ENABLED=true to enable them.",
+      );
+    }
+  }
+
+  async updateGroupMemberLabel(groupId: string, memberLabel: string | null): Promise<void> {
+    this.assertGroupMemberLabelWritesEnabled();
+    if (memberLabel !== null && (memberLabel.trim().length === 0 || memberLabel.length > 30)) {
+      throw new Error("Group member labels must contain 1 to 30 characters");
+    }
+
+    const sock = this.getSock();
+    const jid = normalizeGroupJid(groupId);
+    await sock.updateMemberLabel(jid, memberLabel ?? "");
+
+    const participantJids = [sock.user?.id, sock.user?.lid]
+      .filter((participant): participant is string => !!participant)
+      .map((participant) => jidNormalizedUser(participant));
+    this.processGroupMemberLabelUpdate({
+      groupId: jid,
+      participant: participantJids[0],
+      participantAlt: participantJids[1],
+      label: memberLabel,
+      messageTimestamp: Math.floor(Date.now() / 1000),
+    });
+  }
+
+  private processGroupMemberLabelUpdate(update: {
+    groupId: string;
+    participant?: string | null;
+    participantAlt?: string | null;
+    label?: string | null;
+    messageTimestamp?: number;
+  }): void {
+    const participantJids = [...new Set([update.participant, update.participantAlt])]
+      .filter((participant): participant is string => !!participant)
+      .map((participant) => jidNormalizedUser(participant));
+    if (participantJids.length === 0) return;
+
+    const memberLabel = update.label ? update.label : null;
+    const rawTimestamp = Number(update.messageTimestamp);
+    const timestamp =
+      Number.isSafeInteger(rawTimestamp) && rawTimestamp > 0
+        ? rawTimestamp
+        : Math.floor(Date.now() / 1000);
+    const groupId = normalizeGroupJid(update.groupId);
+    const changed = this.groupMemberLabelStore.update(
+      groupId,
+      participantJids,
+      memberLabel,
+      timestamp,
+    );
+    if (!changed) return;
+
+    const event: NormalizedGroupMemberLabelEvent = {
+      instanceId: this.instanceId,
+      groupId,
+      participant: participantJids[0]!,
+      memberLabel,
+      action: memberLabel === null ? "removed" : "set",
+      timestamp,
+    };
+    this.emit("group.member_label_changed", event);
+  }
+
   private async normalizeGroupMetadata(meta: BaileysGroupMetadata): Promise<GroupMetadata> {
+    const memberLabels = this.groupMemberLabelStore.getForGroup(meta.id);
+    const memberLabelsByJid = new Map(
+      memberLabels.map((row) => [jidNormalizedUser(row.participantJid), row]),
+    );
     const participants = await Promise.all(
       (meta.participants ?? []).map(async (participant) => {
         const role: "admin" | "superadmin" | "member" =
@@ -2851,6 +3601,10 @@ export class BaileysAdapter implements ChannelAdapter {
         const phone = phoneJid?.endsWith("@s.whatsapp.net")
           ? (phoneJid.split("@")[0]?.split(":")[0] ?? null)
           : null;
+        const knownMemberLabel = [...participantJids]
+          .map((participantJid) => memberLabelsByJid.get(participantJid))
+          .filter((row): row is NonNullable<typeof row> => !!row)
+          .sort((left, right) => right.labelTimestamp - left.labelTimestamp)[0]?.memberLabel;
 
         return {
           jid: participant.id,
@@ -2858,6 +3612,7 @@ export class BaileysAdapter implements ChannelAdapter {
           phone,
           isAdmin: role === "admin" || role === "superadmin",
           isSuperAdmin: role === "superadmin",
+          ...(knownMemberLabel ? { memberLabel: knownMemberLabel } : {}),
         };
       }),
     );
@@ -2884,7 +3639,7 @@ export class BaileysAdapter implements ChannelAdapter {
   }
 
   async updateGroupPicture(groupId: string, image: string): Promise<void> {
-    this.requireAppStateWritesEnabled();
+    this.requireGroupWritesEnabled();
     const sock = this.getSock();
     const jid = normalizeGroupJid(groupId);
     await this.requireGroupPictureAdmin(sock, jid, "update");
@@ -2897,7 +3652,7 @@ export class BaileysAdapter implements ChannelAdapter {
   }
 
   async removeGroupPicture(groupId: string): Promise<void> {
-    this.requireAppStateWritesEnabled();
+    this.requireGroupWritesEnabled();
     const sock = this.getSock();
     const jid = normalizeGroupJid(groupId);
     await this.requireGroupPictureAdmin(sock, jid, "remove");
@@ -2995,7 +3750,7 @@ export class BaileysAdapter implements ChannelAdapter {
   }
 
   async joinGroup(inviteCode: string): Promise<string> {
-    this.requireAppStateWritesEnabled();
+    this.requireGroupWritesEnabled();
     const sock = this.getSock();
     const groupId = await sock.groupAcceptInvite(normalizeGroupInviteCode(inviteCode));
     return groupId ?? "";
@@ -3040,7 +3795,7 @@ export class BaileysAdapter implements ChannelAdapter {
     participantJid: string,
     action: "approve" | "reject",
   ): Promise<void> {
-    this.requireAppStateWritesEnabled();
+    this.requireGroupWritesEnabled();
     const sock = this.getSock();
     const jid = normalizeGroupJid(groupId);
     const participant = this.normalizeJid(participantJid);
@@ -3048,7 +3803,7 @@ export class BaileysAdapter implements ChannelAdapter {
   }
 
   async setGroupJoinApprovalMode(groupId: string, mode: "on" | "off"): Promise<void> {
-    this.requireAppStateWritesEnabled();
+    this.requireGroupWritesEnabled();
     const sock = this.getSock();
     await sock.groupJoinApprovalMode(normalizeGroupJid(groupId), mode);
   }
@@ -3057,7 +3812,7 @@ export class BaileysAdapter implements ChannelAdapter {
     groupId: string,
     mode: "admin_add" | "all_member_add",
   ): Promise<void> {
-    this.requireAppStateWritesEnabled();
+    this.requireGroupWritesEnabled();
     const sock = this.getSock();
     await sock.groupMemberAddMode(normalizeGroupJid(groupId), mode);
   }
@@ -3065,7 +3820,7 @@ export class BaileysAdapter implements ChannelAdapter {
   // ---- Communities ----
 
   async createCommunity(subject: string, description = ""): Promise<GroupMetadata | null> {
-    this.requireAppStateWritesEnabled();
+    this.requireGroupWritesEnabled();
     const sock = this.getSock();
     const community = await sock.communityCreate(subject, description);
     return community ? this.normalizeGroupMetadata(community) : null;
@@ -3089,19 +3844,19 @@ export class BaileysAdapter implements ChannelAdapter {
   }
 
   async linkGroupToCommunity(groupId: string, communityId: string): Promise<void> {
-    this.requireAppStateWritesEnabled();
+    this.requireGroupWritesEnabled();
     const sock = this.getSock();
     await sock.communityLinkGroup(normalizeGroupJid(groupId), normalizeGroupJid(communityId));
   }
 
   async unlinkGroupFromCommunity(groupId: string, communityId: string): Promise<void> {
-    this.requireAppStateWritesEnabled();
+    this.requireGroupWritesEnabled();
     const sock = this.getSock();
     await sock.communityUnlinkGroup(normalizeGroupJid(groupId), normalizeGroupJid(communityId));
   }
 
   async leaveCommunity(communityId: string): Promise<void> {
-    this.requireAppStateWritesEnabled();
+    this.requireGroupWritesEnabled();
     const sock = this.getSock();
     await sock.communityLeave(normalizeGroupJid(communityId));
   }
@@ -3173,7 +3928,9 @@ export class BaileysAdapter implements ChannelAdapter {
     // Baileys implements updateProfileName through chatModify/appPatch.
     this.requireAppStateWritesEnabled();
     const sock = this.getSock();
-    await sock.updateProfileName(name);
+    await this.runSafeChatModification(sock, { pushNameSetting: name }, "", () =>
+      sock.updateProfileName(name),
+    );
   }
 
   async updateProfileStatus(statusText: string): Promise<void> {
@@ -3302,13 +4059,13 @@ export class BaileysAdapter implements ChannelAdapter {
   // ---- Newsletter / Channels ----
 
   async newsletterFollow(jid: string): Promise<void> {
-    this.requireAppStateWritesEnabled();
+    this.requireGroupWritesEnabled();
     const sock = this.getSock();
     await sock.newsletterFollow(jid);
   }
 
   async newsletterUnfollow(jid: string): Promise<void> {
-    this.requireAppStateWritesEnabled();
+    this.requireGroupWritesEnabled();
     const sock = this.getSock();
     await sock.newsletterUnfollow(jid);
   }
@@ -3320,7 +4077,7 @@ export class BaileysAdapter implements ChannelAdapter {
   }
 
   async createNewsletter(name: string, description?: string): Promise<NewsletterMetadata> {
-    this.requireAppStateWritesEnabled();
+    this.requireGroupWritesEnabled();
     const sock = this.getSock();
     return sock.newsletterCreate(name, description);
   }
@@ -3337,26 +4094,26 @@ export class BaileysAdapter implements ChannelAdapter {
   }
 
   async updateNewsletterName(jid: string, name: string): Promise<void> {
-    this.requireAppStateWritesEnabled();
+    this.requireGroupWritesEnabled();
     const sock = this.getSock();
     await sock.newsletterUpdateName(jid, name);
   }
 
   async updateNewsletterDescription(jid: string, description: string): Promise<void> {
-    this.requireAppStateWritesEnabled();
+    this.requireGroupWritesEnabled();
     const sock = this.getSock();
     await sock.newsletterUpdateDescription(jid, description);
   }
 
   async updateNewsletterPicture(jid: string, image: string): Promise<void> {
-    this.requireAppStateWritesEnabled();
+    this.requireGroupWritesEnabled();
     const sock = this.getSock();
     const jpeg = await mediaService.prepareGroupProfilePicture(image);
     await sock.newsletterUpdatePicture(jid, jpeg);
   }
 
   async reactToNewsletterMessage(jid: string, serverId: string, reaction?: string): Promise<void> {
-    this.requireAppStateWritesEnabled();
+    this.requireGroupWritesEnabled();
     const sock = this.getSock();
     await sock.newsletterReactMessage(jid, serverId, reaction);
   }
@@ -3648,9 +4405,16 @@ export class BaileysAdapter implements ChannelAdapter {
     chatId: string,
     count: number,
     timeoutMs = 10_000,
-  ): Promise<{ requested: number; stored: number; timedOut: boolean }> {
+  ): Promise<{
+    requested: number;
+    limit: number;
+    capped: boolean;
+    stored: number;
+    timedOut: boolean;
+  }> {
     const sock = this.getSock();
     const jid = this.normalizeJid(chatId);
+    const requestedCount = Math.min(count, this.historySyncMaxMessages);
     if (this.activeHistoryFetch) {
       throw new Error(
         "Another on-demand message history fetch is already in progress for this instance",
@@ -3696,28 +4460,34 @@ export class BaileysAdapter implements ChannelAdapter {
       Number(oldest.timestamp) * 1000,
     );
 
-    const resultPromise = new Promise<{ requested: number; stored: number; timedOut: boolean }>(
-      (resolve, reject) => {
-        const waiter = {
-          chatId: jid,
-          requested: count,
-          stored: 0,
-          receivedMatchingHistorySet: false,
-          seenMessageIds: new Set(),
-          resolve,
-          reject,
-          timer: undefined as unknown as ReturnType<typeof setTimeout>,
-        } satisfies HistoryFetchWaiter;
-        waiter.timer = setTimeout(() => this.finishHistoryFetch(true, waiter), timeoutMs);
-        this.activeHistoryFetch = waiter;
-      },
-    );
+    const resultPromise = new Promise<{
+      requested: number;
+      limit: number;
+      capped: boolean;
+      stored: number;
+      timedOut: boolean;
+    }>((resolve, reject) => {
+      const waiter = {
+        chatId: jid,
+        requested: requestedCount,
+        limit: requestedCount,
+        capped: count > requestedCount,
+        stored: 0,
+        receivedMatchingHistorySet: false,
+        seenMessageIds: new Set(),
+        resolve,
+        reject,
+        timer: undefined as unknown as ReturnType<typeof setTimeout>,
+      } satisfies HistoryFetchWaiter;
+      waiter.timer = setTimeout(() => this.finishHistoryFetch(true, waiter), timeoutMs);
+      this.activeHistoryFetch = waiter;
+    });
 
     try {
       const waiter = this.activeHistoryFetch as HistoryFetchWaiter | null;
       if (!waiter) throw new Error("History fetch waiter was not initialized");
       void sock
-        .fetchMessageHistory(count, oldestKey, oldestTimestamp)
+        .fetchMessageHistory(requestedCount, oldestKey, oldestTimestamp)
         .then((peerDataRequestSessionId) => {
           waiter.peerDataRequestSessionId = peerDataRequestSessionId;
         })
@@ -3730,12 +4500,75 @@ export class BaileysAdapter implements ChannelAdapter {
     return resultPromise;
   }
 
+  private hasStoredMessages(): boolean {
+    return !!sqlite
+      .prepare("SELECT 1 FROM messages WHERE instance_id = ? LIMIT 1")
+      .get(this.instanceId);
+  }
+
+  private hasStoredMessagesForChat(chatId: string): boolean {
+    return !!sqlite
+      .prepare("SELECT 1 FROM messages WHERE instance_id = ? AND chat_id = ? LIMIT 1")
+      .get(this.instanceId, chatId);
+  }
+
+  private scheduleAutomaticHistoryRecovery(chatId: string): void {
+    const jid = this.normalizeJid(chatId);
+    if (
+      !jid ||
+      jid.endsWith("@broadcast") ||
+      jid.endsWith("@newsletter") ||
+      this.automaticHistoryRecoveryChats.has(jid)
+    ) {
+      return;
+    }
+
+    this.automaticHistoryRecoveryChats.add(jid);
+    this.automaticHistoryRecoveryQueue.add(jid);
+    void this.drainAutomaticHistoryRecoveryQueue();
+  }
+
+  private async drainAutomaticHistoryRecoveryQueue(): Promise<void> {
+    if (this.automaticHistoryRecoveryRunning) return;
+    this.automaticHistoryRecoveryRunning = true;
+    try {
+      while (this.automaticHistoryRecoveryQueue.size > 0) {
+        const chatId = this.automaticHistoryRecoveryQueue.values().next().value as string;
+        this.automaticHistoryRecoveryQueue.delete(chatId);
+        try {
+          const result = await this.fetchMessageHistory(
+            chatId,
+            this.historySyncMaxMessages,
+            10_000,
+          );
+          logger.info(
+            { instanceId: this.instanceId, chatId, ...result },
+            "Automatic message history recovery completed",
+          );
+        } catch (error) {
+          logger.warn(
+            { instanceId: this.instanceId, chatId, error },
+            "Automatic message history recovery failed",
+          );
+        }
+      }
+    } finally {
+      this.automaticHistoryRecoveryRunning = false;
+    }
+  }
+
   private finishHistoryFetch(timedOut: boolean, expectedWaiter?: HistoryFetchWaiter): void {
     const waiter = this.activeHistoryFetch;
     if (!waiter || (expectedWaiter && waiter !== expectedWaiter)) return;
     clearTimeout(waiter.timer);
     this.activeHistoryFetch = null;
-    waiter.resolve({ requested: waiter.requested, stored: waiter.stored, timedOut });
+    waiter.resolve({
+      requested: waiter.requested,
+      limit: waiter.limit,
+      capped: waiter.capped,
+      stored: waiter.stored,
+      timedOut,
+    });
   }
 
   private failHistoryFetch(error: unknown, expectedWaiter?: HistoryFetchWaiter): void {
@@ -5124,20 +5957,30 @@ export class BaileysAdapter implements ChannelAdapter {
       const { connection, lastDisconnect, qr } = update;
 
       if (qr) {
+        this.emitAuthChallengeGenerated("qr");
         this.qrCode = qr;
         this.status = "qr_pending";
 
         if (this.pairingPhone && sock) {
           // Evolution API pattern: call requestPairingCode inside the QR event, with a small delay
+          const pairingPhone = this.pairingPhone;
           setTimeout(async () => {
             try {
-              const code = await sock.requestPairingCode(this.pairingPhone!);
-              this.pairingCodeValue = code ?? null;
+              if (this.sock !== sock || this.status !== "qr_pending") {
+                this.pairingCodeResolver?.(null);
+                this.pairingCodeResolver = null;
+                return;
+              }
+              const code = await sock.requestPairingCode(pairingPhone);
+              if (this.sock !== sock || this.status !== "qr_pending") return;
+              const pairingCode = code ?? null;
+              if (pairingCode) this.emitAuthChallengeGenerated("pairing_code");
+              this.pairingCodeValue = pairingCode;
               if (this.pairingCodeResolver) {
                 this.pairingCodeResolver(this.pairingCodeValue);
                 this.pairingCodeResolver = null;
               }
-              logger.info({ instanceId: this.instanceId, code }, "Pairing code generated");
+              logger.info({ instanceId: this.instanceId }, "Pairing code generated");
             } catch (err) {
               logger.error({ instanceId: this.instanceId, err }, "Failed to generate pairing code");
               if (this.pairingCodeResolver) {
@@ -5150,7 +5993,9 @@ export class BaileysAdapter implements ChannelAdapter {
       }
 
       if (connection === "open") {
-        this.appendNotifyWatermarkMs = this.getAppendNotifyWatermark(Date.now());
+        const connectedAt = Date.now();
+        const wasPairing = this.pendingAuthChallenges.size > 0;
+        this.appendNotifyWatermarkMs = this.getAppendNotifyWatermark(connectedAt);
         this.status = "connected";
         const persistedDisconnect = db
           .select({ lastDisconnected: instancesTable.lastDisconnected })
@@ -5160,12 +6005,15 @@ export class BaileysAdapter implements ChannelAdapter {
         const offlineSince = this.disconnectedAtMs ?? persistedDisconnect ?? null;
         const offlineDurationMs =
           offlineSince !== null ? Math.max(0, Date.now() - offlineSince) : undefined;
-        this.connectedAtMs = Date.now();
+        this.connectedAtMs = connectedAt;
         this.disconnectedAtMs = null;
         this.qrCode = null;
         this.pairingPhone = null;
         this.pairingCodeValue = null;
         this.pairingCodeResolver = null;
+        this.clearAuthChallenges();
+        this.disconnectEventEmittedSinceOpen = false;
+        this.terminalDisconnectEventEmittedSinceOpen = false;
         this.reconnectAttempt = 0;
         this.consecutiveHealthProbeFailures = 0;
         this.resetHealthWatchdog(sock);
@@ -5174,6 +6022,15 @@ export class BaileysAdapter implements ChannelAdapter {
             this.logGlobalPresenceFailure(error);
           });
         }
+        const user = sock.user as { lid?: string; name?: string } | undefined;
+        this.emit("instance.connected", {
+          instanceId: this.instanceId,
+          phone: this.ownPhoneJid(sock),
+          lid: this.ownLid(user),
+          pushName: typeof user?.name === "string" ? user.name : null,
+          connectedAt,
+          wasPairing,
+        });
         logger.info({ instanceId: this.instanceId, offlineDurationMs }, "Connected to WhatsApp");
       }
 
@@ -5184,16 +6041,18 @@ export class BaileysAdapter implements ChannelAdapter {
         this.appendNotifyWatermarkMs = null;
         this.status = "disconnected";
         const boom = (lastDisconnect?.error as Boom)?.output;
-        const statusCode = boom?.statusCode;
-        const error = lastDisconnect?.error;
-        const reason = error instanceof Error ? error.message : error ? String(error) : "unknown";
+        const statusCode = typeof boom?.statusCode === "number" ? boom.statusCode : undefined;
+        const reason = disconnectReasonName(statusCode);
+        const loggedOut = statusCode === DisconnectReason.loggedOut;
         const closedAt = Date.now();
+        const priorDisconnectedAt = this.disconnectedAtMs;
         const connectedDurationMs =
           this.connectedAtMs !== null ? Math.max(0, closedAt - this.connectedAtMs) : undefined;
         this.connectedAtMs = null;
         if (this.disconnectedAtMs === null) this.disconnectedAtMs = closedAt;
         this.lastDisconnectReason = reason;
-        this.lastDisconnectStatusCode = typeof statusCode === "number" ? statusCode : null;
+        this.lastDisconnectStatusCode = statusCode ?? null;
+        this.clearAuthChallenges(closedAt);
         logger.warn(
           {
             instanceId: this.instanceId,
@@ -5204,12 +6063,33 @@ export class BaileysAdapter implements ChannelAdapter {
           "Baileys connection closed",
         );
 
-        if (statusCode === DisconnectReason.loggedOut) {
+        let reconnectInMs: number | null = null;
+        if (loggedOut) {
           logger.info({ instanceId: this.instanceId }, "Logged out, clearing auth");
           clearAuthState(this.instanceId);
           this.sock = null;
         } else if (this.autoReconnect) {
-          this.scheduleReconnect();
+          reconnectInMs = this.scheduleReconnect();
+        }
+
+        const shouldEmitDisconnected =
+          !this.disconnectEventEmittedSinceOpen ||
+          (loggedOut && !this.terminalDisconnectEventEmittedSinceOpen);
+        if (shouldEmitDisconnected) {
+          this.emit("instance.disconnected", {
+            instanceId: this.instanceId,
+            reason,
+            statusCode: statusCode ?? null,
+            loggedOut,
+            willReconnect: reconnectInMs !== null,
+            ...(reconnectInMs !== null ? { reconnectInMs } : {}),
+            disconnectedAt: closedAt,
+            ...(priorDisconnectedAt !== null
+              ? { offlineSinceMs: Math.max(0, closedAt - priorDisconnectedAt) }
+              : {}),
+          });
+          this.disconnectEventEmittedSinceOpen = true;
+          if (loggedOut) this.terminalDisconnectEventEmittedSinceOpen = true;
         }
       }
 
@@ -5337,43 +6217,42 @@ export class BaileysAdapter implements ChannelAdapter {
           );
         }
 
-        if (syncType === proto.HistorySync.HistorySyncType.ON_DEMAND) {
-          const waiter = this.activeHistoryFetch;
-          const sessionMatchesWaiter =
-            !!waiter &&
-            (peerDataRequestSessionId == null ||
-              peerDataRequestSessionId === waiter.peerDataRequestSessionId);
-          if (sessionMatchesWaiter) waiter.receivedMatchingHistorySet = true;
+        const waiter =
+          syncType === proto.HistorySync.HistorySyncType.ON_DEMAND ? this.activeHistoryFetch : null;
+        const sessionMatchesWaiter =
+          !!waiter &&
+          (peerDataRequestSessionId == null ||
+            peerDataRequestSessionId === waiter.peerDataRequestSessionId);
+        if (sessionMatchesWaiter && waiter) waiter.receivedMatchingHistorySet = true;
 
-          for (const message of messages) {
-            const inserted = this.persistSourceMessage(message);
-            const content = unwrapMessageContent(message.message, {
-              unwrapProtocolEdits: false,
-            });
-            if (content?.pollUpdateMessage) {
-              await this.persistPollVote(message, content.pollUpdateMessage);
-            }
-            if (extractMessageDetails(message).type === "poll" && message.key.id) {
-              await this.retryPendingPollVotes(message.key.id);
-            }
-            if (content?.encEventResponseMessage) {
-              await this.persistEncryptedEventResponse(message, content.encEventResponseMessage);
-            }
-            if (content?.eventMessage && message.key.id) {
-              await this.retryPendingEventResponses(message.key.id);
-            }
-            const messageChatId = message.key.remoteJid ?? "";
-            if (
-              inserted &&
-              sessionMatchesWaiter &&
-              waiter &&
-              messageChatId === waiter.chatId &&
-              message.key.id &&
-              !waiter.seenMessageIds.has(message.key.id)
-            ) {
-              waiter.seenMessageIds.add(message.key.id);
-              waiter.stored++;
-            }
+        for (const message of messages) {
+          const inserted = this.persistSourceMessage(message);
+          const content = unwrapMessageContent(message.message, {
+            unwrapProtocolEdits: false,
+          });
+          if (content?.pollUpdateMessage) {
+            await this.persistPollVote(message, content.pollUpdateMessage);
+          }
+          if (extractMessageDetails(message).type === "poll" && message.key.id) {
+            await this.retryPendingPollVotes(message.key.id);
+          }
+          if (content?.encEventResponseMessage) {
+            await this.persistEncryptedEventResponse(message, content.encEventResponseMessage);
+          }
+          if (content?.eventMessage && message.key.id) {
+            await this.retryPendingEventResponses(message.key.id);
+          }
+          const messageChatId = getChatJid(message);
+          if (
+            inserted &&
+            sessionMatchesWaiter &&
+            waiter &&
+            messageChatId === waiter.chatId &&
+            message.key.id &&
+            !waiter.seenMessageIds.has(message.key.id)
+          ) {
+            waiter.seenMessageIds.add(message.key.id);
+            waiter.stored++;
           }
         }
       }
@@ -5397,6 +6276,7 @@ export class BaileysAdapter implements ChannelAdapter {
       // --- Messages ---
       if (events["messages.upsert"]) {
         const data = events["messages.upsert"];
+        const automaticHistoryRecoveryCandidates = new Set<string>();
         const appendNow = Date.now();
         const appendWatermark =
           data.type === "append"
@@ -5431,6 +6311,23 @@ export class BaileysAdapter implements ChannelAdapter {
           const protocolMessage = unwrappedContent?.protocolMessage as
             NonNullable<WAMessage["message"]>["protocolMessage"] | undefined;
 
+          if (
+            protocolMessage?.type ===
+              proto.Message.ProtocolMessage.Type.GROUP_MEMBER_LABEL_CHANGE &&
+            msg.key.remoteJid?.endsWith("@g.us")
+          ) {
+            this.processGroupMemberLabelUpdate({
+              groupId: msg.key.remoteJid,
+              participant: msg.key.participant,
+              participantAlt: msg.key.participantAlt,
+              label: protocolMessage.memberLabel?.label ?? null,
+              messageTimestamp: messageTimestampToSeconds(
+                msg.messageTimestamp,
+                Math.floor(Date.now() / 1000),
+              ),
+            });
+          }
+
           if (unwrappedContent?.pollUpdateMessage) {
             await this.persistPollVote(msg, unwrappedContent.pollUpdateMessage);
             continue;
@@ -5454,9 +6351,11 @@ export class BaileysAdapter implements ChannelAdapter {
           // Persist ALL messages (notify + append) to DB
           if (msg.key.id && msg.key.remoteJid && !protocolMessage) {
             const details = extractMessageDetails(msg);
+            const chatId = getChatJid(msg);
+            const needsHistoryRecovery = !this.hasStoredMessagesForChat(chatId);
             const normalized: NormalizedMessageEvent = {
               instanceId: this.instanceId,
-              chatId: getChatJid(msg),
+              chatId,
               message: {
                 id: msg.key.id,
                 sender: getSenderJid(msg),
@@ -5472,6 +6371,7 @@ export class BaileysAdapter implements ChannelAdapter {
               },
             };
             this.persistMessage(normalized, msg);
+            if (needsHistoryRecovery) automaticHistoryRecoveryCandidates.add(chatId);
             if (details.type === "poll") await this.retryPendingPollVotes(msg.key.id);
           }
 
@@ -5481,6 +6381,10 @@ export class BaileysAdapter implements ChannelAdapter {
           if (unwrappedContent?.eventMessage && msg.key.id) {
             await this.retryPendingEventResponses(msg.key.id);
           }
+        }
+
+        for (const chatId of automaticHistoryRecoveryCandidates) {
+          this.scheduleAutomaticHistoryRecovery(chatId);
         }
 
         if (data.type === "notify") {
@@ -5708,6 +6612,10 @@ export class BaileysAdapter implements ChannelAdapter {
         this.emit("group.participants_changed", event);
       }
 
+      if (events["group.member-tag.update"]) {
+        this.processGroupMemberLabelUpdate(events["group.member-tag.update"]);
+      }
+
       // --- Calls ---
       if (events["call"]) {
         const normalized = normalizeCallEvent(this.instanceId, events["call"]);
@@ -5827,7 +6735,7 @@ export class BaileysAdapter implements ChannelAdapter {
     });
   }
 
-  private scheduleReconnect(): void {
+  private scheduleReconnect(): number | null {
     if (this.reconnectAttempt >= RECONNECT_MAX_ATTEMPTS) {
       logger.error(
         {
@@ -5842,7 +6750,7 @@ export class BaileysAdapter implements ChannelAdapter {
         },
         "Max reconnect attempts reached",
       );
-      return;
+      return null;
     }
 
     const delay = Math.min(
@@ -5875,6 +6783,7 @@ export class BaileysAdapter implements ChannelAdapter {
         this.scheduleReconnect();
       }
     }, delay);
+    return delay;
   }
 
   private clearReconnectTimer(): void {
