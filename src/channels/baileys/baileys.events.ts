@@ -670,6 +670,32 @@ export function getSenderJid(msg: WAMessage): string {
   return "me";
 }
 
+function lidJid(value: string | null | undefined): string | undefined {
+  if (!value?.endsWith("@lid")) return undefined;
+  return value;
+}
+
+/** Preserve PN/LID aliases supplied on the message for webhook JID filters. */
+export function messageIdentityFields(msg: WAMessage): {
+  chatLid?: string;
+  senderLid?: string;
+  senderPn?: string;
+} {
+  const chatLid = lidJid(msg.key.remoteJid) ?? lidJid(msg.key.remoteJidAlt);
+  const senderLid =
+    lidJid(msg.key.participant) ??
+    lidJid(msg.key.participantAlt) ??
+    (msg.key.participant ? undefined : chatLid);
+  const senderPn = [msg.key.participant, msg.key.participantAlt].find((jid) =>
+    jid?.endsWith("@s.whatsapp.net"),
+  );
+  return {
+    ...(chatLid ? { chatLid } : {}),
+    ...(senderLid ? { senderLid } : {}),
+    ...(senderPn ? { senderPn } : {}),
+  };
+}
+
 // ---- Normalizers ----
 
 /** Normalize a Baileys messages.upsert event to NormalizedMessageEvent[]. */
@@ -688,16 +714,20 @@ export function normalizeMessagesUpsert(
       normalizeLidInMessage(msg);
       const details = extractMessageDetails(msg);
       const chatId = getChatJid(msg);
+      const identities = messageIdentityFields(msg);
       const isGroup = chatId.endsWith("@g.us");
       return {
         instanceId,
         chatId,
+        ...(identities.chatLid ? { chatLid: identities.chatLid } : {}),
         chatName: isGroup ? null : (msg.pushName ?? null),
         senderName: msg.pushName ?? null,
         isGroup,
         message: {
           id: msg.key.id ?? "",
           sender: getSenderJid(msg),
+          ...(identities.senderLid ? { senderLid: identities.senderLid } : {}),
+          ...(identities.senderPn ? { senderPn: identities.senderPn } : {}),
           timestamp: messageTimestampToSeconds(msg.messageTimestamp, 0),
           type: details.type,
           content: details.content,

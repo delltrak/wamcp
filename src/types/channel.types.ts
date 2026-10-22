@@ -580,6 +580,8 @@ export interface CloudCredentials {
 export interface NormalizedMessageEvent {
   instanceId: string;
   chatId: string;
+  /** LID for this chat when WhatsApp also supplied a phone JID. */
+  chatLid?: string;
   /** Optional display metadata used by outgoing integrations. */
   chatName?: string | null;
   senderName?: string | null;
@@ -588,6 +590,10 @@ export interface NormalizedMessageEvent {
   message: {
     id: string;
     sender: string;
+    /** LID for the sender when WhatsApp also supplied another sender JID. */
+    senderLid?: string;
+    /** Phone JID supplied alongside a group sender's LID, for identity filtering. */
+    senderPn?: string;
     timestamp: number;
     type: MessageType;
     content: string | null;

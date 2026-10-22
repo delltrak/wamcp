@@ -18,6 +18,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Added optional webhook JID ignore rules with exact addresses, user-part wildcards and
+  chat-only domain patterns ([#140](https://github.com/delltrak/wamcp/issues/140),
+  [#159](https://github.com/delltrak/wamcp/pull/159)). Group sender phone aliases from Baileys
+  are retained for filtering even before contact mappings are stored. Message storage and
+  lifecycle events are unaffected; real-account validation remains pending.
 - Added `wa_mark_played` for stored incoming audio, voice notes, and video on Baileys
   ([#143](https://github.com/delltrak/wamcp/issues/143), [#155](https://github.com/delltrak/wamcp/pull/155)).
   Receipts are limited to user, hosted, and group chats. `WA_AUTO_MARK_PLAYED` defaults to
