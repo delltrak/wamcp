@@ -20,6 +20,7 @@ import type { MetaWebhookPayload } from "./channels/cloud-api/cloud.events.js";
 import { installShutdownHandlers, SHUTDOWN_TIMEOUT_MS } from "./utils/shutdown.js";
 import { logger } from "./utils/logger.js";
 import { getAutoReadMode } from "./services/auto-read.js";
+import { loadAutoMarkPlayedConfig } from "./services/auto-mark-played.js";
 import { bootEventWebhook, type EventWebhookStatus } from "./services/event-webhook-config.js";
 import { buildHealthBody } from "./server/health.js";
 import { AuthAttemptLimiter } from "./server/auth-limiter.js";
@@ -40,6 +41,7 @@ const transport = process.env.WA_TRANSPORT ?? DEFAULT_TRANSPORT;
 const port = parseInt(process.env.WA_MCP_PORT ?? String(DEFAULT_PORT), 10);
 
 async function initServices() {
+  loadAutoMarkPlayedConfig();
   getAutoReadMode();
 
   // Initialize services

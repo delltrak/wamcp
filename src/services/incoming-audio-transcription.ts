@@ -1,6 +1,7 @@
 import type { InstanceManager } from "./instance-manager.js";
 import type { ChannelEventPayload } from "../types/channel.types.js";
 import { TranscriptionService } from "./transcription.js";
+import { isAutoMarkPlayedEnabled, markTranscribedAudioPlayed } from "./auto-mark-played.js";
 import { createConcurrencyLimiter } from "../utils/concurrency.js";
 
 interface SharedTranscriptionState {
@@ -57,6 +58,13 @@ export function transcribeIncomingAudioIfConfigured(
         state.transcriptionService.timeoutMs,
       );
     const result = await state.transcriptionService.transcribe(media.data, media.mimeType);
+    if (!messageEvent.message.isFromMe && isAutoMarkPlayedEnabled()) {
+      void markTranscribedAudioPlayed(
+        () => instanceManager.getAdapter(instanceId),
+        messageEvent.message.id,
+        { chatId: messageEvent.chatId },
+      );
+    }
     return result.text;
   });
   state.inFlight.set(key, transcription);

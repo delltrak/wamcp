@@ -282,9 +282,16 @@ export const ReplyPrivatelyToGroupMessageSchema = z
 
 export const SendGroupMentionAllSchema = z
   .object({
-    instanceId: z.string().min(1),
-    groupId: z.string().min(5).describe("Group JID whose participants should all be mentioned"),
-    text: z.string().trim().min(1).max(4096).describe("Message text to send with an @all mention"),
+    instanceId: z.string().min(1).describe("The instance to send from"),
+    groupId: z.string().min(5).describe("Group JID that should receive the @all mention"),
+    text: z
+      .string()
+      .trim()
+      .min(1)
+      .max(4096)
+      .describe(
+        "Message text. A trailing @all is added when the text does not already contain one",
+      ),
   })
   .strict();
 
@@ -417,5 +424,27 @@ export const MarkReadSchema = z
       .describe(
         "Optional sender JID for group messages; otherwise resolved from stored message data",
       ),
+  })
+  .strict();
+
+export const MarkPlayedSchema = z
+  .object({
+    instanceId: z.string().min(1).describe("The instance ID"),
+    chatJid: z
+      .string()
+      .min(5)
+      .describe("Chat JID containing the audio, voice-note, or video messages"),
+    messageIds: z
+      .array(z.string().min(1))
+      .min(1)
+      .max(100)
+      .describe(
+        "Stored incoming audio, voice-note, or video message IDs to mark as played (1-100)",
+      ),
+    participant: z
+      .string()
+      .min(1)
+      .optional()
+      .describe("Sender JID for a group message when storage has no sender. Private chats omit it"),
   })
   .strict();
