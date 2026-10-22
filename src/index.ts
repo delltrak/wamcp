@@ -23,6 +23,7 @@ import type { MetaWebhookPayload } from "./channels/cloud-api/cloud.events.js";
 import { installShutdownHandlers, SHUTDOWN_TIMEOUT_MS } from "./utils/shutdown.js";
 import { logger } from "./utils/logger.js";
 import { getAutoReadMode } from "./services/auto-read.js";
+import { loadAutoMarkPlayedConfig } from "./services/auto-mark-played.js";
 import { bootEventWebhook, getEventWebhookStatus } from "./services/event-webhook-config.js";
 import { buildHealthBody } from "./server/health.js";
 
@@ -68,6 +69,7 @@ function checkApiKey(req: IncomingMessage, res: ServerResponse): boolean {
 }
 
 async function initServices() {
+  loadAutoMarkPlayedConfig();
   getAutoReadMode();
 
   // Initialize services

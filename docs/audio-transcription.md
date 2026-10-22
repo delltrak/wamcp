@@ -49,6 +49,14 @@ notifications include `message.transcription` when processing succeeds. This
 work runs asynchronously after message ingestion; download or provider errors
 leave the normal audio notification intact without that field.
 
+`WA_AUTO_MARK_PLAYED` defaults to `false`. Set it to `true` to send a played
+receipt after a stored incoming audio message is transcribed successfully,
+including transcription started by `wa_transcribe_audio` with a message ID.
+Direct audio that is not a stored message is not marked. The account's own
+audio is not marked. A failed receipt does not fail the transcription.
+`wa_mark_played` remains available when this flag is off. Invalid values stop
+startup.
+
 For message-ID downloads, the existing SQLite message row retains Baileys audio
 metadata needed to fetch and decrypt the media later, and Cloud API rows retain
 the provider media ID. Audio bytes and transcription text are not persisted by

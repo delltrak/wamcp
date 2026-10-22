@@ -21,6 +21,14 @@ import type {
   Chat,
   Message,
   GroupMetadata,
+  CommunityHierarchy,
+  CommunityInviteV4,
+  CommunityParticipantAction,
+  CommunityMemberScope,
+  CommunitySetting,
+  CommunityParticipantUpdateResult,
+  CommunityGroupCreationResult,
+  CommunityJoinRequest,
   ChatModification,
   GroupModification,
   ParticipantAction,
@@ -67,6 +75,8 @@ export interface ChannelAdapter {
   connect(): Promise<void>;
   disconnect(): Promise<void>;
   getStatus(): ConnectionStatus;
+  /** True when this adapter owns a socket that can still reach WhatsApp. */
+  hasLiveSocket?(): boolean;
   getLifecycleStatus?(): InstanceRuntimeStatus;
 
   // ---- Authentication ----
@@ -76,6 +86,8 @@ export interface ChannelAdapter {
 
   // ---- Messaging ----
   sendMessage(to: string, content: MessageContent): Promise<MessageResponse>;
+  /** True when the channel can send native group @all without listing participant JIDs. */
+  supportsNativeGroupMentionAll(): Promise<boolean>;
   sendEvent(options: SendEventOptions): Promise<MessageResponse>;
   getEventResponses(chatId: string, eventMessageId: string): Promise<EventResponse[]>;
   getPollResults(chatId: string, pollMessageId: string): Promise<PollResults>;
@@ -105,6 +117,8 @@ export interface ChannelAdapter {
   ): Promise<void>;
   subscribePresence(chatId: string): Promise<void>;
   markRead(chatId: string, messageIds: string[], participant?: string): Promise<void>;
+  markPlayed(chatId: string, messageIds: string[], participant?: string): Promise<void>;
+  markPlayedMessage(messageId: string, chatId?: string): Promise<void>;
   getMessageReceipts(chatId: string, messageId: string): Promise<MessageReceipt[]>;
   getStatusViewers(messageId: string): Promise<string[]>;
   getMessageReactions(chatId: string, messageId: string): Promise<MessageReaction[]>;
@@ -166,9 +180,47 @@ export interface ChannelAdapter {
   setGroupMemberAddMode(groupId: string, mode: "admin_add" | "all_member_add"): Promise<void>;
 
   // ---- Communities ----
+  joinCommunityV4(
+    invite: CommunityInviteV4,
+  ): Promise<{ communityId: string | null; status: "joined" | "unknown"; retrySafe: false }>;
+  createCommunityGroup(
+    communityId: string,
+    name: string,
+    participants: string[],
+  ): Promise<CommunityGroupCreationResult>;
+  updateCommunityName(communityId: string, name: string): Promise<void>;
+  updateCommunityDescription(communityId: string, description: string): Promise<void>;
+  updateCommunityPicture(communityId: string, image: string | null): Promise<void>;
+  getCommunityMembers(
+    communityId: string,
+    scope: CommunityMemberScope,
+    groupId?: string,
+  ): Promise<GroupMetadata>;
+  updateCommunityParticipants(
+    communityId: string,
+    participants: string[],
+    action: CommunityParticipantAction,
+    confirmLinkedGroupRemoval?: boolean,
+  ): Promise<CommunityParticipantUpdateResult>;
+  listCommunityJoinRequests(communityId: string): Promise<CommunityJoinRequest[]>;
+  handleCommunityJoinRequests(
+    communityId: string,
+    participants: string[],
+    action: "approve" | "reject",
+  ): Promise<CommunityParticipantUpdateResult>;
+  getCommunityInviteCode(communityId: string, revoke?: boolean): Promise<string>;
+  getCommunityInviteInfo(code: string): Promise<GroupMetadata>;
+  joinCommunity(
+    code: string,
+  ): Promise<{ communityId: string | null; status: "joined" | "unknown"; retrySafe: false }>;
+  revokeCommunityMemberInvite(communityId: string, participant: string): Promise<void>;
+  updateCommunitySetting(communityId: string, setting: CommunitySetting): Promise<void>;
+  resolveCommunityAnnouncementGroup(communityId: string, forWrite?: boolean): Promise<string>;
+
   createCommunity(subject: string, description?: string): Promise<GroupMetadata | null>;
   listCommunities(): Promise<Record<string, GroupMetadata>>;
   getCommunityMetadata(communityId: string): Promise<GroupMetadata>;
+  getCommunityHierarchy(communityId: string): Promise<CommunityHierarchy>;
   linkGroupToCommunity(groupId: string, communityId: string): Promise<void>;
   unlinkGroupFromCommunity(groupId: string, communityId: string): Promise<void>;
   leaveCommunity(communityId: string): Promise<void>;

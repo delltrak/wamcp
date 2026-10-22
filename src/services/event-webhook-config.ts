@@ -34,16 +34,17 @@ export interface EventWebhookDestination {
   ignoreFromMe: boolean;
   chatAllowlist?: string[];
   senderAllowlist?: string[];
-  /**
-   * #142 hook for #140. Instance destinations copy the global ignore list when
-   * that field is present. #140 matches it inside shouldSendEventWebhook.
-   */
+  /** Exact JIDs and address-space wildcards. Unset or empty forwards every chat. */
   ignoreJids?: string[];
   debounceMs: number;
 }
 
 export interface EventWebhookConfig {
   destinations: EventWebhookDestination[];
+  /** Shared HMAC secret retained even without a global URL. */
+  secret?: string;
+  /** Shared JID filters also apply when only instance destinations exist. */
+  ignoreJids?: string[];
   queuePrefix: string;
   /** Per-chat batching for incoming messages. Zero keeps the legacy event path. */
   messageDebounceMs: number;
@@ -284,6 +285,79 @@ function parseAllowlist(value: unknown, label: string): string[] | undefined {
   return [...new Set(value.map((item) => (item as string).trim()))];
 }
 
+/** Address-space wildcards. An entry must be one of these or an exact JID. */
+export const JID_ADDRESS_WILDCARDS = [
+  "@g.us",
+  "@s.whatsapp.net",
+  "@lid",
+  "@newsletter",
+  "@broadcast",
+  "@c.us",
+] as const;
+
+const EXACT_JID_RE = /^[0-9A-Za-z][0-9A-Za-z._:-]{0,180}@[A-Za-z0-9][A-Za-z0-9.-]{0,80}$/;
+const STAR_JID_RE = /^([0-9A-Za-z._:-]*)\*([0-9A-Za-z._:-]*)@([A-Za-z0-9][A-Za-z0-9.-]{0,80})$/;
+const JID_DOMAINS = ["g.us", "s.whatsapp.net", "lid", "newsletter", "broadcast", "c.us"] as const;
+
+export function parseIgnoreJidEntry(entry: string, label: string): string {
+  const value = entry.trim().toLowerCase();
+  if (!value) throw new Error(`Invalid ${label}; empty entry`);
+  if (/\s/.test(value)) throw new Error(`Invalid ${label}; invalid JID "${value}"`);
+  if (value.startsWith("@")) {
+    if (!(JID_ADDRESS_WILDCARDS as readonly string[]).includes(value)) {
+      throw new Error(
+        `Invalid ${label}; unsupported wildcard "${value}". Supported wildcards: ${JID_ADDRESS_WILDCARDS.join(", ")}`,
+      );
+    }
+    return value;
+  }
+  if (value.includes("*")) {
+    const match = STAR_JID_RE.exec(value);
+    const domain = match?.[3];
+    if (!domain || !(JID_DOMAINS as readonly string[]).includes(domain)) {
+      throw new Error(
+        `Invalid ${label}; invalid JID wildcard "${value}". Use one * in the user part, for example 5577*@s.whatsapp.net`,
+      );
+    }
+    // #140: *@domain has an empty user part, so it is the chat-only address wildcard.
+    if ((match?.[1] ?? "") === "" && (match?.[2] ?? "") === "") return `@${domain}`;
+    return value;
+  }
+  if (!EXACT_JID_RE.test(value)) {
+    throw new Error(`Invalid ${label}; invalid JID "${value}"`);
+  }
+  return value;
+}
+
+/** Empty or unset means no JID filter. Blank comma slots are skipped; other invalid entries fail. */
+export function parseIgnoreJidList(value: string | undefined, label: string): string[] {
+  if (value === undefined || value.trim() === "") return [];
+  const entries = value
+    .split(",")
+    .map((entry) => entry.trim())
+    .filter(Boolean);
+  return [...new Set(entries.map((entry) => parseIgnoreJidEntry(entry, label)))];
+}
+
+function parseDestinationIgnoreJids(value: unknown): string[] {
+  if (value === undefined) return [];
+  if (!Array.isArray(value) || !value.every((item) => typeof item === "string")) {
+    throw new Error("Invalid WA_EVENT_WEBHOOKS; ignoreJids must be an array of JID patterns");
+  }
+  return [
+    ...new Set(
+      value
+        .map((item) => item.trim())
+        .filter(Boolean)
+        .map((item) => parseIgnoreJidEntry(item, "WA_EVENT_WEBHOOKS ignoreJids")),
+    ),
+  ];
+}
+
+function mergeIgnoreJids(globalJids: readonly string[], extra: readonly string[]): string[] {
+  return [...new Set([...globalJids, ...extra])];
+}
+
 function validateDestinationUrl(url: string, allowHttp: boolean, label: string): string {
   if (validateWebhookUrl(url, allowHttp)) {
     throw new Error(`Invalid ${label}; expected a public URL under the configured protocol policy`);
@@ -301,6 +375,7 @@ function parseDestination(
     ignoreFromMe: boolean;
     preset?: EventWebhookPreset;
     debounceMs: number;
+    ignoreJids: string[];
   },
   ids: Set<string>,
 ): EventWebhookDestination {
@@ -364,6 +439,10 @@ function parseDestination(
     input.senderAllowlist,
     "WA_EVENT_WEBHOOKS senderAllowlist",
   );
+  const ignoreJids = mergeIgnoreJids(
+    global.ignoreJids,
+    parseDestinationIgnoreJids(input.ignoreJids),
+  );
 
   return trackDestinationAuth(
     {
@@ -376,6 +455,7 @@ function parseDestination(
       ignoreFromMe,
       ...(chatAllowlist !== undefined ? { chatAllowlist } : {}),
       ...(senderAllowlist !== undefined ? { senderAllowlist } : {}),
+      ...(ignoreJids.length > 0 ? { ignoreJids } : {}),
       debounceMs,
     },
     authHeader !== undefined,
@@ -503,7 +583,11 @@ export function loadEventWebhookConfig(env: Environment = process.env): EventWeb
   }
   const events = parseEvents(env.WA_EVENT_WEBHOOK_EVENTS);
   const preset = parsePreset(env.WA_EVENT_WEBHOOK_PRESET, "WA_EVENT_WEBHOOK_PRESET");
-  const global = { allowHttp, events, ignoreFromMe, preset, debounceMs };
+  const ignoreJids = parseIgnoreJidList(
+    env.WA_EVENT_WEBHOOK_IGNORE_JIDS,
+    "WA_EVENT_WEBHOOK_IGNORE_JIDS",
+  );
+  const global = { allowHttp, events, ignoreFromMe, preset, debounceMs, ignoreJids };
   const multiValue = env.WA_EVENT_WEBHOOKS?.trim();
 
   if (multiValue) {
@@ -534,6 +618,8 @@ export function loadEventWebhookConfig(env: Environment = process.env): EventWeb
       retryDelayMs,
       ...(preset ? { preset } : {}),
       instanceMergeGlobal,
+      ...(env.WA_EVENT_WEBHOOK_SECRET ? { secret: env.WA_EVENT_WEBHOOK_SECRET } : {}),
+      ...(ignoreJids.length > 0 ? { ignoreJids } : {}),
     };
   }
 
@@ -561,6 +647,8 @@ export function loadEventWebhookConfig(env: Environment = process.env): EventWeb
       retryDelayMs,
       ...(preset ? { preset } : {}),
       instanceMergeGlobal,
+      ...(env.WA_EVENT_WEBHOOK_SECRET ? { secret: env.WA_EVENT_WEBHOOK_SECRET } : {}),
+      ...(ignoreJids.length > 0 ? { ignoreJids } : {}),
     };
   }
 
@@ -575,6 +663,7 @@ export function loadEventWebhookConfig(env: Environment = process.env): EventWeb
           ...(preset ? { preset } : {}),
           events,
           ignoreFromMe,
+          ...(ignoreJids.length > 0 ? { ignoreJids } : {}),
           debounceMs,
         },
         auth.configured,
@@ -589,6 +678,8 @@ export function loadEventWebhookConfig(env: Environment = process.env): EventWeb
     retryDelayMs,
     ...(preset ? { preset } : {}),
     instanceMergeGlobal,
+    ...(env.WA_EVENT_WEBHOOK_SECRET ? { secret: env.WA_EVENT_WEBHOOK_SECRET } : {}),
+    ...(ignoreJids.length > 0 ? { ignoreJids } : {}),
   };
 }
 
@@ -668,6 +759,7 @@ function warnUnsignedInstanceWebhook(): void {
 }
 
 function inheritedWebhookSecret(url: string, config: EventWebhookConfig): string | undefined {
+  if (config.destinations.length === 0) return config.secret;
   const matched = config.destinations.find((destination) => webhookUrlsMatch(destination.url, url));
   if (matched?.secret) return matched.secret;
   const secrets = [
@@ -682,15 +774,12 @@ function inheritedWebhookSecret(url: string, config: EventWebhookConfig): string
   return undefined;
 }
 
-/**
- * #142: copy WA_EVENT_WEBHOOK_IGNORE_JIDS onto the instance destination once #140
- * has attached ignoreJids to the global destinations or the config object.
- */
+/** Copy shared and inherited destination JID filters onto instance destinations. */
 export function instanceWebhookIgnoreJids(config: EventWebhookConfig): string[] | undefined {
   const fromDestinations = config.destinations.flatMap(
     (destination) => destination.ignoreJids ?? [],
   );
-  const fromConfig = (config as { ignoreJids?: readonly string[] }).ignoreJids ?? [];
+  const fromConfig = config.ignoreJids ?? [];
   const merged = [...new Set([...fromDestinations, ...fromConfig])];
   return merged.length > 0 ? merged : undefined;
 }
@@ -723,6 +812,20 @@ export function normalizeInstanceWebhookEvents(
   return names as ChannelEvent[];
 }
 
+/** Shared URL/auth policy for stored-row reads and delivery routing. */
+export function validateStoredInstanceWebhook(
+  row: InstanceWebhookRow,
+  allowHttp: boolean,
+): {
+  url: string;
+  headers: Record<string, string>;
+} {
+  return {
+    url: normalizeInstanceWebhookUrl(row.url, allowHttp),
+    headers: instanceWebhookHeaders(row.authHeader ?? undefined, row.authValue ?? undefined),
+  };
+}
+
 export function instanceWebhookDestination(
   row: InstanceWebhookRow,
   config: EventWebhookConfig,
@@ -730,8 +833,7 @@ export function instanceWebhookDestination(
 ): EventWebhookDestination {
   const authHeader = row.authHeader ?? undefined;
   const authValue = row.authValue ?? undefined;
-  const headers = instanceWebhookHeaders(authHeader, authValue);
-  const url = normalizeInstanceWebhookUrl(row.url, allowHttp);
+  const { headers, url } = validateStoredInstanceWebhook(row, allowHttp);
   const secret = inheritedWebhookSecret(url, config);
   const ignoreJids = instanceWebhookIgnoreJids(config);
   return trackDestinationAuth(

@@ -11,6 +11,7 @@ import {
   loadEventWebhookConfig,
   normalizeInstanceWebhookEvents,
   normalizeInstanceWebhookUrl,
+  validateStoredInstanceWebhook,
 } from "./event-webhook-config.js";
 import {
   deleteInstanceWebhook,
@@ -110,6 +111,12 @@ export function readInstanceWebhook(instanceId: string): InstanceWebhookState {
   try {
     const row = getInstanceWebhook(instanceId);
     if (!row) return { configured: false };
+    const allowHttp = eventWebhookAllowsHttp();
+    try {
+      validateStoredInstanceWebhook(row, allowHttp);
+    } catch {
+      return { configured: false, invalid: true };
+    }
     return viewFromStored(row.url, row.authHeader, row.authValue, row.events, row.updatedAt);
   } catch (err) {
     if (err instanceof InvalidStoredInstanceWebhookError) {

@@ -1,9 +1,13 @@
+import { safeGroupChanges } from "../utils/group-event-fields.js";
 import { createHash, createHmac } from "node:crypto";
 import { lookup as lookupDns } from "node:dns/promises";
 import { isIP } from "node:net";
 import type { ConnectionOptions } from "node:tls";
 import { Queue, UnrecoverableError, Worker, type Job, type JobsOptions } from "bullmq";
-import { Agent } from "undici";
+import { and, eq, inArray, or } from "drizzle-orm";
+import { Agent, fetch as undiciFetch } from "undici";
+import { db } from "../db/client.js";
+import { contacts } from "../db/schema.js";
 import type { InstanceManager } from "./instance-manager.js";
 import { QUEUE_COMPLETED_AGE_S, QUEUE_FAILED_AGE_S } from "../constants.js";
 import type {
@@ -25,7 +29,10 @@ import {
   type EventWebhookConfig,
   type EventWebhookDestination,
 } from "./event-webhook-config.js";
-import { listInstanceWebhooks } from "./instance-webhook-store.js";
+import {
+  instanceWebhookStorageGeneration,
+  listInstanceWebhooks,
+} from "./instance-webhook-store.js";
 import { isNonPublicIp } from "../utils/validation.js";
 
 const logger = createChildLogger({ service: "event-webhook" });
@@ -53,6 +60,9 @@ export interface EventWebhookPayload {
   rawType?: string;
   action?: string;
   groupId?: string;
+  groupChanges?: Record<string, unknown>;
+  participants?: string[];
+  requestMethod?: string | null;
   memberLabel?: string | null;
   eventMessageId?: string;
   responseMessageId?: string;
@@ -558,6 +568,20 @@ export function normalizeEventWebhookPayload(
           memberLabel: memberLabel ?? null,
         }
       : {}),
+    ...(event === "group.updated"
+      ? { groupId: firstString(data.groupId) ?? "", groupChanges: safeGroupChanges(changes) }
+      : {}),
+    ...(event === "group.participants_changed"
+      ? {
+          groupId: firstString(data.groupId) ?? "",
+          participants: Array.isArray(data.participants)
+            ? data.participants.filter((p): p is string => typeof p === "string")
+            : [],
+        }
+      : {}),
+    ...(event === "group.join_request"
+      ? { groupId: firstString(data.groupId) ?? "", requestMethod: firstString(data.method) }
+      : {}),
     ...(eventMessageId ? { eventMessageId } : {}),
     ...(responseMessageId ? { responseMessageId } : {}),
     ...(participant ? { participant } : {}),
@@ -706,11 +730,159 @@ export function normalizeGrokBotInstanceWebhookPayload(
   }
 }
 
+function addJidCandidate(candidates: string[], value: unknown): void {
+  if (typeof value !== "string") return;
+  const jid = value.trim();
+  if (jid.includes("@")) candidates.push(jid);
+}
+
+/** #140: drop a WhatsApp device suffix (`:12` before `@`) and compare case-insensitively. */
+const JID_DEVICE_SUFFIX = /:\d+(?=@)/;
+
+export function normalizeIgnoreJid(value: string): string {
+  return value.trim().toLowerCase().replace(JID_DEVICE_SUFFIX, "");
+}
+
+/**
+ * JIDs used by WA_EVENT_WEBHOOK_IGNORE_JIDS (#140).
+ * Address wildcards match only chatJids. Exact and starred entries also match identityJids.
+ * Participant arrays are not included.
+ */
+export function eventIgnoreJidSets(payload: ChannelEventPayload[ChannelEvent]): {
+  chatJids: string[];
+  identityJids: string[];
+} {
+  const data = payload as unknown as Record<string, unknown>;
+  const message = isRecord(data.message) ? data.message : {};
+  const association = isRecord(data.association) ? data.association : {};
+  const chatJids: string[] = [];
+  addJidCandidate(chatJids, data.chatId);
+  addJidCandidate(chatJids, data.groupId);
+  addJidCandidate(chatJids, data.newsletterId);
+  addJidCandidate(chatJids, association.chatId);
+  const identityJids: string[] = [];
+  addJidCandidate(identityJids, data.participant);
+  addJidCandidate(identityJids, data.callerId);
+  addJidCandidate(identityJids, data.reactedBy);
+  addJidCandidate(identityJids, data.deletedBy);
+  addJidCandidate(identityJids, data.author);
+  addJidCandidate(identityJids, data.contactId);
+  addJidCandidate(identityJids, data.chatLid);
+  addJidCandidate(identityJids, data.senderLid);
+  addJidCandidate(identityJids, data.fromLid);
+  addJidCandidate(identityJids, data.participantLid);
+  addJidCandidate(identityJids, message.sender);
+  addJidCandidate(identityJids, message.senderLid);
+  addJidCandidate(identityJids, message.senderPn);
+  return { chatJids, identityJids };
+}
+
+/** Chat, sender, and LID fields a JID ignore rule can see. Participant lists are not included. */
+export function eventJidCandidates(payload: ChannelEventPayload[ChannelEvent]): string[] {
+  const { chatJids, identityJids } = eventIgnoreJidSets(payload);
+  return [...chatJids, ...identityJids];
+}
+
+export function jidMatchesIgnorePattern(jid: string, pattern: string): boolean {
+  const normalizedJid = normalizeIgnoreJid(jid);
+  const normalizedPattern = normalizeIgnoreJid(pattern);
+  if (!normalizedJid || !normalizedPattern) return false;
+  if (normalizedPattern.startsWith("@")) return normalizedJid.endsWith(normalizedPattern);
+  const star = normalizedPattern.indexOf("*");
+  if (star === -1) return normalizedJid === normalizedPattern;
+  const prefix = normalizedPattern.slice(0, star);
+  const suffix = normalizedPattern.slice(star + 1);
+  return (
+    normalizedJid.length >= prefix.length + suffix.length &&
+    normalizedJid.startsWith(prefix) &&
+    normalizedJid.endsWith(suffix)
+  );
+}
+
+function phoneJidFromStoredPhone(phone: string): string | undefined {
+  const digits = phone.replace(/\D/g, "");
+  if (!digits) return undefined;
+  return `${digits}@s.whatsapp.net`;
+}
+
+/**
+ * #140: a LID-only message has no phone alias on the event. Use the contact row
+ * (jid, lid, phone) so an exact or starred phone entry can still match.
+ * Address wildcards do not use these aliases.
+ */
+function lookupStoredJidAliases(instanceId: string, jids: readonly string[]): string[] {
+  const needles = [
+    ...new Set(
+      jids
+        .map((jid) => normalizeIgnoreJid(jid))
+        .filter(
+          (jid) => jid.endsWith("@lid") || jid.endsWith("@s.whatsapp.net") || jid.endsWith("@c.us"),
+        ),
+    ),
+  ];
+  if (!instanceId || needles.length === 0) return [];
+  try {
+    const rows = db
+      .select({ jid: contacts.jid, phone: contacts.phone, lid: contacts.lid })
+      .from(contacts)
+      .where(
+        and(
+          eq(contacts.instanceId, instanceId),
+          or(inArray(contacts.jid, needles), inArray(contacts.lid, needles)),
+        ),
+      )
+      .all();
+    const aliases: string[] = [];
+    for (const row of rows) {
+      if (row.jid) aliases.push(row.jid);
+      if (row.lid) aliases.push(row.lid);
+      if (row.phone) {
+        const phoneJid = phoneJidFromStoredPhone(row.phone);
+        if (phoneJid) aliases.push(phoneJid);
+      }
+    }
+    return aliases;
+  } catch {
+    logger.warn("Unable to resolve stored LID mappings for the JID ignore filter");
+    return [];
+  }
+}
+
+export function eventMatchesIgnoreJids(
+  payload: ChannelEventPayload[ChannelEvent],
+  ignoreJids: readonly string[] | undefined,
+): boolean {
+  if (!ignoreJids || ignoreJids.length === 0) return false;
+  const { chatJids, identityJids } = eventIgnoreJidSets(payload);
+  const domainPatterns: string[] = [];
+  const specificPatterns: string[] = [];
+  for (const pattern of ignoreJids) {
+    if (normalizeIgnoreJid(pattern).startsWith("@")) domainPatterns.push(pattern);
+    else specificPatterns.push(pattern);
+  }
+  if (
+    domainPatterns.some((pattern) => chatJids.some((jid) => jidMatchesIgnorePattern(jid, pattern)))
+  ) {
+    return true;
+  }
+  if (specificPatterns.length === 0) return false;
+  const instanceId =
+    typeof (payload as { instanceId?: unknown }).instanceId === "string"
+      ? (payload as { instanceId: string }).instanceId
+      : "";
+  const resolved = lookupStoredJidAliases(instanceId, [...chatJids, ...identityJids]);
+  return [...chatJids, ...identityJids, ...resolved].some((jid) =>
+    specificPatterns.some((pattern) => jidMatchesIgnorePattern(jid, pattern)),
+  );
+}
+
 export function shouldSendEventWebhook(
   event: ChannelEvent,
   payload: ChannelEventPayload[ChannelEvent],
   config: Pick<EventWebhookConfig, "events" | "ignoreFromMe"> &
-    Partial<Pick<EventWebhookDestination, "preset" | "chatAllowlist" | "senderAllowlist">>,
+    Partial<
+      Pick<EventWebhookDestination, "preset" | "chatAllowlist" | "senderAllowlist" | "ignoreJids">
+    >,
 ): boolean {
   if (!config.events.includes(event)) return false;
   if (
@@ -754,7 +926,7 @@ export function shouldSendEventWebhook(
   }
 
   if (!event.startsWith("instance.")) {
-    // #142: instance destinations copy ignoreJids. #140's matcher reads that field here.
+    if (eventMatchesIgnoreJids(payload, config.ignoreJids)) return false;
     if (config.chatAllowlist && !config.chatAllowlist.includes(chatId)) return false;
     if (config.senderAllowlist && !config.senderAllowlist.includes(senderId)) return false;
   }
@@ -821,10 +993,10 @@ export function registerEventWebhookHandler(
   };
 
   const flushDestination = (destination: EventWebhookDestination): Promise<void> => {
-    const buffer = buffers.get(destination.id);
+    const buffer = buffers.get(eventWebhookDestinationIdentity(destination));
     if (!buffer) return Promise.resolve();
     clearTimeout(buffer.timer);
-    buffers.delete(destination.id);
+    buffers.delete(eventWebhookDestinationIdentity(destination));
     if (buffer.payloads.length === 1) {
       return enqueuePayload(destination, buffer.payloads[0] as EventWebhookBody);
     }
@@ -892,7 +1064,7 @@ export function registerEventWebhookHandler(
     transcription: Promise<string> | undefined,
     withTranscription: (text: string) => BufferedMessagePayload,
   ): void => {
-    const key = JSON.stringify([destination.id, instanceId, chatId]);
+    const key = JSON.stringify([eventWebhookDestinationIdentity(destination), instanceId, chatId]);
     let batch = messageBuffers.get(key);
     if (!batch) {
       const maxDeadlineAt = Date.now() + config.messageDebounceMaxMs;
@@ -967,7 +1139,7 @@ export function registerEventWebhookHandler(
       return;
     }
 
-    let buffer = buffers.get(destination.id);
+    let buffer = buffers.get(eventWebhookDestinationIdentity(destination));
     if (
       buffer &&
       destination.preset === "grok-bot" &&
@@ -981,7 +1153,7 @@ export function registerEventWebhookHandler(
         void flushDestination(destination);
       }, destination.debounceMs);
       buffer = { payloads: [], timer };
-      buffers.set(destination.id, buffer);
+      buffers.set(eventWebhookDestinationIdentity(destination), buffer);
     }
     buffer.payloads.push(payload);
     if (buffer.payloads.length >= MAX_BATCH_SIZE) void flushDestination(destination);
@@ -1304,10 +1476,12 @@ export async function postEventWebhook(
   destination: EventWebhookDestination,
   payload: EventWebhookBody,
   timeoutMs: number,
-  fetchRequest: typeof fetch = fetch,
+  // Use the client from the same Undici version as Agent: Node's bundled fetch
+  // can still use the legacy dispatcher contract.
+  fetchRequest: typeof fetch | typeof undiciFetch = undiciFetch,
   resolveDns: EventWebhookDnsResolver = resolveWebhookDns,
 ): Promise<void> {
-  let response: Response | undefined;
+  let response: Response | Awaited<ReturnType<typeof undiciFetch>> | undefined;
   let dispatcher: Agent | undefined;
   try {
     const url = new URL(destination.url);
@@ -1339,12 +1513,12 @@ export async function postEventWebhook(
     try {
       response = await fetchRequest(destination.url, {
         method: "POST",
-        headers: createEventWebhookHeaders(body, destination),
+        headers: Object.fromEntries(createEventWebhookHeaders(body, destination)),
         body,
         signal: AbortSignal.timeout(timeoutMs),
         redirect: "error",
         dispatcher,
-      } as RequestInit & { dispatcher: Agent });
+      });
     } catch (error) {
       const diagnostics = readWebhookFailureDiagnostics(error, destination);
       if (isRetryableNetworkError(error)) {
@@ -1404,8 +1578,12 @@ export async function processEventWebhookJob(
   timeoutMs: number,
   deliver: typeof postEventWebhook = postEventWebhook,
 ): Promise<void> {
-  const destination = destinations.get(job.destinationId);
-  if (!destination || job.destinationIdentity !== eventWebhookDestinationIdentity(destination)) {
+  const destination = destinations.get(job.destinationIdentity);
+  if (
+    !destination ||
+    job.destinationId !== destination.id ||
+    job.destinationIdentity !== eventWebhookDestinationIdentity(destination)
+  ) {
     throw new UnrecoverableError(
       "Event webhook destination does not match this service configuration",
     );
@@ -1420,6 +1598,7 @@ export class EventWebhookService {
   private worker: Worker<EventWebhookJob> | null = null;
   private removeEventHandler: EventWebhookUnsubscribe | null = null;
   private readonly knownDestinations = new Map<string, EventWebhookDestination>();
+  private knownDestinationsGeneration = -1;
   private boundManager: InstanceManager | null = null;
 
   constructor(config = loadEventWebhookConfig()) {
@@ -1433,9 +1612,8 @@ export class EventWebhookService {
 
   start(instanceManager: InstanceManager): void {
     this.boundManager = instanceManager;
-    if (!this.hasDeliveryWork()) return;
-
     this.rebuildKnownDestinations();
+    if (!this.hasDeliveryWork()) return;
     if (this.queue) return;
 
     this.queue = new Queue<EventWebhookJob>(WEBHOOK_QUEUE_NAME, {
@@ -1454,7 +1632,7 @@ export class EventWebhookService {
       },
     );
     this.worker.on("failed", (job, error) => {
-      const destination = job ? this.knownDestinations.get(job.data.destinationId) : undefined;
+      const destination = job ? this.destinationMap().get(job.data.destinationIdentity) : undefined;
       logger.warn(
         eventWebhookFailureLogData(job?.attemptsMade, error, destination),
         "Outgoing event webhook delivery attempt failed",
@@ -1480,18 +1658,22 @@ export class EventWebhookService {
     return this.config.destinations.length > 0 || listInstanceWebhooks().length > 0;
   }
 
-  /** Cached map. Rebuilt from storage only in start/sync, not on each delivery. */
+  /** Cached map; storage changes invalidate it before the next delivery. */
   destinationMap(): ReadonlyMap<string, EventWebhookDestination> {
+    if (this.knownDestinationsGeneration !== instanceWebhookStorageGeneration()) {
+      this.rebuildKnownDestinations();
+    }
     return this.knownDestinations;
   }
 
   private rebuildKnownDestinations(): void {
+    this.knownDestinationsGeneration = instanceWebhookStorageGeneration();
     this.knownDestinations.clear();
     for (const destination of this.config.destinations) {
-      this.knownDestinations.set(destination.id, destination);
+      this.knownDestinations.set(eventWebhookDestinationIdentity(destination), destination);
     }
     for (const destination of storedInstanceDestinations(this.config, eventWebhookAllowsHttp())) {
-      this.knownDestinations.set(destination.id, destination);
+      this.knownDestinations.set(eventWebhookDestinationIdentity(destination), destination);
     }
   }
 

@@ -1,3 +1,4 @@
+import { createHmac } from "node:crypto";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { eq } from "drizzle-orm";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -11,7 +12,14 @@ import {
   SetInstanceWebhookSchema,
 } from "../src/schemas/instance.schema.js";
 import type { InstanceManager } from "../src/services/instance-manager.js";
-import { EventWebhookService, registerEventWebhookHandler } from "../src/services/event-webhook.js";
+import {
+  EventWebhookService,
+  processEventWebhookJob,
+  createEventWebhookHeaders,
+  eventWebhookDestinationIdentity,
+  shouldSendEventWebhook,
+  registerEventWebhookHandler,
+} from "../src/services/event-webhook.js";
 import {
   destinationsForInstance,
   eventWebhookHealth,
@@ -41,9 +49,8 @@ const { infoMock, errorMock } = vi.hoisted(() => ({
 }));
 
 vi.mock("../src/utils/logger.js", async () => {
-  const actual = await vi.importActual<typeof import("../src/utils/logger.js")>(
-    "../src/utils/logger.js",
-  );
+  const actual =
+    await vi.importActual<typeof import("../src/utils/logger.js")>("../src/utils/logger.js");
   return {
     ...actual,
     createRequestLogger: () => ({ info: infoMock, error: errorMock }),
@@ -123,9 +130,7 @@ function captureHandler(): { manager: InstanceManager; handler: () => EventHandl
 function serialized(mock: ReturnType<typeof vi.fn>): string {
   return mock.mock.calls
     .map((call) =>
-      call
-        .map((item) => (item instanceof Error ? item.message : JSON.stringify(item)))
-        .join(" "),
+      call.map((item) => (item instanceof Error ? item.message : JSON.stringify(item))).join(" "),
     )
     .join("\n");
 }
@@ -164,6 +169,128 @@ afterEach(() => {
 });
 
 describe("per-instance event webhooks", () => {
+  it("inherits a standalone HMAC secret without a global URL", () => {
+    setInstanceWebhook({ instanceId: INSTANCE_A, url: INSTANCE_URL });
+    for (const extra of [{}, { WA_EVENT_WEBHOOKS: "[]" }]) {
+      const config = loadEventWebhookConfig({ WA_EVENT_WEBHOOK_SECRET: GLOBAL_HMAC, ...extra });
+      expect(config.destinations).toEqual([]);
+      const destination = destinationsForInstance(config, INSTANCE_A)[0]!;
+      expect(destination.secret).toBe(GLOBAL_HMAC);
+      const body = JSON.stringify({ event: "message.received" });
+      const headers = createEventWebhookHeaders(body, destination, "1700000000");
+      expect(headers.get("x-wa-event-signature")).toBe(
+        `sha256=${createHmac("sha256", GLOBAL_HMAC).update(`1700000000.${body}`).digest("hex")}`,
+      );
+      expect(JSON.stringify(getEventWebhookStatus({}, config))).not.toContain(GLOBAL_HMAC);
+    }
+  });
+
+  it("keeps the shared JID filter for instance-only delivery", () => {
+    setInstanceWebhook({ instanceId: INSTANCE_A, url: INSTANCE_URL });
+    const config = loadEventWebhookConfig({
+      WA_EVENT_WEBHOOK_IGNORE_JIDS: "5511888888888@s.whatsapp.net",
+    });
+    const destination = destinationsForInstance(config, INSTANCE_A)[0]!;
+    expect(shouldSendEventWebhook("message.received", incomingMessage(), destination)).toBe(false);
+  });
+
+  it.each([
+    ["url", "http://hooks.example.test/path"],
+    ["url", "https://127.0.0.1/path"],
+    ["url", "not-a-url"],
+    ["auth_header", "Authorization"],
+    ["auth_value", "orphan-secret"],
+  ])("reports an invalid stored %s consistently with routing", (column, value) => {
+    vi.stubEnv("WA_EVENT_WEBHOOK_ALLOW_HTTP", "false");
+    setInstanceWebhook({ instanceId: INSTANCE_A, url: INSTANCE_URL });
+    db.$client
+      .prepare(`UPDATE instance_webhooks SET ${column} = ? WHERE instance_id = ?`)
+      .run(value, INSTANCE_A);
+    touchInstanceWebhookStorage();
+    expect(destinationsForInstance(globalConfig(), INSTANCE_A)).toEqual(
+      globalConfig().destinations,
+    );
+    expect(readInstanceWebhook(INSTANCE_A)).toEqual({ configured: false, invalid: true });
+  });
+
+  it.each([
+    [false, 0],
+    [false, 10],
+    [true, 0],
+    [true, 10],
+  ])("keeps colliding IDs isolated with merge=%s and debounce=%s", async (merge, debounce) => {
+    setInstanceWebhook({
+      instanceId: INSTANCE_A,
+      url: INSTANCE_URL,
+      authHeader: AUTH_HEADER,
+      authValue: AUTH_SECRET,
+    });
+    const config = loadEventWebhookConfig({
+      WA_EVENT_WEBHOOK_INSTANCE_MERGE_GLOBAL: String(merge),
+      WA_WEBHOOK_DEBOUNCE_MS: String(debounce),
+      WA_EVENT_WEBHOOKS: JSON.stringify([
+        { id: `instance:${INSTANCE_A}`, url: GLOBAL_URL, secret: GLOBAL_HMAC },
+      ]),
+    });
+    const service = new EventWebhookService(config);
+    (service as unknown as { rebuildKnownDestinations(): void }).rebuildKnownDestinations();
+    const deliver = vi.fn<Parameters<typeof processEventWebhookJob>[3]>(async () => undefined);
+    const { manager, handler } = captureHandler();
+    const jobs: Parameters<typeof processEventWebhookJob>[0][] = [];
+    const unsubscribe = registerEventWebhookHandler(
+      manager,
+      config,
+      async (job) => {
+        jobs.push(job);
+      },
+      undefined,
+      (instanceId) => destinationsForInstance(config, instanceId),
+    );
+    handler()?.("message.received", INSTANCE_A, incomingMessage());
+    handler()?.("message.received", INSTANCE_B, { ...incomingMessage(), instanceId: INSTANCE_B });
+    await unsubscribe.flush();
+    unsubscribe();
+    expect(jobs).toHaveLength(merge ? 3 : 2);
+    for (const job of jobs)
+      await processEventWebhookJob(job, service.destinationMap(), 1000, deliver);
+    expect(deliver.mock.calls.map(([destination]) => destination.url).sort()).toEqual(
+      (merge ? [GLOBAL_URL, INSTANCE_URL, GLOBAL_URL] : [INSTANCE_URL, GLOBAL_URL]).sort(),
+    );
+  });
+
+  it("clears worker destinations after removing the final instance webhook", () => {
+    setInstanceWebhook({ instanceId: INSTANCE_A, url: INSTANCE_URL });
+    const service = new EventWebhookService(loadEventWebhookConfig({}));
+    (service as unknown as { rebuildKnownDestinations(): void }).rebuildKnownDestinations();
+    expect(service.destinationMap().size).toBe(1);
+    removeInstanceWebhook(INSTANCE_A);
+    service.start(captureHandler().manager);
+    expect(service.destinationMap().size).toBe(0);
+  });
+
+  it("rejects pending delivery after instance deletion invalidates the cache", async () => {
+    setInstanceWebhook({ instanceId: INSTANCE_A, url: INSTANCE_URL });
+    const config = loadEventWebhookConfig({});
+    const destination = destinationsForInstance(config, INSTANCE_A)[0]!;
+    const service = new EventWebhookService(config);
+    expect(service.destinationMap().size).toBe(1);
+    deleteInstance(INSTANCE_A);
+    const deliver = vi.fn<Parameters<typeof processEventWebhookJob>[3]>(async () => undefined);
+    await expect(
+      processEventWebhookJob(
+        {
+          destinationId: destination.id,
+          destinationIdentity: eventWebhookDestinationIdentity(destination),
+          payload: {},
+        },
+        service.destinationMap(),
+        1000,
+        deliver,
+      ),
+    ).rejects.toThrow(/does not match/);
+    expect(deliver).not.toHaveBeenCalled();
+  });
+
   it("defaults merge to false and rejects an invalid flag", () => {
     expect(loadEventWebhookConfig({}).instanceMergeGlobal).toBe(false);
     expect(globalConfig().instanceMergeGlobal).toBe(false);
@@ -174,9 +301,7 @@ describe("per-instance event webhooks", () => {
 
   it("keeps today's global routing when an instance has no stored webhook", () => {
     const config = globalConfig();
-    expect(destinationsForInstance(config, INSTANCE_A).map((item) => item.id)).toEqual([
-      "default",
-    ]);
+    expect(destinationsForInstance(config, INSTANCE_A).map((item) => item.id)).toEqual(["default"]);
     expect(destinationsForInstance(config, INSTANCE_B)).toEqual(config.destinations);
     expect(getEventWebhookStatus({})).toEqual({
       configured: false,
@@ -360,12 +485,12 @@ describe("per-instance event webhooks", () => {
   });
 
   it("rejects invalid URLs, auth pairs, event lists, and instance ids", () => {
-    expect(() => setInstanceWebhook({ instanceId: INSTANCE_A, url: "http://hooks.example.test/hook" })).toThrow(
-      /Invalid instance webhook URL/,
-    );
-    expect(() => setInstanceWebhook({ instanceId: INSTANCE_A, url: "https://127.0.0.1/hook" })).toThrow(
-      /Invalid instance webhook URL/,
-    );
+    expect(() =>
+      setInstanceWebhook({ instanceId: INSTANCE_A, url: "http://hooks.example.test/hook" }),
+    ).toThrow(/Invalid instance webhook URL/);
+    expect(() =>
+      setInstanceWebhook({ instanceId: INSTANCE_A, url: "https://127.0.0.1/hook" }),
+    ).toThrow(/Invalid instance webhook URL/);
     expect(() =>
       setInstanceWebhook({
         instanceId: INSTANCE_A,
@@ -412,9 +537,9 @@ describe("per-instance event webhooks", () => {
       authHeader: AUTH_HEADER,
     });
     expect(mismatched.success).toBe(false);
-    expect(GetInstanceWebhookSchema.safeParse({ instanceId: INSTANCE_A, extra: true }).success).toBe(
-      false,
-    );
+    expect(
+      GetInstanceWebhookSchema.safeParse({ instanceId: INSTANCE_A, extra: true }).success,
+    ).toBe(false);
     expect(DeleteInstanceWebhookSchema.safeParse({ instanceId: INSTANCE_A }).success).toBe(true);
   });
 
@@ -426,9 +551,9 @@ describe("per-instance event webhooks", () => {
     });
     expect(saved.endpoint).toBe("http://hooks.example.test");
     expect(getInstanceWebhook(INSTANCE_A)?.url).toBe("http://hooks.example.test/hook");
-    expect(() => setInstanceWebhook({ instanceId: INSTANCE_B, url: "http://10.1.1.1/hook" })).toThrow(
-      /Invalid instance webhook URL/,
-    );
+    expect(() =>
+      setInstanceWebhook({ instanceId: INSTANCE_B, url: "http://10.1.1.1/hook" }),
+    ).toThrow(/Invalid instance webhook URL/);
   });
 
   it("omits secrets from tool output, logs, status, and health", async () => {
@@ -530,15 +655,18 @@ describe("per-instance event webhooks", () => {
     });
     expect(sync).toHaveBeenCalledOnce();
     expect(readInstanceWebhook(INSTANCE_A)).toEqual({ configured: false });
-    expect(destinationsForInstance(config, INSTANCE_A).map((item) => item.id)).toEqual([
-      "default",
-    ]);
+    expect(destinationsForInstance(config, INSTANCE_A).map((item) => item.id)).toEqual(["default"]);
     expect(removeInstanceWebhook(INSTANCE_A)).toEqual({ deleted: false });
     expect(serialized(infoMock)).not.toContain(INSTANCE_URL);
   });
 
   it("deletes the stored webhook when the instance is deleted", () => {
-    setInstanceWebhook({ instanceId: INSTANCE_A, url: INSTANCE_URL, authValue: AUTH_SECRET, authHeader: AUTH_HEADER });
+    setInstanceWebhook({
+      instanceId: INSTANCE_A,
+      url: INSTANCE_URL,
+      authValue: AUTH_SECRET,
+      authHeader: AUTH_HEADER,
+    });
     deleteInstance(INSTANCE_A);
     expect(getInstanceWebhook(INSTANCE_A)).toBeUndefined();
   });
@@ -603,12 +731,8 @@ describe("per-instance event webhooks", () => {
     expect(booted.destinationCount).toBe(1);
 
     const config = loadEventWebhookConfig(env);
-    expect(destinationsForInstance(config, INSTANCE_A).map((item) => item.id)).toEqual([
-      "default",
-    ]);
-    expect(destinationsForInstance(config, INSTANCE_B).map((item) => item.id)).toEqual([
-      "default",
-    ]);
+    expect(destinationsForInstance(config, INSTANCE_A).map((item) => item.id)).toEqual(["default"]);
+    expect(destinationsForInstance(config, INSTANCE_B).map((item) => item.id)).toEqual(["default"]);
     expect(JSON.stringify(warn.mock.calls)).toContain("Skipping invalid stored instance webhook");
     expect(JSON.stringify(warn.mock.calls)).not.toContain("private-path");
 
@@ -625,20 +749,27 @@ describe("per-instance event webhooks", () => {
     const service = new EventWebhookService(globalConfig());
     const internals = service as unknown as {
       rebuildKnownDestinations: () => void;
-      destinationMap: () => ReadonlyMap<string, { url: string }>;
     };
     internals.rebuildKnownDestinations();
-    expect(internals.destinationMap().get(`instance:${INSTANCE_A}`)?.url).toBe(INSTANCE_URL);
+    expect(
+      [...service.destinationMap().values()].find((item) => item.id === `instance:${INSTANCE_A}`)
+        ?.url,
+    ).toBe(INSTANCE_URL);
 
     db.$client
       .prepare("UPDATE instance_webhooks SET url = ? WHERE instance_id = ?")
       .run("http://hooks.example.test/changed", INSTANCE_A);
-    expect(internals.destinationMap().get(`instance:${INSTANCE_A}`)?.url).toBe(INSTANCE_URL);
+    expect(
+      [...service.destinationMap().values()].find((item) => item.id === `instance:${INSTANCE_A}`)
+        ?.url,
+    ).toBe(INSTANCE_URL);
     touchInstanceWebhookStorage();
 
     internals.rebuildKnownDestinations();
-    expect(internals.destinationMap().has(`instance:${INSTANCE_A}`)).toBe(false);
-    expect(internals.destinationMap().has("default")).toBe(true);
+    expect(
+      [...service.destinationMap().values()].some((item) => item.id === `instance:${INSTANCE_A}`),
+    ).toBe(false);
+    expect([...service.destinationMap().values()].some((item) => item.id === "default")).toBe(true);
   });
 
   it("leaves the instance webhook tools unregistered until the flag is enabled", () => {

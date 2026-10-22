@@ -44,7 +44,8 @@ export const QUEUE_COMPLETED_AGE_S = 3600; // 1 hour
 export const QUEUE_FAILED_AGE_S = 86400; // 24 hours
 export const DEFAULT_JOB_PRIORITY = 5;
 
-// Reconnect settings
+// Reconnect settings. After RECONNECT_MAX_ATTEMPTS the delay stays at
+// RECONNECT_MAX_DELAY_MS until the socket opens, disconnect() runs, or logout.
 export const RECONNECT_INITIAL_DELAY_MS = 1000;
 export const RECONNECT_MAX_DELAY_MS = 30000;
 export const RECONNECT_MAX_ATTEMPTS = 10;
@@ -57,6 +58,8 @@ export const PRUNE_MESSAGES_CRON = "0 3 * * *"; // Daily at 3 AM
 export const PRUNE_DEDUP_CRON = "0 * * * *"; // Hourly
 export const CHECK_VERSION_CRON = "0 6 * * *"; // Daily at 6 AM
 export const HEALTH_CHECK_INTERVAL_MS = 300_000; // 5 minutes
+/** A stored `connecting` status with no live socket is recovered after this age. */
+export const CONNECTING_STUCK_AFTER_MS = 120_000;
 
 // Instance ID prefix
 export const INSTANCE_ID_PREFIX = "inst_";
