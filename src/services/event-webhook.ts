@@ -24,10 +24,17 @@ import { createChildLogger } from "../utils/logger.js";
 import { getRedisConnectionOptions } from "./redis.js";
 import { transcribeIncomingAudioIfConfigured } from "./incoming-audio-transcription.js";
 import {
+  destinationsForInstance,
+  eventWebhookAllowsHttp,
+  storedInstanceDestinations,
   loadEventWebhookConfig,
   type EventWebhookConfig,
   type EventWebhookDestination,
 } from "./event-webhook-config.js";
+import {
+  instanceWebhookStorageGeneration,
+  listInstanceWebhooks,
+} from "./instance-webhook-store.js";
 import { isNonPublicIp } from "../utils/validation.js";
 
 const logger = createChildLogger({ service: "event-webhook" });
@@ -1107,6 +1114,8 @@ export function registerEventWebhookHandler(
   enqueue: EnqueueWebhookJob,
   onEnqueueFailure: () => void = () =>
     logger.warn("Unable to enqueue outgoing event webhook; message processing continues"),
+  destinationsFor: (instanceId: string) => readonly EventWebhookDestination[] = () =>
+    config.destinations,
 ): EventWebhookUnsubscribe {
   if (config.messageDebounceMs > 0) {
     for (const destination of config.destinations) {
@@ -1155,10 +1164,10 @@ export function registerEventWebhookHandler(
   };
 
   const flushDestination = (destination: EventWebhookDestination): Promise<void> => {
-    const buffer = buffers.get(destination.id);
+    const buffer = buffers.get(eventWebhookDestinationIdentity(destination));
     if (!buffer) return Promise.resolve();
     clearTimeout(buffer.timer);
-    buffers.delete(destination.id);
+    buffers.delete(eventWebhookDestinationIdentity(destination));
     if (buffer.payloads.length === 1) {
       return enqueuePayload(destination, buffer.payloads[0] as EventWebhookBody);
     }
@@ -1228,7 +1237,7 @@ export function registerEventWebhookHandler(
     transcription: Promise<string> | undefined,
     withTranscription: (text: string) => BufferedMessagePayload,
   ): void => {
-    const key = JSON.stringify([destination.id, instanceId, chatId]);
+    const key = JSON.stringify([eventWebhookDestinationIdentity(destination), instanceId, chatId]);
     let batch = messageBuffers.get(key);
     if (!batch) {
       const maxDeadlineAt = Date.now() + config.messageDebounceMaxMs;
@@ -1303,7 +1312,7 @@ export function registerEventWebhookHandler(
       return;
     }
 
-    let buffer = buffers.get(destination.id);
+    let buffer = buffers.get(eventWebhookDestinationIdentity(destination));
     if (
       buffer &&
       destination.preset === "grok-bot" &&
@@ -1317,7 +1326,7 @@ export function registerEventWebhookHandler(
         void flushDestination(destination);
       }, destination.debounceMs);
       buffer = { payloads: [], timer };
-      buffers.set(destination.id, buffer);
+      buffers.set(eventWebhookDestinationIdentity(destination), buffer);
     }
     buffer.payloads.push(payload);
     if (buffer.payloads.length >= MAX_BATCH_SIZE) void flushDestination(destination);
@@ -1326,7 +1335,7 @@ export function registerEventWebhookHandler(
   const removeListener = instanceManager.onAnyEvent(
     <E extends ChannelEvent>(event: E, instanceId: string, payload: ChannelEventPayload[E]) => {
       try {
-        for (const destination of config.destinations) {
+        for (const destination of destinationsFor(instanceId)) {
           if (!shouldSendEventWebhook(event, payload, destination)) continue;
 
           let webhookPayload: BufferedDestinationPayload;
@@ -1747,8 +1756,12 @@ export async function processEventWebhookJob(
   timeoutMs: number,
   deliver: typeof postEventWebhook = postEventWebhook,
 ): Promise<void> {
-  const destination = destinations.get(job.destinationId);
-  if (!destination || job.destinationIdentity !== eventWebhookDestinationIdentity(destination)) {
+  const destination = destinations.get(job.destinationIdentity);
+  if (
+    !destination ||
+    job.destinationId !== destination.id ||
+    job.destinationIdentity !== eventWebhookDestinationIdentity(destination)
+  ) {
     throw new UnrecoverableError(
       "Event webhook destination does not match this service configuration",
     );
@@ -1762,15 +1775,25 @@ export class EventWebhookService {
   private queue: Queue<EventWebhookJob> | null = null;
   private worker: Worker<EventWebhookJob> | null = null;
   private removeEventHandler: EventWebhookUnsubscribe | null = null;
+  private readonly knownDestinations = new Map<string, EventWebhookDestination>();
+  private knownDestinationsGeneration = -1;
+  private boundManager: InstanceManager | null = null;
 
   constructor(config = loadEventWebhookConfig()) {
     this.config = config;
   }
 
-  start(instanceManager: InstanceManager): void {
-    if (this.queue || this.config.destinations.length === 0) return;
+  /** Reload instance webhooks and start the worker once any destination exists. */
+  sync(): void {
+    if (this.boundManager) this.start(this.boundManager);
+  }
 
-    const destinations = new Map(this.config.destinations.map((item) => [item.id, item]));
+  start(instanceManager: InstanceManager): void {
+    this.boundManager = instanceManager;
+    this.rebuildKnownDestinations();
+    if (!this.hasDeliveryWork()) return;
+    if (this.queue) return;
+
     this.queue = new Queue<EventWebhookJob>(WEBHOOK_QUEUE_NAME, {
       connection: getRedisConnectionOptions(),
       prefix: this.config.queuePrefix,
@@ -1779,7 +1802,7 @@ export class EventWebhookService {
     this.worker = new Worker<EventWebhookJob>(
       WEBHOOK_QUEUE_NAME,
       (job: Job<EventWebhookJob>) =>
-        processEventWebhookJob(job.data, destinations, this.config.timeoutMs),
+        processEventWebhookJob(job.data, this.destinationMap(), this.config.timeoutMs),
       {
         connection: getRedisConnectionOptions(),
         prefix: this.config.queuePrefix,
@@ -1787,7 +1810,7 @@ export class EventWebhookService {
       },
     );
     this.worker.on("failed", (job, error) => {
-      const destination = job ? destinations.get(job.data.destinationId) : undefined;
+      const destination = job ? this.destinationMap().get(job.data.destinationIdentity) : undefined;
       logger.warn(
         eventWebhookFailureLogData(job?.attemptsMade, error, destination),
         "Outgoing event webhook delivery attempt failed",
@@ -1797,10 +1820,39 @@ export class EventWebhookService {
       logger.error("Outgoing event webhook worker encountered an error");
     });
 
-    this.removeEventHandler = registerEventWebhookHandler(instanceManager, this.config, (job) => {
-      if (!this.queue) return Promise.reject(new Error("Event webhook queue is closed"));
-      return this.queue.add("deliver", job);
-    });
+    this.removeEventHandler = registerEventWebhookHandler(
+      instanceManager,
+      this.config,
+      (job) => {
+        if (!this.queue) return Promise.reject(new Error("Event webhook queue is closed"));
+        return this.queue.add("deliver", job);
+      },
+      undefined,
+      (instanceId) => destinationsForInstance(this.config, instanceId),
+    );
+  }
+
+  private hasDeliveryWork(): boolean {
+    return this.config.destinations.length > 0 || listInstanceWebhooks().length > 0;
+  }
+
+  /** Cached map; storage changes invalidate it before the next delivery. */
+  destinationMap(): ReadonlyMap<string, EventWebhookDestination> {
+    if (this.knownDestinationsGeneration !== instanceWebhookStorageGeneration()) {
+      this.rebuildKnownDestinations();
+    }
+    return this.knownDestinations;
+  }
+
+  private rebuildKnownDestinations(): void {
+    this.knownDestinationsGeneration = instanceWebhookStorageGeneration();
+    this.knownDestinations.clear();
+    for (const destination of this.config.destinations) {
+      this.knownDestinations.set(eventWebhookDestinationIdentity(destination), destination);
+    }
+    for (const destination of storedInstanceDestinations(this.config, eventWebhookAllowsHttp())) {
+      this.knownDestinations.set(eventWebhookDestinationIdentity(destination), destination);
+    }
   }
 
   async close(): Promise<void> {

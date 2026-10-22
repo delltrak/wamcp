@@ -7,6 +7,11 @@ import {
 } from "../types/channel.types.js";
 import { logger } from "../utils/logger.js";
 import { validateWebhookUrl } from "../utils/validation.js";
+import {
+  instanceWebhookStorageGeneration,
+  listInstanceWebhooks,
+  type InstanceWebhookRow,
+} from "./instance-webhook-store.js";
 
 const DISALLOWED_HEADERS = new Set([
   "connection",
@@ -40,6 +45,10 @@ export interface EventWebhookDestination {
 
 export interface EventWebhookConfig {
   destinations: EventWebhookDestination[];
+  /** Shared HMAC secret retained even without a global URL. */
+  secret?: string;
+  /** Shared JID filters also apply when only instance destinations exist. */
+  ignoreJids?: string[];
   queuePrefix: string;
   /** Per-chat batching for incoming messages. Zero keeps the legacy event path. */
   messageDebounceMs: number;
@@ -51,6 +60,10 @@ export interface EventWebhookConfig {
   timeoutMs: number;
   retryAttempts: number;
   retryDelayMs: number;
+  /** Global preset from WA_EVENT_WEBHOOK_PRESET, also used by instance webhooks. */
+  preset?: EventWebhookPreset;
+  /** When false, an instance webhook replaces global destinations for that instance. */
+  instanceMergeGlobal: boolean;
 }
 
 export type EventWebhookWarning =
@@ -498,9 +511,11 @@ function effectiveEvents(
 function droppedPresetEvents(
   config: EventWebhookConfig,
   fallbackPreset: EventWebhookPreset | undefined,
+  extra: readonly EventWebhookDestination[] = [],
 ): ChannelEvent[] {
-  if (config.destinations.length === 0) return [];
-  const groups = config.destinations.map((destination) => ({
+  const destinations = [...config.destinations, ...extra];
+  if (destinations.length === 0) return [];
+  const groups = destinations.map((destination) => ({
     events: destination.events,
     preset: destination.preset ?? fallbackPreset,
   }));
@@ -523,10 +538,12 @@ function droppedPresetEvents(
 function countEffectiveEvents(
   config: EventWebhookConfig,
   fallbackPreset: EventWebhookPreset | undefined,
+  extra: readonly EventWebhookDestination[] = [],
 ): number {
+  const destinations = [...config.destinations, ...extra];
   const groups =
-    config.destinations.length > 0
-      ? config.destinations.map((destination) => ({
+    destinations.length > 0
+      ? destinations.map((destination) => ({
           events: destination.events,
           preset: destination.preset ?? fallbackPreset,
         }))
@@ -559,6 +576,7 @@ export function loadEventWebhookConfig(env: Environment = process.env): EventWeb
     `wa-event-webhooks-${createHash("sha256").update(deploymentId).digest("hex").slice(0, 16)}`;
   const allowHttp = parseBoolean(env, "WA_EVENT_WEBHOOK_ALLOW_HTTP", false);
   const ignoreFromMe = parseBoolean(env, "WA_EVENT_WEBHOOK_IGNORE_FROM_ME", true);
+  const instanceMergeGlobal = parseBoolean(env, "WA_EVENT_WEBHOOK_INSTANCE_MERGE_GLOBAL", false);
   const timeoutMs = parsePositiveInteger(env, "WA_EVENT_WEBHOOK_TIMEOUT_MS", 10_000, 300_000);
   const retryAttempts = parsePositiveInteger(env, "WA_EVENT_WEBHOOK_RETRY_ATTEMPTS", 5, 100);
   const retryDelayMs = parsePositiveInteger(env, "WA_EVENT_WEBHOOK_RETRY_DELAY_MS", 1_000, 300_000);
@@ -613,6 +631,10 @@ export function loadEventWebhookConfig(env: Environment = process.env): EventWeb
       timeoutMs,
       retryAttempts,
       retryDelayMs,
+      ...(preset ? { preset } : {}),
+      instanceMergeGlobal,
+      ...(env.WA_EVENT_WEBHOOK_SECRET ? { secret: env.WA_EVENT_WEBHOOK_SECRET } : {}),
+      ...(ignoreJids.length > 0 ? { ignoreJids } : {}),
     };
   }
 
@@ -638,6 +660,10 @@ export function loadEventWebhookConfig(env: Environment = process.env): EventWeb
       timeoutMs,
       retryAttempts,
       retryDelayMs,
+      ...(preset ? { preset } : {}),
+      instanceMergeGlobal,
+      ...(env.WA_EVENT_WEBHOOK_SECRET ? { secret: env.WA_EVENT_WEBHOOK_SECRET } : {}),
+      ...(ignoreJids.length > 0 ? { ignoreJids } : {}),
     };
   }
 
@@ -665,6 +691,10 @@ export function loadEventWebhookConfig(env: Environment = process.env): EventWeb
     timeoutMs,
     retryAttempts,
     retryDelayMs,
+    ...(preset ? { preset } : {}),
+    instanceMergeGlobal,
+    ...(env.WA_EVENT_WEBHOOK_SECRET ? { secret: env.WA_EVENT_WEBHOOK_SECRET } : {}),
+    ...(ignoreJids.length > 0 ? { ignoreJids } : {}),
   };
 }
 
@@ -672,25 +702,303 @@ function usesMultiDestinationConfig(env: Environment): boolean {
   return Boolean(env.WA_EVENT_WEBHOOKS?.trim());
 }
 
+export function eventWebhookAllowsHttp(env: Environment = process.env): boolean {
+  return parseBoolean(env, "WA_EVENT_WEBHOOK_ALLOW_HTTP", false);
+}
+
+/** Lowercase host, no trailing slash. Used before instance/global URL dedup. */
+export function canonicalWebhookUrl(url: string): string {
+  const parsed = new URL(url);
+  if (parsed.pathname.length > 1 && parsed.pathname.endsWith("/")) {
+    parsed.pathname = parsed.pathname.replace(/\/+$/, "");
+  }
+  return parsed.href;
+}
+
+export function webhookUrlsMatch(left: string, right: string): boolean {
+  try {
+    return canonicalWebhookUrl(left) === canonicalWebhookUrl(right);
+  } catch {
+    return left === right;
+  }
+}
+
+export function normalizeInstanceWebhookUrl(url: string, allowHttp: boolean): string {
+  return canonicalWebhookUrl(validateDestinationUrl(url, allowHttp, "instance webhook URL"));
+}
+
+/** #142: unset by default, so the three instance webhook tools are not registered. */
+export function instanceWebhookToolsEnabled(env: Environment = process.env): boolean {
+  return parseBoolean(env, "WA_INSTANCE_WEBHOOK_TOOLS_ENABLED", false);
+}
+
+/**
+ * #142: optional host allowlist for wa_set_instance_webhook.
+ * Unset allows any public host that passes the webhook URL policy.
+ */
+export function assertInstanceWebhookHostAllowed(
+  url: string,
+  env: Environment = process.env,
+): void {
+  const raw = env.WA_INSTANCE_WEBHOOK_ALLOWED_HOSTS;
+  if (raw === undefined || raw.trim() === "") return;
+  const hosts = raw
+    .split(",")
+    .map((host) => host.trim().toLowerCase())
+    .filter(Boolean);
+  const hostPattern = /^[a-z0-9.-]+$/;
+  if (
+    hosts.length === 0 ||
+    hosts.some((host) => !hostPattern.test(host) || host.startsWith(".") || host.endsWith("."))
+  ) {
+    throw new Error(
+      "Invalid WA_INSTANCE_WEBHOOK_ALLOWED_HOSTS; expected a comma-separated host list",
+    );
+  }
+  const hostname = new URL(url).hostname.toLowerCase();
+  if (!hosts.includes(hostname)) {
+    throw new Error(
+      "Invalid instance webhook URL; host is not in WA_INSTANCE_WEBHOOK_ALLOWED_HOSTS",
+    );
+  }
+}
+
+let warnedUnsignedInstanceWebhook = false;
+
+function warnUnsignedInstanceWebhook(): void {
+  if (warnedUnsignedInstanceWebhook) return;
+  warnedUnsignedInstanceWebhook = true;
+  logger.warn(
+    "Instance webhook is unsigned because global destinations use different HMAC secrets",
+  );
+}
+
+function inheritedWebhookSecret(url: string, config: EventWebhookConfig): string | undefined {
+  if (config.destinations.length === 0) return config.secret;
+  const matched = config.destinations.find((destination) => webhookUrlsMatch(destination.url, url));
+  if (matched?.secret) return matched.secret;
+  const secrets = [
+    ...new Set(
+      config.destinations
+        .map((destination) => destination.secret)
+        .filter((secret): secret is string => typeof secret === "string" && secret.length > 0),
+    ),
+  ];
+  if (secrets.length === 1) return secrets[0];
+  if (secrets.length > 1) warnUnsignedInstanceWebhook();
+  return undefined;
+}
+
+/** Copy shared and inherited destination JID filters onto instance destinations. */
+export function instanceWebhookIgnoreJids(config: EventWebhookConfig): string[] | undefined {
+  const fromDestinations = config.destinations.flatMap(
+    (destination) => destination.ignoreJids ?? [],
+  );
+  const fromConfig = config.ignoreJids ?? [];
+  const merged = [...new Set([...fromDestinations, ...fromConfig])];
+  return merged.length > 0 ? merged : undefined;
+}
+
+export function instanceWebhookHeaders(
+  authHeader: string | undefined,
+  authValue: string | undefined,
+): Record<string, string> {
+  if ((authHeader === undefined) !== (authValue === undefined)) {
+    throw new Error("Instance webhook authHeader and authValue must be set together");
+  }
+  const headers: Record<string, string> = {};
+  if (authHeader !== undefined && authValue !== undefined) {
+    setHeader(headers, authHeader, authValue, "instance webhook auth");
+  }
+  return headers;
+}
+
+export function normalizeInstanceWebhookEvents(
+  events: readonly string[] | undefined,
+): ChannelEvent[] | null {
+  if (events === undefined) return null;
+  const names = [...new Set(events.map((event) => event.trim()).filter(Boolean))];
+  if (names.length === 0) {
+    throw new Error("Instance webhook events must list at least one event name");
+  }
+  if (names.some((event) => !CHANNEL_EVENTS.includes(event as ChannelEvent))) {
+    throw new Error("Invalid instance webhook events; contains an unsupported event name");
+  }
+  return names as ChannelEvent[];
+}
+
+/** Shared URL/auth policy for stored-row reads and delivery routing. */
+export function validateStoredInstanceWebhook(
+  row: InstanceWebhookRow,
+  allowHttp: boolean,
+): {
+  url: string;
+  headers: Record<string, string>;
+} {
+  return {
+    url: normalizeInstanceWebhookUrl(row.url, allowHttp),
+    headers: instanceWebhookHeaders(row.authHeader ?? undefined, row.authValue ?? undefined),
+  };
+}
+
+export function instanceWebhookDestination(
+  row: InstanceWebhookRow,
+  config: EventWebhookConfig,
+  allowHttp: boolean,
+): EventWebhookDestination {
+  const authHeader = row.authHeader ?? undefined;
+  const authValue = row.authValue ?? undefined;
+  const { headers, url } = validateStoredInstanceWebhook(row, allowHttp);
+  const secret = inheritedWebhookSecret(url, config);
+  const ignoreJids = instanceWebhookIgnoreJids(config);
+  return trackDestinationAuth(
+    {
+      id: `instance:${row.instanceId}`,
+      url,
+      headers,
+      ...(secret ? { secret } : {}),
+      ...(config.preset ? { preset: config.preset } : {}),
+      events: row.events ?? config.events,
+      ignoreFromMe: config.ignoreFromMe,
+      ...(ignoreJids ? { ignoreJids } : {}),
+      debounceMs: 0,
+    },
+    authHeader !== undefined && authValue !== undefined,
+  );
+}
+
+function skipInvalidInstanceWebhook(instanceId: string): void {
+  logger.warn({ instanceId }, "Skipping invalid stored instance webhook");
+}
+
+function tryInstanceWebhookDestination(
+  row: InstanceWebhookRow,
+  config: EventWebhookConfig,
+  allowHttp: boolean,
+): EventWebhookDestination | null {
+  try {
+    return instanceWebhookDestination(row, config, allowHttp);
+  } catch {
+    skipInvalidInstanceWebhook(row.instanceId);
+    return null;
+  }
+}
+
+let cachedInstanceWebhookRows: {
+  generation: number;
+  byInstance: Map<string, InstanceWebhookRow>;
+} | null = null;
+
+/**
+ * #142: one read of every stored row until set or delete bumps the storage generation.
+ * The same generation key already invalidates the /health status cache.
+ */
+function instanceWebhookRows(): ReadonlyMap<string, InstanceWebhookRow> {
+  const generation = instanceWebhookStorageGeneration();
+  if (cachedInstanceWebhookRows?.generation === generation) {
+    return cachedInstanceWebhookRows.byInstance;
+  }
+  const byInstance = new Map<string, InstanceWebhookRow>();
+  for (const row of listInstanceWebhooks()) byInstance.set(row.instanceId, row);
+  cachedInstanceWebhookRows = { generation, byInstance };
+  return byInstance;
+}
+
+/** Global destinations, or the instance webhook in replace mode, or both when merge is on. */
+export function destinationsForInstance(
+  config: EventWebhookConfig,
+  instanceId: string,
+  allowHttp = eventWebhookAllowsHttp(),
+): EventWebhookDestination[] {
+  const row = instanceWebhookRows().get(instanceId);
+  if (!row) return config.destinations;
+  const instanceDestination = tryInstanceWebhookDestination(row, config, allowHttp);
+  if (!instanceDestination) return config.destinations;
+  if (!config.instanceMergeGlobal) return [instanceDestination];
+  const globals = config.destinations.filter(
+    (destination) => !webhookUrlsMatch(destination.url, instanceDestination.url),
+  );
+  return [...globals, instanceDestination];
+}
+
+export function storedInstanceDestinations(
+  config: EventWebhookConfig,
+  allowHttp: boolean,
+): EventWebhookDestination[] {
+  const destinations: EventWebhookDestination[] = [];
+  for (const row of instanceWebhookRows().values()) {
+    const destination = tryInstanceWebhookDestination(row, config, allowHttp);
+    if (destination) destinations.push(destination);
+  }
+  return destinations;
+}
+
+let cachedEventWebhookStatus: {
+  generation: number;
+  fingerprint: string;
+  status: EventWebhookStatus;
+} | null = null;
+
+function eventWebhookStatusFingerprint(env: Environment): string {
+  return [
+    env.WA_EVENT_WEBHOOK_URL,
+    env.WA_EVENT_WEBHOOKS,
+    env.WA_EVENT_WEBHOOK_ALLOW_HTTP,
+    env.WA_EVENT_WEBHOOK_PRESET,
+    env.WA_EVENT_WEBHOOK_EVENTS,
+    env.WA_EVENT_WEBHOOK_IGNORE_FROM_ME,
+    env.WA_EVENT_WEBHOOK_AUTH_HEADER,
+    env.WA_EVENT_WEBHOOK_AUTH_VALUE,
+    env.WA_EVENT_WEBHOOK_SECRET,
+    env.WA_EVENT_WEBHOOK_HEADERS,
+    env.WA_EVENT_WEBHOOK_INSTANCE_MERGE_GLOBAL,
+    env.WA_EVENT_WEBHOOK_DEBOUNCE_MS,
+    env.WA_WEBHOOK_DEBOUNCE_MS,
+    env.WA_WEBHOOK_DEBOUNCE_MAX_MS,
+  ].join("\u0000");
+}
+
 /**
  * Internal redacted event-webhook state for boot logs and status projections.
  * The health projection omits dropped event names; only the tool projection
  * exposes them. Callers can pass a parsed config to avoid loading twice.
  * Nothing returned includes a URL, header name, header value, token, or secret.
+ * #142: the no-config path caches the database read until instance webhook storage changes.
  */
 export function getEventWebhookStatus(
   env: Environment = process.env,
   config?: EventWebhookConfig,
 ): EventWebhookStatus {
+  const generation = instanceWebhookStorageGeneration();
+  const fingerprint = config ? "" : eventWebhookStatusFingerprint(env);
+  if (
+    !config &&
+    cachedEventWebhookStatus &&
+    cachedEventWebhookStatus.generation === generation &&
+    cachedEventWebhookStatus.fingerprint === fingerprint
+  ) {
+    return cachedEventWebhookStatus.status;
+  }
+
+  const status = readEventWebhookStatus(env, config);
+  if (!config) cachedEventWebhookStatus = { generation, fingerprint, status };
+  return status;
+}
+
+function readEventWebhookStatus(
+  env: Environment,
+  config: EventWebhookConfig | undefined,
+): EventWebhookStatus {
   const multi = usesMultiDestinationConfig(env);
   const preset = parsePreset(env.WA_EVENT_WEBHOOK_PRESET, "WA_EVENT_WEBHOOK_PRESET");
   const auth = resolveSingleDestinationAuth(env, preset);
   const resolved = config ?? loadConfigForStatus(env, !multi && auth.incomplete);
-  const destinationCount = resolved.destinations.length;
+  const instanceDestinations = storedInstanceDestinations(resolved, eventWebhookAllowsHttp(env));
+  const destinationCount = resolved.destinations.length + instanceDestinations.length;
   const configured = destinationCount > 0;
-  const eventCount = countEffectiveEvents(resolved, preset);
+  const eventCount = countEffectiveEvents(resolved, preset, instanceDestinations);
   const warnings: EventWebhookWarning[] = [];
-  const droppedEvents = droppedPresetEvents(resolved, preset);
+  const droppedEvents = droppedPresetEvents(resolved, preset, instanceDestinations);
   if (!configured) warnings.push("not_configured");
   if (!multi && auth.incomplete) warnings.push("incomplete_auth");
   if (eventCount === 0) warnings.push("empty_event_set");
@@ -702,7 +1010,8 @@ export function getEventWebhookStatus(
     eventCount,
     authConfigured:
       (!multi && auth.configured) ||
-      resolved.destinations.some((destination) => destinationsWithAuth.has(destination)),
+      resolved.destinations.some((destination) => destinationsWithAuth.has(destination)) ||
+      instanceDestinations.some((destination) => destinationsWithAuth.has(destination)),
     warnings,
     droppedEvents,
   };

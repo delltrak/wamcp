@@ -39,6 +39,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Added opt-in `wa_set_instance_webhook`, `wa_get_instance_webhook`, and
+  `wa_delete_instance_webhook` tools for per-instance event destinations, with global
+  replacement or merge and duplicate URL suppression
+  ([#142](https://github.com/delltrak/wamcp/issues/142), [#160](https://github.com/delltrak/wamcp/pull/160)).
+  Instance-only routing retains the shared HMAC secret and JID filters; reads and delivery
+  reject invalid stored URL/auth settings, and worker/batch identities isolate colliding IDs.
+  Deleted destinations invalidate queued delivery configuration. Authentication values remain
+  plaintext in SQLite and are omitted from tool results, logs and health. One configured
+  instance satisfies the process-wide required-webhook check; live webhook delivery remains
+  unverified, and unmatched URLs with differing global HMAC secrets remain unsigned.
 - Added opt-in Baileys webhooks and MCP notifications for group roster joins, label associations,
   and newsletter membership, posts, and mute changes
   ([#141](https://github.com/delltrak/wamcp/issues/141), [#157](https://github.com/delltrak/wamcp/pull/157)).

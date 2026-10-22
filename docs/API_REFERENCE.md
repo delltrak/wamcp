@@ -117,6 +117,7 @@ Tools marked **Baileys only** are not available on Cloud API instances.
 ## 2. Tools Reference
 
 WA MCP exposes **157 tools** grouped by domain. All tools return MCP-standard responses.
+`WA_INSTANCE_WEBHOOK_TOOLS_ENABLED=true` adds three #142 instance webhook tools.
 
 ### Success Response Format
 
@@ -147,7 +148,7 @@ WA MCP exposes **157 tools** grouped by domain. All tools return MCP-standard re
 
 ---
 
-### 2.1 Instance Management (9 tools)
+### 2.1 Instance Management (9 tools, plus 3 when `WA_INSTANCE_WEBHOOK_TOOLS_ENABLED=true`)
 
 Tools for creating, connecting, and managing WhatsApp instances.
 
@@ -332,6 +333,85 @@ Configure Meta Cloud API credentials for a Cloud API instance. Required before c
 {
   "instanceId": "inst_abc123",
   "configured": true
+}
+```
+
+---
+
+#### `wa_set_instance_webhook`
+
+Registered only when `WA_INSTANCE_WEBHOOK_TOOLS_ENABLED=true` (#142). Replace the outgoing event webhook stored for one instance. `auth_value` is saved in plaintext for delivery and is not returned. Omit `events` to inherit `WA_EVENT_WEBHOOK_EVENTS`. An empty event list is rejected. The instance webhook uses `WA_EVENT_WEBHOOK_PRESET`, `WA_EVENT_WEBHOOK_IGNORE_FROM_ME`, and `WA_EVENT_WEBHOOK_SECRET` when that global HMAC secret is set. If global destinations use different HMAC secrets and this URL matches none of them, delivery is unsigned and one warning is logged. The response `endpoint` is the URL origin, not the full URL.
+
+`WA_EVENT_WEBHOOK_INSTANCE_MERGE_GLOBAL` defaults to `false`: this instance then uses only this webhook, and a warning is logged when a global destination exists. Set it to `true` to also deliver to the global destinations. A URL that matches a global destination, after lowercasing the host and removing a trailing slash, is delivered once, with this instance's auth header, events, and the global HMAC secret. `WA_INSTANCE_WEBHOOK_ALLOWED_HOSTS` optionally restricts the host. Instances without a stored webhook keep the global destinations. One stored instance webhook satisfies `WA_REQUIRE_EVENT_WEBHOOK` for the whole process. An invalid stored row is skipped so the other destinations keep working.
+
+| Parameter    | Type     | Required | Description                                                                 |
+| ------------ | -------- | -------- | --------------------------------------------------------------------------- |
+| `instanceId` | string   | Yes      | Instance ID (`inst_` plus 8 hex characters)                                 |
+| `url`        | string   | Yes      | Public HTTPS URL. HTTP only when `WA_EVENT_WEBHOOK_ALLOW_HTTP=true`         |
+| `authHeader` | string   | No       | Auth header name. Must be set together with `authValue`                     |
+| `authValue`  | string   | No       | Auth header value. Write-only; omitted from this response, logs, and health |
+| `events`     | string[] | No       | Channel event names. Omit to inherit the global event list                  |
+
+**Channel support:** Both
+
+**Response:**
+
+```json
+{
+  "configured": true,
+  "endpoint": "https://automation.example.com",
+  "authHeader": "X-Instance-Token",
+  "authConfigured": true,
+  "events": null,
+  "updatedAt": 1709136000000
+}
+```
+
+`events: null` means the instance inherits `WA_EVENT_WEBHOOK_EVENTS`. `authHeader` is `null` when no auth header is stored. `endpoint` is the origin only.
+
+---
+
+#### `wa_get_instance_webhook`
+
+Read the webhook stored for one instance. The auth value and full URL are never returned. `configured: false` means the instance uses the global destinations. A stored row that fails validation returns `configured: false` and `invalid: true` instead of an error.
+
+| Parameter    | Type   | Required | Description                                 |
+| ------------ | ------ | -------- | ------------------------------------------- |
+| `instanceId` | string | Yes      | Instance ID (`inst_` plus 8 hex characters) |
+
+**Channel support:** Both
+
+**Response:**
+
+```json
+{
+  "configured": true,
+  "endpoint": "https://automation.example.com",
+  "authHeader": "X-Instance-Token",
+  "authConfigured": true,
+  "events": ["message.received"],
+  "updatedAt": 1709136000000
+}
+```
+
+---
+
+#### `wa_delete_instance_webhook`
+
+Remove the webhook stored for one instance. Later events for that instance use the global destinations.
+
+| Parameter    | Type   | Required | Description                                 |
+| ------------ | ------ | -------- | ------------------------------------------- |
+| `instanceId` | string | Yes      | Instance ID (`inst_` plus 8 hex characters) |
+
+**Channel support:** Both
+
+**Response:**
+
+```json
+{
+  "instanceId": "inst_abc123",
+  "deleted": true
 }
 ```
 

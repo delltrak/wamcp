@@ -36,7 +36,7 @@
 
 **WA MCP** is a WhatsApp MCP server built with TypeScript that gives AI agents full access to WhatsApp through the [Model Context Protocol](https://modelcontextprotocol.io). It supports both **Baileys** (WhatsApp Web) and **Meta Cloud API** as dual-channel backends, deployable with **Docker** in a single command.
 
-Your agent connects once and auto-discovers **157 tools**, **10 resources**, and **22 real-time events** — zero configuration, zero REST wrappers, zero glue code.
+Your agent connects once and auto-discovers **157 tools**, **10 resources**, and **22 real-time events** — zero configuration, zero REST wrappers, zero glue code. Three instance webhook tools are added when `WA_INSTANCE_WEBHOOK_TOOLS_ENABLED=true`.
 
 ```
 Your AI Agent ←→ MCP Protocol ←→ WA MCP ←→ WhatsApp
@@ -147,9 +147,10 @@ Add to your `claude_desktop_config.json`:
 ## 🛠️ Tools
 
 WA MCP exposes **157 tools** across 16 domains. All tools use the `wa_` prefix.
+`WA_INSTANCE_WEBHOOK_TOOLS_ENABLED=true` adds the three #142 instance webhook tools.
 
 <details>
-<summary>📋 <strong>Instance Management</strong> (9 tools)</summary>
+<summary>📋 <strong>Instance Management</strong> (9 tools, plus 3 when enabled)</summary>
 
 | Tool                       | Description                      |
 | -------------------------- | -------------------------------- |
@@ -162,6 +163,9 @@ WA MCP exposes **157 tools** across 16 domains. All tools use the `wa_` prefix.
 | `wa_get_qr_code`           | Get QR as base64 (Baileys)       |
 | `wa_get_pairing_code`      | Get pairing code (Baileys)       |
 | `wa_set_cloud_credentials` | Set Cloud API token              |
+| `wa_set_instance_webhook`  | Set this instance's event webhook |
+| `wa_get_instance_webhook`  | Read this instance's event webhook |
+| `wa_delete_instance_webhook` | Remove this instance's event webhook |
 
 </details>
 
@@ -528,8 +532,8 @@ interrupt WhatsApp message processing. The default filter is
 `message.received`, and messages sent by this instance are ignored by default.
 If no destination is configured, startup logs a warning that no events will be
 delivered. `GET /health` includes the same redacted `webhook` state. Set
-`WA_REQUIRE_EVENT_WEBHOOK=true` to refuse startup when no destination is
-configured or the event set is empty.
+`WA_REQUIRE_EVENT_WEBHOOK=true` to refuse startup when no global destination
+and no per-instance webhook is configured, or when the event set is empty.
 
 Webhook targets must use HTTPS and a public host. Set
 `WA_EVENT_WEBHOOK_ALLOW_HTTP=true` to permit the HTTP scheme; local and
@@ -621,6 +625,31 @@ For more routines, set `WA_EVENT_WEBHOOKS` to a JSON array instead of
 `events`, `preset`, `chatAllowlist`, `senderAllowlist`, `ignoreJids`, and `debounceMs`.
 Destination-specific `events` override the shared `WA_EVENT_WEBHOOK_EVENTS`.
 See [Outgoing event webhooks](docs/event-webhooks.md) for a complete example.
+
+`wa_set_instance_webhook`, `wa_get_instance_webhook`, and
+`wa_delete_instance_webhook` store a webhook for one instance. They are
+registered only when `WA_INSTANCE_WEBHOOK_TOOLS_ENABLED=true` (#142); the
+default is false. `WA_INSTANCE_WEBHOOK_ALLOWED_HOSTS` optionally limits the
+saved host. The stored fields are the URL, an optional auth header, and an
+optional event list. Omitting the event list inherits `WA_EVENT_WEBHOOK_EVENTS`.
+The instance webhook also uses `WA_EVENT_WEBHOOK_PRESET` and
+`WA_EVENT_WEBHOOK_IGNORE_FROM_ME`. `auth_value` is stored in plaintext and is
+never returned by those tools, written to logs, or included in `GET /health`.
+The tools return the endpoint origin, not the full URL. Instance delivery uses
+`WA_EVENT_WEBHOOK_SECRET` when that global HMAC secret is set. If global
+destinations use different HMAC secrets and the instance URL matches none of
+them, that delivery is unsigned and one warning is logged. A stored row that
+fails validation makes `wa_get_instance_webhook` return `configured: false` and
+`invalid: true`. A webhook stored
+for any one instance satisfies `WA_REQUIRE_EVENT_WEBHOOK` for the process.
+`WA_EVENT_WEBHOOK_INSTANCE_MERGE_GLOBAL` defaults to false: that instance uses
+only its own webhook, and saving it logs a warning when a global destination
+exists. Set it to true to also deliver to the global destinations. When the
+instance URL matches a global URL, after lowercasing the host and dropping a
+trailing slash, the event is sent once, using the instance auth header, the
+instance event list, and the global HMAC secret. An instance without a stored
+webhook keeps today's global destinations. `GET /health` caches the webhook
+database read until that storage changes.
 
 The standard JSON body includes `event`, `instanceId`, `chat`, `sender`,
 `type`, `text`, and `timestamp`. When `WA_EVENT_WEBHOOK_SECRET` is set, requests
@@ -874,7 +903,10 @@ Copy `.env.example` to `.env` and configure:
 | `WA_EVENT_WEBHOOK_TIMEOUT_MS` | `10000` | Per-request timeout in milliseconds |
 | `WA_EVENT_WEBHOOK_RETRY_ATTEMPTS` | `5` | BullMQ delivery attempts, including the first attempt |
 | `WA_EVENT_WEBHOOK_RETRY_DELAY_MS` | `1000` | Initial exponential retry delay in milliseconds |
-| `WA_REQUIRE_EVENT_WEBHOOK` | `false` | Exit on startup when no event webhook destination is configured or the event set is empty |
+| `WA_REQUIRE_EVENT_WEBHOOK` | `false` | Exit on startup when no global or per-instance event webhook is configured, or the event set is empty. One instance webhook satisfies this for the process |
+| `WA_EVENT_WEBHOOK_INSTANCE_MERGE_GLOBAL` | `false` | When false, an instance webhook replaces global destinations for that instance. When true, the instance URL is added; a duplicate URL is delivered once |
+| `WA_INSTANCE_WEBHOOK_TOOLS_ENABLED` | `false` | Register `wa_set_instance_webhook`, `wa_get_instance_webhook`, and `wa_delete_instance_webhook` |
+| `WA_INSTANCE_WEBHOOK_ALLOWED_HOSTS` | unset | Comma-separated hosts allowed by `wa_set_instance_webhook` |
 | `WA_VERSION_CHECK`          | `true`                   | Daily WhatsApp Web version check         |
 
 ### Message history and backups
