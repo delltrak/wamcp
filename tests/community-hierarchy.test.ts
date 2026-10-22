@@ -1,3 +1,4 @@
+import { extractGroupMetadata } from "@whiskeysockets/baileys/lib/Socket/groups.js";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { GroupMetadata, WASocket } from "@whiskeysockets/baileys";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
@@ -30,6 +31,7 @@ function fixture() {
       size: undefined,
     }));
   const known: Record<string, GroupMetadata> = {
+    [PARENT]: parent,
     [ANNOUNCEMENTS]: metadata(ANNOUNCEMENTS, {
       linkedParent: PARENT,
       isCommunityAnnounce: true,
@@ -68,6 +70,29 @@ afterEach(() => {
 });
 
 describe("community hierarchy", () => {
+  it("discovers communities from the native standard group parser without treating Avisos as a parent", async () => {
+    const { adapter, socket } = fixture();
+    const parse = (id: string, marker: string) =>
+      extractGroupMetadata({
+        tag: "result",
+        attrs: {},
+        content: [
+          {
+            tag: "group",
+            attrs: { id, subject: "Fixture" },
+            content: [{ tag: marker, attrs: {} }],
+          },
+        ],
+      });
+    socket.groupFetchAllParticipating.mockResolvedValue({
+      [PARENT]: parse(PARENT, "parent"),
+      [ANNOUNCEMENTS]: parse(ANNOUNCEMENTS, "default_sub_group"),
+      [REGULAR]: parse(REGULAR, "announcement"),
+    });
+    expect(Object.keys(await adapter.listCommunities())).toEqual([PARENT]);
+    expect(socket.communityFetchAllParticipating).not.toHaveBeenCalled();
+  });
+
   it("reads the hierarchy with writes disabled, retaining non-participating groups and unknowns", async () => {
     const { adapter, socket } = fixture();
     const result = await adapter.getCommunityHierarchy(PARENT.split("@")[0]!);

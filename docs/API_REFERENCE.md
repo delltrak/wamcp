@@ -21,6 +21,7 @@
    - [WhatsApp Business Labels](#211-whatsapp-business-labels-8-tools)
    - [WhatsApp Events](#212-whatsapp-events-2-tools)
    - [Business, Communities, and Catalog](#213-business-communities-and-catalog-16-tools)
+   - [Community administration](#214-community-administration-16-tools)
 3. [Resources Reference](#3-resources-reference)
 4. [Notifications Reference](#4-notifications-reference)
 5. [Error Handling](#5-error-handling)
@@ -110,7 +111,7 @@ Tools marked **Baileys only** are not available on Cloud API instances.
 
 ## 2. Tools Reference
 
-WA MCP exposes **138 tools** grouped by domain. All tools return MCP-standard responses.
+WA MCP exposes **154 tools** grouped by domain. All tools return MCP-standard responses.
 
 ### Success Response Format
 
@@ -2658,6 +2659,56 @@ limits before upload.
 
 ---
 
+### 2.14 Community administration (16 tools)
+
+All tools below require `instanceId` and Baileys. Administrative writes require the group-write gate
+and a verified community admin. Joining/leaving do not require prior admin status; Avisos sending
+requires an admin of the actual Avisos group. Read-only operations do not enable writes.
+
+| Tool | Additional inputs | Behavior |
+| --- | --- | --- |
+| `wa_community_create_group` | `communityId, name, participants?` | Create directly linked group; preserve unknown outcome. |
+| `wa_community_update_name` | `communityId, name` | Rename community. |
+| `wa_community_update_description` | `communityId, description` | Update/clear description. |
+| `wa_community_update_picture` | `communityId, image` | Public HTTPS/base64; null removes photo. |
+| `wa_community_list_members` | `communityId, scope?, groupId?` | Read community/Avisos/linked-group members and roles. |
+| `wa_community_update_participants` | `communityId, participants, action, confirmLinkedGroupRemoval?` | Add/remove/promote/demote; removal also affects linked groups. |
+| `wa_community_list_join_requests` | `communityId` | Read pending requests; admin required. |
+| `wa_community_handle_join_requests` | `communityId, participants, action` | Approve/reject with per-member results. |
+| `wa_community_get_invite` | `communityId` | Read invitation; admin required. |
+| `wa_community_reset_invite` | `communityId` | Revoke and replace invitation. |
+| `wa_community_get_invite_info` | `invite` | Inspect code/link without joining. |
+| `wa_community_join` | `invite` | Join; verify membership before reporting joined. |
+| `wa_community_join_v4` | `communityId, inviter, inviteCode, inviteExpiration` | Verify parent, reject expiry, accept V4 invitation and confirm membership. |
+| `wa_community_revoke_member_invite` | `communityId, participant` | Revoke one V4 member invitation. |
+| `wa_community_update_settings` | `communityId, change` | One typed setting/value change on the parent. |
+| `wa_community_send_announcement` | `communityId, content` | Queue text/image/video/audio/document to verified Avisos. |
+
+`scope` is `community` (default), `announcements`, or `group`; only `group` accepts and requires
+`groupId`. `action` is `add/remove/promote/demote` for participants and `approve/reject` for requests.
+`confirmLinkedGroupRemoval=true` is mandatory for removal. A mutation returns individual nullable
+acknowledgements plus aggregate `success/partial/failed/unknown`, rather than assuming all succeeded.
+
+`change` is one strict `{setting, value}` object: `edit_info`, `send_messages`, and `add_members`
+accept `admins/all`; `join_approval` accepts `on/off`; `disappearing_messages` accepts
+`0/86400/604800/7776000`. Invalid pairs and extra properties are rejected.
+
+`content` uses `type: text/image/video/audio/document` plus the corresponding fields from the
+existing send tool, without `to` or `instanceId`. Text/image/video/audio accept `quotedMessageId`;
+mention support is inherited from the corresponding send schema. Queuing returns
+`{status: "queued", jobId, to}`. Destination/admin/gate are rechecked by the worker; a changed
+destination fails without retargeting. Announcement jobs have one attempt to avoid duplicate broadcasts.
+
+Creation returns `retrySafe: false`; null metadata may mean the operation already succeeded. Child
+creation preserves `groupId` if later enrichment fails. Joining only returns `joined` after confirming
+own membership; otherwise `unknown`, including pending approval. See [Community management](COMMUNITIES.md)
+for limits, events, safe retry behavior, live validation, and examples.
+
+There is no community-deactivation tool: leaving is not deactivation. This version does not expose
+arbitrary visibility/non-admin subgroup-creation protocol switches.
+
+---
+
 ## 3. Resources Reference
 
 Resources provide read-only data that agents can query for context. All resources return `application/json`.
@@ -3171,6 +3222,17 @@ Fired when participants are added, removed, promoted, or demoted in a group.
 
 ---
 
+#### Community/group updates and join requests
+
+`group.updated` includes safe hierarchy/settings fields; duplicate metadata snapshots are suppressed
+until their values change or the connection restarts. Invitation codes are excluded. The corresponding
+webhook includes `groupChanges`. Participant changes include `modify` and a `participants` array.
+
+`whatsapp/group.join_request` carries `{instanceId, groupId, participant, action, method}`. Actions are
+`created`, `revoked`, or `rejected`; methods are `invite_link`, `linked_group_join`, `non_admin_add`, or
+`null` when absent. The webhook uses `requestMethod` for the method field. These events only reflect
+what the backend emits; they do not guarantee notification of every community/invitation change.
+
 ### 4.10 `whatsapp/group.member_label_changed`
 
 Fired when a member's group label changes. The connected account can only set or remove its own
@@ -3392,7 +3454,7 @@ Add to your Claude Desktop MCP configuration:
 }
 ```
 
-Once configured, the client will auto-discover all 138 WA MCP tools and can interact with WhatsApp directly.
+Once configured, the client will auto-discover all 154 WA MCP tools and can interact with WhatsApp directly.
 
 ### 6.3 LangChain (Python)
 
@@ -3405,7 +3467,7 @@ toolkit = MCPToolkit(
 )
 
 tools = toolkit.get_tools()
-# tools now contains all 138 WA MCP tools, ready for any LangChain agent
+# tools now contains all 154 WA MCP tools, ready for any LangChain agent
 ```
 
 ---
@@ -3429,7 +3491,8 @@ tools = toolkit.get_tools()
 | Newsletter / Channels             | 10    | Baileys only                         |
 | Business, Communities, and Catalog| 16    | Baileys only                         |
 | Call Management                   | 1     | Baileys only                         |
-| **Total**                         | **138** |                                    |
+| Community administration | 16 | Baileys only |
+| **Total**                         | **154** |                                    |
 
 | Resources     | 10  |
 | ------------- | --- |

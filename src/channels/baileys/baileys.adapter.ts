@@ -61,6 +61,13 @@ import type {
   GroupSummary,
   GroupMetadata,
   CommunityHierarchy,
+  CommunityInviteV4,
+  CommunityParticipantAction,
+  CommunityMemberScope,
+  CommunitySetting,
+  CommunityParticipantUpdateResult,
+  CommunityGroupCreationResult,
+  CommunityJoinRequest,
   CommunityLinkedGroup,
   CreateGroupFromGroupResponse,
   ChatModification,
@@ -947,6 +954,7 @@ export class BaileysAdapter implements ChannelAdapter {
   private readonly activityInFlight = new Map<WASocket, number>();
   private readonly maxStatusRecipients: number;
   private readonly autoRejectCalls: boolean;
+  private readonly groupEventSnapshots = new Map<string, Record<string, unknown>>();
   private readonly pendingCalls = new Map<string, { from: string; isVideo: boolean }>();
   private readonly lastPresenceUpdateAt = new Map<string, number>();
   private readonly presenceSubscriptions = new Set<string>();
@@ -3826,6 +3834,340 @@ export class BaileysAdapter implements ChannelAdapter {
 
   // ---- Communities ----
 
+  private async requireCommunity(
+    communityId: string,
+    admin = false,
+  ): Promise<BaileysGroupMetadata> {
+    const jid = normalizeGroupJid(communityId);
+    const sock = this.getSock();
+    const metadata = await sock.groupMetadata(jid);
+    if (metadata.id !== jid || metadata.isCommunity !== true || metadata.linkedParent) {
+      throw new Error("The supplied communityId could not be verified as a WhatsApp community");
+    }
+    if (admin) {
+      const ownJids = await this.getOwnGroupParticipantJids(sock);
+      const role = await this.getOwnGroupRole(metadata.participants ?? [], ownJids);
+      if (!role.isAdmin) throw new Error("Only a community admin can perform this operation");
+    }
+    return metadata;
+  }
+
+  private communityParticipants(participants: string[]): string[] {
+    if (
+      participants.length < 1 ||
+      participants.length > 100 ||
+      participants.some((p) => !isValidStatusRecipient(p))
+    ) {
+      throw new Error(
+        "Invalid community participants; provide 1 to 100 individual phone numbers or JIDs",
+      );
+    }
+    return [...new Set(participants.map((p) => jidNormalizedUser(this.normalizeJid(p))))];
+  }
+
+  private async communityParticipantResults(
+    requested: string[],
+    results: Array<{ jid: string | undefined; status: string }>,
+  ): Promise<CommunityParticipantUpdateResult> {
+    const returned = await Promise.all(
+      results.map(async (result) => ({
+        ...result,
+        identities: await this.getNormalizedGroupIdentities([result.jid]),
+      })),
+    );
+    const normalized = await Promise.all(
+      requested.map(async (participant) => {
+        const identities = await this.getNormalizedGroupIdentities([participant]);
+        const result = returned.find((entry) =>
+          [...entry.identities].some((id) => identities.has(id)),
+        );
+        return {
+          participant,
+          returnedJid: result?.jid ?? null,
+          status: result?.status ?? null,
+          success: result ? result.status === "200" : null,
+        };
+      }),
+    );
+    return {
+      status: normalized.every((r) => r.success === true)
+        ? "success"
+        : normalized.every((r) => r.success === null)
+          ? "unknown"
+          : normalized.every((r) => r.success === false)
+            ? "failed"
+            : "partial",
+      results: normalized,
+    };
+  }
+
+  async createCommunityGroup(
+    communityId: string,
+    name: string,
+    participants: string[],
+  ): Promise<CommunityGroupCreationResult> {
+    this.requireGroupWritesEnabled();
+    const parent = await this.requireCommunity(communityId, true);
+    const jids = participants.length ? this.communityParticipants(participants) : [];
+    const group = await this.getSock().communityCreateGroup(name, jids, parent.id);
+    // Upstream can return null after creation when its follow-up metadata fetch fails.
+    // A known ID must remain available even if local enrichment fails.
+    if (!group) return { status: "unknown", groupId: null, group: null, retrySafe: false };
+    let normalized: GroupMetadata | null = null;
+    try {
+      normalized = await this.normalizeGroupMetadata(group);
+    } catch {
+      logger.warn(
+        { instanceId: this.instanceId, groupId: group.id },
+        "Community group created but metadata enrichment failed",
+      );
+    }
+    return { status: "created", groupId: group.id, group: normalized, retrySafe: false };
+  }
+
+  async updateCommunityName(communityId: string, name: string): Promise<void> {
+    this.requireGroupWritesEnabled();
+    const parent = await this.requireCommunity(communityId, true);
+    await this.getSock().communityUpdateSubject(parent.id, name);
+  }
+
+  async updateCommunityDescription(communityId: string, description: string): Promise<void> {
+    this.requireGroupWritesEnabled();
+    const parent = await this.requireCommunity(communityId, true);
+    await this.getSock().communityUpdateDescription(parent.id, description);
+  }
+
+  async updateCommunityPicture(communityId: string, image: string | null): Promise<void> {
+    this.requireGroupWritesEnabled();
+    const parent = await this.requireCommunity(communityId, true);
+    if (image === null) await this.getSock().removeProfilePicture(parent.id);
+    else {
+      const jpeg = await mediaService.prepareGroupProfilePicture(image);
+      await this.getSock().updateProfilePicture(parent.id, jpeg);
+    }
+  }
+
+  async getCommunityMembers(
+    communityId: string,
+    scope: CommunityMemberScope,
+    groupId?: string,
+  ): Promise<GroupMetadata> {
+    const parent = await this.requireCommunity(communityId);
+    if (scope === "community") return this.normalizeGroupMetadata(parent);
+    const target =
+      scope === "announcements"
+        ? await this.resolveCommunityAnnouncementGroup(parent.id)
+        : normalizeGroupJid(groupId ?? "");
+    const metadata = await this.getSock().groupMetadata(target);
+    if (
+      metadata.id !== target ||
+      metadata.linkedParent !== parent.id ||
+      metadata.isCommunity === true
+    ) {
+      throw new Error("The requested group is not linked to this community");
+    }
+    return this.normalizeGroupMetadata(metadata);
+  }
+
+  async updateCommunityParticipants(
+    communityId: string,
+    participants: string[],
+    action: CommunityParticipantAction,
+    confirmLinkedGroupRemoval = false,
+  ): Promise<CommunityParticipantUpdateResult> {
+    this.requireGroupWritesEnabled();
+    if (action === "remove" && !confirmLinkedGroupRemoval) {
+      throw new Error(
+        "Removing community members also removes them from linked groups; confirmLinkedGroupRemoval=true is required",
+      );
+    }
+    const parent = await this.requireCommunity(communityId, true);
+    const jids = this.communityParticipants(participants);
+    if (action === "remove" || action === "demote") {
+      const protectedIds = await this.getNormalizedGroupIdentities([parent.owner, parent.ownerPn]);
+      for (const participant of parent.participants ?? []) {
+        if (participant.admin !== "superadmin") continue;
+        for (const id of await this.getGroupParticipantIdentities(participant))
+          protectedIds.add(id);
+      }
+      for (const jid of jids) {
+        const ids = await this.getNormalizedGroupIdentities([jid]);
+        if ([...ids].some((id) => protectedIds.has(id))) {
+          throw new Error("The community owner/superadmin cannot be removed or demoted");
+        }
+      }
+    }
+    const result = await this.getSock().communityParticipantsUpdate(parent.id, jids, action);
+    return this.communityParticipantResults(jids, result);
+  }
+
+  async listCommunityJoinRequests(communityId: string): Promise<CommunityJoinRequest[]> {
+    const parent = await this.requireCommunity(communityId, true);
+    const requests = await this.getSock().communityRequestParticipantsList(parent.id);
+    // Only expose known fields; upstream attribute maps can include invitation secrets.
+    return requests.map((r) => ({
+      participant: r.jid ?? null,
+      requestedAt: r.request_time ?? r.t ?? null,
+    }));
+  }
+
+  async handleCommunityJoinRequests(
+    communityId: string,
+    participants: string[],
+    action: "approve" | "reject",
+  ): Promise<CommunityParticipantUpdateResult> {
+    this.requireGroupWritesEnabled();
+    const parent = await this.requireCommunity(communityId, true);
+    const jids = this.communityParticipants(participants);
+    return this.communityParticipantResults(
+      jids,
+      await this.getSock().communityRequestParticipantsUpdate(parent.id, jids, action),
+    );
+  }
+
+  async getCommunityInviteCode(communityId: string, revoke = false): Promise<string> {
+    if (revoke) this.requireGroupWritesEnabled();
+    const parent = await this.requireCommunity(communityId, true);
+    const sock = this.getSock();
+    const code = revoke
+      ? await sock.communityRevokeInvite(parent.id)
+      : await sock.communityInviteCode(parent.id);
+    if (!code)
+      throw new Error(
+        revoke
+          ? "The invitation may have been reset, but WhatsApp returned no code; retrieve it before retrying"
+          : "WhatsApp returned no community invitation code",
+      );
+    return code;
+  }
+
+  async getCommunityInviteInfo(code: string): Promise<GroupMetadata> {
+    const metadata = await this.getSock().communityGetInviteInfo(normalizeGroupInviteCode(code));
+    if (metadata.isCommunity !== true || metadata.linkedParent) {
+      throw new Error("This invitation could not be verified as a community invitation");
+    }
+    return this.normalizeGroupMetadata(metadata);
+  }
+
+  async joinCommunity(
+    code: string,
+  ): Promise<{ communityId: string | null; status: "joined" | "unknown"; retrySafe: false }> {
+    this.requireGroupWritesEnabled();
+    const normalized = normalizeGroupInviteCode(code);
+    const expected = await this.getCommunityInviteInfo(normalized);
+    const jid = await this.getSock().communityAcceptInvite(normalized);
+    return this.confirmCommunityJoin(expected.jid, jid);
+  }
+
+  async joinCommunityV4(
+    invite: CommunityInviteV4,
+  ): Promise<{ communityId: string | null; status: "joined" | "unknown"; retrySafe: false }> {
+    this.requireGroupWritesEnabled();
+    if (
+      !Number.isSafeInteger(invite.inviteExpiration) ||
+      invite.inviteExpiration <= Date.now() / 1000
+    ) {
+      throw new Error("The community invitation is expired or has an invalid expiration");
+    }
+    const communityId = normalizeGroupJid(invite.communityId);
+    const [inviter] = this.communityParticipants([invite.inviter]);
+    const code = normalizeGroupInviteCode(invite.inviteCode);
+    const expected = await this.getCommunityInviteInfo(code);
+    if (expected.jid !== communityId)
+      throw new Error("The invitation refers to a different community");
+    // Pass the inviter only, not a source message key: do not rewrite a stored invitation message.
+    const result: unknown = await this.getSock().communityAcceptInviteV4(inviter!, {
+      groupJid: communityId,
+      inviteCode: code,
+      inviteExpiration: invite.inviteExpiration,
+    });
+    return this.confirmCommunityJoin(communityId, typeof result === "string" ? result : undefined);
+  }
+
+  private async confirmCommunityJoin(
+    expectedId: string,
+    jid: string | undefined,
+  ): Promise<{ communityId: string | null; status: "joined" | "unknown"; retrySafe: false }> {
+    const communityId = jid && isValidGroupId(jid) ? normalizeGroupJid(jid) : null;
+    let confirmed = false;
+    if (communityId === expectedId) {
+      try {
+        const parent = await this.requireCommunity(communityId);
+        const own = await this.getOwnGroupParticipantJids(this.getSock());
+        for (const member of parent.participants ?? []) {
+          const identities = await this.getGroupParticipantIdentities(member);
+          if ([...identities].some((identity) => own.has(identity))) confirmed = true;
+        }
+      } catch {
+        // Approval may still be pending, or metadata may be unavailable. Do not retry the join.
+      }
+    }
+    return { communityId, status: confirmed ? "joined" : "unknown", retrySafe: false };
+  }
+
+  async revokeCommunityMemberInvite(communityId: string, participant: string): Promise<void> {
+    this.requireGroupWritesEnabled();
+    const parent = await this.requireCommunity(communityId, true);
+    const [jid] = this.communityParticipants([participant]);
+    if (!(await this.getSock().communityRevokeInviteV4(parent.id, jid!))) {
+      throw new Error("WhatsApp did not confirm revocation of the member invitation");
+    }
+  }
+
+  async updateCommunitySetting(communityId: string, setting: CommunitySetting): Promise<void> {
+    this.requireGroupWritesEnabled();
+    const parent = await this.requireCommunity(communityId, true);
+    const sock = this.getSock();
+    switch (setting.setting) {
+      case "edit_info":
+        return sock.communitySettingUpdate(
+          parent.id,
+          setting.value === "admins" ? "locked" : "unlocked",
+        );
+      case "send_messages":
+        return sock.communitySettingUpdate(
+          parent.id,
+          setting.value === "admins" ? "announcement" : "not_announcement",
+        );
+      case "add_members":
+        return sock.communityMemberAddMode(
+          parent.id,
+          setting.value === "admins" ? "admin_add" : "all_member_add",
+        );
+      case "join_approval":
+        return sock.communityJoinApprovalMode(parent.id, setting.value);
+      case "disappearing_messages":
+        return sock.communityToggleEphemeral(parent.id, setting.value);
+    }
+  }
+
+  async resolveCommunityAnnouncementGroup(communityId: string, forWrite = false): Promise<string> {
+    if (forWrite) this.requireGroupWritesEnabled();
+    const hierarchy = await this.getCommunityHierarchy(communityId);
+    const jid = hierarchy.announcementGroupJid;
+    if (!jid)
+      throw new Error(
+        `Community Avisos destination is ${hierarchy.announcementResolution}; no destination was selected`,
+      );
+    const group = await this.getSock().groupMetadata(jid);
+    if (
+      group.id !== jid ||
+      group.linkedParent !== hierarchy.community.jid ||
+      group.isCommunityAnnounce !== true
+    ) {
+      throw new Error("The Avisos group could not be verified; refresh the community hierarchy");
+    }
+    if (forWrite) {
+      const role = await this.getOwnGroupRole(
+        group.participants ?? [],
+        await this.getOwnGroupParticipantJids(this.getSock()),
+      );
+      if (!role.isAdmin)
+        throw new Error("Only an Avisos group admin can send a community announcement");
+    }
+    return jid;
+  }
+
   async createCommunity(subject: string, description = ""): Promise<GroupMetadata | null> {
     this.requireGroupWritesEnabled();
     const sock = this.getSock();
@@ -3835,19 +4177,22 @@ export class BaileysAdapter implements ChannelAdapter {
 
   async listCommunities(): Promise<Record<string, GroupMetadata>> {
     const sock = this.getSock();
-    const communities = await sock.communityFetchAllParticipating();
+    // Both upstream helpers issue the same participating IQ, but rc14's community
+    // helper only parses communities/community nodes. The group parser retains
+    // the parent marker in the standard groups/group response.
+    const groups = await sock.groupFetchAllParticipating();
     const entries = await Promise.all(
-      Object.entries(communities).map(
-        async ([jid, metadata]) => [jid, await this.normalizeGroupMetadata(metadata)] as const,
-      ),
+      Object.entries(groups)
+        .filter(([, metadata]) => metadata.isCommunity === true && !metadata.linkedParent)
+        .map(
+          async ([jid, metadata]) => [jid, await this.normalizeGroupMetadata(metadata)] as const,
+        ),
     );
     return Object.fromEntries(entries);
   }
 
   async getCommunityMetadata(communityId: string): Promise<GroupMetadata> {
-    const sock = this.getSock();
-    const metadata = await sock.communityMetadata(normalizeGroupJid(communityId));
-    return this.normalizeGroupMetadata(metadata);
+    return this.normalizeGroupMetadata(await this.requireCommunity(communityId));
   }
 
   async getCommunityHierarchy(communityId: string): Promise<CommunityHierarchy> {
@@ -3913,19 +4258,48 @@ export class BaileysAdapter implements ChannelAdapter {
   async linkGroupToCommunity(groupId: string, communityId: string): Promise<void> {
     this.requireGroupWritesEnabled();
     const sock = this.getSock();
-    await sock.communityLinkGroup(normalizeGroupJid(groupId), normalizeGroupJid(communityId));
+    const parent = await this.requireCommunity(communityId, true);
+    const group = await sock.groupMetadata(normalizeGroupJid(groupId));
+    if (
+      group.id !== normalizeGroupJid(groupId) ||
+      group.isCommunity !== false ||
+      group.isCommunityAnnounce !== false ||
+      group.linkedParent
+    ) {
+      throw new Error("Only an unlinked ordinary group can be linked to a community");
+    }
+    const role = await this.getOwnGroupRole(
+      group.participants ?? [],
+      await this.getOwnGroupParticipantJids(sock),
+    );
+    if (!role.isAdmin)
+      throw new Error("Only an admin of both the community and group can link them");
+    await sock.communityLinkGroup(group.id, parent.id);
   }
 
   async unlinkGroupFromCommunity(groupId: string, communityId: string): Promise<void> {
     this.requireGroupWritesEnabled();
     const sock = this.getSock();
-    await sock.communityUnlinkGroup(normalizeGroupJid(groupId), normalizeGroupJid(communityId));
+    const parent = await this.requireCommunity(communityId, true);
+    const group = await sock.groupMetadata(normalizeGroupJid(groupId));
+    if (
+      group.id !== normalizeGroupJid(groupId) ||
+      group.linkedParent !== parent.id ||
+      group.isCommunity ||
+      group.isCommunityAnnounce !== false
+    ) {
+      throw new Error(
+        "Only a verified ordinary subgroup can be unlinked; Avisos cannot be unlinked",
+      );
+    }
+    await sock.communityUnlinkGroup(group.id, parent.id);
   }
 
   async leaveCommunity(communityId: string): Promise<void> {
     this.requireGroupWritesEnabled();
     const sock = this.getSock();
-    await sock.communityLeave(normalizeGroupJid(communityId));
+    const parent = await this.requireCommunity(communityId);
+    await sock.communityLeave(parent.id);
   }
 
   // ---- Contacts ----
@@ -6060,6 +6434,7 @@ export class BaileysAdapter implements ChannelAdapter {
       }
 
       if (connection === "open") {
+        this.groupEventSnapshots.clear();
         const connectedAt = Date.now();
         const wasPairing = this.pendingAuthChallenges.size > 0;
         this.appendNotifyWatermarkMs = this.getAppendNotifyWatermark(connectedAt);
@@ -6666,9 +7041,39 @@ export class BaileysAdapter implements ChannelAdapter {
       }
 
       // --- Groups ---
-      if (events["groups.update"]) {
-        const normalized = normalizeGroupsUpdate(this.instanceId, events["groups.update"]);
-        for (const event of normalized) this.emit("group.updated", event);
+      if (events["groups.update"] || events["groups.upsert"]) {
+        // A creation/sync snapshot and update may describe the same group in one batch.
+        const merged = new Map<string, Partial<BaileysGroupMetadata>>();
+        for (const update of [
+          ...(events["groups.upsert"] ?? []),
+          ...(events["groups.update"] ?? []),
+        ]) {
+          if (update.id) merged.set(update.id, { ...merged.get(update.id), ...update });
+        }
+        const normalized = normalizeGroupsUpdate(this.instanceId, [...merged.values()]);
+        for (const event of normalized) {
+          const previous = this.groupEventSnapshots.get(event.groupId);
+          if (
+            previous &&
+            Object.entries(event.changes).every(([key, value]) => previous[key] === value)
+          )
+            continue;
+          this.groupEventSnapshots.set(event.groupId, { ...previous, ...event.changes });
+          if (this.groupEventSnapshots.size > 10000) {
+            this.groupEventSnapshots.delete(this.groupEventSnapshots.keys().next().value!);
+          }
+          this.emit("group.updated", event);
+        }
+      }
+      if (events["group.join-request"]) {
+        const request = events["group.join-request"];
+        this.emit("group.join_request", {
+          instanceId: this.instanceId,
+          groupId: request.id,
+          participant: request.participant,
+          action: request.action,
+          method: request.method ?? null,
+        });
       }
 
       if (events["group-participants.update"]) {

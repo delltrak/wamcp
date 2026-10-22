@@ -95,7 +95,12 @@ export function registerBusinessTools(server: McpServer, instanceManager: Instan
     CreateCommunitySchema,
     async (adapter, params) => {
       const community = await adapter.createCommunity(params.name, params.description);
-      return { communityId: community?.jid ?? null, community };
+      return {
+        communityId: community?.jid ?? null,
+        community,
+        status: community ? "created" : "unknown",
+        retrySafe: false,
+      };
     },
   );
 
