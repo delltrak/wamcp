@@ -81,7 +81,7 @@ Everything that is not a "send a message" call (edit, delete, react, presence, g
 - LID (v7): contacts can arrive as `<id>@lid`. `resolvePn()` maps LID→phone via `sock.signalRepository.lidMapping`; `normalizeLidInMessage()` swaps `remoteJid`/`remoteJidAlt` when LID is primary. The contact cache is keyed by phone JID whenever one is known.
 - Contacts accumulate in an **in-memory** `contactCache` (from `contacts.upsert`, `chats.upsert`, `messaging-history.set`, and incoming `pushName`) and are only flushed to SQLite inside `getContacts()`. So `wa_search_contact` is what materializes them — a fresh instance returns nothing until that runs.
 - `getMessages()` reads the local `messages` table, not WhatsApp. Persistence happens in the `messages.upsert` branch of `bindEvents`.
-- Reconnect is exponential backoff (1s → 30s, 10 attempts) inside the adapter; `MaintenanceService` independently retries `disconnected` instances every 5 min if they have a `lastConnected`.
+- Reconnect is exponential backoff (1s → 30s). After 10 attempts a paired session keeps retrying every 30s until the socket opens, `disconnect()` runs, or the session logs out; an unpaired session stops. Concurrent `connect()` calls share one attempt. A non-logout close clears the dead socket. `MaintenanceService` retries `disconnected` instances every 5 min if they have a `lastConnected`, and recovers a `connecting` row older than 2 min with no live socket (also only with a `lastConnected`).
 
 **Cloud API**: webhooks are served by the **main** HTTP server at `POST /cloud-webhook`, verified with `x-hub-signature-256` against `WA_CLOUD_WEBHOOK_SECRET`, answered 200 immediately (Meta's 5s budget) and processed async. Routing to an instance is by `phone_number_id` via `findCloudAdapterByPhoneNumberId()`.
 
@@ -105,6 +105,8 @@ Everything that is not a "send a message" call (edit, delete, react, presence, g
    Always use `toolSuccess`/`handleToolError` — they sanitize file paths and stack traces out of agent-visible output.
 3. Add the method to `channel.interface.ts`, implement in Baileys, implement or throw-with-the-standard-wording in Cloud API.
 4. Update `README.md` and `docs/API_REFERENCE.md` tables.
+5. Record user-visible features, fixes, and behavior changes in `CHANGELOG.md` under
+   `[Unreleased]` before merging. Include relevant issue/PR links and material limitations.
 
 ## Adding a resource
 
