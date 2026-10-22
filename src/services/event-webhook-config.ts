@@ -1,6 +1,10 @@
 import { createHash } from "node:crypto";
 import { hostname } from "node:os";
-import { CHANNEL_EVENTS, type ChannelEvent } from "../types/channel.types.js";
+import {
+  CHANNEL_EVENTS,
+  isWebhookRoutineEvent,
+  type ChannelEvent,
+} from "../types/channel.types.js";
 import { logger } from "../utils/logger.js";
 import { validateWebhookUrl } from "../utils/validation.js";
 
@@ -481,7 +485,12 @@ function effectiveEvents(
   preset: EventWebhookPreset | undefined,
 ): ChannelEvent[] {
   if (preset === "grok-bot") {
-    return events.filter((event) => event === "message.received" || event.startsWith("instance."));
+    return events.filter(
+      (event) =>
+        event === "message.received" ||
+        event.startsWith("instance.") ||
+        isWebhookRoutineEvent(event),
+    );
   }
   return [...events];
 }
@@ -499,7 +508,13 @@ function droppedPresetEvents(
   for (const group of groups) {
     if (group.preset !== "grok-bot") continue;
     for (const event of group.events) {
-      if (event !== "message.received" && !event.startsWith("instance.")) dropped.add(event);
+      if (
+        event !== "message.received" &&
+        !event.startsWith("instance.") &&
+        !isWebhookRoutineEvent(event)
+      ) {
+        dropped.add(event);
+      }
     }
   }
   return [...dropped];

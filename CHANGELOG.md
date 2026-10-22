@@ -39,6 +39,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Added opt-in Baileys webhooks and MCP notifications for group roster joins, label associations,
+  and newsletter membership, posts, and mute changes
+  ([#141](https://github.com/delltrak/wamcp/issues/141), [#157](https://github.com/delltrak/wamcp/pull/157)).
+  Grok Bot keeps these events separate from message batches. Newsletter post deduplication includes
+  the channel and suppresses stored append replays. Phone follow/mute notifications remain
+  best-effort; local newsletter history still has its existing instance/message-ID collision
+  limitation, and real-account validation remains pending.
 - Added read-only group-participant CSV export and Channel post media download
   ([#148](https://github.com/delltrak/wamcp/issues/148), [#134](https://github.com/delltrak/wamcp/pull/134)).
   CSV exports retain PN/LID identities, escape spreadsheet formulas, use private permissions, and

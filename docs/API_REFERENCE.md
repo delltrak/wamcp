@@ -3485,7 +3485,63 @@ Fired when Baileys reports a label edit or a chat/message label association chan
 
 ---
 
-### 4.15 `whatsapp/event.response`
+### 4.15 `whatsapp/group.joined`
+
+Fired when a group roster or a participant-add lists this Baileys account (#141). An empty roster
+does not emit. `wa_create_group` does not emit this notification. `wa_join_group` waits until a
+later roster includes this account. Other participants joining still use
+`whatsapp/group.participants_changed`.
+
+**Payload:** `instanceId`, `groupId`, `chatId`, `subject`, `description`, `memberCount`, `author`,
+and `timestamp` (Unix seconds). `memberCount` is the size of the list that contained this account.
+Member JIDs are not included. `subject` and `description` are null when the add notification does
+not include them.
+
+---
+
+### 4.16 `whatsapp/label.association`
+
+Fired when a label is applied to or removed from a chat or message. `whatsapp/label.updated` is
+also fired for the same change.
+
+**Payload:** `instanceId`, `labelId`, `labeled`, `chatId`, `label`, and `association`. `messageId`
+is included for a message association. `labeled` is true when the label is applied.
+
+---
+
+### 4.17 `whatsapp/newsletter.joined` and `whatsapp/newsletter.left`
+
+Fired when this account subscribes to or leaves a newsletter. Local follow, unfollow, and newsletter
+create emit these events. A newsletter participant update emits them only when the affected user is
+this account and the action is a join or leave. A follow started on the phone is best-effort on
+Baileys 7.0.0-rc14 (#141): that release does not confirm it from the settings stanza.
+
+**Payload:** `instanceId`, `newsletterId`, `chatId`, `name`, `description`, and `role`.
+
+---
+
+### 4.18 `whatsapp/newsletter.message`
+
+Fired for a newsletter post. Append-path posts are not duplicated as `whatsapp/message.received`.
+
+**Payload:** `instanceId`, `newsletterId`, `chatId`, and `message` (`id`, `serverId`, `sender`,
+`timestamp`, `type`, `text`, `views`, `isFromMe`). `views` is null when Baileys does not include a
+view count. `serverId` is set when the message id is numeric.
+
+---
+
+### 4.19 `whatsapp/newsletter.mute`
+
+Best-effort on Baileys 7.0.0-rc14 (#141). Fired when a newsletter settings object includes `mute`,
+`mute_state`, or `muted`. The binary settings stanza on that release carries only name and
+description, so a mute or follow started on the phone cannot be confirmed from it.
+
+**Payload:** `instanceId`, `newsletterId`, `chatId`, `mute` (`on` or `off`), and `timestamp`
+(Unix seconds).
+
+---
+
+### 4.20 `whatsapp/event.response`
 
 Fired when a Baileys event RSVP is decrypted and stored. A response recovered after its event
 message or LID mapping becomes available emits this event at that time.

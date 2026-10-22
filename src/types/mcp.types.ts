@@ -70,6 +70,12 @@ export type McpNotificationMethod =
   | "whatsapp/instance.qr_expired"
   | "whatsapp/call.received"
   | "whatsapp/label.updated"
+  | "whatsapp/label.association"
+  | "whatsapp/group.joined"
+  | "whatsapp/newsletter.joined"
+  | "whatsapp/newsletter.left"
+  | "whatsapp/newsletter.message"
+  | "whatsapp/newsletter.mute"
   | "whatsapp/event.response";
 
 // MCP resource URI patterns

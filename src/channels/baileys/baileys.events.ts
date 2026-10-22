@@ -670,6 +670,47 @@ export function getSenderJid(msg: WAMessage): string {
   return "me";
 }
 
+const NEWSLETTER_JOIN_ACTIONS = new Set([
+  "join",
+  "add",
+  "subscribe",
+  "subscribed",
+  "follow",
+  "followed",
+]);
+
+const NEWSLETTER_LEAVE_ACTIONS = new Set([
+  "leave",
+  "remove",
+  "unsubscribe",
+  "unsubscribed",
+  "unfollow",
+  "left",
+]);
+
+/** Map a Baileys newsletter participant action to a membership webhook. Promote and demote are ignored. */
+export function newsletterMembershipAction(action: string): "joined" | "left" | null {
+  const normalized = action.trim().toLowerCase();
+  if (NEWSLETTER_JOIN_ACTIONS.has(normalized)) return "joined";
+  if (NEWSLETTER_LEAVE_ACTIONS.has(normalized)) return "left";
+  return null;
+}
+
+/**
+ * Best-effort mute read for #141. Baileys 7.0.0-rc14 copies only name and description
+ * from the binary newsletter settings stanza, so a mute started on the phone is emitted
+ * only when this object actually contains mute, mute_state, or muted. A follow started
+ * on the phone is not visible on that stanza either.
+ */
+export function newsletterMuteState(update: unknown): "on" | "off" | null {
+  if (typeof update !== "object" || update === null || Array.isArray(update)) return null;
+  const record = update as Record<string, unknown>;
+  const raw = record.mute ?? record.mute_state ?? record.muted;
+  if (raw === true || raw === "on" || raw === "ON" || raw === "true") return "on";
+  if (raw === false || raw === "off" || raw === "OFF" || raw === "false") return "off";
+  return null;
+}
+
 function lidJid(value: string | null | undefined): string | undefined {
   if (!value?.endsWith("@lid")) return undefined;
   return value;
