@@ -6,7 +6,7 @@
 import { lookup } from "node:dns/promises";
 import { isIP } from "node:net";
 import type { ConnectionOptions } from "node:tls";
-import { Agent } from "undici";
+import { Agent, fetch as undiciFetch } from "undici";
 import { isNonPublicIp } from "../utils/validation.js";
 import { createChildLogger } from "../utils/logger.js";
 import {
@@ -58,7 +58,7 @@ export interface ChatwootDnsRecord {
 }
 
 export interface ChatwootTransportDeps {
-  fetchImpl?: typeof fetch;
+  fetchImpl?: typeof fetch | typeof undiciFetch;
   resolveDns?: (hostname: string) => Promise<ChatwootDnsRecord[]>;
 }
 
@@ -76,12 +76,15 @@ export interface ChatwootInboundMessage {
 interface FoundContact {
   id: number;
   identifier: string;
+  phoneNumber: string;
   sourceIds: string[];
 }
 
 interface FoundConversation {
   id: number;
   inboxId: string;
+  instanceId: string;
+  chatId: string;
   status: string;
 }
 
@@ -139,6 +142,8 @@ function readContacts(body: unknown): FoundContact[] {
     contacts.push({
       id: item.id,
       identifier: typeof item.identifier === "string" ? item.identifier : "",
+      phoneNumber:
+        typeof item.phone_number === "string" ? item.phone_number.replace(/[^+0-9]/g, "") : "",
       sourceIds: readSourceIds(item),
     });
   }
@@ -161,6 +166,16 @@ function readConversations(body: unknown): FoundConversation[] {
     conversations.push({
       id: item.id,
       inboxId: String(inboxRaw),
+      instanceId:
+        isRecord(item.additional_attributes) &&
+        typeof item.additional_attributes.wamcp_instance_id === "string"
+          ? item.additional_attributes.wamcp_instance_id
+          : "",
+      chatId:
+        isRecord(item.additional_attributes) &&
+        typeof item.additional_attributes.wamcp_chat_id === "string"
+          ? item.additional_attributes.wamcp_chat_id
+          : "",
       status: typeof item.status === "string" ? item.status : "",
     });
   }
@@ -265,7 +280,7 @@ export function createChatwootTransport(
   config: EnabledChatwootConfig,
   deps: ChatwootTransportDeps = {},
 ): ChatwootTransport {
-  const fetchImpl = deps.fetchImpl ?? fetch;
+  const fetchImpl = deps.fetchImpl ?? undiciFetch;
   const resolveDns = deps.resolveDns ?? defaultResolve;
 
   return {
@@ -287,7 +302,7 @@ export function createChatwootTransport(
           redirect: "error",
           signal: AbortSignal.timeout(config.timeoutMs),
           dispatcher: agent,
-        } as RequestInit & { dispatcher: Agent });
+        });
         const text = await response.text();
         let body: unknown = null;
         if (text) {
@@ -324,7 +339,10 @@ function sharesChatwootOrigin(target: URL, config: EnabledChatwootConfig): boole
   return port(target) === port(base);
 }
 
-async function readLimitedResponse(response: Response, maxBytes: number): Promise<Buffer> {
+async function readLimitedResponse(
+  response: Response | Awaited<ReturnType<typeof undiciFetch>>,
+  maxBytes: number,
+): Promise<Buffer> {
   const reader = response.body?.getReader();
   if (!reader) {
     const buffer = Buffer.from(await response.arrayBuffer());
@@ -368,7 +386,7 @@ export async function fetchPinnedResource(
     throw new ChatwootRequestError(0);
   }
   if (target.username || target.password) throw new ChatwootRequestError(0);
-  const fetchImpl = deps.fetchImpl ?? fetch;
+  const fetchImpl = deps.fetchImpl ?? undiciFetch;
   const allowPrivate = config.allowPrivateUrl && sharesChatwootOrigin(target, config);
   const pinned = await pinAddress(target, config, deps.resolveDns ?? defaultResolve, allowPrivate);
   const agent = new Agent({
@@ -383,7 +401,7 @@ export async function fetchPinnedResource(
       redirect: "error",
       signal: AbortSignal.timeout(config.timeoutMs),
       dispatcher: agent,
-    } as RequestInit & { dispatcher: Agent });
+    });
     if (!response.ok) throw new ChatwootRequestError(response.status);
     const declared = Number(response.headers.get("content-length"));
     if (Number.isFinite(declared) && declared > maxBytes)
@@ -480,7 +498,12 @@ export class ChatwootClient {
       `/api/v1/accounts/${this.config.accountId}/contacts/${contactId}/conversations`,
     );
     const selected = pickConversation(
-      readConversations(listed).filter((item) => item.inboxId === this.config.inboxId),
+      readConversations(listed).filter(
+        (item) =>
+          item.inboxId === this.config.inboxId &&
+          item.instanceId === message.instanceId &&
+          item.chatId === message.chatId,
+      ),
     );
     if (selected) {
       if (selected.status === "resolved" || selected.status === "snoozed") {
@@ -544,7 +567,9 @@ export class ChatwootClient {
       return id;
     } catch (error) {
       if (error instanceof ChatwootRequestError && (error.status === 409 || error.status === 422)) {
-        const again = await this.findContact(sourceId, message.chatId);
+        const again =
+          (await this.findContact(sourceId, message.chatId)) ??
+          (phone ? await this.findContactByPhone(phone) : null);
         if (again) {
           await this.ensureInbox(again, sourceId);
           return again.id;
@@ -552,6 +577,17 @@ export class ChatwootClient {
       }
       throw error;
     }
+  }
+
+  private async findContactByPhone(phone: string): Promise<FoundContact | null> {
+    const body = await this.request(
+      "GET",
+      `/api/v1/accounts/${this.config.accountId}/contacts/search`,
+      undefined,
+      { q: phone },
+    );
+    // Search results can be fuzzy; only reuse the exact normalized phone.
+    return readContacts(body).find((contact) => contact.phoneNumber === phone) ?? null;
   }
 
   private async findContact(sourceId: string, chatId: string): Promise<FoundContact | null> {

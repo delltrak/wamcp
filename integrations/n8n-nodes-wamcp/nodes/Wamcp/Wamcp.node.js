@@ -1,6 +1,6 @@
 "use strict";
 
-const { callWamcpTool } = require("../../lib/protocol.cjs");
+const { callWamcpTool, testWamcpConnection } = require("../../lib/protocol.cjs");
 
 function show(operation) {
   return { show: { operation } };
@@ -19,7 +19,7 @@ class Wamcp {
       defaults: { name: "WA MCP" },
       inputs: ["main"],
       outputs: ["main"],
-      credentials: [{ name: "wamcpApi", required: true }],
+      credentials: [{ name: "wamcpApi", required: true, testedBy: "wamcpApiTest" }],
       properties: [
         {
           displayName: "Operation",
@@ -110,6 +110,32 @@ class Wamcp {
     };
   }
 
+  methods = {
+    credentialTest: {
+      async wamcpApiTest(credential) {
+        try {
+          await testWamcpConnection(async (request) => {
+            const response = await this.helpers.httpRequest({
+              ...request,
+              json: true,
+              returnFullResponse: true,
+              timeout: 10000,
+              disableFollowRedirect: true,
+            });
+            return { headers: response.headers, body: response.body };
+          }, credential.data || {});
+          return { status: "OK", message: "WA MCP API authentication succeeded" };
+        } catch {
+          return {
+            status: "Error",
+            message:
+              "WA MCP API authentication or connection failed. Check the Base URL and API Key.",
+          };
+        }
+      },
+    },
+  };
+
   async execute() {
     const items = this.getInputData();
     const credentials = await this.getCredentials("wamcpApi");
@@ -117,8 +143,9 @@ class Wamcp {
 
     for (let index = 0; index < items.length; index += 1) {
       const operation = this.getNodeParameter("operation", index);
-      const instanceId =
-        String(this.getNodeParameter("instanceId", index) || credentials.instanceId || "").trim();
+      const instanceId = String(
+        this.getNodeParameter("instanceId", index) || credentials.instanceId || "",
+      ).trim();
       const args = operation === "getStatus" ? {} : { instanceId };
       if (operation !== "getStatus" && !instanceId) {
         throw new Error("Instance ID is required");
@@ -162,6 +189,8 @@ class Wamcp {
             body: request.body,
             json: true,
             returnFullResponse: true,
+            timeout: 10000,
+            disableFollowRedirect: true,
           });
           return { headers: response.headers, body: response.body };
         },

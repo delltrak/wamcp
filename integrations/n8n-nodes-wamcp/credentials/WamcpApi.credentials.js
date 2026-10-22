@@ -4,7 +4,8 @@ class WamcpApi {
   constructor() {
     this.name = "wamcpApi";
     this.displayName = "WA MCP API";
-    this.documentationUrl = "https://github.com/delltrak/wamcp/blob/main/integrations/n8n-nodes-wamcp/README.md";
+    this.documentationUrl =
+      "https://github.com/delltrak/wamcp/blob/main/integrations/n8n-nodes-wamcp/README.md";
     this.properties = [
       {
         displayName: "Base URL",
@@ -30,13 +31,6 @@ class WamcpApi {
         description: "Used when a node does not set its own instance ID",
       },
     ];
-    this.test = {
-      request: {
-        baseURL: "={{$credentials.baseUrl}}",
-        url: "/health",
-        method: "GET",
-      },
-    };
   }
 }
 

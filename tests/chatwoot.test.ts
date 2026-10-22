@@ -1,6 +1,6 @@
 import { createHmac } from "node:crypto";
 import { Readable } from "node:stream";
-import type { IncomingMessage, ServerResponse } from "node:http";
+import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { Agent } from "undici";
@@ -286,6 +286,179 @@ describe("Chatwoot inbound sync", () => {
     });
   });
 
+  it.each([409, 422])(
+    "recovers contact conflict %s by exact phone without reusing another instance's conversation",
+    async (status) => {
+      const { transport: fallback, calls } = recordingTransport();
+      const request = vi.fn(async (input: ChatwootRequest) => {
+        if (input.path.endsWith("/contacts/search")) {
+          return {
+            status: 200,
+            body: {
+              payload:
+                input.query?.q === "+15551234567"
+                  ? [
+                      { id: 6, phone_number: "+155512345678", identifier: "other" },
+                      {
+                        id: 7,
+                        phone_number: "+1 (555) 123-4567",
+                        identifier: "another-instance",
+                        contact_inboxes: [],
+                      },
+                    ]
+                  : [],
+            },
+          };
+        }
+        if (input.path.endsWith("/contacts")) throw new ChatwootRequestError(status);
+        if (input.path.endsWith("/conversations") && input.method === "GET") {
+          return {
+            status: 200,
+            body: {
+              payload: [
+                {
+                  id: 90,
+                  inbox_id: 34,
+                  status: "open",
+                  additional_attributes: {
+                    wamcp_instance_id: "inst_other",
+                    wamcp_chat_id: "15551234567@s.whatsapp.net",
+                  },
+                },
+              ],
+            },
+          };
+        }
+        return fallback.request(input);
+      });
+      const client = new ChatwootClient(enabledConfig(), { request });
+      await client.syncMessage({
+        instanceId: "inst_0123abcd",
+        chatId: "15551234567@s.whatsapp.net",
+        isGroup: false,
+        messageId: "conflict",
+        isFromMe: false,
+        text: "hello",
+      });
+      expect(request.mock.calls.some(([input]) => input.query?.q === "+15551234567")).toBe(true);
+      expect(calls).toContainEqual(
+        expect.objectContaining({
+          path: "/api/v1/accounts/12/contacts/7/contact_inboxes",
+          body: { inbox_id: 34, source_id: "inst_0123abcd|15551234567@s.whatsapp.net" },
+        }),
+      );
+      expect(calls).toContainEqual(
+        expect.objectContaining({ path: "/api/v1/accounts/12/conversations", method: "POST" }),
+      );
+      expect(calls).toContainEqual(
+        expect.objectContaining({ path: "/api/v1/accounts/12/conversations/42/messages" }),
+      );
+    },
+  );
+
+  it("reopens the matching conversation while ignoring another chat and inbox", async () => {
+    const { transport: fallback, calls } = recordingTransport();
+    const request = vi.fn(async (input: ChatwootRequest) => {
+      if (input.path.endsWith("/contacts/search"))
+        return {
+          status: 200,
+          body: {
+            payload: [
+              {
+                id: 7,
+                identifier: "inst_0123abcd|15551234567@s.whatsapp.net",
+                contact_inboxes: [{ source_id: "inst_0123abcd|15551234567@s.whatsapp.net" }],
+              },
+            ],
+          },
+        };
+      if (input.path.endsWith("/conversations") && input.method === "GET")
+        return {
+          status: 200,
+          body: {
+            payload: [
+              {
+                id: 90,
+                inbox_id: 35,
+                status: "open",
+                additional_attributes: {
+                  wamcp_instance_id: "inst_0123abcd",
+                  wamcp_chat_id: "15551234567@s.whatsapp.net",
+                },
+              },
+              {
+                id: 91,
+                inbox_id: 34,
+                status: "open",
+                additional_attributes: {
+                  wamcp_instance_id: "inst_0123abcd",
+                  wamcp_chat_id: "15559999999@s.whatsapp.net",
+                },
+              },
+              {
+                id: 92,
+                inbox_id: 34,
+                status: "resolved",
+                additional_attributes: {
+                  wamcp_instance_id: "inst_0123abcd",
+                  wamcp_chat_id: "15551234567@s.whatsapp.net",
+                },
+              },
+            ],
+          },
+        };
+      if (input.path.endsWith("/toggle_status")) {
+        calls.push(input);
+        return { status: 200, body: {} };
+      }
+      return fallback.request(input);
+    });
+    const client = new ChatwootClient(enabledConfig(), { request });
+    await client.syncMessage({
+      instanceId: "inst_0123abcd",
+      chatId: "15551234567@s.whatsapp.net",
+      isGroup: false,
+      messageId: "reopen",
+      isFromMe: false,
+      text: "hello",
+    });
+    expect(calls).toContainEqual(
+      expect.objectContaining({
+        path: "/api/v1/accounts/12/conversations/92/toggle_status",
+        body: { status: "open" },
+      }),
+    );
+    expect(calls).toContainEqual(
+      expect.objectContaining({ path: "/api/v1/accounts/12/conversations/92/messages" }),
+    );
+    expect(calls.some((input) => input.path.endsWith("/conversations"))).toBe(false);
+  });
+
+  it("does not reuse a fuzzy phone search result after a contact conflict", async () => {
+    const request = vi.fn(async (input: ChatwootRequest) => {
+      if (input.path.endsWith("/contacts/search"))
+        return {
+          status: 200,
+          body: { payload: [{ id: 7, phone_number: "+155512345678", identifier: "other" }] },
+        };
+      throw new ChatwootRequestError(422);
+    });
+    const client = new ChatwootClient(enabledConfig(), { request });
+    await expect(
+      client.syncMessage({
+        instanceId: "inst_0123abcd",
+        chatId: "15551234567@s.whatsapp.net",
+        isGroup: false,
+        messageId: "conflict",
+        isFromMe: false,
+        text: "hello",
+      }),
+    ).rejects.toMatchObject({ status: 422 });
+    expect(request.mock.calls.some(([input]) => input.path.endsWith("/contact_inboxes"))).toBe(
+      false,
+    );
+  });
+
   it("skips filtered chats and does not call Chatwoot again for the same message", async () => {
     const { transport, calls } = recordingTransport();
     const service = new ChatwootService(
@@ -507,9 +680,7 @@ describe("Chatwoot agent replies", () => {
     );
 
     const replay = webhookBody({ id: 81, content: "again" });
-    const second = await service.handleWebhook(
-      signedWebhook(replay, 1_700_000_100, "delivery-80"),
-    );
+    const second = await service.handleWebhook(signedWebhook(replay, 1_700_000_100, "delivery-80"));
     expect(second.body).toMatchObject({ reason: "duplicate" });
     expect(queue.enqueueMessage).toHaveBeenCalledTimes(1);
   });
@@ -582,7 +753,10 @@ describe("Chatwoot agent replies", () => {
     expect(queue.enqueueMessage).not.toHaveBeenCalled();
 
     const allowed = new ChatwootService(legacyConfig(), queue);
-    const accepted = await allowed.handleWebhook({ rawBody: webhookBody({ id: 92 }), headerSecret: SECRET });
+    const accepted = await allowed.handleWebhook({
+      rawBody: webhookBody({ id: 92 }),
+      headerSecret: SECRET,
+    });
     expect(accepted.status).toBe(202);
   });
 
@@ -890,7 +1064,11 @@ describe("Chatwoot agent replies", () => {
     );
     expect(result.status).toBe(202);
     await waitQueued(queue);
-    expect(fetchAttachment).toHaveBeenNthCalledWith(1, "https://files.example.com/a.png", 16 * 1024 * 1024);
+    expect(fetchAttachment).toHaveBeenNthCalledWith(
+      1,
+      "https://files.example.com/a.png",
+      16 * 1024 * 1024,
+    );
     expect(fetchAttachment).toHaveBeenNthCalledWith(
       2,
       "https://files.example.com/b.png",
@@ -1117,7 +1295,11 @@ describe("Chatwoot agent replies", () => {
     const now = 1_700_003_000;
     for (let index = 0; index < MAX_CHATWOOT_DELIVERIES; index += 1) {
       const result = await service.handleWebhook(
-        signedWebhook(webhookBody({ id: 4_000 + index, content: `m${index}` }), now, `full-${index}`),
+        signedWebhook(
+          webhookBody({ id: 4_000 + index, content: `m${index}` }),
+          now,
+          `full-${index}`,
+        ),
       );
       expect(result.status).toBe(202);
     }
@@ -1148,6 +1330,37 @@ describe("Chatwoot agent replies", () => {
 });
 
 describe("Chatwoot transport", () => {
+  it("uses the installed Undici dispatcher for actual HTTP responses on Node 24", async () => {
+    const requests: string[] = [];
+    const server = createServer((req, res) => {
+      requests.push(req.url || "");
+      res.setHeader("content-type", "application/json");
+      res.end(JSON.stringify({ ok: true }));
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    try {
+      const address = server.address();
+      if (!address || typeof address === "string") throw new Error("expected local test port");
+      const url = `http://127.0.0.1:${address.port}`;
+      const config = enabledConfig({
+        WA_CHATWOOT_URL: url,
+        WA_CHATWOOT_ALLOW_HTTP: "true",
+        WA_CHATWOOT_ALLOW_PRIVATE_URL: "true",
+      });
+      await expect(
+        createChatwootTransport(config).request({ method: "GET", path: "/api/v1/accounts/12" }),
+      ).resolves.toMatchObject({ status: 200, body: { ok: true } });
+      await expect(
+        fetchPinnedResource(new URL(`${url}/attachment`), config, 1024),
+      ).resolves.toMatchObject({ data: Buffer.from('{"ok":true}') });
+      expect(requests).toEqual(["/api/v1/accounts/12", "/attachment"]);
+    } finally {
+      await new Promise<void>((resolve, reject) =>
+        server.close((error) => (error ? reject(error) : resolve())),
+      );
+    }
+  });
+
   it("pins a public address and blocks private or metadata answers", async () => {
     const fetchImpl = vi.fn(
       async () => new Response(JSON.stringify({ ok: true }), { status: 200 }),
@@ -1260,10 +1473,15 @@ describe("Chatwoot transport", () => {
     const config = enabledConfig({ WA_CHATWOOT_ALLOW_PRIVATE_URL: "true" });
     const fetchImpl = vi.fn(async () => new Response(Buffer.from("blob"), { status: 200 }));
     await expect(
-      fetchPinnedResource(new URL("https://chatwoot.example.com/rails/active_storage/a"), config, 1024, {
-        fetchImpl: fetchImpl as typeof fetch,
-        resolveDns: async () => [{ address: "10.1.1.1", family: 4 }],
-      }),
+      fetchPinnedResource(
+        new URL("https://chatwoot.example.com/rails/active_storage/a"),
+        config,
+        1024,
+        {
+          fetchImpl: fetchImpl as typeof fetch,
+          resolveDns: async () => [{ address: "10.1.1.1", family: 4 }],
+        },
+      ),
     ).resolves.toMatchObject({ data: Buffer.from("blob") });
 
     const other = vi.fn(async () => new Response(Buffer.from("nope")));

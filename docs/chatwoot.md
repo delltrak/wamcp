@@ -60,8 +60,8 @@ The timestamp must be within 300 seconds of the server clock. The comparison use
 
 For each `message.received` event that passes the instance and JID filters, the bridge:
 
-1. Searches or creates a Chatwoot contact in the configured inbox.
-2. Reuses an open conversation for that inbox, reopens a resolved or snoozed one, or creates a conversation.
+1. Searches or creates a Chatwoot contact in the configured inbox. A 409/422 creation conflict retries the source identity, then searches the normalized phone and accepts only an exact phone match before attaching the inbox.
+2. Reuses an open conversation for that inbox with matching stored instance/chat attributes, reopens a matching resolved or snoozed one, or creates a conversation. Conversations without those attributes are not reused, avoiding accidental reuse across instances sharing a contact.
 3. Posts the message. Customer messages are `incoming`. Messages sent by the WhatsApp account are `outgoing` with source id `WAID:<message id>`.
 
 `status@broadcast`, other `@broadcast` chats, and `@newsletter` chats are never copied.
@@ -105,3 +105,7 @@ Without a pinned instance, the contact source id is `inst_<id>|<chat jid>`, so t
 ## Not included
 
 History import, direct writes to the Chatwoot database, automatic inbox creation, and edit or delete mirroring are not part of this bridge. Live messages and agent replies use the Chatwoot REST API only.
+
+## Validation limits
+
+The bridge has synthetic tests and local HTTP transport coverage, including the installed Undici dispatcher on Node 24. Real Chatwoot/n8n installation, webhook signatures, account behavior, and WhatsApp delivery remain unverified. No live message was sent during validation.

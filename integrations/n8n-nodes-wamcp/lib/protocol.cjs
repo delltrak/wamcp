@@ -10,7 +10,9 @@ function isObject(value) {
 }
 
 function joinUrl(baseUrl, path) {
-  const base = String(baseUrl || "").trim().replace(/\/+$/, "");
+  const base = String(baseUrl || "")
+    .trim()
+    .replace(/\/+$/, "");
   if (!base) throw new Error("WA MCP base URL is required");
   return `${base}${path}`;
 }
@@ -102,10 +104,10 @@ function buildToolCallRequest(tool, args) {
 }
 
 /**
- * Open one MCP HTTP session, call one tool, and close the session.
+ * Open one authenticated MCP HTTP session, run an operation, and close the session.
  * `transport` performs the HTTP request and returns `{ headers, body }`.
  */
-async function callWamcpTool(transport, options) {
+async function withWamcpSession(transport, options, operation) {
   const url = joinUrl(options.baseUrl, "/mcp");
   const initialize = await transport({
     method: "POST",
@@ -126,13 +128,7 @@ async function callWamcpTool(transport, options) {
       headers: sessionHeaders,
       body: buildInitializedNotification(),
     });
-    const call = await transport({
-      method: "POST",
-      url,
-      headers: sessionHeaders,
-      body: buildToolCallRequest(options.tool, options.arguments || {}),
-    });
-    return toolResultData(parseMcpBody(call.body));
+    return await operation(url, sessionHeaders);
   } finally {
     await transport({
       method: "DELETE",
@@ -143,9 +139,26 @@ async function callWamcpTool(transport, options) {
   }
 }
 
+async function callWamcpTool(transport, options) {
+  return withWamcpSession(transport, options, async (url, headers) => {
+    const call = await transport({
+      method: "POST",
+      url,
+      headers,
+      body: buildToolCallRequest(options.tool, options.arguments || {}),
+    });
+    return toolResultData(parseMcpBody(call.body));
+  });
+}
+
+async function testWamcpConnection(transport, options) {
+  return withWamcpSession(transport, options, async () => ({ ok: true }));
+}
+
 function eventName(item) {
   if (typeof item.event === "string" && item.event) return item.event;
-  if (item.chat || item.chatId || item.messageId || item.text !== undefined) return "message.received";
+  if (item.chat || item.chatId || item.messageId || item.text !== undefined)
+    return "message.received";
   return "";
 }
 
@@ -186,7 +199,11 @@ function verifyEventSignature(input) {
       ? Buffer.from(input.rawBody, "utf8")
       : null;
   if (!rawBody) return false;
-  const digest = crypto.createHmac("sha256", secret).update(`${timestamp}.`).update(rawBody).digest();
+  const digest = crypto
+    .createHmac("sha256", secret)
+    .update(`${timestamp}.`)
+    .update(rawBody)
+    .digest();
   const provided = Buffer.from(match[1], "hex");
   if (digest.length !== provided.length) return false;
   return crypto.timingSafeEqual(digest, provided);
@@ -227,5 +244,6 @@ module.exports = {
   isDirectIncomingEvent,
   parseMcpBody,
   toolResultData,
+  testWamcpConnection,
   verifyEventSignature,
 };

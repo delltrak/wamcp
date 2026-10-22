@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Added the optional Chatwoot API inbox bridge and local n8n community nodes
+  ([#152](https://github.com/delltrak/wamcp/issues/152), [#135](https://github.com/delltrak/wamcp/pull/135)).
+  The n8n trigger requires a fresh HMAC signature and emits only verified raw JSON; credential
+  tests authenticate through MCP and close the session without calling tools. Chatwoot contact
+  conflicts retry exact normalized phones, and conversation reuse requires matching instance/chat
+  metadata. HTTP clients use the installed Undici dispatcher. Synthetic/local HTTP validation
+  only; real Chatwoot, n8n, and WhatsApp delivery remain unverified, and n8n is not published to npm.
+
 - Updated Undici from 7.30.0 to 8.12.3 and paired outgoing webhook requests with its
   HTTP client, preserving compatibility with the new dispatcher contract on Node 24
   ([#96](https://github.com/delltrak/wamcp/pull/96)).

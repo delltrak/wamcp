@@ -16,13 +16,13 @@ Restart n8n. The palette then contains **WA MCP** and **WA MCP Trigger**.
 
 ## Credential
 
-| Field | Value |
-| --- | --- |
-| Base URL | Origin of the WA MCP HTTP server, for example `http://localhost:3000` |
-| API Key | `WA_MCP_API_KEY`, or empty when the server does not require one |
-| Default Instance ID | Optional `inst_…` used when a node leaves Instance ID blank |
+| Field               | Value                                                                 |
+| ------------------- | --------------------------------------------------------------------- |
+| Base URL            | Origin of the WA MCP HTTP server, for example `http://localhost:3000` |
+| API Key             | `WA_MCP_API_KEY`, or empty when the server does not require one       |
+| Default Instance ID | Optional `inst_…` used when a node leaves Instance ID blank           |
 
-The credential test calls `GET /health`.
+The credential test opens an authenticated MCP session at `POST /mcp`, sends the initialized notification, and closes the session with `DELETE /mcp`. An invalid API key fails the test. No tool is called and no WhatsApp message is sent. Requests time out after 10 seconds and do not follow redirects.
 
 ## Trigger
 
@@ -36,7 +36,7 @@ WA_EVENT_WEBHOOK_EVENTS=message.received
 WA_EVENT_WEBHOOK_SECRET=replace-with-a-long-random-secret
 ```
 
-The trigger checks `x-wa-event-timestamp` and `x-wa-event-signature`. The signature is HMAC-SHA256 of `<timestamp>.<raw body>` using the node secret, compared with `timingSafeEqual`, and the timestamp must be within 300 seconds. A missing raw body or a bad signature is answered with HTTP 401 from the webhook response object and does not start the workflow. Webhook Secret is required. Flows that were saved without it stop receiving events until the secret is set. The node does not rebuild the signed payload from the parsed JSON.
+The trigger checks `x-wa-event-timestamp` and `x-wa-event-signature`. The signature is HMAC-SHA256 of `<timestamp>.<raw body>` using the node secret, compared with `timingSafeEqual`, and the timestamp must be within 300 seconds. A missing raw body or a bad signature is answered with HTTP 401 from the webhook response object and does not start the workflow. Webhook Secret is required. Flows that were saved without it stop receiving events until the secret is set. The node parses and emits only the verified raw JSON bytes. It does not rebuild the signed payload from parsed request data.
 
 The trigger emits one item per event. Batches posted as `{ "events": [...] }` or `{ "messages": [...] }` are expanded. Each item includes `event`, `instanceId`, `chat` (copied from `chatId` when needed), and `text`. `message.received` from WA MCP also includes `isFromMe`.
 
@@ -44,12 +44,12 @@ The Events field is a comma-separated allowlist. The default is `message.receive
 
 ## Actions
 
-| Operation | MCP tool |
-| --- | --- |
-| Send Text | `wa_send_text` |
-| Send Image | `wa_send_image` |
-| Send Audio | `wa_send_audio` |
-| Send Document | `wa_send_document` |
+| Operation           | MCP tool                 |
+| ------------------- | ------------------------ |
+| Send Text           | `wa_send_text`           |
+| Send Image          | `wa_send_image`          |
+| Send Audio          | `wa_send_audio`          |
+| Send Document       | `wa_send_document`       |
 | Get Instance Status | `wa_get_instance_status` |
 
 Sends go through the normal WA MCP queue and return `{ "status": "queued", "jobId": "..." }`.
@@ -65,3 +65,7 @@ Import [`examples/reply-on-message.json`](examples/reply-on-message.json).
 If two automations both reply, they can loop. Add a per-chat cooldown in the workflow, and skip a chat that was already answered in the last few minutes, before Send text.
 
 Replace the credential placeholder and the trigger secret, set `WA_EVENT_WEBHOOK_URL` and `WA_EVENT_WEBHOOK_SECRET`, and activate the workflow. A pinned sample item is included so the send node can be inspected before a live event arrives.
+
+## Validation limits
+
+Synthetic tests cover authentication failures, signed payloads, session cleanup, and the example filters. Installation and execution in a real n8n instance remain unverified. Signatures expire after 300 seconds but do not provide durable replay deduplication; workflows should deduplicate message IDs before sending.

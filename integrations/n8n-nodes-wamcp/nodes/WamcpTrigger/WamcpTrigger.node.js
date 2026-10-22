@@ -1,6 +1,10 @@
 "use strict";
 
-const { filterTriggerEvents, headerValue, verifyEventSignature } = require("../../lib/protocol.cjs");
+const {
+  filterTriggerEvents,
+  headerValue,
+  verifyEventSignature,
+} = require("../../lib/protocol.cjs");
 
 class WamcpTrigger {
   constructor() {
@@ -62,7 +66,15 @@ class WamcpTrigger {
       return { noWebhookResponse: true };
     }
     const events = this.getNodeParameter("events");
-    const matched = filterTriggerEvents(this.getBodyData(), events);
+    // Emit only the bytes authenticated above, even if a middleware changed req.body.
+    let body;
+    try {
+      body = JSON.parse(request.rawBody.toString("utf8"));
+    } catch {
+      this.getResponseObject().status(400).json({ error: "Invalid JSON" });
+      return { noWebhookResponse: true };
+    }
+    const matched = filterTriggerEvents(body, events);
     return { workflowData: [matched.map((json) => ({ json }))] };
   }
 }

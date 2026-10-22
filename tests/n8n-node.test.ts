@@ -1,7 +1,7 @@
 import { createHmac } from "node:crypto";
 import { createRequire } from "node:module";
 import { readFileSync } from "node:fs";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 const require = createRequire(import.meta.url);
 const protocol = require("../integrations/n8n-nodes-wamcp/lib/protocol.cjs") as {
@@ -30,7 +30,20 @@ const protocol = require("../integrations/n8n-nodes-wamcp/lib/protocol.cjs") as 
   }) => boolean;
 };
 const { Wamcp } = require("../integrations/n8n-nodes-wamcp/nodes/Wamcp/Wamcp.node.js") as {
-  Wamcp: new () => { description: { name: string; properties: Array<{ name: string }> } };
+  Wamcp: new () => {
+    description: {
+      name: string;
+      properties: Array<{ name: string }>;
+      credentials: Array<{ testedBy: string }>;
+    };
+    methods: {
+      credentialTest: {
+        wamcpApiTest: (credential: {
+          data: { baseUrl: string; apiKey: string };
+        }) => Promise<{ status: string; message: string }>;
+      };
+    };
+  };
 };
 const { WamcpTrigger } =
   require("../integrations/n8n-nodes-wamcp/nodes/WamcpTrigger/WamcpTrigger.node.js") as {
@@ -117,6 +130,48 @@ describe("n8n WA MCP nodes", () => {
     });
   });
 
+  it.each([true, false])(
+    "tests the API key through MCP authentication (valid=%s), without a tool call",
+    async (valid) => {
+      const action = new Wamcp();
+      const httpRequest = vi.fn(
+        async (request: {
+          method: string;
+          url: string;
+          headers: Record<string, string>;
+          body?: { method: string };
+        }) => {
+          if (request.body?.method === "initialize") {
+            if (!valid) throw new Error("401 Unauthorized");
+            return {
+              headers: { "mcp-session-id": "credential-test" },
+              body: { jsonrpc: "2.0", id: 1, result: { protocolVersion: "2024-11-05" } },
+            };
+          }
+          return { headers: {}, body: "" };
+        },
+      );
+      const result = await action.methods.credentialTest.wamcpApiTest.call(
+        { helpers: { httpRequest } },
+        {
+          data: { baseUrl: "https://wamcp.example.test", apiKey: valid ? "test-key" : "wrong-key" },
+        },
+      );
+      expect(action.description.credentials[0]?.testedBy).toBe("wamcpApiTest");
+      expect(result.status).toBe(valid ? "OK" : "Error");
+      expect(httpRequest.mock.calls[0]?.[0]).toMatchObject({
+        url: "https://wamcp.example.test/mcp",
+        headers: { authorization: `Bearer ${valid ? "test-key" : "wrong-key"}` },
+      });
+      expect(httpRequest.mock.calls.map(([request]) => request.method)).toEqual(
+        valid ? ["POST", "POST", "DELETE"] : ["POST"],
+      );
+      expect(
+        httpRequest.mock.calls.some(([request]) => request.body?.method === "tools/call"),
+      ).toBe(false);
+    },
+  );
+
   it("fires the example reply flow from a message event", () => {
     const flow = JSON.parse(
       readFileSync(
@@ -179,9 +234,9 @@ describe("n8n WA MCP nodes", () => {
     expect(
       protocol.isDirectIncomingEvent({ chat: "120363000000000001@g.us", isFromMe: false }),
     ).toBe(false);
-    expect(
-      protocol.isDirectIncomingEvent({ chat: "status@broadcast", isFromMe: false }),
-    ).toBe(false);
+    expect(protocol.isDirectIncomingEvent({ chat: "status@broadcast", isFromMe: false })).toBe(
+      false,
+    );
     expect(
       protocol.isDirectIncomingEvent({ chat: "123456789012345@newsletter", isFromMe: false }),
     ).toBe(false);
@@ -237,7 +292,7 @@ describe("n8n WA MCP nodes", () => {
     trigger.getBodyData = () => ({
       event: "message.received",
       chat: "15551234567@s.whatsapp.net",
-      text: "Hello",
+      text: "Tampered parsed body",
       isFromMe: false,
     });
     const accepted = await trigger.webhook();
@@ -256,6 +311,29 @@ describe("n8n WA MCP nodes", () => {
       },
     };
     trigger.getResponseObject = () => response;
+    for (const overrides of [
+      { secret: "" },
+      { secret: "wrong" },
+      { timestamp: "" },
+      { timestamp: String(nowSeconds - 301) },
+      { signature: "sha256=bad" },
+      { rawBody: Buffer.from('{"event":"message.received","text":"forged"}') },
+    ]) {
+      expect(
+        protocol.verifyEventSignature({
+          secret,
+          rawBody,
+          timestamp,
+          signature,
+          nowSeconds,
+          ...overrides,
+        }),
+      ).toBe(false);
+    }
+    trigger.getHeaderData = () => ({});
+    const unsigned = await trigger.webhook();
+    expect(unsigned).toEqual({ noWebhookResponse: true });
+    expect(response.statusCode).toBe(401);
     trigger.getRequestObject = () => ({});
     const rejected = await trigger.webhook();
     expect(response.statusCode).toBe(401);
