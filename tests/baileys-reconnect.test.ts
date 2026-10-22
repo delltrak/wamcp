@@ -9,6 +9,7 @@ import {
 } from "../src/constants.js";
 import type { BaileysAdapter } from "../src/channels/baileys/baileys.adapter.js";
 import { useSqliteAuthState } from "../src/channels/baileys/baileys.auth.js";
+import { getWaVersion } from "../src/channels/baileys/baileys.version.js";
 import { InstanceManager } from "../src/services/instance-manager.js";
 import { MaintenanceService } from "../src/services/maintenance.js";
 import type { ChannelEventPayload } from "../src/types/channel.types.js";
@@ -297,6 +298,37 @@ describe("Baileys reconnect after unavailable service", () => {
     await vi.advanceTimersByTimeAsync(RECONNECT_MAX_DELAY_MS * 2);
     expect(mocks.makeWASocket.mock.calls.length).toBe(socketsBeforeRetry);
   });
+
+  it.each([false, true])(
+    "stops an in-flight reconnect after late logout (version lookup fails: %s)",
+    async (lookupFails) => {
+      vi.useFakeTimers();
+      const { manager, id, adapter } = await createConnectedInstance();
+      const disconnected: ChannelEventPayload["instance.disconnected"][] = [];
+      adapter.on("instance.disconnected", (payload) => disconnected.push(payload));
+      const versionLookup = Promise.withResolvers<Awaited<ReturnType<typeof getWaVersion>>>();
+      vi.mocked(getWaVersion).mockReturnValueOnce(versionLookup.promise);
+
+      closeSocket(0, DisconnectReason.unavailableService);
+      await vi.advanceTimersByTimeAsync(RECONNECT_INITIAL_DELAY_MS);
+      // The timer has fired and loaded credentials, but no replacement socket exists yet.
+      expect(mocks.makeWASocket).toHaveBeenCalledTimes(1);
+      expect(adapter.getStatus()).toBe("connecting");
+      closeSocket(0, DisconnectReason.loggedOut);
+      expect(authKeyCount(id)).toBe(0);
+
+      if (lookupFails) versionLookup.reject(new Error("Version lookup failed"));
+      else versionLookup.resolve({ version: [2, 3000, 0], isLatest: true });
+      await vi.advanceTimersByTimeAsync(RECONNECT_MAX_DELAY_MS * 2);
+
+      expect(mocks.makeWASocket).toHaveBeenCalledTimes(1);
+      expect(manager.hasLiveSocket(id)).toBe(false);
+      expect(adapter.getStatus()).toBe("disconnected");
+      expect(instanceStatus(id)).toBe("disconnected");
+      expect(authKeyCount(id)).toBe(0);
+      expect(disconnected.at(-1)).toMatchObject({ loggedOut: true, willReconnect: false });
+    },
+  );
 
   it("recovers a stuck connecting status when no socket is live", async () => {
     const manager = new InstanceManager();

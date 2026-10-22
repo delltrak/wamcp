@@ -1768,11 +1768,15 @@ export class BaileysAdapter implements ChannelAdapter {
 
   private async openSocket(): Promise<void> {
     const { state, saveCreds } = await useSqliteAuthState(this.instanceId);
+    if (this.reconnectSuspended) return;
     this.saveCreds = saveCreds;
     this.authMeId = state.creds.me?.id;
     this.authMeLid = state.creds.me?.lid;
 
     const { version } = await getWaVersion();
+    // Logout/disconnect may arrive while auth or version lookup is awaiting.
+    // Do not start a replacement connection with credentials from that attempt.
+    if (this.reconnectSuspended) return;
     const requestFullHistory = !this.hasStoredMessages();
 
     const sock = makeWASocket({
@@ -6177,6 +6181,7 @@ export class BaileysAdapter implements ChannelAdapter {
         this.sock = null;
         let reconnectInMs: number | null = null;
         if (loggedOut) {
+          this.reconnectSuspended = true;
           logger.info({ instanceId: this.instanceId }, "Logged out, clearing auth");
           clearAuthState(this.instanceId);
           this.clearReconnectTimer();
@@ -6861,6 +6866,7 @@ export class BaileysAdapter implements ChannelAdapter {
     if (statusCode !== DisconnectReason.loggedOut) return;
 
     const closedAt = Date.now();
+    this.reconnectSuspended = true;
     logger.info({ instanceId: this.instanceId }, "Logged out, clearing auth");
     clearAuthState(this.instanceId);
     this.clearReconnectTimer();
