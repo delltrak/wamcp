@@ -15,6 +15,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Added community hierarchy discovery and 16 administration tools for linked-group creation,
+  name/description/picture editing, scoped member lists, member/admin changes, join requests,
+  invitations (including V4), community settings, and queued text/media announcements to Avisos
+  ([#166](https://github.com/delltrak/wamcp/issues/166), [#167](https://github.com/delltrak/wamcp/pull/167)).
+  Administrative writes retain the existing write gates and permission checks; member removal
+  requires confirmation because it also affects linked groups. Cloud API explicitly rejects
+  unsupported community operations.
+- Added community metadata and join-request events to MCP notifications and outgoing webhooks,
+  with safe metadata filtering and snapshot deduplication. Avisos sends resolve the destination
+  from explicit hierarchy metadata and revalidate permissions and destination in the queue worker.
+  Real-account validation remains pending; community deactivation and visibility/non-admin
+  subgroup-creation controls are not implemented because upstream support is unverified.
 - Added Baileys instance lifecycle webhooks for connection, disconnect, pairing-code, and QR events,
   plus the read-only `wa_get_instance_status` tool. Pairing and QR challenge data is omitted from
   webhook payloads and status output.
@@ -40,6 +52,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Community discovery, description updates and invitation inspection/acceptance now use the
+  Baileys group helpers for standard group responses while verifying explicit community markers.
+  Missing creation/join acknowledgements remain unknown instead of reporting confirmed success
+  or triggering automatic retries. Provider resource-not-found errors are no longer mislabeled
+  as missing MCP instances.
 - Baileys message operations now resolve full stored keys, including group authorship and ownership.
 - Fast Baileys reconnects now persist `status`, `last_connected`, and `last_disconnected`.
   Each socket open stores `connected` and `last_connected`. A close that ends that open stores
