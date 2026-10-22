@@ -592,6 +592,8 @@ export interface NormalizedMessageEvent {
     sender: string;
     /** LID for the sender when WhatsApp also supplied another sender JID. */
     senderLid?: string;
+    /** Phone JID supplied alongside a group sender's LID, for identity filtering. */
+    senderPn?: string;
     timestamp: number;
     type: MessageType;
     content: string | null;

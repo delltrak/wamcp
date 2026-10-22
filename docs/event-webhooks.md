@@ -62,11 +62,14 @@ An entry with one `*` in the user part is a prefix or suffix wildcard, for examp
 `@s.whatsapp.net`) and follows the chat-only rule. Every other entry is an exact JID.
 Exact and starred entries match the
 chat, the sender (`message.sender`, `participant`, `callerId`, `reactedBy`, `deletedBy`, `author`,
-`contactId`), and LID aliases (`chatLid`, `senderLid`, `fromLid`, `participantLid`). Participant
+`contactId`), phone aliases (`message.senderPn`), and LID aliases (`chatLid`, `senderLid`, `fromLid`, `participantLid`). Participant
 arrays are not scanned. Comparison is case-insensitive, and a device suffix (`:12` immediately
 before `@`) is ignored on both the entry and the candidate.
 
-A LID-only message has no phone alias on the event. Before exact and starred matching, the filter
+A group message retains the phone alias supplied in Baileys' `participantAlt` even when
+the primary sender is a LID and no contact mapping has been stored. This alias is used for
+filtering and does not change the primary sender or the outgoing webhook body.
+Before exact and starred matching, the filter also
 looks up `contacts` for that instance (`jid`, `lid`, or `phone`) and adds the stored phone JID and
 LID. If that row is missing, list both forms. Address wildcards do not use this lookup.
 

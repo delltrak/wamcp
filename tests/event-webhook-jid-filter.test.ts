@@ -45,6 +45,66 @@ function destination(env: Record<string, string | undefined> = {}) {
 }
 
 describe("WA_EVENT_WEBHOOK_IGNORE_JIDS", () => {
+  it.each([
+    ["notify", "557712345678@s.whatsapp.net"],
+    ["notify", "5577*@s.whatsapp.net"],
+    ["append", "557712345678@s.whatsapp.net"],
+    ["append", "5577*@s.whatsapp.net"],
+  ] as const)(
+    "filters %s group sender phone aliases with %s before contacts are stored",
+    async (type, pattern) => {
+      const instanceId = `unmapped_${randomUUID()}`;
+      const events = normalizeMessagesUpsert(instanceId, {
+        type,
+        messages: ["557712345678:3@s.whatsapp.net", "5511888888888@s.whatsapp.net"].map(
+          (phone, index) => ({
+            key: {
+              id: `alias-${index}`,
+              remoteJid: "120363999000111@g.us",
+              participant: `${111222333 + index}@lid`,
+              participantAlt: phone,
+              fromMe: false,
+            },
+            message: { conversation: "group message" },
+            messageTimestamp: 1_700_000_000,
+          }),
+        ),
+      });
+      expect(events[0]?.message.sender).toBe("111222333@lid");
+      expect(
+        shouldSendEventWebhook(
+          "message.received",
+          events[0]!,
+          destination({ WA_EVENT_WEBHOOK_IGNORE_JIDS: "@s.whatsapp.net" }),
+        ),
+      ).toBe(true);
+
+      let handler: Parameters<InstanceManager["onAnyEvent"]>[0] | undefined;
+      const manager = {
+        onAnyEvent: (next: Parameters<InstanceManager["onAnyEvent"]>[0]) => {
+          handler = next;
+          return () => undefined;
+        },
+      } as unknown as InstanceManager;
+      const config = loadEventWebhookConfig({
+        WA_EVENT_WEBHOOK_URL: URL,
+        WA_EVENT_WEBHOOK_IGNORE_JIDS: pattern,
+      });
+      const enqueue = vi.fn((_: EventWebhookJob) => Promise.resolve());
+      const unsubscribe = registerEventWebhookHandler(manager, config, enqueue);
+      try {
+        for (const event of events) handler?.("message.received", instanceId, event);
+        await Promise.resolve();
+        expect(enqueue).toHaveBeenCalledTimes(1);
+        expect(enqueue.mock.calls[0]?.[0].payload).toMatchObject({ sender: "111222334@lid" });
+        expect(JSON.stringify(enqueue.mock.calls[0]?.[0].payload)).not.toContain("senderPn");
+      } finally {
+        unsubscribe();
+        await unsubscribe.flush();
+      }
+    },
+  );
+
   it("stays unset by default and still forwards group traffic", () => {
     const config = loadEventWebhookConfig({ WA_EVENT_WEBHOOK_URL: URL });
     expect(config.destinations[0]).not.toHaveProperty("ignoreJids");

@@ -766,6 +766,7 @@ export function eventIgnoreJidSets(payload: ChannelEventPayload[ChannelEvent]): 
   addJidCandidate(identityJids, data.participantLid);
   addJidCandidate(identityJids, message.sender);
   addJidCandidate(identityJids, message.senderLid);
+  addJidCandidate(identityJids, message.senderPn);
   return { chatJids, identityJids };
 }
 

@@ -675,16 +675,24 @@ function lidJid(value: string | null | undefined): string | undefined {
   return value;
 }
 
-/** LID identities that remain after phone-number normalization, for webhook JID filters. */
-export function messageLidFields(msg: WAMessage): { chatLid?: string; senderLid?: string } {
+/** Preserve PN/LID aliases supplied on the message for webhook JID filters. */
+export function messageIdentityFields(msg: WAMessage): {
+  chatLid?: string;
+  senderLid?: string;
+  senderPn?: string;
+} {
   const chatLid = lidJid(msg.key.remoteJid) ?? lidJid(msg.key.remoteJidAlt);
   const senderLid =
     lidJid(msg.key.participant) ??
     lidJid(msg.key.participantAlt) ??
     (msg.key.participant ? undefined : chatLid);
+  const senderPn = [msg.key.participant, msg.key.participantAlt].find((jid) =>
+    jid?.endsWith("@s.whatsapp.net"),
+  );
   return {
     ...(chatLid ? { chatLid } : {}),
     ...(senderLid ? { senderLid } : {}),
+    ...(senderPn ? { senderPn } : {}),
   };
 }
 
@@ -706,19 +714,20 @@ export function normalizeMessagesUpsert(
       normalizeLidInMessage(msg);
       const details = extractMessageDetails(msg);
       const chatId = getChatJid(msg);
-      const lids = messageLidFields(msg);
+      const identities = messageIdentityFields(msg);
       const isGroup = chatId.endsWith("@g.us");
       return {
         instanceId,
         chatId,
-        ...(lids.chatLid ? { chatLid: lids.chatLid } : {}),
+        ...(identities.chatLid ? { chatLid: identities.chatLid } : {}),
         chatName: isGroup ? null : (msg.pushName ?? null),
         senderName: msg.pushName ?? null,
         isGroup,
         message: {
           id: msg.key.id ?? "",
           sender: getSenderJid(msg),
-          ...(lids.senderLid ? { senderLid: lids.senderLid } : {}),
+          ...(identities.senderLid ? { senderLid: identities.senderLid } : {}),
+          ...(identities.senderPn ? { senderPn: identities.senderPn } : {}),
           timestamp: messageTimestampToSeconds(msg.messageTimestamp, 0),
           type: details.type,
           content: details.content,

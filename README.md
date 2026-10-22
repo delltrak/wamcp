@@ -588,8 +588,9 @@ chat that also has a LID alias and
 `@s.whatsapp.net` does not hide a group message from a phone sender. Exact and
 starred entries still match the chat, the sender, and LID aliases. Matching is
 case-insensitive and ignores a `:device` suffix. A LID-only message is also
-compared with the phone JID stored on that contact; list both forms when no
-contact row exists. A trailing comma is ignored. Unset or empty forwards every
+compared with the phone JID stored on that contact. Group sender phone aliases supplied
+by WhatsApp are used even before contacts are stored; list both forms when neither
+an alias nor a contact mapping is available. A trailing comma is ignored. Unset or empty forwards every
 chat. Messages stay stored; only the webhook is skipped. A destination
 `ignoreJids` array is added to that global list. Lifecycle `instance.*` events
 are not filtered. Set `WA_WEBHOOK_DEBOUNCE_MS` to batch incoming
