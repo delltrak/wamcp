@@ -16,7 +16,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   requires a WABA ID and `whatsapp_business_management` permission; Baileys is unsupported for
   templates. Inspection never starts a worker or retries a send; queue completion does not prove
   recipient delivery, and old or cleaned-up jobs may lack results. Cloud receipts are stored as
-  metadata without OTP content. See [discovery and tracking](docs/channel-discovery.md).
+  metadata without OTP content. See [discovery and tracking](docs/channel-discovery.md)
+  ([#171](https://github.com/delltrak/wamcp/pull/171)).
 
 - Added `wa_send_otp` for native Cloud API AUTHENTICATION templates with an OTP copy-code button.
   Backend-generated codes are encrypted in Redis, have a bounded queue deadline and a request ID,
