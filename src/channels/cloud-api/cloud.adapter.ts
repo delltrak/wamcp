@@ -16,6 +16,7 @@ import {
 } from "../../services/media.js";
 import { MEDIA_LIMITS } from "../../constants.js";
 import type {
+  OtpOptions,
   ConnectionStatus,
   MessageContent,
   MessageResponse,
@@ -73,6 +74,9 @@ import type {
 import { searchStoredMessages } from "../../services/message-search.js";
 import { createChildLogger } from "../../utils/logger.js";
 import { getAutoReadMode, scheduleIncomingMessageRead } from "../../services/auto-read.js";
+
+import { OtpOptionsSchema } from "../../schemas/otp.schema.js";
+import { normalizeOtpRecipient } from "../../utils/otp.js";
 
 const logger = createChildLogger({ service: "cloud-api-adapter" });
 
@@ -318,6 +322,39 @@ export class CloudApiAdapter implements ChannelAdapter {
 
   async supportsNativeGroupMentionAll(): Promise<boolean> {
     return false;
+  }
+
+  async sendOtp(to: string, options: OtpOptions): Promise<MessageResponse> {
+    const phone = normalizeOtpRecipient(to);
+    if (!OtpOptionsSchema.safeParse(options).success)
+      throw new Error("Invalid OTP template parameters.");
+    try {
+      const response = await this.sendRaw({
+        recipient_type: "individual",
+        to: phone,
+        type: "template",
+        template: {
+          name: options.templateName,
+          language: { code: options.languageCode },
+          components: [
+            { type: "body", parameters: [{ type: "text", text: options.otpCode }] },
+            {
+              type: "button",
+              sub_type: "url",
+              index: "0",
+              parameters: [{ type: "text", text: options.otpCode }],
+            },
+          ],
+        },
+      });
+      if (!response.messages?.[0]?.id) throw new Error("No message ID");
+      return this.toMessageResponse(response);
+    } catch {
+      // Provider error strings may echo template arguments. Never attach the original error.
+      throw new Error(
+        "Cloud API OTP send failed; delivery may be uncertain. Check template approval, language and credentials before issuing a new code.",
+      );
+    }
   }
 
   async sendMessage(to: string, content: MessageContent): Promise<MessageResponse> {

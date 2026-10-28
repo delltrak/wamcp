@@ -2,6 +2,18 @@
 // WA MCP — Message Queue (BullMQ)
 // ============================================================
 
+import { createHash } from "node:crypto";
+import {
+  otpBinding,
+  otpContext,
+  otpEncryptionKey,
+  normalizeOtpRecipient,
+  sealOtp,
+  openOtp,
+  type OtpEnvelope,
+} from "../utils/otp.js";
+import { OtpOptionsSchema } from "../schemas/otp.schema.js";
+import type { OtpOptions } from "../types/channel.types.js";
 import { Queue, UnrecoverableError, Worker, type Job } from "bullmq";
 import type { ChannelAdapter } from "../channels/channel.interface.js";
 import type { ChannelType, MessageContent } from "../types/channel.types.js";
@@ -22,6 +34,14 @@ import { getRedisConnectionOptions } from "./redis.js";
 const logger = createChildLogger({ service: "message-queue" });
 
 export type OutboundJob =
+  | {
+      kind: "otp";
+      instanceId: string;
+      to: string;
+      expiresAt: number;
+      binding: string;
+      envelope?: OtpEnvelope;
+    }
   | {
       kind: "community-announcement";
       instanceId: string;
@@ -128,6 +148,34 @@ export class MessageQueue {
           throw new Error("Adapter resolver not set");
         }
         const data = job.data as OutboundJob;
+        if (data.kind === "otp") {
+          try {
+            if (!data.envelope || !Number.isFinite(data.expiresAt) || Date.now() >= data.expiresAt)
+              throw new Error("OTP queue deadline passed or payload was already consumed");
+            const options = openOtp(
+              data.envelope,
+              otpContext(data.instanceId, data.to, data.expiresAt),
+              otpEncryptionKey(),
+            );
+            // Persist consumption before the side effect. A stalled/restarted worker must
+            // never resend a code that may already have reached the provider.
+            await job.updateData({ ...data, envelope: undefined });
+            return await this.getAdapter(data.instanceId).sendOtp(data.to, options);
+          } catch {
+            throw new UnrecoverableError(
+              "OTP was not confirmed; it may have expired or delivery may be uncertain. Do not automatically resend.",
+            );
+          } finally {
+            try {
+              await job.updateData({ ...data, envelope: undefined });
+            } catch {
+              logger.warn(
+                { instanceId: data.instanceId, jobId: job.id },
+                "Encrypted OTP payload cleanup deferred to queue retention",
+              );
+            }
+          }
+        }
         const adapter = this.getAdapter(data.instanceId);
         try {
           if (data.kind === "community-announcement") {
@@ -207,6 +255,59 @@ export class MessageQueue {
       { attempts: 1 },
     );
     return { status: "queued", jobId: job.id ?? "", to };
+  }
+
+  /** Encrypted, deadline-bound native OTP. A retained request ID never sends twice. */
+  async enqueueOtp(
+    instanceId: string,
+    to: string,
+    options: OtpOptions,
+    requestId: string,
+    deliveryTtlSeconds = 120,
+  ): Promise<EnqueueResult & { deliverBefore: string }> {
+    if (
+      !OtpOptionsSchema.safeParse(options).success ||
+      !/^[A-Za-z0-9_-]{8,128}$/.test(requestId) ||
+      !Number.isInteger(deliveryTtlSeconds) ||
+      deliveryTtlSeconds < 10 ||
+      deliveryTtlSeconds > 600
+    )
+      throw new Error("Invalid OTP request parameters.");
+    const phone = normalizeOtpRecipient(to),
+      key = otpEncryptionKey();
+    const binding = otpBinding(instanceId, phone, options, key);
+    const jobId =
+      "otp-" +
+      createHash("sha256")
+        .update(JSON.stringify([instanceId, phone, requestId]))
+        .digest("hex");
+    const queue = this.getOrCreateQueue(instanceId, "cloud");
+    let job = await queue.getJob(jobId);
+    if (!job) {
+      const expiresAt = Date.now() + deliveryTtlSeconds * 1000;
+      const data: OutboundJob = {
+        kind: "otp",
+        instanceId,
+        to: phone,
+        expiresAt,
+        binding,
+        envelope: sealOtp(options, otpContext(instanceId, phone, expiresAt), key),
+      };
+      await queue.add("otp", data, {
+        jobId,
+        attempts: 1,
+        removeOnComplete: { age: 86400 },
+        removeOnFail: { age: 86400 },
+      });
+      job = await queue.getJob(jobId);
+    }
+    // Re-read after add: BullMQ may have deduplicated a concurrent producer.
+    const stored = job?.data as OutboundJob | undefined;
+    if (stored?.kind !== "otp" || stored.binding !== binding)
+      throw new Error(
+        "OTP requestId is already bound to another payload, or the queue result could not be confirmed.",
+      );
+    return { status: "queued", jobId, deliverBefore: new Date(stored.expiresAt).toISOString() };
   }
 
   /** Enqueue an outbound message */

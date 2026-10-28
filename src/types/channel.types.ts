@@ -183,6 +183,13 @@ export type PrivacyUpdate =
 
 // ---- Message Content Types ----
 
+/** Native Cloud API AUTHENTICATION template; code validity is enforced by the caller. */
+export interface OtpOptions {
+  templateName: string;
+  languageCode: string;
+  otpCode: string;
+}
+
 export interface TextContent {
   type: "text";
   text: string;

@@ -18,6 +18,11 @@ export const logger = pino(
         ? { target: "pino-pretty", options: { colorize: true, destination: isStdio ? 2 : 1 } }
         : undefined,
     redact: [
+      "otpCode",
+      "*.otpCode",
+      "params.otpCode",
+      "WA_OTP_ENCRYPTION_KEY",
+      "*.WA_OTP_ENCRYPTION_KEY",
       "headers.authorization",
       "*.accessToken",
       "*.cloudAccessToken",

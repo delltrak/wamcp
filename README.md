@@ -36,7 +36,7 @@
 
 **WA MCP** is a WhatsApp MCP server built with TypeScript that gives AI agents full access to WhatsApp through the [Model Context Protocol](https://modelcontextprotocol.io). It supports both **Baileys** (WhatsApp Web) and **Meta Cloud API** as dual-channel backends, deployable with **Docker** in a single command.
 
-Your agent connects once and auto-discovers **163 tools**, **10 resources**, and **22 real-time events** — zero configuration, zero REST wrappers, zero glue code. Three instance webhook tools are added when `WA_INSTANCE_WEBHOOK_TOOLS_ENABLED=true`.
+Your agent connects once and auto-discovers **164 tools**, **10 resources**, and **22 real-time events** — zero configuration, zero REST wrappers, zero glue code. Three instance webhook tools are added when `WA_INSTANCE_WEBHOOK_TOOLS_ENABLED=true`.
 
 ```
 Your AI Agent ←→ MCP Protocol ←→ WA MCP ←→ WhatsApp
@@ -82,7 +82,7 @@ from google.adk.tools.mcp_tool import McpToolset
 
 tools = McpToolset(url="http://localhost:3000/mcp")
 
-# Agent auto-discovers 163 WhatsApp tools
+# Agent auto-discovers 164 WhatsApp tools
 # wa_create_instance, wa_send_text, wa_send_image, ...
 ```
 
@@ -148,9 +148,16 @@ Add to your `claude_desktop_config.json`:
 
 ---
 
+Native OTP delivery is available through `wa_send_otp` on Cloud API instances with an approved
+AUTHENTICATION template. The backend supplies and validates the code; WAMCP queues it encrypted,
+rejects groups, and does not automatically retry an uncertain send. Set `WA_OTP_ENCRYPTION_KEY`
+(a private 32-byte key encoded as 64 hex characters). The delivery deadline is separate from code
+validity and the template's expiry footer. Baileys does not support native authentication templates.
+See [OTP delivery](docs/otp.md).
+
 ## 🛠️ Tools
 
-WA MCP exposes **163 tools** across 17 domains. All tools use the `wa_` prefix.
+WA MCP exposes **164 tools** across 17 domains. All tools use the `wa_` prefix.
 `WA_INSTANCE_WEBHOOK_TOOLS_ENABLED=true` adds the three #142 instance webhook tools.
 
 <details>
@@ -174,11 +181,12 @@ WA MCP exposes **163 tools** across 17 domains. All tools use the `wa_` prefix.
 </details>
 
 <details>
-<summary>💬 <strong>Messaging</strong> (32 tools)</summary>
+<summary>💬 <strong>Messaging</strong> (33 tools)</summary>
 
 | Tool                   | Description             |
 | ---------------------- | ----------------------- |
 | `wa_send_text`         | Send text message       |
+| `wa_send_otp`          | Native Cloud API authentication template |
 | `wa_send_image`        | Send image with caption; optional compression |
 | `wa_send_video`        | Send video with caption; optional compression |
 | `wa_send_ptv`          | Send a round video note (Baileys) |
@@ -1514,7 +1522,7 @@ src/
 ├── constants.ts                 # Defaults and limits
 ├── server/mcp.ts                # MCP server setup
 ├── server/dashboard.ts          # Optional operations dashboard
-├── tools/                       # 🔧 163 MCP tools (17 files)
+├── tools/                       # 🔧 164 MCP tools (17 files)
 ├── resources/                   # 📖 10 MCP resources (8 files)
 ├── notifications/events.ts      # 📡 15 documented event types
 ├── channels/
