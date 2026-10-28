@@ -36,7 +36,7 @@
 
 **WA MCP** is a WhatsApp MCP server built with TypeScript that gives AI agents full access to WhatsApp through the [Model Context Protocol](https://modelcontextprotocol.io). It supports both **Baileys** (WhatsApp Web) and **Meta Cloud API** as dual-channel backends, deployable with **Docker** in a single command.
 
-Your agent connects once and auto-discovers **164 tools**, **10 resources**, and **22 real-time events** — zero configuration, zero REST wrappers, zero glue code. Three instance webhook tools are added when `WA_INSTANCE_WEBHOOK_TOOLS_ENABLED=true`.
+Your agent connects once and auto-discovers **167 tools**, **10 resources**, and **22 real-time events** — zero configuration, zero REST wrappers, zero glue code. Three instance webhook tools are added when `WA_INSTANCE_WEBHOOK_TOOLS_ENABLED=true`.
 
 ```
 Your AI Agent ←→ MCP Protocol ←→ WA MCP ←→ WhatsApp
@@ -82,7 +82,7 @@ from google.adk.tools.mcp_tool import McpToolset
 
 tools = McpToolset(url="http://localhost:3000/mcp")
 
-# Agent auto-discovers 164 WhatsApp tools
+# Agent auto-discovers 167 WhatsApp tools
 # wa_create_instance, wa_send_text, wa_send_image, ...
 ```
 
@@ -157,11 +157,12 @@ See [OTP delivery](docs/otp.md).
 
 ## 🛠️ Tools
 
-WA MCP exposes **164 tools** across 17 domains. All tools use the `wa_` prefix.
+WA MCP exposes **167 tools** across 17 domains. All tools use the `wa_` prefix.
+See [channel discovery and send tracking](docs/channel-discovery.md) for capability checks, authentication-template discovery and safe queued-job inspection.
 `WA_INSTANCE_WEBHOOK_TOOLS_ENABLED=true` adds the three #142 instance webhook tools.
 
 <details>
-<summary>📋 <strong>Instance Management</strong> (9 tools, plus 3 when enabled)</summary>
+<summary>📋 <strong>Instance Management</strong> (10 tools, plus 3 when enabled)</summary>
 
 | Tool                       | Description                      |
 | -------------------------- | -------------------------------- |
@@ -170,6 +171,7 @@ WA MCP exposes **164 tools** across 17 domains. All tools use the `wa_` prefix.
 | `wa_disconnect_instance`   | Gracefully disconnect            |
 | `wa_delete_instance`       | Permanently remove instance      |
 | `wa_restart_instance`      | Disconnect + reconnect           |
+| `wa_get_channel_capabilities` | Inspect implemented features, requirements and channel limitations |
 | `wa_get_instance_status`   | Read lifecycle status for one or all instances |
 | `wa_get_qr_code`           | Get QR as base64 (Baileys)       |
 | `wa_get_pairing_code`      | Get pairing code (Baileys)       |
@@ -181,11 +183,13 @@ WA MCP exposes **164 tools** across 17 domains. All tools use the `wa_` prefix.
 </details>
 
 <details>
-<summary>💬 <strong>Messaging</strong> (33 tools)</summary>
+<summary>💬 <strong>Messaging</strong> (35 tools)</summary>
 
 | Tool                   | Description             |
 | ---------------------- | ----------------------- |
 | `wa_send_text`         | Send text message       |
+| `wa_list_authentication_templates` | Discover Cloud authentication templates and exact locales |
+| `wa_get_job_status` | Read retained queue outcomes, real message IDs and observed receipt counts |
 | `wa_send_otp`          | Native Cloud API authentication template |
 | `wa_send_image`        | Send image with caption; optional compression |
 | `wa_send_video`        | Send video with caption; optional compression |
@@ -1522,7 +1526,7 @@ src/
 ├── constants.ts                 # Defaults and limits
 ├── server/mcp.ts                # MCP server setup
 ├── server/dashboard.ts          # Optional operations dashboard
-├── tools/                       # 🔧 164 MCP tools (17 files)
+├── tools/                       # 🔧 167 MCP tools (17 files)
 ├── resources/                   # 📖 10 MCP resources (8 files)
 ├── notifications/events.ts      # 📡 15 documented event types
 ├── channels/

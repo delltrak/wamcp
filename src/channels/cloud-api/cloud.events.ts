@@ -148,7 +148,7 @@ function mapStatusToDelivery(status: string): MessageDeliveryStatus | null {
     case "read":
       return "read";
     case "failed":
-      return "sent"; // keep last known status
+      return null; // a delivery failure is not evidence of a successful send
     default:
       return null;
   }
@@ -311,18 +311,21 @@ export function normalizeWebhookPayload(payload: MetaWebhookPayload): Normalized
       // Process status updates
       if (value.statuses) {
         for (const status of value.statuses) {
-          const deliveryStatus = mapStatusToDelivery(status.status);
-          if (!deliveryStatus) continue;
-
           if (status.errors?.length) {
             logger.warn({ messageId: status.id, errors: status.errors }, "Message delivery error");
           }
+          const deliveryStatus = mapStatusToDelivery(status.status);
+          if (!deliveryStatus) continue;
 
           const updateEvent: NormalizedMessageUpdateEvent = {
             instanceId: "", // filled by caller
             chatId: `${status.recipient_id}@s.whatsapp.net`,
             messageId: status.id,
             status: deliveryStatus,
+            timestamp:
+              Number.isSafeInteger(Number(status.timestamp)) && Number(status.timestamp) > 0
+                ? Number(status.timestamp)
+                : undefined,
           };
 
           events.push({

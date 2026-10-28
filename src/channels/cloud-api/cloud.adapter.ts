@@ -16,6 +16,8 @@ import {
 } from "../../services/media.js";
 import { MEDIA_LIMITS } from "../../constants.js";
 import type {
+  AuthenticationTemplateOptions,
+  AuthenticationTemplatesPage,
   OtpOptions,
   ConnectionStatus,
   MessageContent,
@@ -76,6 +78,9 @@ import { createChildLogger } from "../../utils/logger.js";
 import { getAutoReadMode, scheduleIncomingMessageRead } from "../../services/auto-read.js";
 
 import { OtpOptionsSchema } from "../../schemas/otp.schema.js";
+import { AuthenticationTemplateOptionsSchema } from "../../schemas/discovery.schema.js";
+import { authenticationTemplatesPage } from "../../utils/authentication-templates.js";
+import { recordCloudReceipt } from "../../services/delivery-status.js";
 import { normalizeOtpRecipient } from "../../utils/otp.js";
 
 const logger = createChildLogger({ service: "cloud-api-adapter" });
@@ -322,6 +327,34 @@ export class CloudApiAdapter implements ChannelAdapter {
 
   async supportsNativeGroupMentionAll(): Promise<boolean> {
     return false;
+  }
+
+  async listAuthenticationTemplates(
+    options: AuthenticationTemplateOptions,
+  ): Promise<AuthenticationTemplatesPage> {
+    const params = AuthenticationTemplateOptionsSchema.parse(options);
+    this.getCredentials();
+    if (!this.businessId || !/^\d+$/.test(this.businessId)) {
+      throw new Error(
+        "A numeric WhatsApp Business Account (WABA) ID is required. Set businessId with wa_set_cloud_credentials; do not use the Business Portfolio ID.",
+      );
+    }
+    const url = new URL(`${GRAPH_API_BASE}/${this.businessId}/message_templates`);
+    url.searchParams.set("fields", "id,name,language,status,category,components");
+    url.searchParams.set("limit", String(params.limit));
+    if (params.after) url.searchParams.set("after", params.after);
+    try {
+      const response = await this.request<unknown>(url.toString(), {
+        signal: AbortSignal.timeout(15000),
+        redirect: "error",
+      });
+      return authenticationTemplatesPage(response, params.approvedOnly);
+    } catch {
+      // Provider errors and paging URLs can include access tokens or template examples.
+      throw new Error(
+        "Could not list authentication templates. Check the WABA ID, token permissions (whatsapp_business_management), pagination cursor and Meta availability.",
+      );
+    }
   }
 
   async sendOtp(to: string, options: OtpOptions): Promise<MessageResponse> {
@@ -1475,6 +1508,22 @@ export class CloudApiAdapter implements ChannelAdapter {
 
   /** Emit an event to registered listeners. Public so the webhook handler can use it. */
   async emit<E extends ChannelEvent>(event: E, payload: ChannelEventPayload[E]): Promise<void> {
+    if (event === "message.updated") {
+      const update = payload as ChannelEventPayload["message.updated"];
+      if (update.status === "delivered" || update.status === "read") {
+        try {
+          await recordCloudReceipt(
+            this.instanceId,
+            update.chatId,
+            update.messageId,
+            update.status,
+            update.timestamp ?? Math.floor(Date.now() / 1000),
+          );
+        } catch (err) {
+          logger.error({ err, messageId: update.messageId }, "Could not persist Cloud API receipt");
+        }
+      }
+    }
     if (event === "message.received") {
       const messageEvent = payload as ChannelEventPayload["message.received"];
       await this.persistMediaMessage(messageEvent);

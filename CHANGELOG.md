@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Added read-only `wa_get_channel_capabilities`, `wa_list_authentication_templates` and
+  `wa_get_job_status`. Agents can inspect implemented channel features/requirements, discover
+  Cloud AUTHENTICATION template approval/locales/copy-code compatibility, and correlate retained
+  queued jobs with safe WhatsApp message IDs and observed receipt counts. Template discovery
+  requires a WABA ID and `whatsapp_business_management` permission; Baileys is unsupported for
+  templates. Inspection never starts a worker or retries a send; queue completion does not prove
+  recipient delivery, and old or cleaned-up jobs may lack results. Cloud receipts are stored as
+  metadata without OTP content. See [discovery and tracking](docs/channel-discovery.md)
+  ([#171](https://github.com/delltrak/wamcp/pull/171)).
+
 - Added `wa_send_otp` for native Cloud API AUTHENTICATION templates with an OTP copy-code button.
   Backend-generated codes are encrypted in Redis, have a bounded queue deadline and a request ID,
   and are consumed before sending so uncertain outcomes and stalled workers are not resent.
@@ -19,6 +29,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ([#170](https://github.com/delltrak/wamcp/pull/170)); live Meta template delivery remains unverified.
 
 ### Fixed
+
+- Cloud delivery failures are no longer normalized as successful `sent` events. Delivered/read
+  receipts persist for job tracking in the same millisecond units as existing Baileys receipts,
+  and do not regress when webhooks arrive out of order.
 
 - Updated transitive `body-parser` to 2.4.0 and `qs` to 6.17.0 to address the production
   dependency audit findings GHSA-27r3-jxmh-p828 and GHSA-6pq8-jhm2-2vcw.

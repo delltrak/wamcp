@@ -15,6 +15,8 @@ import { toolSuccess } from "../types/mcp.types.js";
 import { handleToolError } from "../utils/tool-handler.js";
 import { createRequestLogger } from "../utils/logger.js";
 import { registerInstanceWebhookTools } from "./instance-webhook.tools.js";
+import { GetChannelCapabilitiesSchema } from "../schemas/discovery.schema.js";
+import { getChannelCapabilities } from "../services/channel-capabilities.js";
 import {
   CreateInstanceSchema,
   ConnectInstanceSchema,
@@ -36,6 +38,37 @@ export function registerInstanceTools(
   if (instanceWebhookToolsEnabled()) {
     registerInstanceWebhookTools(server, eventWebhook);
   }
+
+  server.registerTool(
+    "wa_get_channel_capabilities",
+    {
+      description:
+        "Inspect implemented channel features, representative tools, requirements and limitations for an existing instance. Works while disconnected; does not connect or probe WhatsApp. Support is not permission or proof that prerequisites are configured. This is a feature summary, not the complete tool catalog.",
+      inputSchema: GetChannelCapabilitiesSchema,
+      annotations: {
+        readOnlyHint: true,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: false,
+      },
+    },
+    async (params) => {
+      const log = createRequestLogger("wa_get_channel_capabilities", params.instanceId);
+      try {
+        const [instance] = await instanceManager.getInstanceLifecycleStatuses(params.instanceId);
+        const features = getChannelCapabilities(instance.channel);
+        log.info({ channel: instance.channel }, "Channel capabilities inspected");
+        return toolSuccess({
+          instanceId: params.instanceId,
+          channel: instance.channel,
+          connectionState: instance.state,
+          features,
+        });
+      } catch (err) {
+        return handleToolError("wa_get_channel_capabilities", err, params.instanceId);
+      }
+    },
+  );
 
   server.registerTool(
     "wa_get_instance_status",

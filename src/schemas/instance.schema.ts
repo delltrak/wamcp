@@ -69,7 +69,12 @@ export const SetCloudCredentialsSchema = z
     instanceId: z.string().min(1).describe("The instance ID to configure (Cloud API only)"),
     accessToken: z.string().min(1).describe("Meta Cloud API access token"),
     phoneNumberId: z.string().min(1).describe("Meta Phone Number ID"),
-    businessId: z.string().optional().describe("Meta Business ID (optional)"),
+    businessId: z
+      .string()
+      .optional()
+      .describe(
+        "WhatsApp Business Account (WABA) ID, not Business Portfolio ID; required for template discovery",
+      ),
   })
   .strict();
 

@@ -326,6 +326,26 @@ export interface MessageResponse {
   status: "queued" | "sent";
 }
 
+export interface AuthenticationTemplateOptions {
+  limit: number;
+  after?: string;
+  approvedOnly: boolean;
+}
+
+export interface AuthenticationTemplatesPage {
+  templates: Array<{
+    id: string;
+    name: string;
+    languageCode: string;
+    status: string;
+    otpButtonType: string | null;
+    compatibleWithSendOtp: boolean;
+    codeExpirationMinutes: number | null;
+  }>;
+  nextCursor: string | null;
+  hasMore: boolean;
+}
+
 export interface LinkPreviewOptions {
   title?: string;
   description?: string;
@@ -613,6 +633,7 @@ export interface StatusSendResult {
 export interface CloudCredentials {
   accessToken: string;
   phoneNumberId: string;
+  /** WhatsApp Business Account (WABA) ID, not the Business Portfolio ID. */
   businessId?: string;
 }
 
@@ -662,6 +683,8 @@ export interface NormalizedMessageUpdateEvent {
   chatId: string;
   messageId: string;
   status: MessageDeliveryStatus;
+  /** Provider event time in Unix seconds, when supplied. */
+  timestamp?: number;
 }
 
 export interface NormalizedMessageDeleteEvent {

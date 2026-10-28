@@ -15,6 +15,8 @@ import {
 import { reserveOtpRequest, consumeOtpEnvelope } from "../utils/otp-queue.js";
 import { OtpOptionsSchema } from "../schemas/otp.schema.js";
 import type { OtpOptions } from "../types/channel.types.js";
+import type { MessageResponse } from "../types/channel.types.js";
+import { getDeliverySummary } from "./delivery-status.js";
 import { Queue, UnrecoverableError, Worker, type Job } from "bullmq";
 import type { ChannelAdapter } from "../channels/channel.interface.js";
 import type { ChannelType, MessageContent } from "../types/channel.types.js";
@@ -94,6 +96,22 @@ export interface QueueStats {
   failed: number;
 }
 
+/** Whitelist the provider result; never persist/return content or extra adapter fields. */
+function messageResult(value: unknown): MessageResponse | null {
+  if (!value || typeof value !== "object") return null;
+  const result = value as Record<string, unknown>;
+  if (
+    typeof result.messageId !== "string" ||
+    !result.messageId ||
+    result.messageId.length > 512 ||
+    typeof result.timestamp !== "number" ||
+    !Number.isFinite(result.timestamp) ||
+    (result.status !== "sent" && result.status !== "queued")
+  )
+    return null;
+  return { messageId: result.messageId, timestamp: result.timestamp, status: result.status };
+}
+
 export class MessageQueue {
   private readonly redisOpts = getRedisConnectionOptions();
   private readonly queues = new Map<string, Queue>();
@@ -169,7 +187,7 @@ export class MessageQueue {
               ))
             )
               throw new Error("OTP envelope is no longer owned by this worker");
-            return await this.getAdapter(data.instanceId).sendOtp(data.to, options);
+            return messageResult(await this.getAdapter(data.instanceId).sendOtp(data.to, options));
           } catch {
             throw new UnrecoverableError(
               "OTP was not confirmed; it may have expired or delivery may be uncertain. Do not automatically resend.",
@@ -179,6 +197,7 @@ export class MessageQueue {
 
         const adapter = this.getAdapter(data.instanceId);
         try {
+          let result: MessageResponse | undefined;
           if (data.kind === "community-announcement") {
             const target = await adapter.resolveCommunityAnnouncementGroup(data.communityId, true);
             if (target !== data.to) {
@@ -189,18 +208,19 @@ export class MessageQueue {
             if ("quotedMessageId" in data.content && data.content.quotedMessageId) {
               await adapter.validateQuotedMessage?.(target, data.content.quotedMessageId);
             }
-            await adapter.sendMessage(target, data.content);
+            result = await adapter.sendMessage(target, data.content);
           } else if (data.kind === "group-member-label") {
             await adapter.updateGroupMemberLabel(data.groupId, data.memberLabel);
           } else if (data.kind === "album") {
-            await adapter.sendMediaAlbum(data.to, data.images);
+            result = await adapter.sendMediaAlbum(data.to, data.images);
           } else if (data.kind === "group-history") {
             assertGroupHistoryWritesEnabled();
             await validateGroupHistoryDelivery(adapter, data.to, data.validation);
-            await adapter.sendMessage(data.to, data.content);
+            result = await adapter.sendMessage(data.to, data.content);
           } else {
-            await adapter.sendMessage(data.to, data.content);
+            result = await adapter.sendMessage(data.to, data.content);
           }
+          return messageResult(result);
         } catch (err) {
           if (err instanceof QuotedMessageResolutionError) {
             throw new UnrecoverableError(err.message);
@@ -359,6 +379,49 @@ export class MessageQueue {
   async removeScheduledJob(instanceId: string, jobId: string, channel: ChannelType): Promise<void> {
     const job = await this.getOrCreateQueue(instanceId, channel).getJob(jobId);
     if (job) await job.remove();
+  }
+
+  /** Inspect persisted jobs without creating a Worker or resuming any pending sends. */
+  async getJobStatus(instanceId: string, jobId: string) {
+    const existing = this.queues.get(instanceId);
+    const queue = existing ?? new Queue(`outbound-${instanceId}`, { connection: this.redisOpts });
+    try {
+      const missing = { instanceId, jobId, state: "missing" as const };
+      const job = await queue.getJob(jobId);
+      if (!job || job.data?.instanceId !== instanceId) return missing;
+      const state = await job.getState();
+      if (state === "unknown") return missing;
+      const data = job.data as OutboundJob;
+      const message = state === "completed" ? messageResult(job.returnvalue) : null;
+      const to = "to" in data ? data.to : null;
+      const chatId = to
+        ? to.includes("@")
+          ? to
+          : `${to.replace(/[^0-9]/g, "")}@s.whatsapp.net`
+        : null;
+      return {
+        instanceId,
+        jobId,
+        state,
+        kind: data.kind ?? "message",
+        attemptsMade: job.attemptsMade,
+        processedAt: job.processedOn ?? null,
+        finishedAt: job.finishedOn ?? null,
+        message,
+        receipts:
+          message && chatId
+            ? await getDeliverySummary(instanceId, chatId, message.messageId)
+            : null,
+        ...(state === "failed"
+          ? {
+              failure:
+                "Outbound job failed. Delivery may be uncertain; do not automatically resend. Server logs contain diagnostics.",
+            }
+          : {}),
+      };
+    } finally {
+      if (!existing) await queue.close();
+    }
   }
 
   /** Enqueue a bounded Baileys album through the same per-instance rate limiter as messages. */
