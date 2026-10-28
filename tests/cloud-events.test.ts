@@ -468,7 +468,7 @@ describe("normalizeWebhookPayload", () => {
       expect(p.status).toBe("read");
     });
 
-    it("maps failed status to sent", () => {
+    it("does not report a failed delivery as sent", () => {
       const payload = makePayload({
         statuses: [
           {
@@ -482,9 +482,7 @@ describe("normalizeWebhookPayload", () => {
       });
 
       const events = normalizeWebhookPayload(payload);
-      expect(events).toHaveLength(1);
-      const p = events[0].payload as { status: string };
-      expect(p.status).toBe("sent");
+      expect(events).toHaveLength(0);
     });
   });
 

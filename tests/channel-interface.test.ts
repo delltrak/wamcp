@@ -16,6 +16,7 @@ const CHANNEL_ADAPTER_METHODS: (keyof ChannelAdapter)[] = [
   // Messaging
   "sendMessage",
   "sendOtp",
+  "listAuthenticationTemplates",
   "supportsNativeGroupMentionAll",
   "sendEvent",
   "getEventResponses",

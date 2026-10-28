@@ -2429,6 +2429,12 @@ export class BaileysAdapter implements ChannelAdapter {
     );
   }
 
+  async listAuthenticationTemplates(): Promise<never> {
+    throw new Error(
+      "Authentication template discovery is not supported on Baileys; use a Cloud API instance configured with a WABA ID.",
+    );
+  }
+
   async sendMessage(to: string, content: MessageContent): Promise<MessageResponse> {
     const sock = this.getSock();
     const jid = this.normalizeJid(to);

@@ -160,6 +160,19 @@ describe.skipIf(!available)("OTP atomic Redis reservation and consumption", () =
       }
       expect(completed).toBe(true);
       expect(sends).toBe(1);
+      // The same safe result is readable by a fresh service with no adapter resolver/worker.
+      const reader = new MessageQueue();
+      try {
+        const status = await reader.getJobStatus("redis-otp-fixture", r.jobId);
+        expect(status).toMatchObject({
+          state: "completed",
+          kind: "otp",
+          message: { messageId: "wamid.fixture", status: "sent" },
+        });
+        expect(JSON.stringify(status)).not.toContain(opts.otpCode);
+      } finally {
+        await reader.close();
+      }
       const stored = await client.hget("bull:outbound-redis-otp-fixture:" + r.jobId, "data");
       expect(stored).not.toContain(opts.otpCode);
       expect(JSON.parse(stored!).envelope).toBeUndefined();

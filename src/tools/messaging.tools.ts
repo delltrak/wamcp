@@ -3,6 +3,10 @@
 // ============================================================
 
 import { SendOtpSchema } from "../schemas/otp.schema.js";
+import {
+  ListAuthenticationTemplatesSchema,
+  GetJobStatusSchema,
+} from "../schemas/discovery.schema.js";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { InstanceManager } from "../services/instance-manager.js";
 import type { MessageQueue } from "../services/message-queue.js";
@@ -52,6 +56,69 @@ export function registerMessagingTools(
   messageQueue: MessageQueue,
 ): void {
   const mediaService = new MediaService();
+
+  server.registerTool(
+    "wa_list_authentication_templates",
+    {
+      description:
+        "List Cloud API AUTHENTICATION template metadata, exact language codes, approval status and copy-code compatibility with wa_send_otp. Requires businessId=WABA ID and whatsapp_business_management token permission. Approved only by default. Scans one bounded Meta page; filtered pages can be empty with hasMore=true. Continue with nextCursor. No template text, examples or token-bearing paging URLs are returned.",
+      inputSchema: ListAuthenticationTemplatesSchema,
+      annotations: {
+        readOnlyHint: true,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: true,
+      },
+    },
+    async (params) => {
+      const log = createRequestLogger("wa_list_authentication_templates", params.instanceId);
+      try {
+        if ((await instanceManager.getInstanceChannel(params.instanceId)) !== "cloud")
+          throw new Error(
+            "Authentication template discovery is not supported on Baileys; use a Cloud API instance.",
+          );
+        const adapter = await instanceManager.ensureAdapter(params.instanceId);
+        const result = await adapter.listAuthenticationTemplates({
+          limit: params.limit,
+          after: params.after,
+          approvedOnly: params.approvedOnly,
+        });
+        log.info(
+          { count: result.templates.length, hasMore: result.hasMore },
+          "Authentication template metadata read",
+        );
+        return toolSuccess(result);
+      } catch (err) {
+        return handleToolError("wa_list_authentication_templates", err, params.instanceId);
+      }
+    },
+  );
+
+  server.registerTool(
+    "wa_get_job_status",
+    {
+      description:
+        "Read a retained outbound job by the jobId returned from a queued send. Does not enqueue, retry, connect an account or start a worker. Returns queue state, safe send result with WhatsApp messageId when available, and counts of locally observed delivery/read/played receipts. Group counts are observed participants, not proof everyone read it. Missing can mean expired or cleaned up; completed means the worker finished, not recipient delivery. Older jobs may have no messageId. Failure details and message/OTP content are omitted.",
+      inputSchema: GetJobStatusSchema,
+      annotations: {
+        readOnlyHint: true,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: false,
+      },
+    },
+    async (params) => {
+      const log = createRequestLogger("wa_get_job_status", params.instanceId);
+      try {
+        await instanceManager.getInstanceChannel(params.instanceId);
+        const result = await messageQueue.getJobStatus(params.instanceId, params.jobId);
+        log.info({ jobId: params.jobId, state: result.state }, "Outbound job status read");
+        return toolSuccess(result);
+      } catch (err) {
+        return handleToolError("wa_get_job_status", err, params.instanceId);
+      }
+    },
+  );
 
   server.registerTool(
     "wa_send_otp",

@@ -9,8 +9,8 @@
 1. [Overview](#1-overview)
    - [Operations dashboard](#operations-dashboard)
 2. [Tools Reference](#2-tools-reference)
-   - [Instance Management](#21-instance-management-9-tools)
-   - [Messaging](#22-messaging-33-tools)
+   - [Instance Management](#21-instance-management-10-tools)
+   - [Messaging](#22-messaging-35-tools)
    - [Chat Management](#23-chat-management-11-tools)
    - [Group Management](#24-group-management-28-tools)
    - [Contact Management](#25-contact-management-8-tools)
@@ -170,7 +170,7 @@ Tools marked **Baileys only** are not available on Cloud API instances.
 
 ## 2. Tools Reference
 
-WA MCP exposes **164 tools** grouped by domain. All tools return MCP-standard responses.
+WA MCP exposes **167 tools** grouped by domain. All tools return MCP-standard responses.
 `WA_INSTANCE_WEBHOOK_TOOLS_ENABLED=true` adds three #142 instance webhook tools.
 
 ### Success Response Format
@@ -202,9 +202,17 @@ WA MCP exposes **164 tools** grouped by domain. All tools return MCP-standard re
 
 ---
 
-### 2.1 Instance Management (9 tools, plus 3 when `WA_INSTANCE_WEBHOOK_TOOLS_ENABLED=true`)
+### 2.1 Instance Management (10 tools, plus 3 when `WA_INSTANCE_WEBHOOK_TOOLS_ENABLED=true`)
 
 Tools for creating, connecting, and managing WhatsApp instances.
+
+#### `wa_get_channel_capabilities`
+
+Inspect implemented channel features for an existing instance, including while disconnected.
+Requires `instanceId`. Returns `{instanceId, channel, connectionState, features}`; each feature
+has `supported`, representative `tools`, `requirements` and optional `notes`. Support is not
+permission or proof of configuration. Does not connect or probe WhatsApp. This is a feature
+summary, not a complete tool catalog. [Details and limitations](channel-discovery.md).
 
 #### `wa_create_instance`
 
@@ -377,7 +385,7 @@ Configure Meta Cloud API credentials for a Cloud API instance. Required before c
 | `instanceId`    | string | Yes      | The instance ID (Cloud API only) |
 | `accessToken`   | string | Yes      | Meta Cloud API access token      |
 | `phoneNumberId` | string | Yes      | Meta Phone Number ID             |
-| `businessId`    | string | No       | Meta Business ID                 |
+| `businessId`    | string | No       | WhatsApp Business Account (WABA) ID; required for template discovery |
 
 **Channel support:** Cloud API only
 
@@ -471,9 +479,39 @@ Remove the webhook stored for one instance. Later events for that instance use t
 
 ---
 
-### 2.2 Messaging (33 tools)
+### 2.2 Messaging (35 tools)
 
 Tools for sending messages, media, reactions, and managing message state.
+
+#### `wa_list_authentication_templates`
+
+Read one Cloud API template page and return only AUTHENTICATION metadata. Requires Cloud
+credentials with `businessId` set to the **WABA ID**, plus `whatsapp_business_management` token
+permission. Baileys is unsupported. Does not create or approve templates.
+
+| Parameter | Type | Default | Description |
+| --- | --- | --- | --- |
+| `instanceId` | string | required | Cloud API instance |
+| `limit` | integer | `25` | Meta records to scan, 1–100 |
+| `after` | string | omitted | Opaque `nextCursor` from the preceding page |
+| `approvedOnly` | boolean | `true` | Include only approved templates; false includes other states |
+
+Returns `{templates, nextCursor, hasMore}`. Entries include `name`, exact `languageCode`, `status`,
+`otpButtonType`, `compatibleWithSendOtp` and `codeExpirationMinutes`. Filtered pages may be empty
+with `hasMore: true`. No template text, example codes or pagination URLs are returned.
+[Pagination and compatibility rules](channel-discovery.md#wa_list_authentication_templates).
+
+#### `wa_get_job_status`
+
+Read an outbound job without starting a worker, connecting WhatsApp or retrying a send.
+Requires `instanceId` and the exact `jobId` returned by a queued send (not a message/schedule ID).
+Returns queue `state`, `kind`, `attemptsMade`, millisecond `processedAt`/`finishedAt`, safe
+`message: {messageId, timestamp, status}` and observed `receipts` counts when available.
+`completed` is not proof of recipient delivery. Older/non-message jobs can have `message: null`.
+Failed jobs omit raw errors, payloads and stack traces. Missing/cleaned-up jobs return
+`{instanceId, jobId, state: "missing"}`; this does not prove that no send happened.
+Group receipt counts are exclusive latest states of observed participants, not proof everyone read.
+[Retention, receipt interpretation and examples](channel-discovery.md#wa_get_job_status).
 
 #### `wa_send_otp`
 
@@ -4075,8 +4113,8 @@ Details and the Chatwoot inbox checklist are in [docs/chatwoot.md](chatwoot.md).
 
 | Domain                            | Tools | Channel                              |
 | --------------------------------- | ----- | ------------------------------------ |
-| Instance Management              | 9     | Both (2 Baileys only, 1 Cloud only)  |
-| Messaging                         | 33    | Both                                 |
+| Instance Management              | 10     | Both (2 Baileys only, 1 Cloud only)  |
+| Messaging                         | 35    | Both                                 |
 | Audio Transcription               | 1     | Both                                 |
 | Text-to-speech                    | 3     | Provider-dependent                   |
 | Chat Management                   | 11    | Both                                 |
@@ -4092,7 +4130,7 @@ Details and the Chatwoot inbox checklist are in [docs/chatwoot.md](chatwoot.md).
 | Call Management                   | 1     | Baileys only                         |
 | Community administration | 16 | Baileys only |
 | Scheduled messages               | 5     | Both                                 |
-| **Total**                         | **164** |                                    |
+| **Total**                         | **167** |                                    |
 
 | Resources     | 10  |
 | ------------- | --- |
