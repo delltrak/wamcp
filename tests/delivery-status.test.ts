@@ -22,6 +22,34 @@ beforeEach(async () => {
     .run();
 });
 describe("delivery metadata with either storage driver", () => {
+  it("interprets existing Baileys receipt milliseconds without multiplying them again", async () => {
+    const baileysId = randomUUID();
+    await db
+      .insert(instances)
+      .values({
+        id: baileysId,
+        name: "baileys fixture",
+        channel: "baileys",
+        createdAt: 1,
+        updatedAt: 1,
+      })
+      .run();
+    await db
+      .insert(messageReceipts)
+      .values({
+        instanceId: baileysId,
+        chatId: chat,
+        messageId: "baileys-message",
+        participant: chat,
+        status: "read",
+        timestamp: 1700000002000,
+      })
+      .run();
+    expect(await getDeliverySummary(baileysId, chat, "baileys-message")).toMatchObject({
+      latestObservedAt: "2023-11-14T22:13:22.000Z",
+      counts: { read: 1 },
+    });
+  });
   it("persists cloud receipts without storing message/OTP content and does not regress on out-of-order webhooks", async () => {
     const adapter = new CloudApiAdapter(instanceId);
     const base = { instanceId, chatId: chat, messageId: "wamid.fixture" };
@@ -61,7 +89,7 @@ describe("delivery metadata with either storage driver", () => {
           messageId: "group-message",
           participant,
           status,
-          timestamp: 1700000001,
+          timestamp: 1700000001000,
         })
         .run();
     const result = await getDeliverySummary(instanceId, "fixture@g.us", "group-message");

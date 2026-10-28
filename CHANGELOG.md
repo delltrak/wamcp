@@ -31,7 +31,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - Cloud delivery failures are no longer normalized as successful `sent` events. Delivered/read
-  receipts persist for job tracking and do not regress when webhooks arrive out of order.
+  receipts persist for job tracking in the same millisecond units as existing Baileys receipts,
+  and do not regress when webhooks arrive out of order.
 
 - Updated transitive `body-parser` to 2.4.0 and `qs` to 6.17.0 to address the production
   dependency audit findings GHSA-27r3-jxmh-p828 and GHSA-6pq8-jhm2-2vcw.

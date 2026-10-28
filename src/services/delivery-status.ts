@@ -12,6 +12,8 @@ export async function recordCloudReceipt(
   if (!Number.isSafeInteger(timestamp) || timestamp <= 0 || timestamp > 253402300799) {
     timestamp = Math.floor(Date.now() / 1000);
   }
+  // Existing Baileys receipt rows use milliseconds; Meta webhooks supply seconds.
+  timestamp *= 1000;
   await db
     .insert(messageReceipts)
     .values({
@@ -64,7 +66,7 @@ export async function getDeliverySummary(instanceId: string, chatId: string, mes
   }
   return {
     counts,
-    latestObservedAt: latest ? new Date(latest * 1000).toISOString() : null,
+    latestObservedAt: latest ? new Date(latest).toISOString() : null,
     scope: "observed_participants_only" as const,
   };
 }

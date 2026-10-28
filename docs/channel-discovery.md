@@ -83,7 +83,9 @@ do not prove that a recipient has not read it; privacy settings, webhook deliver
 retention affect observations. Use `wa_get_message_receipts` on Baileys for participant details.
 
 Cloud delivered/read webhooks now persist receipt metadata, including for OTPs without storing
-their content. Out-of-order events cannot lower a read receipt to delivered. Failed Cloud delivery
+their content. Provider seconds are converted to milliseconds, matching existing Baileys receipt
+storage; summaries render either channel's stored milliseconds as ISO timestamps. Out-of-order
+events cannot lower a read receipt to delivered. Failed Cloud delivery
 webhooks are logged and no longer mislabeled as successful `sent` events. These counts do not
 report delivery failures; inspect the existing delivery event/log diagnostics when necessary.
 
