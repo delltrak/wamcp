@@ -34,8 +34,8 @@ Synthetic example:
 
 The response contains `status: queued`, `jobId` and an absolute `deliverBefore`. It never returns
 the code. Queued does not mean delivered. Use a fresh request ID for every issuance, and reuse an
-ID only when checking/retrying submission of the same code/template to the same recipient. Queue
-records retain that ID for 24 hours; do not reuse IDs after their retention window.
+ID only when checking/retrying submission of the same code/template to the same recipient. A separate Redis
+reservation retains that ID for 24 hours; do not reuse IDs after their retention window.
 
 ## Storage and failure handling
 
@@ -44,8 +44,7 @@ expiry are authenticated as additional data. A keyed digest detects request-ID r
 code/template without storing a plaintext code or an easily brute-forced unkeyed OTP hash.
 Groups, LIDs, newsletters and status broadcasts are refused.
 
-The per-instance Cloud API limiter applies. A worker refuses an expired envelope, persists its
-consumption **before** calling Meta, and does not automatically retry OTP delivery. Thus an
+The per-instance Cloud API limiter applies. The request-ID reservation lives outside BullMQ's completed-job set, so ordinary job cleanup cannot shorten its 24-hour window. If the job itself has been removed, resubmitting that request ID refuses to send rather than recreating it. A worker refuses an expired envelope, atomically verifies its lock ownership and persists consumption **before** calling Meta, and does not automatically retry OTP delivery. Thus an
 interrupted worker cannot resend a code whose delivery may already have happened. A crash after
 consumption but before sending can lose a delivery: the caller must handle that uncertain outcome
 through its normal authentication flow. Do not manually retry the old job or infer success from
@@ -76,3 +75,5 @@ No real WhatsApp recipient or paid Cloud API send is used in these tests.
 References: [Meta's authentication template collection](https://www.postman.com/meta/whatsapp-business-platform/folder/huymv7d/templates),
 [authentication template parameters](https://www.twilio.com/docs/content/whatsappauthentication),
 and [OWASP OTP handling](https://cheatsheetseries.owasp.org/cheatsheets/Multifactor_Authentication_Cheat_Sheet.html#one-time-password-otp-handling-and-storage).
+
+Redis concurrency regressions also run against a disposable private Redis process on the Node 26 CI leg, including a real BullMQ worker. No application Redis keys are used.

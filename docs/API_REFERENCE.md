@@ -493,7 +493,7 @@ configure the template footer or delete the delivered message.
 | `deliveryTtlSeconds` | integer | `120`    | Queue deadline, 10–600 seconds                              |
 
 Returns `{status: "queued", jobId, deliverBefore}`; this is not proof of delivery. Reuse the request
-ID only for the same recipient/code/template. Retained jobs deduplicate it for 24 hours. Payloads
+ID only for the same recipient/code/template. A separate Redis reservation deduplicates it for 24 hours, independently of mixed-queue job cleanup. Payloads
 are AES-256-GCM encrypted in Redis; the worker consumes the envelope before calling Meta and sends
 at most once even when a stalled job resumes. A failure after that point requires checking the
 outcome, not an automatic resend. See [OTP delivery](otp.md) for setup and limitations.

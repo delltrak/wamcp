@@ -17,12 +17,19 @@ type FakeJob = {
 };
 const fake = vi.hoisted(() => ({
   jobs: new Map<string, FakeJob>(),
-  processors: [] as Array<(job: Job) => Promise<unknown>>,
+  reservations: new Map<string, { binding: string; expiresAt: number; consumed?: boolean }>(),
+  processors: [] as Array<(job: Job, token?: string) => Promise<unknown>>,
   options: [] as unknown[],
   add: vi.fn(),
 }));
 vi.mock("bullmq", () => ({
   Queue: class {
+    getBackend() {
+      return { client: Promise.resolve({}) };
+    }
+    toKey(key: string) {
+      return key;
+    }
     async add(name: string, data: Record<string, unknown>, options: { jobId: string }) {
       fake.add(name, data, options);
       if (!fake.jobs.has(options.jobId)) {
@@ -54,11 +61,36 @@ vi.mock("bullmq", () => ({
   },
   UnrecoverableError: class extends Error {},
 }));
+vi.mock("../src/utils/otp-queue.js", () => ({
+  reserveOtpRequest: async (_client: unknown, key: string, binding: string, expiresAt: number) => {
+    const r = fake.reservations.get(key);
+    if (r) {
+      if (r.binding !== binding) throw Error("OTP requestId is already bound to another payload");
+      return { created: false, expiresAt: r.expiresAt };
+    }
+    fake.reservations.set(key, { binding, expiresAt });
+    return { created: true, expiresAt };
+  },
+  consumeOtpEnvelope: async (
+    _client: unknown,
+    jobKey: string,
+    requestKey: string,
+    token: string | undefined,
+  ) => {
+    const job = fake.jobs.get(jobKey),
+      r = fake.reservations.get(requestKey);
+    if (token !== "worker-token" || !job?.data.envelope || r?.consumed) return false;
+    await job.updateData({ ...job.data, envelope: undefined });
+    if (r) r.consumed = true;
+    return true;
+  },
+}));
 const options = { templateName: "login_code", languageCode: "pt_BR", otpCode: "Q9W8E7R6" };
 const recipient = "5500000000001";
 beforeEach(() => {
   vi.stubEnv("WA_OTP_ENCRYPTION_KEY", "ab".repeat(32));
   fake.jobs.clear();
+  fake.reservations.clear();
   fake.processors.length = 0;
   fake.options.length = 0;
   fake.add.mockClear();
@@ -142,11 +174,11 @@ describe("native OTP queue", () => {
     queue.setAdapterResolver(
       () => ({ sendOtp }) as unknown as ReturnType<InstanceManager["getAdapter"]>,
     );
-    expect(await fake.processors[0](job as unknown as Job)).toMatchObject({
+    expect(await fake.processors[0](job as unknown as Job, "worker-token")).toMatchObject({
       messageId: "wamid.fixture",
     });
     expect(sendOtp).toHaveBeenCalledWith(recipient, options);
-    await expect(fake.processors[0](job as unknown as Job)).rejects.toThrow(
+    await expect(fake.processors[0](job as unknown as Job, "worker-token")).rejects.toThrow(
       "Do not automatically resend",
     );
     expect(sendOtp).toHaveBeenCalledTimes(1);
@@ -161,15 +193,15 @@ describe("native OTP queue", () => {
       () => ({ sendOtp }) as unknown as ReturnType<InstanceManager["getAdapter"]>,
     );
     vi.advanceTimersByTime(10000);
-    await expect(fake.processors[0](fake.jobs.get(result.jobId) as unknown as Job)).rejects.toThrow(
-      "not confirmed",
-    );
+    await expect(
+      fake.processors[0](fake.jobs.get(result.jobId) as unknown as Job, "worker-token"),
+    ).rejects.toThrow("not confirmed");
     expect(sendOtp).not.toHaveBeenCalled();
     const next = await queue.enqueueOtp("instance", recipient, options, "request-456", 120);
     vi.stubEnv("WA_OTP_ENCRYPTION_KEY", "cd".repeat(32));
-    await expect(fake.processors[0](fake.jobs.get(next.jobId) as unknown as Job)).rejects.toThrow(
-      "not confirmed",
-    );
+    await expect(
+      fake.processors[0](fake.jobs.get(next.jobId) as unknown as Job, "worker-token"),
+    ).rejects.toThrow("not confirmed");
     expect(sendOtp).not.toHaveBeenCalled();
     await queue.close();
   });
@@ -184,12 +216,14 @@ describe("native OTP queue", () => {
     );
     const job = fake.jobs.get(r.jobId)!;
     try {
-      await fake.processors[0](job as unknown as Job);
+      await fake.processors[0](job as unknown as Job, "worker-token");
       expect.fail("must fail");
     } catch (e) {
       expect(String(e)).not.toContain(options.otpCode);
     }
-    await expect(fake.processors[0](job as unknown as Job)).rejects.toThrow("not confirmed");
+    await expect(fake.processors[0](job as unknown as Job, "worker-token")).rejects.toThrow(
+      "not confirmed",
+    );
     expect(sendOtp).toHaveBeenCalledTimes(1);
     expect(job.data.envelope).toBeUndefined();
     await queue.close();
@@ -205,7 +239,9 @@ describe("native OTP queue", () => {
     job.updateData = async () => {
       throw Error("Redis failed");
     };
-    await expect(fake.processors[0](job as unknown as Job)).rejects.toThrow("not confirmed");
+    await expect(fake.processors[0](job as unknown as Job, "worker-token")).rejects.toThrow(
+      "not confirmed",
+    );
     expect(sendOtp).not.toHaveBeenCalled();
     await queue.close();
   });

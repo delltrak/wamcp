@@ -12,6 +12,7 @@ import {
   openOtp,
   type OtpEnvelope,
 } from "../utils/otp.js";
+import { reserveOtpRequest, consumeOtpEnvelope } from "../utils/otp-queue.js";
 import { OtpOptionsSchema } from "../schemas/otp.schema.js";
 import type { OtpOptions } from "../types/channel.types.js";
 import { Queue, UnrecoverableError, Worker, type Job } from "bullmq";
@@ -143,7 +144,7 @@ export class MessageQueue {
 
     const worker = new Worker(
       queueName,
-      async (job: Job) => {
+      async (job: Job, token?: string) => {
         if (!this.getAdapter) {
           throw new Error("Adapter resolver not set");
         }
@@ -157,25 +158,25 @@ export class MessageQueue {
               otpContext(data.instanceId, data.to, data.expiresAt),
               otpEncryptionKey(),
             );
-            // Persist consumption before the side effect. A stalled/restarted worker must
-            // never resend a code that may already have reached the provider.
-            await job.updateData({ ...data, envelope: undefined });
+            if (
+              !(await consumeOtpEnvelope(
+                await queue.getBackend().client,
+                queue.toKey(String(job.id)),
+                queue.toKey("otp-request-" + job.id),
+                token,
+                data.envelope,
+                data.binding,
+              ))
+            )
+              throw new Error("OTP envelope is no longer owned by this worker");
             return await this.getAdapter(data.instanceId).sendOtp(data.to, options);
           } catch {
             throw new UnrecoverableError(
               "OTP was not confirmed; it may have expired or delivery may be uncertain. Do not automatically resend.",
             );
-          } finally {
-            try {
-              await job.updateData({ ...data, envelope: undefined });
-            } catch {
-              logger.warn(
-                { instanceId: data.instanceId, jobId: job.id },
-                "Encrypted OTP payload cleanup deferred to queue retention",
-              );
-            }
           }
         }
+
         const adapter = this.getAdapter(data.instanceId);
         try {
           if (data.kind === "community-announcement") {
@@ -282,9 +283,14 @@ export class MessageQueue {
         .update(JSON.stringify([instanceId, phone, requestId]))
         .digest("hex");
     const queue = this.getOrCreateQueue(instanceId, "cloud");
-    let job = await queue.getJob(jobId);
-    if (!job) {
-      const expiresAt = Date.now() + deliveryTtlSeconds * 1000;
+    const reservation = await reserveOtpRequest(
+      await queue.getBackend().client,
+      queue.toKey("otp-request-" + jobId),
+      binding,
+      Date.now() + deliveryTtlSeconds * 1000,
+    );
+    if (reservation.created) {
+      const expiresAt = reservation.expiresAt;
       const data: OutboundJob = {
         kind: "otp",
         instanceId,
@@ -299,9 +305,9 @@ export class MessageQueue {
         removeOnComplete: { age: 86400 },
         removeOnFail: { age: 86400 },
       });
-      job = await queue.getJob(jobId);
     }
-    // Re-read after add: BullMQ may have deduplicated a concurrent producer.
+    const job = await queue.getJob(jobId);
+    // A reservation survives mixed-queue cleanup; an absent job is never recreated.
     const stored = job?.data as OutboundJob | undefined;
     if (stored?.kind !== "otp" || stored.binding !== binding)
       throw new Error(

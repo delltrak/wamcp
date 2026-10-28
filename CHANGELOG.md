@@ -15,7 +15,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Requires `WA_OTP_ENCRYPTION_KEY`, an individual recipient and an approved template. Baileys is
   unsupported. Code validity/one-time use remain the caller's responsibility; template expiry
   text does not implement expiry or auto-delete. Verified with synthetic Cloud API responses and
-  queue failure tests; live Meta template delivery remains unverified.
+  queue failure tests, plus real Redis ownership/idempotency regressions
+  ([#170](https://github.com/delltrak/wamcp/pull/170)); live Meta template delivery remains unverified.
 
 ### Fixed
 

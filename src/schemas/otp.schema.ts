@@ -38,7 +38,7 @@ export const SendOtpSchema = OtpOptionsSchema.extend({
     .string()
     .regex(/^[A-Za-z0-9_-]{8,128}$/)
     .describe(
-      "Unique backend request ID. Reuse only for the same code/template. Retained queue jobs deduplicate it for 24 hours",
+      "Unique backend request ID. Reuse only for the same code/template. A separate Redis reservation deduplicates it for 24 hours",
     ),
   deliveryTtlSeconds: z
     .number()
