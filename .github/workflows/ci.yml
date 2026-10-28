@@ -41,11 +41,12 @@ jobs:
 
       # Exercise real media conversion on one matrix leg; other runtimes still run
       # the complete unit suite and codec-aware tests when codecs are available.
-      - name: Install media conversion codecs
+      - name: Install media codecs and Redis test binary
         if: matrix.node-version == '26.x'
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y ffmpeg
+          sudo apt-get install -y ffmpeg redis-server
+          redis-server --version
           ffmpeg -hide_banner -encoders 2>/dev/null | grep -q libwebp_anim
 
       - name: Test

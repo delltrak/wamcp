@@ -2,6 +2,7 @@
 // WA MCP — Messaging Tools
 // ============================================================
 
+import { SendOtpSchema } from "../schemas/otp.schema.js";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { InstanceManager } from "../services/instance-manager.js";
 import type { MessageQueue } from "../services/message-queue.js";
@@ -51,6 +52,40 @@ export function registerMessagingTools(
   messageQueue: MessageQueue,
 ): void {
   const mediaService = new MediaService();
+
+  server.registerTool(
+    "wa_send_otp",
+    {
+      description:
+        "Send a backend-generated OTP using an approved Cloud API AUTHENTICATION template (copy-code/OTP URL button at index 0). Cloud API only; individual recipients only. Requires WA_OTP_ENCRYPTION_KEY. Queued encrypted, with a delivery deadline, idempotent request ID and no automatic send retries. Returns queued, not delivered. The backend must enforce code expiry and one-time use. Does not auto-delete messages or configure the template footer.",
+      inputSchema: SendOtpSchema,
+    },
+    async (params) => {
+      const log = createRequestLogger("wa_send_otp", params.instanceId);
+      try {
+        const channel = await instanceManager.getInstanceChannel(params.instanceId);
+        if (channel !== "cloud")
+          throw new Error(
+            "Native OTP authentication templates are not supported on Baileys; use a Cloud API instance and an approved AUTHENTICATION template.",
+          );
+        const result = await messageQueue.enqueueOtp(
+          params.instanceId,
+          params.to,
+          {
+            templateName: params.templateName,
+            languageCode: params.languageCode,
+            otpCode: params.otpCode,
+          },
+          params.requestId,
+          params.deliveryTtlSeconds,
+        );
+        log.info({ jobId: result.jobId }, "OTP queued");
+        return toolSuccess(result);
+      } catch (err) {
+        return handleToolError("wa_send_otp", err, params.instanceId);
+      }
+    },
+  );
 
   server.registerTool(
     "wa_send_text",

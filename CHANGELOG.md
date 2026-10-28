@@ -7,7 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Added `wa_send_otp` for native Cloud API AUTHENTICATION templates with an OTP copy-code button.
+  Backend-generated codes are encrypted in Redis, have a bounded queue deadline and a request ID,
+  and are consumed before sending so uncertain outcomes and stalled workers are not resent.
+  Requires `WA_OTP_ENCRYPTION_KEY`, an individual recipient and an approved template. Baileys is
+  unsupported. Code validity/one-time use remain the caller's responsibility; template expiry
+  text does not implement expiry or auto-delete. Verified with synthetic Cloud API responses and
+  queue failure tests, plus real Redis ownership/idempotency regressions
+  ([#170](https://github.com/delltrak/wamcp/pull/170)); live Meta template delivery remains unverified.
+
 ### Fixed
+
+- Updated transitive `body-parser` to 2.4.0 and `qs` to 6.17.0 to address the production
+  dependency audit findings GHSA-27r3-jxmh-p828 and GHSA-6pq8-jhm2-2vcw.
 
 - MP4 sticker conversion and video compression read the source from a private temporary file, so an
   MP4 with the `moov` atom after `mdat` decodes. Image and video compression sends the original and

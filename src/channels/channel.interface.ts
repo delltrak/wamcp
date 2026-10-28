@@ -5,6 +5,7 @@
 // ============================================================
 
 import type {
+  OtpOptions,
   ConnectionStatus,
   MessageContent,
   MessageResponse,
@@ -88,6 +89,7 @@ export interface ChannelAdapter {
 
   // ---- Messaging ----
   sendMessage(to: string, content: MessageContent): Promise<MessageResponse>;
+  sendOtp(to: string, options: OtpOptions): Promise<MessageResponse>;
   /** True when the channel can send native group @all without listing participant JIDs. */
   supportsNativeGroupMentionAll(): Promise<boolean>;
   sendEvent(options: SendEventOptions): Promise<MessageResponse>;

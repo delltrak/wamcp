@@ -54,6 +54,7 @@ import { redactError } from "../../utils/proxy-redact.js";
 import { Boom } from "@hapi/boom";
 import type { ChannelAdapter, ChannelEventHandler } from "../channel.interface.js";
 import type {
+  OtpOptions,
   ConnectionStatus,
   MessageContent,
   MessageResponse,
@@ -2420,6 +2421,12 @@ export class BaileysAdapter implements ChannelAdapter {
 
   supportsNativeGroupMentionAll(): Promise<boolean> {
     return baileysSupportsNativeGroupMentionAll();
+  }
+
+  async sendOtp(_to: string, _options: OtpOptions): Promise<MessageResponse> {
+    throw new Error(
+      "Native OTP authentication templates are not supported on Baileys; use a Cloud API instance and an approved AUTHENTICATION template.",
+    );
   }
 
   async sendMessage(to: string, content: MessageContent): Promise<MessageResponse> {
