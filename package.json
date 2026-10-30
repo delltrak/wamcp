@@ -46,11 +46,11 @@
     "node": ">=24"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.32.1",
+    "@modelcontextprotocol/sdk": "^1.32.2",
     "@whiskeysockets/baileys": "^7.0.0-rc14",
     "better-sqlite3": "^13.0.3",
-    "bullmq": "^6.3.14",
-    "dotenv": "^18.0.7",
+    "bullmq": "^6.5.0",
+    "dotenv": "^18.0.9",
     "drizzle-orm": "^0.45.4",
     "https-proxy-agent": "^9.1.0",
     "ioredis": "^6.0.0",
@@ -67,14 +67,14 @@
     "@types/better-sqlite3": "^9.6.0",
     "@types/node": "^24.19.2",
     "@types/pg": "^8.23.1",
-    "@vitest/coverage-v8": "^5.0.4",
+    "@vitest/coverage-v8": "^5.0.5",
     "drizzle-kit": "^0.31.11",
-    "eslint": "^10.12.0",
+    "eslint": "^10.13.0",
     "pg": "^8.23.1",
     "prettier": "^3.9.10",
     "tsx": "^4.23.15",
     "typescript": "^6.0.3",
-    "typescript-eslint": "^8.71.2",
+    "typescript-eslint": "^8.72.1",
     "vitest": "^5.0.4"
   }
 }
