@@ -127,6 +127,10 @@ import {
   patchGroupStatusMessage,
   wrapGroupStatusMessage,
 } from "./group-status.js";
+import {
+  GROUP_STATUS_PATCH_MISSING_ERROR,
+  isBaileysGroupStatusPatchApplied,
+} from "./group-status-patch.js";
 import { decodeEventResponseMessage, eventResponseName } from "./event-response.js";
 import { messageTimestampToMilliseconds, messageTimestampToSeconds } from "./message-timestamp.js";
 import { db, sqlite } from "../../db/client.js";
@@ -243,14 +247,16 @@ const GROUP_STATUS_PERSIST_WARNING =
 const GROUP_WRITES_DISABLED_ERROR =
   "WhatsApp group, community, and Channel writes are disabled. Set WA_GROUP_WRITES_ENABLED=true or WA_APP_STATE_WRITES_ENABLED=true to enable them.";
 
-interface AppStateWriteQueue {
+interface IntervalQueue {
   tail: Promise<void>;
   lastStartedAt: number | null;
 }
 
-const appStateWriteQueues = new Map<string, AppStateWriteQueue>();
-const groupStatusSendQueues = new Map<string, AppStateWriteQueue>();
-const callLinkQueues = new Map<string, AppStateWriteQueue>();
+type MessagePersistOutcome = "inserted" | "updated" | "failed";
+
+const appStateWriteQueues = new Map<string, IntervalQueue>();
+const groupStatusSendQueues = new Map<string, IntervalQueue>();
+const callLinkQueues = new Map<string, IntervalQueue>();
 
 export class AppStateNotSyncedError extends Error {
   readonly code = "app_state_not_synced";
@@ -3034,8 +3040,10 @@ export class BaileysAdapter implements ChannelAdapter {
       outgoing,
       true,
     );
-    if (details.type === "poll") await this.retryPendingPollVotes(outgoingId);
-    return persisted;
+    if (details.type === "poll" && persisted !== "failed") {
+      await this.retryPendingPollVotes(outgoingId);
+    }
+    return persisted !== "failed";
   }
 
   private async persistReceipt(
@@ -5444,6 +5452,7 @@ export class BaileysAdapter implements ChannelAdapter {
 
   async sendGroupStatus(content: GroupStatusContent): Promise<GroupStatusSendResult> {
     if (!this.groupStatusEnabled) throw new Error(GROUP_STATUS_DISABLED_ERROR);
+    if (!isBaileysGroupStatusPatchApplied()) throw new Error(GROUP_STATUS_PATCH_MISSING_ERROR);
     if (content.type === "video" && !this.groupStatusVideoEnabled) {
       throw new Error(GROUP_STATUS_VIDEO_DISABLED_ERROR);
     }
@@ -5501,7 +5510,7 @@ export class BaileysAdapter implements ChannelAdapter {
   }
 
   private async withMinInterval<T>(
-    queues: Map<string, AppStateWriteQueue>,
+    queues: Map<string, IntervalQueue>,
     minIntervalMs: number,
     run: () => Promise<T>,
   ): Promise<T> {
@@ -6184,7 +6193,7 @@ export class BaileysAdapter implements ChannelAdapter {
         isFromMe: source.key.fromMe ?? false,
       },
     };
-    return await this.persistMessage(normalized, source);
+    return (await this.persistMessage(normalized, source)) === "inserted";
   }
 
   async downloadMessageAudio(
@@ -6352,7 +6361,7 @@ export class BaileysAdapter implements ChannelAdapter {
     event: NormalizedMessageEvent,
     source?: WAMessage,
     persistFullMessage = false,
-  ): Promise<boolean> {
+  ): Promise<MessagePersistOutcome> {
     try {
       const existed = await db
         .select({ id: messagesTable.id })
@@ -6419,10 +6428,10 @@ export class BaileysAdapter implements ChannelAdapter {
         { instanceId, messageId: message.id, chatId, fromMe: message.isFromMe },
         "Message persisted to DB",
       );
-      return !existed;
+      return existed ? "updated" : "inserted";
     } catch (err) {
       logger.error({ err, messageId: event.message.id }, "Failed to persist message");
-      return false;
+      return "failed";
     }
   }
 

@@ -13,7 +13,7 @@ WORKDIR /app
 COPY package.json package-lock.json ./
 COPY patches ./patches
 # --ignore-scripts skips postinstall, which is where patch-package normally runs.
-RUN npm ci --ignore-scripts && npx patch-package
+RUN npm ci --ignore-scripts && npx patch-package --error-on-fail --error-on-warn
 COPY tsconfig.json ./
 COPY src/ ./src/
 RUN npm run build
@@ -27,8 +27,8 @@ COPY package.json package-lock.json ./
 COPY patches ./patches
 # Install the full tree so patch-package is present, apply the Baileys retry patch,
 # then drop devDependencies. --ignore-scripts skips the postinstall hook.
-RUN npm ci --ignore-scripts && npx patch-package && npm prune --omit=dev \
- && node -e "const fs=require('fs'); const s=fs.readFileSync('node_modules/@whiskeysockets/baileys/lib/Socket/messages-send.js','utf8'); if(!s.includes(\"is_group_status\")||!s.includes('normalizeMessageContent(message)')) process.exit(1)"
+RUN npm ci --ignore-scripts && npx patch-package --error-on-fail --error-on-warn && npm prune --omit=dev \
+ && node -e "const fs=require('fs'); const s=fs.readFileSync('node_modules/@whiskeysockets/baileys/lib/Socket/messages-send.js','utf8'); if(!s.includes('/* wamcp-group-status-retry-patch */')) process.exit(1)"
 
 FROM node:24-alpine AS runtime
 

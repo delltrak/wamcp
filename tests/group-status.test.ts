@@ -14,6 +14,7 @@ import {
 } from "../src/channels/baileys/group-status.js";
 import { db } from "../src/db/client.js";
 import { instances, messages } from "../src/db/schema.js";
+import type { NormalizedMessageEvent } from "../src/types/channel.types.js";
 import { SendGroupStatusSchema } from "../src/schemas/status.schema.js";
 import type { InstanceManager } from "../src/services/instance-manager.js";
 import type { MessageQueue } from "../src/services/message-queue.js";
@@ -252,6 +253,45 @@ describe("group status wire format", () => {
       }),
     ).rejects.toThrow("Media URLs must use HTTPS");
     expect(relayMessage).not.toHaveBeenCalled();
+  });
+
+  it("treats a second save as an update and a missing instance as a failure", async () => {
+    const { adapter } = await connectedAdapter();
+    const persist = (
+      adapter as unknown as {
+        persistMessage: (
+          event: NormalizedMessageEvent,
+          source?: unknown,
+          full?: boolean,
+        ) => Promise<"inserted" | "updated" | "failed">;
+      }
+    ).persistMessage.bind(adapter);
+    const event: NormalizedMessageEvent = {
+      instanceId: INSTANCE_ID,
+      chatId: GROUP_JID,
+      message: {
+        id: "persist-outcome",
+        sender: "me",
+        timestamp: 1,
+        type: "text",
+        content: "stored",
+        mediaUrl: null,
+        quotedMessageId: null,
+        isFromMe: true,
+      },
+    };
+    expect(await persist(event)).toBe("inserted");
+    expect(await persist(event)).toBe("updated");
+
+    const missing = new BaileysAdapter("group-status-missing-instance");
+    const persistMissing = (
+      missing as unknown as {
+        persistMessage: (event: NormalizedMessageEvent) => Promise<"inserted" | "updated" | "failed">;
+      }
+    ).persistMessage.bind(missing);
+    expect(await persistMissing({ ...event, instanceId: "group-status-missing-instance" })).toBe(
+      "failed",
+    );
   });
 
   it("returns success with a warning when the local retry copy is not stored", async () => {

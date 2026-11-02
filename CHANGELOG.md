@@ -55,6 +55,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Group status sends refuse to run when the Baileys retry patch is missing. Startup logs that
+  case. The patch is recognized by `/* wamcp-group-status-retry-patch */`. `postinstall` and the
+  Docker build run `patch-package --error-on-fail --error-on-warn`. `@whiskeysockets/baileys` is
+  pinned to `7.0.0-rc14`. Saving a message now reports `inserted`, `updated`, or `failed`
+  separately, so an existing row is not treated as a lost retry copy.
+
 - Group status retries keep `<meta is_group_status="true" origin="group_status">` and, on a
   full-group retry, `<enc mediatype>`. rc14's `sendMessagesAgain` calls `relayMessage` without
   `additionalNodes`, and `getMediaType` of the envelope is empty. A `patch-package` patch on

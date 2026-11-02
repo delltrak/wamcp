@@ -2768,17 +2768,20 @@ rc14's `sendMessagesAgain` calls `relayMessage` again with no `additionalNodes`.
 (`patches/@whiskeysockets+baileys+7.0.0-rc14.patch`) adds
 `<meta is_group_status="true" origin="group_status">` whenever the relayed message is already a
 `groupStatusMessageV2`, and reads `<enc mediatype>` from `normalizeMessageContent` so a
-`sendToAll` retry still marks image or video. `npm ci` applies it via `postinstall`. The Docker
-image runs `npx patch-package` after `npm ci --ignore-scripts`, because that flag skips
-`postinstall`.
+`sendToAll` retry still marks image or video. The patched file contains
+`/* wamcp-group-status-retry-patch */`. `postinstall` runs
+`patch-package --error-on-fail --error-on-warn`. The Docker image runs the same command after
+`npm ci --ignore-scripts`, because that flag skips `postinstall`, and fails the build if the
+marker is missing. Startup logs a warning when the marker is absent, and group status sends are
+refused until the patch is present. `@whiskeysockets/baileys` is pinned to `7.0.0-rc14`.
 
 After a successful relay the server replaces the in-memory retry cache with the envelope and
 writes the same envelope to the local messages table. Enums are stored as numbers
 (`proto.Message.toObject` with `enums: Number`); `getMessage` rebuilds the proto with
 `fromObject`, which is what a retry uses after the cache expires (about five minutes). The
 normalized row is the inner text or image, so it can show up in local message reads. If that
-write fails, the tool still returns the stanza id and a `warning`, because the status was already
-sent.
+write fails, the response still includes the stanza id and a `warning`, because the status was
+already sent. An update of an existing row is not a failure.
 
 The call is blocked unless `WA_GROUP_STATUS_ENABLED=true`. It is not an app-state write. It does
 not use the BullMQ queue; `WA_GROUP_STATUS_MIN_INTERVAL_MS` (default `1500`) spaces posts for one

@@ -41,6 +41,7 @@ import { renderQrDataUrl } from "./server/dashboard-qr.js";
 import { loadChatwootConfig, type ChatwootConfig } from "./services/chatwoot-config.js";
 import { ChatwootService, handleChatwootHttpRequest } from "./services/chatwoot.js";
 import { parseBaileysProxyUrl } from "./channels/baileys/proxy.js";
+import { warnIfBaileysGroupStatusPatchMissing } from "./channels/baileys/group-status-patch.js";
 
 import { AuthAttemptLimiter, clientAddress } from "./server/auth-limiter.js";
 import {
@@ -458,6 +459,7 @@ async function main(): Promise<void> {
   assertDashboardTransport(dashboardConfig, transport);
   parseBaileysProxyUrl(process.env.WA_PROXY_URL);
   logger.info({ transport, version: VERSION }, "Starting WA MCP server");
+  warnIfBaileysGroupStatusPatchMissing();
   await bootEventWebhook();
   const chatwootConfig = loadChatwootConfig();
   if (chatwootConfig.enabled && transport === "stdio") {

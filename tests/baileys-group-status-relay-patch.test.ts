@@ -140,4 +140,63 @@ describe("Baileys group status retry patch", () => {
     expect(participantStanza).toContain("is_group_status='true'");
     expect(participantStanza).toContain("participant=");
   });
+
+  it("leaves a normal group relay without status meta or mediatype", async () => {
+    const creds = initAuthCreds();
+    creds.me = { id: "5500000000001:1@s.whatsapp.net", name: "synthetic" };
+    const { logger, sent } = traceLogger();
+    const sock = makeWASocket({
+      auth: {
+        creds,
+        keys: {
+          get: async (type: string, ids: string[]) => {
+            if (type !== "sender-key-memory") return {};
+            return Object.fromEntries(ids.map((id) => [id, { [MEMBER_JID]: true }]));
+          },
+          set: async () => {},
+          transaction: async <T>(work: () => Promise<T> | T) => work(),
+        },
+      },
+      logger: logger as never,
+      printQRInTerminal: false,
+      cachedGroupMetadata: async (jid: string) => ({
+        id: jid,
+        addressingMode: "pn" as const,
+        participants: [{ id: MEMBER_JID, admin: null }],
+      }),
+      makeSignalRepository: () =>
+        ({
+          lidMapping: {
+            getLIDForPN: async () => undefined,
+            getPNForLID: async () => undefined,
+            storeLIDPNMappings: async () => {},
+          },
+          encryptGroupMessage: async () => ({
+            ciphertext: Buffer.from("cipher"),
+            senderKeyDistributionMessage: Buffer.from("skdm"),
+          }),
+          encryptMessage: async () => ({ type: "pkmsg", ciphertext: Buffer.from("cipher") }),
+          validateSession: async () => ({ exists: true, reason: "" }),
+          hasSenderKey: async () => true,
+        }) as never,
+    });
+    sockets.push(sock);
+
+    await sock
+      .relayMessage(GROUP_JID, { conversation: "hello" }, { messageId: "NORMAL-1" })
+      .catch((error: unknown) => {
+        if (!sent.some((xml) => xml.includes("NORMAL-1"))) throw error;
+      });
+
+    const stanza = sent.find((xml) => xml.includes("NORMAL-1"));
+    expect(stanza).toBe(
+      [
+        "<message id='NORMAL-1' to='120363000000000000@g.us' type='text' addressing_mode='pn'>",
+        "\t\t<enc v='2' type='skmsg'>",
+        "\t\t\t636970686572",
+        "\t\t</enc>",
+        "</message>",
+      ].join("\n"),
+    );
+  });
 });
