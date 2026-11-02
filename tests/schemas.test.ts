@@ -548,23 +548,41 @@ describe("DeleteMessageSchema", () => {
 });
 
 describe("PinMessageSchema", () => {
-  it("accepts valid pin", () => {
+  const base = {
+    instanceId: "inst_abc123",
+    chatId: "5511999999999@s.whatsapp.net",
+    messageId: "msg_123",
+  };
+
+  it("accepts valid pin and defaults duration to 7d", () => {
     const result = PinMessageSchema.safeParse({
-      instanceId: "inst_abc123",
-      chatId: "5511999999999@s.whatsapp.net",
-      messageId: "msg_123",
+      ...base,
       pin: true,
     });
     expect(result.success).toBe(true);
+    if (result.success) expect(result.data.duration).toBe("7d");
+  });
+
+  it("accepts 24h, 7d, and 30d", () => {
+    for (const duration of ["24h", "7d", "30d"] as const) {
+      const result = PinMessageSchema.safeParse({ ...base, pin: true, duration });
+      expect(result.success).toBe(true);
+      if (result.success) expect(result.data.duration).toBe(duration);
+    }
   });
 
   it("rejects missing pin boolean", () => {
-    const result = PinMessageSchema.safeParse({
-      instanceId: "inst_abc123",
-      chatId: "5511999999999@s.whatsapp.net",
-      messageId: "msg_123",
-    });
+    const result = PinMessageSchema.safeParse(base);
     expect(result.success).toBe(false);
+  });
+
+  it("rejects forever and other durations", () => {
+    for (const duration of ["forever", "90d", "0", "", 86400]) {
+      expect(PinMessageSchema.safeParse({ ...base, pin: true, duration }).success).toBe(false);
+    }
+    expect(PinMessageSchema.safeParse({ ...base, pin: true, unexpected: true }).success).toBe(
+      false,
+    );
   });
 });
 

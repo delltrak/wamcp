@@ -1156,14 +1156,21 @@ delete. Status deletion is supported by Baileys.
 
 #### `wa_pin_message`
 
-Pin or unpin a message in a chat.
+Pin or unpin a message in a chat. When pinning, `duration` selects how long the pin stays active.
+Omitting it keeps the previous behavior: 7 days. `duration` is ignored when `pin` is `false`.
 
-| Parameter    | Type    | Required | Description                     |
-| ------------ | ------- | -------- | ------------------------------- |
-| `instanceId` | string  | Yes      | The instance ID                 |
-| `chatId`     | string  | Yes      | Chat JID where the message is   |
-| `messageId`  | string  | Yes      | Message ID to pin or unpin      |
-| `pin`        | boolean | Yes      | `true` to pin, `false` to unpin |
+| Parameter    | Type                         | Required | Description                                                                 |
+| ------------ | ---------------------------- | -------- | --------------------------------------------------------------------------- |
+| `instanceId` | string                       | Yes      | The instance ID                                                             |
+| `chatId`     | string                       | Yes      | Chat JID where the message is                                               |
+| `messageId`  | string                       | Yes      | Message ID to pin or unpin                                                  |
+| `pin`        | boolean                      | Yes      | `true` to pin, `false` to unpin                                             |
+| `duration`   | `"24h"`, `"7d"`, or `"30d"`  | No       | Pin lifetime when `pin` is true. Defaults to `7d`. Ignored when unpinning. |
+
+`24h`, `7d`, and `30d` are sent as `86400`, `604800`, and `2592000` seconds. Those are the only
+values Baileys 7.0.0-rc14 accepts on the pin `time` field. The field is copied to
+`messageAddOnDurationInSecs`. The protocol snapshot has no no-expiry value, so an indefinite pin
+is not available. Unpinning still sends pin type `0` and omits `time`.
 
 **Channel support:** Baileys only. Cloud API does not support pinning messages.
 

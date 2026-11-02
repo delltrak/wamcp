@@ -115,6 +115,7 @@ import type {
   InstanceAuthMethod,
   InstanceRuntimeStatus,
 } from "../../types/channel.types.js";
+import { pinDurationSeconds, type PinDuration } from "../../types/channel.types.js";
 import { useSqliteAuthState, clearAuthState } from "./baileys.auth.js";
 import { normalizePrivacySettings } from "./privacy.js";
 import { getWaVersion } from "./baileys.version.js";
@@ -3149,13 +3150,18 @@ export class BaileysAdapter implements ChannelAdapter {
     });
   }
 
-  async pinMessage(chatId: string, msgId: string, pin: boolean): Promise<void> {
+  async pinMessage(
+    chatId: string,
+    msgId: string,
+    pin: boolean,
+    duration: PinDuration = "7d",
+  ): Promise<void> {
     const sock = this.getSock();
     const jid = this.normalizeJid(chatId);
     const pinMsg = {
       pin: await this.resolveMessageKey(jid, msgId, true),
       type: pin ? 1 : 0,
-      time: pin ? 604800 : undefined,
+      time: pin ? pinDurationSeconds(duration) : undefined,
     };
     await this.sendMessageWithActivity(sock, jid, pinMsg as unknown as AnyMessageContent);
   }

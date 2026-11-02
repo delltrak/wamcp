@@ -209,7 +209,7 @@ See [channel discovery and send tracking](docs/channel-discovery.md) for capabil
 | `wa_forward_message`   | Forward a message       |
 | `wa_edit_message`      | Edit sent message       |
 | `wa_delete_message`    | Delete message          |
-| `wa_pin_message`       | Pin a message           |
+| `wa_pin_message`       | Pin a message for 24h, 7d, or 30d (default 7d) |
 | `wa_send_view_once`    | Send view-once media    |
 | `wa_send_presence`     | Show typing / recording / paused |
 | `wa_subscribe_presence` | Subscribe to contact or group presence updates (Baileys) |
