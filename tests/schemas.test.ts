@@ -91,7 +91,7 @@ import {
 } from "../src/schemas/status.schema.js";
 
 // Call schemas
-import { RejectCallSchema } from "../src/schemas/call.schema.js";
+import { CreateCallLinkSchema, RejectCallSchema } from "../src/schemas/call.schema.js";
 
 // Newsletter schemas
 import {
@@ -1290,6 +1290,44 @@ describe("RejectCallSchema", () => {
       callId: "",
     });
     expect(result.success).toBe(false);
+  });
+});
+
+describe("CreateCallLinkSchema", () => {
+  it("accepts audio and video, with an optional Unix start time", () => {
+    expect(
+      CreateCallLinkSchema.safeParse({ instanceId: "inst_abc123", type: "audio" }).success,
+    ).toBe(true);
+    expect(
+      CreateCallLinkSchema.safeParse({
+        instanceId: "inst_abc123",
+        type: "video",
+        startTime: 1_700_000_000,
+      }).success,
+    ).toBe(true);
+  });
+
+  it("rejects voice, empty type, fractional startTime, and unknown keys", () => {
+    expect(
+      CreateCallLinkSchema.safeParse({ instanceId: "inst_abc123", type: "voice" }).success,
+    ).toBe(false);
+    expect(CreateCallLinkSchema.safeParse({ instanceId: "inst_abc123", type: "" }).success).toBe(
+      false,
+    );
+    expect(
+      CreateCallLinkSchema.safeParse({
+        instanceId: "inst_abc123",
+        type: "audio",
+        startTime: 1.5,
+      }).success,
+    ).toBe(false);
+    expect(
+      CreateCallLinkSchema.safeParse({
+        instanceId: "inst_abc123",
+        type: "audio",
+        timeoutMs: 1000,
+      }).success,
+    ).toBe(false);
   });
 });
 

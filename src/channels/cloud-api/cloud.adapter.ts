@@ -62,6 +62,7 @@ import type {
   PinDuration,
   MessageSearchOptions,
   SendEventOptions,
+  CallLinkResult,
   CatalogProductCreateInput,
   CatalogProductUpdateInput,
   NewsletterMediaDownload,
@@ -1271,6 +1272,10 @@ export class CloudApiAdapter implements ChannelAdapter {
 
   async rejectCall(_callId: string): Promise<void> {
     throw new Error("Call rejection is not supported on Cloud API");
+  }
+
+  async createCallLink(_type: "audio" | "video", _startTime?: number): Promise<CallLinkResult> {
+    throw new Error("Call link creation is not supported on Cloud API");
   }
 
   // ---- Data access ----

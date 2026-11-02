@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Added `wa_create_call_link` for a Baileys audio or video call link. `@whiskeysockets/baileys`
+  7.0.0-rc14 `createCallLink(type, event?, timeoutMs?)` returns only `link_create@token`
+  (`string | undefined`) and drops every other response attribute. The tool publishes
+  `https://call.whatsapp.com/voice/<token>` or `https://call.whatsapp.com/video/<token>` using
+  `CALL_AUDIO_PREFIX` and `CALL_VIDEO_PREFIX`. Optional `startTime` is Unix seconds and is sent as
+  `link_create/event@start_time`. The query is not an app-state patch, so
+  `WA_APP_STATE_WRITES_ENABLED` does not gate it. Cloud API returns an unsupported-operation error.
+  A missing token is an error. The link was not checked against a real WhatsApp account.
+
 - `wa_pin_message` accepts an optional `duration` of `24h` (86400s), `7d` (604800s), or `30d`
   (2592000s). Omitting it still pins for 7 days. Baileys 7.0.0-rc14 types pin `time` as only those
   three values and writes them to `messageAddOnDurationInSecs`. `PinInChat` has no no-expiry field
