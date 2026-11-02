@@ -163,7 +163,7 @@ export function getChannelCapabilities(channel: ChannelType): Record<string, Fea
       baileys,
       ["wa_send_group_status"],
       ["Connected account", "WA_GROUP_STATUS_ENABLED=true"],
-      "One group, 24 hours, outside the chat timeline. Off unless WA_GROUP_STATUS_ENABLED=true. Not an app-state write.",
+      "Text and image. Video also requires WA_GROUP_STATUS_VIDEO_ENABLED=true. Sends for one instance are spaced by WA_GROUP_STATUS_MIN_INTERVAL_MS (default 1500). Off unless WA_GROUP_STATUS_ENABLED=true. Not an app-state write.",
     ),
     chatModifications: feature(
       baileys,

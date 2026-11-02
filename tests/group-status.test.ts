@@ -1,14 +1,19 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { proto, type WASocket } from "@whiskeysockets/baileys";
+import { BufferJSON, proto, type WASocket } from "@whiskeysockets/baileys";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { and, eq } from "drizzle-orm";
 import { BaileysAdapter } from "../src/channels/baileys/baileys.adapter.js";
 import { CloudApiAdapter } from "../src/channels/cloud-api/cloud.adapter.js";
 import {
   createGroupStatusMessage,
   DEFAULT_GROUP_STATUS_TEXT_ARGB,
   groupStatusMetaNode,
+  MAX_GROUP_STATUS_CAPTION_LENGTH,
+  MAX_GROUP_STATUS_MEDIA_CHARS,
   patchGroupStatusMessage,
 } from "../src/channels/baileys/group-status.js";
+import { db } from "../src/db/client.js";
+import { instances, messages } from "../src/db/schema.js";
 import { SendGroupStatusSchema } from "../src/schemas/status.schema.js";
 import type { InstanceManager } from "../src/services/instance-manager.js";
 import type { MessageQueue } from "../src/services/message-queue.js";
@@ -16,6 +21,7 @@ import { registerStatusTools } from "../src/tools/status.tools.js";
 
 const GROUP_JID = "120363000000000000@g.us";
 const OWN_JID = "5500000000001:3@s.whatsapp.net";
+const INSTANCE_ID = "synthetic-group-status";
 
 function mediaType(message: proto.IMessage): string {
   if (message.imageMessage) return "image";
@@ -23,28 +29,52 @@ function mediaType(message: proto.IMessage): string {
   return "";
 }
 
-function connectedAdapter() {
+/** rc14 encodes a participant retry from the cached object and does not call the patch. */
+function messageSentOnRetry(
+  cached: proto.IMessage,
+  participant?: { jid: string; count: number },
+): proto.IMessage {
+  if (participant) return cached;
+  return patchGroupStatusMessage(cached);
+}
+
+async function connectedAdapter(options?: { instanceId?: string; minIntervalMs?: number }) {
+  const instanceId = options?.instanceId ?? INSTANCE_ID;
   vi.stubEnv("WA_GROUP_STATUS_ENABLED", "true");
+  vi.stubEnv(
+    "WA_GROUP_STATUS_MIN_INTERVAL_MS",
+    String(options?.minIntervalMs ?? 0),
+  );
+  const now = Date.now();
+  await db
+    .insert(instances)
+    .values({ id: instanceId, name: "test", createdAt: now, updatedAt: now })
+    .onConflictDoNothing()
+    .run();
   const relayMessage = vi.fn(async () => undefined);
+  const addRecentMessage = vi.fn();
   const sendPresenceUpdate = vi.fn(async () => undefined);
   const sock = {
     user: { id: OWN_JID },
     relayMessage,
     sendPresenceUpdate,
     waUploadToServer: vi.fn(),
+    messageRetryManager: { addRecentMessage },
   } as unknown as WASocket;
-  const adapter = new BaileysAdapter("synthetic-group-status");
+  const adapter = new BaileysAdapter(instanceId);
   Object.assign(adapter, { sock, status: "connected" });
-  return { adapter, relayMessage };
+  return { adapter, relayMessage, addRecentMessage, instanceId };
 }
 
 describe("group status wire format", () => {
-  afterEach(() => {
+  afterEach(async () => {
     vi.unstubAllEnvs();
+    await db.delete(instances).where(eq(instances.id, INSTANCE_ID)).run();
+    await db.delete(instances).where(eq(instances.id, `${INSTANCE_ID}-spaced`)).run();
   });
 
   it("relays text to the group and wraps it only in the send hook", async () => {
-    const { adapter, relayMessage } = connectedAdapter();
+    const { adapter, relayMessage, addRecentMessage } = await connectedAdapter();
     const result = await adapter.sendGroupStatus({
       groupId: "120363000000000000",
       type: "text",
@@ -86,12 +116,46 @@ describe("group status wire format", () => {
     );
     expect(wrapped.groupStatusMessageV2?.message?.messageContextInfo).toBeFalsy();
     expect(wrapped.messageContextInfo?.messageSecret).toHaveLength(32);
-    expect(patchGroupStatusMessage(inner)).toBe(inner);
-    expect(patchGroupStatusMessage(wrapped).groupStatusMessageV2).toBeTruthy();
+    const wrappedAgain = patchGroupStatusMessage(inner);
+    expect(wrappedAgain.groupStatusMessageV2?.message?.extendedTextMessage?.text).toBe(
+      "Synthetic group status",
+    );
+    expect(Buffer.from(wrappedAgain.messageContextInfo?.messageSecret ?? [])).toEqual(
+      Buffer.from(wrapped.messageContextInfo?.messageSecret ?? []),
+    );
+    expect(patchGroupStatusMessage(wrapped)).toBe(wrapped);
+
+    expect(addRecentMessage).toHaveBeenCalledWith(GROUP_JID, result.messageId, expect.any(Object));
+    const cached = addRecentMessage.mock.calls[0]![2] as proto.IMessage;
+    expect(cached.groupStatusMessageV2?.message?.extendedTextMessage?.text).toBe(
+      "Synthetic group status",
+    );
+    expect(cached.extendedTextMessage).toBeFalsy();
+    const participantRetry = messageSentOnRetry(cached, {
+      jid: "5500000000002:0@s.whatsapp.net",
+      count: 1,
+    });
+    expect(participantRetry.groupStatusMessageV2).toBeTruthy();
+    expect(messageSentOnRetry(inner, { jid: "5500000000002:0@s.whatsapp.net", count: 1 })).toBe(
+      inner,
+    );
+    expect(messageSentOnRetry(inner).groupStatusMessageV2).toBeTruthy();
+
+    const stored = await db
+      .select({ rawData: messages.rawData })
+      .from(messages)
+      .where(and(eq(messages.instanceId, INSTANCE_ID), eq(messages.id, result.messageId)))
+      .get();
+    const parsed = JSON.parse(stored?.rawData ?? "null", BufferJSON.reviver) as {
+      message?: proto.IMessage;
+    };
+    expect(parsed.message?.groupStatusMessageV2?.message?.extendedTextMessage?.text).toBe(
+      "Synthetic group status",
+    );
   });
 
   it("uses the default text color, background, and SYSTEM_BOLD font", async () => {
-    const { adapter, relayMessage } = connectedAdapter();
+    const { adapter, relayMessage } = await connectedAdapter();
     await adapter.sendGroupStatus({
       groupId: GROUP_JID,
       type: "text",
@@ -175,7 +239,7 @@ describe("group status wire format", () => {
   });
 
   it("rejects a non-HTTPS media URL before relaying", async () => {
-    const { adapter, relayMessage } = connectedAdapter();
+    const { adapter, relayMessage } = await connectedAdapter();
     await expect(
       adapter.sendGroupStatus({
         groupId: GROUP_JID,
@@ -184,6 +248,65 @@ describe("group status wire format", () => {
       }),
     ).rejects.toThrow("Media URLs must use HTTPS");
     expect(relayMessage).not.toHaveBeenCalled();
+  });
+
+  it("rejects video unless WA_GROUP_STATUS_VIDEO_ENABLED=true", async () => {
+    const { adapter, relayMessage } = await connectedAdapter();
+    await expect(
+      adapter.sendGroupStatus({
+        groupId: GROUP_JID,
+        type: "video",
+        media: "https://example.com/synthetic.mp4",
+      }),
+    ).rejects.toThrow("WA_GROUP_STATUS_VIDEO_ENABLED=true");
+    expect(relayMessage).not.toHaveBeenCalled();
+  });
+
+  it("spaces a second post by WA_GROUP_STATUS_MIN_INTERVAL_MS", async () => {
+    const { adapter } = await connectedAdapter({
+      instanceId: `${INSTANCE_ID}-spaced`,
+      minIntervalMs: 40,
+    });
+    const started = Date.now();
+    await adapter.sendGroupStatus({ groupId: GROUP_JID, type: "text", text: "one" });
+    await adapter.sendGroupStatus({ groupId: GROUP_JID, type: "text", text: "two" });
+    expect(Date.now() - started).toBeGreaterThanOrEqual(40);
+  });
+
+  it("rejects an oversized caption or media string before upload", async () => {
+    await expect(
+      createGroupStatusMessage(
+        GROUP_JID,
+        {
+          groupId: GROUP_JID,
+          type: "image",
+          media: "https://example.com/synthetic.jpg",
+          caption: "x".repeat(MAX_GROUP_STATUS_CAPTION_LENGTH + 1),
+        },
+        {
+          userJid: OWN_JID,
+          upload: vi.fn(),
+          resolveMedia: () => Buffer.from("img"),
+          generate: vi.fn() as never,
+        },
+      ),
+    ).rejects.toThrow("caption exceeds");
+    await expect(
+      createGroupStatusMessage(
+        GROUP_JID,
+        {
+          groupId: GROUP_JID,
+          type: "image",
+          media: "a".repeat(MAX_GROUP_STATUS_MEDIA_CHARS + 1),
+        },
+        {
+          userJid: OWN_JID,
+          upload: vi.fn(),
+          resolveMedia: () => Buffer.from("img"),
+          generate: vi.fn() as never,
+        },
+      ),
+    ).rejects.toThrow("media exceeds");
   });
 
   it("is unsupported on Cloud API", async () => {
@@ -198,8 +321,9 @@ describe("group status wire format", () => {
 });
 
 describe("wa_send_group_status", () => {
-  afterEach(() => {
+  afterEach(async () => {
     vi.unstubAllEnvs();
+    await db.delete(instances).where(eq(instances.id, INSTANCE_ID)).run();
   });
 
   it("rejects incomplete and unknown fields", () => {
@@ -223,15 +347,28 @@ describe("wa_send_group_status", () => {
         font: 5,
       }).success,
     ).toBe(false);
-    expect(
-      SendGroupStatusSchema.safeParse({
-        instanceId: "i",
-        groupId: GROUP_JID,
-        type: "image",
-        media: "https://example.com/synthetic.jpg",
-        backgroundColor: "#112233",
-      }).success,
-    ).toBe(false);
+    const fontOnly = SendGroupStatusSchema.safeParse({
+      instanceId: "i",
+      groupId: GROUP_JID,
+      type: "image",
+      media: "https://example.com/synthetic.jpg",
+      font: 6,
+    });
+    expect(fontOnly.success).toBe(false);
+    if (!fontOnly.success) {
+      expect(fontOnly.error.issues.map((issue) => issue.path[0])).toEqual(["font"]);
+    }
+    const backgroundOnly = SendGroupStatusSchema.safeParse({
+      instanceId: "i",
+      groupId: GROUP_JID,
+      type: "image",
+      media: "https://example.com/synthetic.jpg",
+      backgroundColor: "#112233",
+    });
+    expect(backgroundOnly.success).toBe(false);
+    if (!backgroundOnly.success) {
+      expect(backgroundOnly.error.issues.map((issue) => issue.path[0])).toEqual(["backgroundColor"]);
+    }
     expect(
       SendGroupStatusSchema.safeParse({
         instanceId: "i",
@@ -269,7 +406,7 @@ describe("wa_send_group_status", () => {
   });
 
   it("returns the stanza id from the tool and the disabled error from the flag", async () => {
-    const { adapter } = connectedAdapter();
+    const { adapter } = await connectedAdapter();
     const handlers = new Map<string, (params: unknown) => Promise<{ content: { text: string }[]; isError?: boolean }>>();
     const server = {
       registerTool(

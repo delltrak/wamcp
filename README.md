@@ -411,7 +411,7 @@ this operation.
 | `wa_send_text_status`  | Post text status  |
 | `wa_send_image_status` | Post image status |
 | `wa_send_video_status` | Post video status |
-| `wa_send_group_status` | Post a text, image, or video status to one group (`WA_GROUP_STATUS_ENABLED=true`) |
+| `wa_send_group_status` | Post a text or image status to one group (`WA_GROUP_STATUS_ENABLED=true`; video needs `WA_GROUP_STATUS_VIDEO_ENABLED=true`) |
 | `wa_get_status_viewers` | List viewers observed from story read receipts (Baileys) |
 
 </details>
@@ -930,6 +930,8 @@ Copy `.env.example` to `.env` and configure. Leave the new HTTP auth settings un
 | `WA_APP_STATE_WRITES_ENABLED` | `false`                 | Enable protected Baileys app-state patches and remaining gated account/server changes |
 | `WA_GROUP_WRITES_ENABLED` | `false` | Enable Baileys group, community, and Channel server writes without enabling app-state patches |
 | `WA_GROUP_STATUS_ENABLED` | `false` | Enable `wa_send_group_status`. Off by default. Not an app-state write |
+| `WA_GROUP_STATUS_VIDEO_ENABLED` | `false` | Allow `type: video` on `wa_send_group_status`. Also requires `WA_GROUP_STATUS_ENABLED=true` |
+| `WA_GROUP_STATUS_MIN_INTERVAL_MS` | `1500` | Minimum delay between group-status posts per instance. `0` disables spacing |
 | `WA_GROUP_HISTORY_ON_JOIN` | `false` | Automatically DM a new member a local group-history digest after a `GROUP_PARTICIPANT_ADD` stub authored by this account; requires `WA_GROUP_WRITES_ENABLED=true`. Only `true` or `false` |
 | `WA_GROUP_HISTORY_ON_JOIN_COUNT` | `50` | Integer count of local messages in automatic digests, clamped to `25`–`100`. Any other value fails startup |
 | `WA_APP_STATE_MIN_INTERVAL_MS` | `1500` | Minimum delay between app-state write attempts per instance; accepts `0` to disable spacing |

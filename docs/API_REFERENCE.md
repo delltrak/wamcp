@@ -120,11 +120,14 @@ Tools marked **Baileys only** are not available on Cloud API instances.
   collection lacks a positive version and 128-byte hash. After a successful patch it resyncs once
   and warns if the version did not advance; failed patches are not automatically retried.
 - **Group status** -- `WA_GROUP_STATUS_ENABLED=false` by default. `wa_send_group_status` posts a
-  text, image, or video status visible to the members of one group. It relays a group message
-  wrapped as `groupStatusMessageV2`; it does not call `appPatch` and does not require
-  `WA_APP_STATE_WRITES_ENABLED`. The flag accepts only `true` or `false`. The call is direct, not
-  queued. rc14 does not record the outgoing copy in the local messages table. Cloud API returns an
-  unsupported-operation error.
+  text or image status visible to the members of one group. Video also requires
+  `WA_GROUP_STATUS_VIDEO_ENABLED=true` (default false); that shape was not checked on WhatsApp Web.
+  The relay wraps the payload as `groupStatusMessageV2`. It does not call `appPatch` and does not
+  require `WA_APP_STATE_WRITES_ENABLED`. Posts for one instance are serialized and spaced by
+  `WA_GROUP_STATUS_MIN_INTERVAL_MS` (default `1500`; `0` disables spacing). rc14 caches the inner
+  message and would retry it as a normal group message, so the server overwrites that cache with
+  the envelope and stores the same envelope for `getMessage` after the cache expires. Cloud API
+  returns an unsupported-operation error.
 - **Group, community, and Channel server writes** -- `WA_GROUP_WRITES_ENABLED=false` by default.
   It enables group creation, membership/settings, invite and join-request changes, community
   changes, and Channel follow/management calls. The inspected Baileys methods use group/community
@@ -2751,26 +2754,35 @@ receipt; Cloud API does not expose status viewers.
 
 #### `wa_send_group_status`
 
-Post a text, image, or video status that only members of one group can see. It shows on that
-group's status for 24 hours and does not land in the chat timeline. Baileys 7.0.0-rc14 has no
-send helper for this; the server relays the group JID with the inner message still at the top
-level (so `<enc mediatype>` is set) and a socket hook wraps the encrypted bytes in
-`groupStatusMessageV2`, with `contextInfo.isGroupStatus` on the inner message, a 32-byte
-`messageSecret` on the outer message, and `<meta is_group_status="true" origin="group_status">`.
+Post a text or image status that only members of one group can see. It shows on that group's
+status for 24 hours and does not land in the chat timeline. `type: video` is rejected unless
+`WA_GROUP_STATUS_VIDEO_ENABLED=true`, because that shape was not checked on WhatsApp Web. Baileys
+7.0.0-rc14 has no send helper for this; the server relays the group JID with the inner message
+still at the top level (so `<enc mediatype>` is set) and a socket hook wraps the encrypted bytes
+in `groupStatusMessageV2` when `contextInfo.isGroupStatus` is true. The hook is idempotent: an
+existing `groupStatusMessageV2` is returned unchanged. The outer message carries a 32-byte
+`messageSecret`, and the stanza includes `<meta is_group_status="true" origin="group_status">`.
 
-The call is blocked unless `WA_GROUP_STATUS_ENABLED=true`. It is not an app-state write and does
-not use the outbound queue, so the per-instance BullMQ rate limit does not apply. `relayMessage`
-does not emit the sender's own copy, so the post is not inserted into the local messages table.
-The returned `messageId` is the stanza id.
+rc14 stores the pre-wrap message in its retry cache and, on a retry that names `participant`,
+sends that object without calling the hook. After a successful relay the server replaces the
+cache entry with the envelope and writes the same envelope to the local messages table, which is
+what `getMessage` reads after the cache expires (about five minutes). A retry therefore stays a
+group status. The normalized row is the inner text or image, so it can show up in local message
+reads.
 
-Text defaults to background `#233E4F`, white text, and font `6` (`SYSTEM_BOLD`). Image and video
-inputs are HTTPS URLs or base64, same as other media tools.
+The call is blocked unless `WA_GROUP_STATUS_ENABLED=true`. It is not an app-state write. It does
+not use the BullMQ queue; `WA_GROUP_STATUS_MIN_INTERVAL_MS` (default `1500`) spaces posts for one
+instance instead. The returned `messageId` is the stanza id.
+
+Text defaults to background `#233E4F`, white text, and font `6` (`SYSTEM_BOLD`). Image inputs are
+HTTPS URLs or base64. `caption` is at most 1024 characters. `media` is at most the base64 length
+of the 16 MB video cap.
 
 | Parameter         | Type         | Required | Description |
 | ----------------- | ------------ | -------- | ----------- |
 | `instanceId`      | string       | Yes      | The instance ID |
 | `groupId`         | string       | Yes      | Group ID or `@g.us` JID |
-| `type`            | string       | Yes      | `text`, `image`, or `video` |
+| `type`            | string       | Yes      | `text`, `image`, or `video` (`video` requires `WA_GROUP_STATUS_VIDEO_ENABLED=true`) |
 | `text`            | string       | When `type` is `text` | Text body |
 | `media`           | string       | When `type` is `image` or `video` | HTTPS URL or base64 |
 | `caption`         | string       | No       | Image or video caption |

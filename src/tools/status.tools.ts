@@ -148,7 +148,7 @@ export function registerStatusTools(
     "wa_send_group_status",
     {
       description:
-        "Post a text, image, or video status visible only to the members of one group (Updates tab, 24 hours, outside the chat). Baileys only. Requires WA_GROUP_STATUS_ENABLED=true (default false). Sends directly with relayMessage; it is not queued and does not write app state. Cloud API does not support group status.",
+        "Post a text or image status visible only to the members of one group (Updates tab, 24 hours, outside the chat). Video also requires WA_GROUP_STATUS_VIDEO_ENABLED=true. Baileys only. Requires WA_GROUP_STATUS_ENABLED=true (default false). Sends are spaced by WA_GROUP_STATUS_MIN_INTERVAL_MS and are not an app-state write. Cloud API does not support group status.",
       inputSchema: SendGroupStatusSchema,
     },
     async (params) => {

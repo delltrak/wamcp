@@ -125,6 +125,7 @@ import {
   createGroupStatusMessage,
   groupStatusMetaNode,
   patchGroupStatusMessage,
+  wrapGroupStatusMessage,
 } from "./group-status.js";
 import { decodeEventResponseMessage, eventResponseName } from "./event-response.js";
 import { messageTimestampToMilliseconds, messageTimestampToSeconds } from "./message-timestamp.js";
@@ -212,6 +213,8 @@ const DEFAULT_BAILEYS_HEALTH_WATCHDOG_MS = 180_000;
 const DEFAULT_BAILEYS_EVENT_BUFFER_STALL_MS = 60_000;
 const DEFAULT_PRESENCE_IDLE_SECONDS = 30;
 const DEFAULT_APP_STATE_MIN_INTERVAL_MS = 1_500;
+const DEFAULT_GROUP_STATUS_MIN_INTERVAL_MS = 1_500;
+const CALL_LINK_START_SKEW_SECONDS = 60;
 const MAX_NODE_TIMEOUT_MS = 2_147_483_647;
 const MAX_PRESENCE_IDLE_SECONDS = Math.floor(MAX_NODE_TIMEOUT_MS / 1000);
 const BAILEYS_EVENT_BUFFER_STALL_RECHECK_MS = 1_000;
@@ -232,6 +235,8 @@ const APP_STATE_WRITES_DISABLED_ERROR =
   "WhatsApp account, server, and app-state writes are disabled. Set WA_APP_STATE_WRITES_ENABLED=true to enable them.";
 const GROUP_STATUS_DISABLED_ERROR =
   "Group status posts are disabled. Set WA_GROUP_STATUS_ENABLED=true to enable them.";
+const GROUP_STATUS_VIDEO_DISABLED_ERROR =
+  "Group status video is disabled. Set WA_GROUP_STATUS_VIDEO_ENABLED=true to enable it.";
 const GROUP_WRITES_DISABLED_ERROR =
   "WhatsApp group, community, and Channel writes are disabled. Set WA_GROUP_WRITES_ENABLED=true or WA_APP_STATE_WRITES_ENABLED=true to enable them.";
 
@@ -241,6 +246,7 @@ interface AppStateWriteQueue {
 }
 
 const appStateWriteQueues = new Map<string, AppStateWriteQueue>();
+const groupStatusSendQueues = new Map<string, AppStateWriteQueue>();
 
 export class AppStateNotSyncedError extends Error {
   readonly code = "app_state_not_synced";
@@ -1046,6 +1052,8 @@ export class BaileysAdapter implements ChannelAdapter {
   private readonly appStateWritesEnabled: boolean;
   private readonly groupWritesEnabled: boolean;
   private readonly groupStatusEnabled: boolean;
+  private readonly groupStatusVideoEnabled: boolean;
+  private readonly groupStatusMinIntervalMs: number;
   private readonly appStateWriteMinIntervalMs: number;
   private readonly appStateResyncLogObserver = new AppStateResyncLogObserver();
   private readonly presenceMode: PresenceMode;
@@ -1128,6 +1136,16 @@ export class BaileysAdapter implements ChannelAdapter {
       process.env.WA_GROUP_STATUS_ENABLED,
       "WA_GROUP_STATUS_ENABLED",
       false,
+    );
+    this.groupStatusVideoEnabled = parseBooleanEnv(
+      process.env.WA_GROUP_STATUS_VIDEO_ENABLED,
+      "WA_GROUP_STATUS_VIDEO_ENABLED",
+      false,
+    );
+    this.groupStatusMinIntervalMs = parseNonNegativeIntegerEnv(
+      process.env.WA_GROUP_STATUS_MIN_INTERVAL_MS,
+      "WA_GROUP_STATUS_MIN_INTERVAL_MS",
+      DEFAULT_GROUP_STATUS_MIN_INTERVAL_MS,
     );
     this.appStateWriteMinIntervalMs = parseNonNegativeIntegerEnv(
       process.env.WA_APP_STATE_MIN_INTERVAL_MS,
@@ -5409,6 +5427,9 @@ export class BaileysAdapter implements ChannelAdapter {
 
   async sendGroupStatus(content: GroupStatusContent): Promise<GroupStatusSendResult> {
     if (!this.groupStatusEnabled) throw new Error(GROUP_STATUS_DISABLED_ERROR);
+    if (content.type === "video" && !this.groupStatusVideoEnabled) {
+      throw new Error(GROUP_STATUS_VIDEO_DISABLED_ERROR);
+    }
     const sock = this.getSock();
     const userJid = sock.user?.id;
     if (!userJid) throw new Error("Instance not connected");
@@ -5418,13 +5439,51 @@ export class BaileysAdapter implements ChannelAdapter {
       upload: sock.waUploadToServer,
       resolveMedia: (input) => this.resolveMedia(input),
     });
-    await this.withSendActivity(sock, () =>
-      sock.relayMessage(groupJid, message, {
-        messageId,
-        additionalNodes: [groupStatusMetaNode()],
+    const wrapped = wrapGroupStatusMessage(message);
+    await this.withGroupStatusInterval(() =>
+      this.withSendActivity(sock, async () => {
+        await sock.relayMessage(groupJid, message, {
+          messageId,
+          additionalNodes: [groupStatusMetaNode()],
+        });
+        // rc14 caches the pre-patch message. Overwrite it with the envelope so a
+        // participant retry does not resend the status as a normal group message.
+        sock.messageRetryManager?.addRecentMessage(groupJid, messageId, wrapped);
       }),
     );
+    await this.persistOutgoingMessage(
+      {
+        key: { remoteJid: groupJid, fromMe: true, id: messageId },
+        message: wrapped,
+        messageTimestamp: Math.floor(Date.now() / 1000),
+      },
+      groupJid,
+    );
     return { messageId, groupId: groupJid };
+  }
+
+  private async withGroupStatusInterval<T>(run: () => Promise<T>): Promise<T> {
+    let queue = groupStatusSendQueues.get(this.instanceId);
+    if (!queue) {
+      queue = { tail: Promise.resolve(), lastStartedAt: null };
+      groupStatusSendQueues.set(this.instanceId, queue);
+    }
+    const previous = queue.tail;
+    let release!: () => void;
+    queue.tail = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    await previous;
+    try {
+      if (queue.lastStartedAt !== null && this.groupStatusMinIntervalMs > 0) {
+        const remainingMs = this.groupStatusMinIntervalMs - (Date.now() - queue.lastStartedAt);
+        if (remainingMs > 0) await new Promise<void>((resolve) => setTimeout(resolve, remainingMs));
+      }
+      queue.lastStartedAt = Date.now();
+      return await run();
+    } finally {
+      release();
+    }
   }
 
   // ---- Newsletter / Channels ----
@@ -5651,11 +5710,14 @@ export class BaileysAdapter implements ChannelAdapter {
     if (media !== "audio" && media !== "video") {
       throw new Error("Invalid call link type: expected audio or video");
     }
-    if (
-      startTime !== undefined &&
-      (!Number.isSafeInteger(startTime) || startTime < 0 || startTime > 4_000_000_000)
-    ) {
-      throw new Error("Invalid call link startTime: expected Unix seconds from 0 to 4000000000");
+    if (startTime !== undefined) {
+      if (!Number.isSafeInteger(startTime) || startTime < 0 || startTime > 4_000_000_000) {
+        throw new Error("Invalid call link startTime: expected Unix seconds from 0 to 4000000000");
+      }
+      const earliest = Math.floor(Date.now() / 1000) - CALL_LINK_START_SKEW_SECONDS;
+      if (startTime < earliest) {
+        throw new Error("Invalid call link startTime: it is more than 60 seconds in the past");
+      }
     }
 
     const sock = this.getSock();

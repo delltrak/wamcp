@@ -1302,7 +1302,7 @@ describe("CreateCallLinkSchema", () => {
       CreateCallLinkSchema.safeParse({
         instanceId: "inst_abc123",
         type: "video",
-        startTime: 1_700_000_000,
+        startTime: Math.floor(Date.now() / 1000) + 3600,
       }).success,
     ).toBe(true);
   });
@@ -1328,6 +1328,13 @@ describe("CreateCallLinkSchema", () => {
         timeoutMs: 1000,
       }).success,
     ).toBe(false);
+    const past = CreateCallLinkSchema.safeParse({
+      instanceId: "inst_abc123",
+      type: "audio",
+      startTime: Math.floor(Date.now() / 1000) - 120,
+    });
+    expect(past.success).toBe(false);
+    if (!past.success) expect(past.error.issues[0]?.path).toEqual(["startTime"]);
   });
 });
 
