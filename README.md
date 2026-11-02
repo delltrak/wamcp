@@ -932,6 +932,7 @@ Copy `.env.example` to `.env` and configure. Leave the new HTTP auth settings un
 | `WA_GROUP_STATUS_ENABLED` | `false` | Enable `wa_send_group_status`. Off by default. Not an app-state write |
 | `WA_GROUP_STATUS_VIDEO_ENABLED` | `false` | Allow `type: video` on `wa_send_group_status`. Also requires `WA_GROUP_STATUS_ENABLED=true` |
 | `WA_GROUP_STATUS_MIN_INTERVAL_MS` | `1500` | Minimum delay between group-status posts per instance. `0` disables spacing |
+| `WA_CALL_LINK_MIN_INTERVAL_MS` | `1500` | Minimum delay between `wa_create_call_link` calls per instance. `0` disables spacing |
 | `WA_GROUP_HISTORY_ON_JOIN` | `false` | Automatically DM a new member a local group-history digest after a `GROUP_PARTICIPANT_ADD` stub authored by this account; requires `WA_GROUP_WRITES_ENABLED=true`. Only `true` or `false` |
 | `WA_GROUP_HISTORY_ON_JOIN_COUNT` | `50` | Integer count of local messages in automatic digests, clamped to `25`–`100`. Any other value fails startup |
 | `WA_APP_STATE_MIN_INTERVAL_MS` | `1500` | Minimum delay between app-state write attempts per instance; accepts `0` to disable spacing |

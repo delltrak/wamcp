@@ -673,6 +673,8 @@ export interface GroupStatusContent {
 export interface GroupStatusSendResult {
   messageId: string;
   groupId: string;
+  /** Set when the status was sent but the local retry copy was not stored. */
+  warning?: string;
 }
 
 export interface CloudCredentials {
