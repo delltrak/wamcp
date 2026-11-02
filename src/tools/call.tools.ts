@@ -40,7 +40,7 @@ export function registerCallTools(
     "wa_create_call_link",
     {
       description:
-        "Create a WhatsApp audio or video call link on Baileys. createCallLink returns only a token; the result adds the public https://call.whatsapp.com/voice/ or /video/ URL. Optional startTime is Unix seconds. Cloud API does not support this operation.",
+        "Create a WhatsApp audio or video call link on Baileys. createCallLink returns only a token; the result adds the public https://call.whatsapp.com/voice/ or /video/ URL. Optional startTime is Unix seconds and must be no more than 60 seconds in the past. Cloud API does not support this operation.",
       inputSchema: CreateCallLinkSchema,
     },
     async (params) => {

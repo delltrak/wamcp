@@ -93,15 +93,30 @@ describe("wa_create_call_link", () => {
     const createCallLink = vi.fn(async () => "video-token");
     const { invoke } = createFixture(createCallLink);
 
-    const response = await invoke({ type: "video", startTime: 1_700_000_000 });
+    const startTime = Math.floor(Date.now() / 1000) + 3600;
+    const response = await invoke({ type: "video", startTime });
 
     expect(JSON.parse(textOf(response))).toEqual({
       type: "video",
       token: "video-token",
       link: `${CALL_VIDEO_PREFIX}video-token`,
-      startTime: 1_700_000_000,
+      startTime,
     });
-    expect(createCallLink).toHaveBeenCalledWith("video", { startTime: 1_700_000_000 });
+    expect(createCallLink).toHaveBeenCalledWith("video", { startTime });
+  });
+
+  it("rejects a startTime more than 60 seconds in the past", async () => {
+    const { adapter, createCallLink, tool } = createFixture();
+    const past = Math.floor(Date.now() / 1000) - 120;
+    expect(
+      tool.inputSchema.safeParse({
+        instanceId: "call-link-instance",
+        type: "audio",
+        startTime: past,
+      }).success,
+    ).toBe(false);
+    await expect(adapter.createCallLink("audio", past)).rejects.toThrow("60 seconds");
+    expect(createCallLink).not.toHaveBeenCalled();
   });
 
   it("rejects a missing token and an unsupported type before calling the socket", async () => {

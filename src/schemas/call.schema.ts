@@ -19,6 +19,8 @@ export const RejectCallSchema = z
   })
   .strict();
 
+const CALL_LINK_START_SKEW_SECONDS = 60;
+
 export const CreateCallLinkSchema = z
   .object({
     instanceId: z.string().min(1).describe("The instance ID"),
@@ -34,7 +36,18 @@ export const CreateCallLinkSchema = z
       .max(4_000_000_000)
       .optional()
       .describe(
-        "Optional Unix start time in seconds. When set, Baileys sends link_create/event@start_time. Omit it for a link with no scheduled start.",
+        "Optional Unix start time in seconds. When set, Baileys sends link_create/event@start_time. Must be at most 60 seconds in the past. Omit it for a link with no scheduled start.",
       ),
   })
-  .strict();
+  .strict()
+  .superRefine((value, ctx) => {
+    if (value.startTime === undefined) return;
+    const earliest = Math.floor(Date.now() / 1000) - CALL_LINK_START_SKEW_SECONDS;
+    if (value.startTime < earliest) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["startTime"],
+        message: "startTime must be no more than 60 seconds in the past",
+      });
+    }
+  });

@@ -3,6 +3,10 @@
 // ============================================================
 
 import { z } from "zod";
+import {
+  MAX_GROUP_STATUS_CAPTION_LENGTH,
+  MAX_GROUP_STATUS_MEDIA_CHARS,
+} from "../channels/baileys/group-status.js";
 import { isValidGroupId } from "../utils/group-jid.js";
 import { isValidStatusRecipient } from "../utils/validation.js";
 
@@ -75,9 +79,14 @@ export const SendGroupStatusSchema = z
     media: z
       .string()
       .min(1)
+      .max(MAX_GROUP_STATUS_MEDIA_CHARS)
       .optional()
       .describe("HTTPS URL or base64 image or video. Required when type is image or video"),
-    caption: z.string().optional().describe("Caption for an image or video status"),
+    caption: z
+      .string()
+      .max(MAX_GROUP_STATUS_CAPTION_LENGTH)
+      .optional()
+      .describe("Caption for an image or video status"),
     backgroundColor: z
       .string()
       .trim()
@@ -123,14 +132,18 @@ export const SendGroupStatusSchema = z
         message: "caption applies only to image or video",
       });
     }
-    if (
-      value.type !== "text" &&
-      (value.backgroundColor !== undefined || value.font !== undefined)
-    ) {
+    if (value.type !== "text" && value.backgroundColor !== undefined) {
       ctx.addIssue({
         code: "custom",
         path: ["backgroundColor"],
-        message: "backgroundColor and font apply only to text",
+        message: "backgroundColor applies only to text",
+      });
+    }
+    if (value.type !== "text" && value.font !== undefined) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["font"],
+        message: "font applies only to text",
       });
     }
   });

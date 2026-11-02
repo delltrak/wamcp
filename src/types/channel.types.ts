@@ -195,18 +195,10 @@ export const PIN_DURATION_SECONDS = {
 export function pinDurationSeconds(
   duration: PinDuration = "7d",
 ): (typeof PIN_DURATION_SECONDS)[PinDuration] {
-  switch (duration) {
-    case "24h":
-    case "7d":
-    case "30d":
-      return PIN_DURATION_SECONDS[duration];
-    default: {
-      const unexpected: never = duration;
-      throw new Error(
-        `Unsupported pin duration "${String(unexpected)}". Expected 24h, 7d, or 30d.`,
-      );
-    }
+  if (!Object.hasOwn(PIN_DURATION_SECONDS, duration)) {
+    throw new Error(`Unsupported pin duration "${String(duration)}". Expected 24h, 7d, or 30d.`);
   }
+  return PIN_DURATION_SECONDS[duration];
 }
 
 export type PrivacyUpdate =

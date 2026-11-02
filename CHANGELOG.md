@@ -15,10 +15,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `groupStatusMessageV2`, with `contextInfo.isGroupStatus`, a 32-byte `messageSecret` on the outer
   message, and `<meta is_group_status="true" origin="group_status">`. Media stays at the top level
   until `patchMessageBeforeSending`, because rc14 sets `<enc mediatype>` before that hook. The tool
-  is off unless `WA_GROUP_STATUS_ENABLED=true`. It does not write app state, does not go through
-  the outbound queue, and is not stored in the local messages table. Cloud API returns an
+  is off unless `WA_GROUP_STATUS_ENABLED=true`. It does not write app state. Cloud API returns an
   unsupported-operation error. Video uses the same envelope as image; the cited phone/Web check
-  covered text and image.
+  covered text and image, so video stays behind `WA_GROUP_STATUS_VIDEO_ENABLED`.
 
 - Added `wa_create_call_link` for a Baileys audio or video call link. `@whiskeysockets/baileys`
   7.0.0-rc14 `createCallLink(type, event?, timeoutMs?)` returns only `link_create@token`
@@ -55,6 +54,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ([#170](https://github.com/delltrak/wamcp/pull/170)); live Meta template delivery remains unverified.
 
 ### Fixed
+
+- Group status retries no longer resend the inner message as a normal group message. rc14 caches
+  the pre-patch payload and skips `patchMessageBeforeSending` when a retry names `participant`.
+  The wrap is now based on `contextInfo.isGroupStatus` and is idempotent for an existing
+  `groupStatusMessageV2`. After relay, the retry cache and the local message row used by
+  `getMessage` store the envelope. Posts for one instance wait `WA_GROUP_STATUS_MIN_INTERVAL_MS`
+  (default `1500`). `wa_create_call_link` rejects a `startTime` more than 60 seconds in the past.
+  `wa_pin_message` maps duration through `PIN_DURATION_SECONDS`.
 
 - Cloud delivery failures are no longer normalized as successful `sent` events. Delivered/read
   receipts persist for job tracking in the same millisecond units as existing Baileys receipts,
