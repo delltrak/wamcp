@@ -15,7 +15,7 @@
    - [Group Management](#24-group-management-28-tools)
    - [Contact Management](#25-contact-management-8-tools)
    - [Profile Management](#26-profile-management-7-tools)
-   - [Status / Stories](#27-status--stories-4-tools)
+   - [Status / Stories](#27-status--stories-5-tools)
    - [Newsletter / Channels](#28-newsletter--channels-11-tools)
    - [Call Management](#29-call-management-1-tool)
    - [Message Search](#210-message-search-1-tool)
@@ -119,6 +119,12 @@ Tools marked **Baileys only** are not available on Cloud API instances.
   collection. It refuses to patch if Baileys reports a sync/decode/key/hash failure or if the
   collection lacks a positive version and 128-byte hash. After a successful patch it resyncs once
   and warns if the version did not advance; failed patches are not automatically retried.
+- **Group status** -- `WA_GROUP_STATUS_ENABLED=false` by default. `wa_send_group_status` posts a
+  text, image, or video status visible to the members of one group. It relays a group message
+  wrapped as `groupStatusMessageV2`; it does not call `appPatch` and does not require
+  `WA_APP_STATE_WRITES_ENABLED`. The flag accepts only `true` or `false`. The call is direct, not
+  queued. rc14 does not record the outgoing copy in the local messages table. Cloud API returns an
+  unsupported-operation error.
 - **Group, community, and Channel server writes** -- `WA_GROUP_WRITES_ENABLED=false` by default.
   It enables group creation, membership/settings, invite and join-request changes, community
   changes, and Channel follow/management calls. The inspected Baileys methods use group/community
@@ -170,7 +176,7 @@ Tools marked **Baileys only** are not available on Cloud API instances.
 
 ## 2. Tools Reference
 
-WA MCP exposes **167 tools** grouped by domain. All tools return MCP-standard responses.
+WA MCP exposes **168 tools** grouped by domain. All tools return MCP-standard responses.
 `WA_INSTANCE_WEBHOOK_TOOLS_ENABLED=true` adds three #142 instance webhook tools.
 
 ### Success Response Format
@@ -2629,7 +2635,7 @@ Read normalized account privacy settings. Reads refresh from WhatsApp by default
 
 ---
 
-### 2.7 Status / Stories (4 tools)
+### 2.7 Status / Stories (5 tools)
 
 Tools for posting WhatsApp status/story updates.
 
@@ -2733,6 +2739,49 @@ List contacts whose read or played receipt this server observed for a status/sto
 
 **Channel support:** Baileys only. Viewers are available only after this server observes their
 receipt; Cloud API does not expose status viewers.
+
+---
+
+#### `wa_send_group_status`
+
+Post a text, image, or video status that only members of one group can see. It shows on that
+group's status for 24 hours and does not land in the chat timeline. Baileys 7.0.0-rc14 has no
+send helper for this; the server relays the group JID with the inner message still at the top
+level (so `<enc mediatype>` is set) and a socket hook wraps the encrypted bytes in
+`groupStatusMessageV2`, with `contextInfo.isGroupStatus` on the inner message, a 32-byte
+`messageSecret` on the outer message, and `<meta is_group_status="true" origin="group_status">`.
+
+The call is blocked unless `WA_GROUP_STATUS_ENABLED=true`. It is not an app-state write and does
+not use the outbound queue, so the per-instance BullMQ rate limit does not apply. `relayMessage`
+does not emit the sender's own copy, so the post is not inserted into the local messages table.
+The returned `messageId` is the stanza id.
+
+Text defaults to background `#233E4F`, white text, and font `6` (`SYSTEM_BOLD`). Image and video
+inputs are HTTPS URLs or base64, same as other media tools.
+
+| Parameter         | Type         | Required | Description |
+| ----------------- | ------------ | -------- | ----------- |
+| `instanceId`      | string       | Yes      | The instance ID |
+| `groupId`         | string       | Yes      | Group ID or `@g.us` JID |
+| `type`            | string       | Yes      | `text`, `image`, or `video` |
+| `text`            | string       | When `type` is `text` | Text body |
+| `media`           | string       | When `type` is `image` or `video` | HTTPS URL or base64 |
+| `caption`         | string       | No       | Image or video caption |
+| `backgroundColor` | string       | No       | `#RRGGBB` or `#AARRGGBB`. Text only. Default `#233E4F` |
+| `font`            | number       | No       | FontType `0`, `1`, `2`, or `6`–`10`. Text only. Default `6` |
+
+**Channel support:** Baileys only, and only when `WA_GROUP_STATUS_ENABLED=true`. Cloud API does
+not support group status.
+
+**Response:**
+
+```json
+{
+  "success": true,
+  "messageId": "BAE5...",
+  "groupId": "120363000000000000@g.us"
+}
+```
 
 ---
 
@@ -4124,13 +4173,13 @@ Details and the Chatwoot inbox checklist are in [docs/chatwoot.md](chatwoot.md).
 | Group Management                  | 28    | Baileys                              |
 | Contact Management                | 8     | Both                                 |
 | Profile Management                | 7     | Both                                 |
-| Status / Stories                  | 4     | Baileys only                         |
+| Status / Stories                  | 5     | Baileys only                         |
 | Newsletter / Channels             | 11    | Baileys only                         |
 | Business, Communities, and Catalog| 16    | Baileys only                         |
 | Call Management                   | 1     | Baileys only                         |
 | Community administration | 16 | Baileys only |
 | Scheduled messages               | 5     | Both                                 |
-| **Total**                         | **167** |                                    |
+| **Total**                         | **168** |                                    |
 
 | Resources     | 10  |
 | ------------- | --- |

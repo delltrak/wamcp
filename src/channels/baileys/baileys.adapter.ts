@@ -85,6 +85,8 @@ import type {
   ParticipantAction,
   StatusContent,
   StatusSendResult,
+  GroupStatusContent,
+  GroupStatusSendResult,
   CloudCredentials,
   ChannelEvent,
   ChannelEventPayload,
@@ -115,6 +117,11 @@ import type {
 import { useSqliteAuthState, clearAuthState } from "./baileys.auth.js";
 import { normalizePrivacySettings } from "./privacy.js";
 import { getWaVersion } from "./baileys.version.js";
+import {
+  createGroupStatusMessage,
+  groupStatusMetaNode,
+  patchGroupStatusMessage,
+} from "./group-status.js";
 import { decodeEventResponseMessage, eventResponseName } from "./event-response.js";
 import { messageTimestampToMilliseconds, messageTimestampToSeconds } from "./message-timestamp.js";
 import { db, sqlite } from "../../db/client.js";
@@ -219,6 +226,8 @@ const MAX_POLL_VOTE_DECRYPT_ATTEMPTS = 16;
 const MAX_LINK_PREVIEW_THUMBNAIL_BYTES = 512 * 1024;
 const APP_STATE_WRITES_DISABLED_ERROR =
   "WhatsApp account, server, and app-state writes are disabled. Set WA_APP_STATE_WRITES_ENABLED=true to enable them.";
+const GROUP_STATUS_DISABLED_ERROR =
+  "Group status posts are disabled. Set WA_GROUP_STATUS_ENABLED=true to enable them.";
 const GROUP_WRITES_DISABLED_ERROR =
   "WhatsApp group, community, and Channel writes are disabled. Set WA_GROUP_WRITES_ENABLED=true or WA_APP_STATE_WRITES_ENABLED=true to enable them.";
 
@@ -1032,6 +1041,7 @@ export class BaileysAdapter implements ChannelAdapter {
   private readonly autoReconnect: boolean;
   private readonly appStateWritesEnabled: boolean;
   private readonly groupWritesEnabled: boolean;
+  private readonly groupStatusEnabled: boolean;
   private readonly appStateWriteMinIntervalMs: number;
   private readonly appStateResyncLogObserver = new AppStateResyncLogObserver();
   private readonly presenceMode: PresenceMode;
@@ -1108,6 +1118,11 @@ export class BaileysAdapter implements ChannelAdapter {
     this.groupWritesEnabled = parseBooleanEnv(
       process.env.WA_GROUP_WRITES_ENABLED,
       "WA_GROUP_WRITES_ENABLED",
+      false,
+    );
+    this.groupStatusEnabled = parseBooleanEnv(
+      process.env.WA_GROUP_STATUS_ENABLED,
+      "WA_GROUP_STATUS_ENABLED",
       false,
     );
     this.appStateWriteMinIntervalMs = parseNonNegativeIntegerEnv(
@@ -1384,6 +1399,10 @@ export class BaileysAdapter implements ChannelAdapter {
     sock: WASocket,
     ...args: Parameters<WASocket["sendMessage"]>
   ): Promise<Awaited<ReturnType<WASocket["sendMessage"]>>> {
+    return this.withSendActivity(sock, () => sock.sendMessage(...args));
+  }
+
+  private async withSendActivity<T>(sock: WASocket, send: () => Promise<T>): Promise<T> {
     const trackActivity = this.presenceMode === "on_activity";
     if (trackActivity) {
       this.activityInFlight.set(sock, (this.activityInFlight.get(sock) ?? 0) + 1);
@@ -1392,7 +1411,7 @@ export class BaileysAdapter implements ChannelAdapter {
 
     try {
       await this.prepareActivityPresence(sock);
-      return await sock.sendMessage(...args);
+      return await send();
     } finally {
       if (trackActivity) {
         const activitiesInFlight = (this.activityInFlight.get(sock) ?? 1) - 1;
@@ -2136,6 +2155,7 @@ export class BaileysAdapter implements ChannelAdapter {
         shouldSyncHistoryMessage: ({ syncType }) =>
           syncType !== proto.HistorySync.HistorySyncType.FULL || requestFullHistory,
         markOnlineOnConnect: this.markOnlineOnConnect,
+        patchMessageBeforeSending: (message) => patchGroupStatusMessage(message),
         ...(proxyAgents
           ? {
               agent: proxyAgents.agent,
@@ -5376,6 +5396,26 @@ export class BaileysAdapter implements ChannelAdapter {
       omittedRecipientCount: audience.omittedRecipientCount,
       ...(audience.warning ? { warning: audience.warning } : {}),
     };
+  }
+
+  async sendGroupStatus(content: GroupStatusContent): Promise<GroupStatusSendResult> {
+    if (!this.groupStatusEnabled) throw new Error(GROUP_STATUS_DISABLED_ERROR);
+    const sock = this.getSock();
+    const userJid = sock.user?.id;
+    if (!userJid) throw new Error("Instance not connected");
+    const groupJid = normalizeGroupJid(content.groupId);
+    const { message, messageId } = await createGroupStatusMessage(groupJid, content, {
+      userJid,
+      upload: sock.waUploadToServer,
+      resolveMedia: (input) => this.resolveMedia(input),
+    });
+    await this.withSendActivity(sock, () =>
+      sock.relayMessage(groupJid, message, {
+        messageId,
+        additionalNodes: [groupStatusMetaNode()],
+      }),
+    );
+    return { messageId, groupId: groupJid };
   }
 
   // ---- Newsletter / Channels ----

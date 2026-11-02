@@ -9,6 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Added `wa_send_group_status` for a text, image, or video status visible only to the members of
+  one group. Baileys 7.0.0-rc14 can unwrap `groupStatusMessage` / `groupStatusMessageV2` on
+  receive but has no send helper. The tool relays the group JID and wraps the encrypted payload in
+  `groupStatusMessageV2`, with `contextInfo.isGroupStatus`, a 32-byte `messageSecret` on the outer
+  message, and `<meta is_group_status="true" origin="group_status">`. Media stays at the top level
+  until `patchMessageBeforeSending`, because rc14 sets `<enc mediatype>` before that hook. The tool
+  is off unless `WA_GROUP_STATUS_ENABLED=true`. It does not write app state, does not go through
+  the outbound queue, and is not stored in the local messages table. Cloud API returns an
+  unsupported-operation error. Video uses the same envelope as image; the cited phone/Web check
+  covered text and image.
+
 - Added read-only `wa_get_channel_capabilities`, `wa_list_authentication_templates` and
   `wa_get_job_status`. Agents can inspect implemented channel features/requirements, discover
   Cloud AUTHENTICATION template approval/locales/copy-code compatibility, and correlate retained

@@ -5,7 +5,7 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { InstanceManager } from "../services/instance-manager.js";
 import type { MessageQueue } from "../services/message-queue.js";
-import type { StatusSendResult } from "../types/channel.types.js";
+import type { GroupStatusSendResult, StatusSendResult } from "../types/channel.types.js";
 import { toolSuccess } from "../types/mcp.types.js";
 import { handleToolError } from "../utils/tool-handler.js";
 import { createRequestLogger } from "../utils/logger.js";
@@ -14,7 +14,16 @@ import {
   SendImageStatusSchema,
   SendVideoStatusSchema,
   GetStatusViewersSchema,
+  SendGroupStatusSchema,
 } from "../schemas/status.schema.js";
+
+function groupStatusToolSuccess(result: GroupStatusSendResult) {
+  return toolSuccess({
+    success: true,
+    messageId: result.messageId,
+    groupId: result.groupId,
+  });
+}
 
 function statusToolSuccess(result: StatusSendResult) {
   return toolSuccess({
@@ -131,6 +140,38 @@ export function registerStatusTools(
         return statusToolSuccess(result);
       } catch (err) {
         return handleToolError("wa_send_video_status", err, params.instanceId);
+      }
+    },
+  );
+
+  server.registerTool(
+    "wa_send_group_status",
+    {
+      description:
+        "Post a text, image, or video status visible only to the members of one group (Updates tab, 24 hours, outside the chat). Baileys only. Requires WA_GROUP_STATUS_ENABLED=true (default false). Sends directly with relayMessage; it is not queued and does not write app state. Cloud API does not support group status.",
+      inputSchema: SendGroupStatusSchema,
+    },
+    async (params) => {
+      const log = createRequestLogger("wa_send_group_status", params.instanceId);
+      const start = Date.now();
+      try {
+        const adapter = instanceManager.getAdapter(params.instanceId);
+        const result = await adapter.sendGroupStatus({
+          groupId: params.groupId,
+          type: params.type,
+          text: params.text,
+          media: params.media,
+          caption: params.caption,
+          backgroundColor: params.backgroundColor,
+          font: params.font,
+        });
+        log.info(
+          { duration: Date.now() - start, messageId: result.messageId, groupId: result.groupId },
+          "Group status posted",
+        );
+        return groupStatusToolSuccess(result);
+      } catch (err) {
+        return handleToolError("wa_send_group_status", err, params.instanceId);
       }
     },
   );
