@@ -171,6 +171,36 @@ export type GroupAddPrivacyValue = "all" | "contacts" | "contact_blacklist";
 export type CallPrivacyValue = "all" | "known";
 export type DefaultDisappearingModeDuration = 0 | 86400 | 604800 | 7776000;
 
+/**
+ * Pin lifetimes accepted by Baileys 7.0.0-rc14.
+ * `AnyMessageContent.time` is `86400 | 604800 | 2592000` and is written to
+ * `MessageContextInfo.messageAddOnDurationInSecs`. That proto has no no-expiry value.
+ */
+export const PIN_DURATIONS = ["24h", "7d", "30d"] as const;
+export type PinDuration = (typeof PIN_DURATIONS)[number];
+export const PIN_DURATION_SECONDS = {
+  "24h": 86400,
+  "7d": 604800,
+  "30d": 2592000,
+} as const satisfies Record<PinDuration, 86400 | 604800 | 2592000>;
+
+export function pinDurationSeconds(
+  duration: PinDuration = "7d",
+): (typeof PIN_DURATION_SECONDS)[PinDuration] {
+  switch (duration) {
+    case "24h":
+    case "7d":
+    case "30d":
+      return PIN_DURATION_SECONDS[duration];
+    default: {
+      const unexpected: never = duration;
+      throw new Error(
+        `Unsupported pin duration "${String(unexpected)}". Expected 24h, 7d, or 30d.`,
+      );
+    }
+  }
+}
+
 export type PrivacyUpdate =
   | { setting: "lastSeen"; value: PrivacyValue }
   | { setting: "online"; value: OnlinePrivacyValue }

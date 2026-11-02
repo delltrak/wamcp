@@ -59,6 +59,7 @@ import type {
   MessageReceipt,
   MessageReaction,
   LinkPreviewOptions,
+  PinDuration,
   MessageSearchOptions,
   SendEventOptions,
   CatalogProductCreateInput,
@@ -668,7 +669,12 @@ export class CloudApiAdapter implements ChannelAdapter {
     });
   }
 
-  async pinMessage(_chatId: string, _msgId: string, _pin: boolean): Promise<void> {
+  async pinMessage(
+    _chatId: string,
+    _msgId: string,
+    _pin: boolean,
+    _duration?: PinDuration,
+  ): Promise<void> {
     throw new Error("Pinning messages is not supported on Cloud API");
   }
 
