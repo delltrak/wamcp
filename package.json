@@ -16,7 +16,8 @@
     "lint": "eslint src/",
     "lint:fix": "eslint src/ --fix",
     "format": "prettier --write src/",
-    "format:check": "prettier --check src/"
+    "format:check": "prettier --check src/",
+    "postinstall": "patch-package"
   },
   "keywords": [
     "whatsapp",
@@ -70,6 +71,7 @@
     "@vitest/coverage-v8": "^5.0.4",
     "drizzle-kit": "^0.31.11",
     "eslint": "^10.12.0",
+    "patch-package": "^8.0.1",
     "pg": "^8.23.1",
     "prettier": "^3.9.10",
     "tsx": "^4.23.15",

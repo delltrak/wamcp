@@ -1,0 +1,36 @@
+diff --git a/node_modules/@whiskeysockets/baileys/lib/Socket/messages-send.js b/node_modules/@whiskeysockets/baileys/lib/Socket/messages-send.js
+index d61e064..2a130d9 100644
+--- a/node_modules/@whiskeysockets/baileys/lib/Socket/messages-send.js
++++ b/node_modules/@whiskeysockets/baileys/lib/Socket/messages-send.js
+@@ -425,7 +425,17 @@ export const makeMessagesSocket = (config) => {
+         }
+         return { nodes, shouldIncludeDeviceIdentity };
+     };
+-    const relayMessage = async (jid, message, { messageId: msgId, participant, additionalAttributes, additionalNodes, useUserDevicesCache, useCachedGroupMetadata, statusJidList }) => {
++    const relayMessage = async (jid, message, { messageId: msgId, participant, additionalAttributes, additionalNodes: suppliedAdditionalNodes, useUserDevicesCache, useCachedGroupMetadata, statusJidList }) => {
++        // Group status retries call relayMessage with the envelope and no additionalNodes.
++        // Keep the meta node on every send of that envelope, including participant retries.
++        const additionalNodes = suppliedAdditionalNodes ? [...suppliedAdditionalNodes] : [];
++        if (message?.groupStatusMessageV2 &&
++            !additionalNodes.some((node) => node.tag === 'meta' && node.attrs?.is_group_status)) {
++            additionalNodes.push({
++                tag: 'meta',
++                attrs: { is_group_status: 'true', origin: 'group_status' }
++            });
++        }
+         const meId = assertMeId(authState.creds);
+         const meLid = authState.creds.me?.lid;
+         const isRetryResend = Boolean(participant?.jid);
+@@ -466,7 +476,11 @@ export const makeMessagesSocket = (config) => {
+             });
+         }
+         await authState.keys.transaction(async () => {
+-            const mediaType = getMediaType(message);
++            // A group status envelope has no top-level image/video. sendToAll retries
++            // would otherwise omit <enc mediatype>. The inner message still has it.
++            const mediaType = getMediaType(message?.groupStatusMessageV2
++                ? (normalizeMessageContent(message) || message)
++                : message);
+             if (mediaType) {
+                 extraAttrs['mediatype'] = mediaType;
+             }

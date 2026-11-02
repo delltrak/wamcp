@@ -22,6 +22,7 @@ function groupStatusToolSuccess(result: GroupStatusSendResult) {
     success: true,
     messageId: result.messageId,
     groupId: result.groupId,
+    ...(result.warning ? { warning: result.warning } : {}),
   });
 }
 
