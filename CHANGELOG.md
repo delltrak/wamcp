@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `wa_pin_message` accepts an optional `duration` of `24h` (86400s), `7d` (604800s), or `30d`
+  (2592000s). Omitting it still pins for 7 days. Baileys 7.0.0-rc14 types pin `time` as only those
+  three values and writes them to `messageAddOnDurationInSecs`. `PinInChat` has no no-expiry field
+  (`MessageAddonExpiryType` is `STATIC` or `DEPENDENT_ON_PARENT`), and a missing or zero `time` on
+  a pin is rewritten to 86400, so indefinite pins are not offered. Unpinning still omits `time`.
+
 - Added read-only `wa_get_channel_capabilities`, `wa_list_authentication_templates` and
   `wa_get_job_status`. Agents can inspect implemented channel features/requirements, discover
   Cloud AUTHENTICATION template approval/locales/copy-code compatibility, and correlate retained

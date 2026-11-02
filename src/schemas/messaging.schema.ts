@@ -3,6 +3,7 @@
 // ============================================================
 
 import { z } from "zod";
+import { PIN_DURATIONS } from "../types/channel.types.js";
 import { isValidStatusRecipient } from "../utils/validation.js";
 
 const MentionsSchema = z
@@ -391,6 +392,12 @@ export const PinMessageSchema = z
     chatId: z.string().min(5).describe("Chat JID where the message is"),
     messageId: z.string().min(1).describe("Message ID to pin or unpin"),
     pin: z.boolean().describe("true to pin, false to unpin"),
+    duration: z
+      .enum(PIN_DURATIONS)
+      .default("7d")
+      .describe(
+        "How long to keep the message pinned when pin is true: 24h (86400s), 7d (604800s), or 30d (2592000s). Defaults to 7d. Ignored when pin is false.",
+      ),
   })
   .strict();
 

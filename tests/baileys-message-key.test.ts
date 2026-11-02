@@ -197,6 +197,21 @@ describe("Baileys message operation keys", () => {
       fromMe: false,
       participant: AUTHOR_JID,
     });
+    expect(lastPayload(sendMessage)).toMatchObject({ type: 1, time: 604800 });
+
+    await adapter.pinMessage(GROUP_JID, messageId, true, "24h");
+    expect(lastPayload(sendMessage)).toMatchObject({ type: 1, time: 86400 });
+
+    await adapter.pinMessage(GROUP_JID, messageId, true, "30d");
+    expect(lastPayload(sendMessage)).toMatchObject({ type: 1, time: 2592000 });
+
+    await adapter.pinMessage(GROUP_JID, messageId, false, "30d");
+    expect(lastPayload(sendMessage).type).toBe(0);
+    expect(lastPayload(sendMessage).time).toBeUndefined();
+
+    await expect(adapter.pinMessage(GROUP_JID, messageId, true, "forever" as "7d")).rejects.toThrow(
+      'Unsupported pin duration "forever"',
+    );
   });
 
   it("keeps edits of own group messages marked fromMe", async () => {
