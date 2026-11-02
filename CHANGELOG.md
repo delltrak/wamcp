@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Added `wa_create_call_link` for a Baileys audio or video call link. `@whiskeysockets/baileys`
+  7.0.0-rc14 `createCallLink(type, event?, timeoutMs?)` returns only `link_create@token`
+  (`string | undefined`) and drops every other response attribute. The tool publishes
+  `https://call.whatsapp.com/voice/<token>` or `https://call.whatsapp.com/video/<token>` using
+  `CALL_AUDIO_PREFIX` and `CALL_VIDEO_PREFIX`. Optional `startTime` is Unix seconds and is sent as
+  `link_create/event@start_time`. The query is not an app-state patch, so
+  `WA_APP_STATE_WRITES_ENABLED` does not gate it. Cloud API returns an unsupported-operation error.
+  A missing token is an error. The link was not checked against a real WhatsApp account.
+
 - Added read-only `wa_get_channel_capabilities`, `wa_list_authentication_templates` and
   `wa_get_job_status`. Agents can inspect implemented channel features/requirements, discover
   Cloud AUTHENTICATION template approval/locales/copy-code compatibility, and correlate retained

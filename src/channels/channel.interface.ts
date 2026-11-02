@@ -50,6 +50,7 @@ import type {
   LinkPreviewOptions,
   MessageSearchOptions,
   SendEventOptions,
+  CallLinkResult,
   CatalogProductCreateInput,
   CatalogProductUpdateInput,
   NewsletterPostsPage,
@@ -291,6 +292,7 @@ export interface ChannelAdapter {
 
   // ---- Calls ----
   rejectCall(callId: string, callFrom?: string): Promise<void>;
+  createCallLink(type: "audio" | "video", startTime?: number): Promise<CallLinkResult>;
 
   // ---- Data access ----
   getContacts(search?: string): Promise<Contact[]>;

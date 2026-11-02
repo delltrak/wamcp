@@ -36,7 +36,7 @@
 
 **WA MCP** is a WhatsApp MCP server built with TypeScript that gives AI agents full access to WhatsApp through the [Model Context Protocol](https://modelcontextprotocol.io). It supports both **Baileys** (WhatsApp Web) and **Meta Cloud API** as dual-channel backends, deployable with **Docker** in a single command.
 
-Your agent connects once and auto-discovers **167 tools**, **10 resources**, and **22 real-time events** — zero configuration, zero REST wrappers, zero glue code. Three instance webhook tools are added when `WA_INSTANCE_WEBHOOK_TOOLS_ENABLED=true`.
+Your agent connects once and auto-discovers **168 tools**, **10 resources**, and **22 real-time events** — zero configuration, zero REST wrappers, zero glue code. Three instance webhook tools are added when `WA_INSTANCE_WEBHOOK_TOOLS_ENABLED=true`.
 
 ```
 Your AI Agent ←→ MCP Protocol ←→ WA MCP ←→ WhatsApp
@@ -82,7 +82,7 @@ from google.adk.tools.mcp_tool import McpToolset
 
 tools = McpToolset(url="http://localhost:3000/mcp")
 
-# Agent auto-discovers 167 WhatsApp tools
+# Agent auto-discovers 168 WhatsApp tools
 # wa_create_instance, wa_send_text, wa_send_image, ...
 ```
 
@@ -157,7 +157,7 @@ See [OTP delivery](docs/otp.md).
 
 ## 🛠️ Tools
 
-WA MCP exposes **167 tools** across 17 domains. All tools use the `wa_` prefix.
+WA MCP exposes **168 tools** across 17 domains. All tools use the `wa_` prefix.
 See [channel discovery and send tracking](docs/channel-discovery.md) for capability checks, authentication-template discovery and safe queued-job inspection.
 `WA_INSTANCE_WEBHOOK_TOOLS_ENABLED=true` adds the three #142 instance webhook tools.
 
@@ -490,11 +490,14 @@ See the [community management roadmap](docs/COMMUNITIES.md) for supported operat
 Baileys rc14 has no quick-reply list API, and this server does not store quick-reply sync actions locally. Use the WhatsApp Business app to find an existing reply's timestamp before editing or deleting it.
 
 <details>
-<summary>📞 <strong>Calls</strong> (1 tool)</summary>
+<summary>📞 <strong>Calls</strong> (2 tools)</summary>
 
-| Tool             | Description          |
-| ---------------- | -------------------- |
-| `wa_reject_call` | Reject incoming call |
+| Tool                   | Description                              |
+| ---------------------- | ---------------------------------------- |
+| `wa_reject_call`       | Reject incoming call                     |
+| `wa_create_call_link`  | Create an audio or video call link       |
+
+`wa_create_call_link` calls Baileys `createCallLink`. In 7.0.0-rc14 that method returns only the `link_create` token. The tool turns it into `https://call.whatsapp.com/voice/<token>` or `https://call.whatsapp.com/video/<token>`. `type` is `audio` or `video`. Optional `startTime` is Unix seconds and is sent as `link_create/event@start_time`. This is a call query, not an app-state patch. Cloud API does not support it.
 
 </details>
 
@@ -1526,7 +1529,7 @@ src/
 ├── constants.ts                 # Defaults and limits
 ├── server/mcp.ts                # MCP server setup
 ├── server/dashboard.ts          # Optional operations dashboard
-├── tools/                       # 🔧 167 MCP tools (17 files)
+├── tools/                       # 🔧 168 MCP tools (17 files)
 ├── resources/                   # 📖 10 MCP resources (8 files)
 ├── notifications/events.ts      # 📡 15 documented event types
 ├── channels/

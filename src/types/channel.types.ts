@@ -147,6 +147,14 @@ export interface SendEventOptions {
   quotedMessageId?: string;
 }
 
+/** Public call link assembled from the token returned by Baileys createCallLink. */
+export interface CallLinkResult {
+  type: "audio" | "video";
+  token: string;
+  link: string;
+  startTime?: number;
+}
+
 /** A display-safe action exposed by a business template or interactive message. */
 export interface MessageButton {
   type: string;

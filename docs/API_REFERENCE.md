@@ -17,7 +17,7 @@
    - [Profile Management](#26-profile-management-7-tools)
    - [Status / Stories](#27-status--stories-4-tools)
    - [Newsletter / Channels](#28-newsletter--channels-11-tools)
-   - [Call Management](#29-call-management-1-tool)
+   - [Call Management](#29-call-management-2-tools)
    - [Message Search](#210-message-search-1-tool)
    - [WhatsApp Business Labels](#211-whatsapp-business-labels-8-tools)
    - [WhatsApp Events](#212-whatsapp-events-2-tools)
@@ -170,7 +170,7 @@ Tools marked **Baileys only** are not available on Cloud API instances.
 
 ## 2. Tools Reference
 
-WA MCP exposes **167 tools** grouped by domain. All tools return MCP-standard responses.
+WA MCP exposes **168 tools** grouped by domain. All tools return MCP-standard responses.
 `WA_INSTANCE_WEBHOOK_TOOLS_ENABLED=true` adds three #142 instance webhook tools.
 
 ### Success Response Format
@@ -2872,7 +2872,38 @@ Channel post media.
 
 ---
 
-### 2.9 Call Management (1 tool)
+### 2.9 Call Management (2 tools)
+
+#### `wa_create_call_link`
+
+Create a WhatsApp call link on a connected Baileys instance. `type` must be `audio` or `video`.
+
+Baileys 7.0.0-rc14 `createCallLink(type: 'audio' | 'video', event?: { startTime: number }, timeoutMs?: number)` sends a `call` / `link_create` query (`media` is the type; an optional `event` child carries `start_time`). The return value is only `link_create@token` (`string | undefined`). Other response attributes are discarded inside Baileys. This server does not pass `timeoutMs`, so the socket uses its default query timeout.
+
+The tool keeps that token and builds the public URL the same way Baileys builds an event `joinLink`: `CALL_AUDIO_PREFIX` (`https://call.whatsapp.com/voice/`) or `CALL_VIDEO_PREFIX` (`https://call.whatsapp.com/video/`) plus the raw token. A missing or blank token is an error. The request is not an app-state patch and is not gated by `WA_APP_STATE_WRITES_ENABLED`. It does not place a call or notify a contact. Whether a guest can join depends on the WhatsApp account and client; that was not checked against a live number.
+
+| Parameter    | Type              | Required | Description |
+| ------------ | ----------------- | -------- | ----------- |
+| `instanceId` | string            | Yes      | The instance ID |
+| `type`       | `audio` or `video` | Yes     | Voice (`audio`) or video link |
+| `startTime`  | integer           | No       | Unix seconds, 0 through 4000000000. Sent as `link_create/event@start_time`. Omit for a link with no scheduled start |
+
+**Channel support:** Baileys only. Cloud API returns an unsupported-operation error.
+
+**Response:**
+
+```json
+{
+  "type": "video",
+  "token": "abc123",
+  "link": "https://call.whatsapp.com/video/abc123",
+  "startTime": 1700000000
+}
+```
+
+`startTime` is present only when the request included it.
+
+---
 
 #### `wa_reject_call`
 
@@ -4127,10 +4158,10 @@ Details and the Chatwoot inbox checklist are in [docs/chatwoot.md](chatwoot.md).
 | Status / Stories                  | 4     | Baileys only                         |
 | Newsletter / Channels             | 11    | Baileys only                         |
 | Business, Communities, and Catalog| 16    | Baileys only                         |
-| Call Management                   | 1     | Baileys only                         |
+| Call Management                   | 2     | Baileys only                         |
 | Community administration | 16 | Baileys only |
 | Scheduled messages               | 5     | Both                                 |
-| **Total**                         | **167** |                                    |
+| **Total**                         | **168** |                                    |
 
 | Resources     | 10  |
 | ------------- | --- |

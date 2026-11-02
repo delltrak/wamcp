@@ -5,6 +5,8 @@
 // ============================================================
 
 import makeWASocket, {
+  CALL_AUDIO_PREFIX,
+  CALL_VIDEO_PREFIX,
   DisconnectReason,
   proto,
   BufferJSON,
@@ -101,6 +103,7 @@ import type {
   EventResponseStatus,
   MessageSearchOptions,
   SendEventOptions,
+  CallLinkResult,
   NormalizedLabelUpdateEvent,
   NormalizedGroupMemberLabelEvent,
   CatalogProductCreateInput,
@@ -5595,6 +5598,36 @@ export class BaileysAdapter implements ChannelAdapter {
     }
     await sock.rejectCall(callId, this.normalizeJid(caller));
     this.pendingCalls.delete(callId);
+  }
+
+  async createCallLink(type: "audio" | "video", startTime?: number): Promise<CallLinkResult> {
+    const media: string = type;
+    if (media !== "audio" && media !== "video") {
+      throw new Error("Invalid call link type: expected audio or video");
+    }
+    if (
+      startTime !== undefined &&
+      (!Number.isSafeInteger(startTime) || startTime < 0 || startTime > 4_000_000_000)
+    ) {
+      throw new Error("Invalid call link startTime: expected Unix seconds from 0 to 4000000000");
+    }
+
+    const sock = this.getSock();
+    const token = await sock.createCallLink(
+      media,
+      startTime === undefined ? undefined : { startTime },
+    );
+    if (typeof token !== "string" || token.trim().length === 0) {
+      throw new Error("Baileys createCallLink returned no call link token");
+    }
+
+    const prefix = type === "audio" ? CALL_AUDIO_PREFIX : CALL_VIDEO_PREFIX;
+    return {
+      type,
+      token,
+      link: `${prefix}${token}`,
+      ...(startTime === undefined ? {} : { startTime }),
+    };
   }
 
   // ---- Data access ----
