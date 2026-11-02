@@ -159,6 +159,12 @@ export function getChannelCapabilities(channel: ChannelType): Record<string, Fea
       ["wa_send_text_status", "wa_get_status_viewers"],
       ["Connected account", "Status audience requirements"],
     ),
+    groupStatus: feature(
+      baileys,
+      ["wa_send_group_status"],
+      ["Connected account", "WA_GROUP_STATUS_ENABLED=true"],
+      "One group, 24 hours, outside the chat timeline. Off unless WA_GROUP_STATUS_ENABLED=true. Not an app-state write.",
+    ),
     chatModifications: feature(
       baileys,
       ["wa_archive_chat", "wa_pin_chat", "wa_mute_chat"],

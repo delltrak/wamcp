@@ -668,6 +668,21 @@ export interface StatusSendResult {
   warning?: string;
 }
 
+export interface GroupStatusContent {
+  groupId: string;
+  type: "text" | "image" | "video";
+  text?: string;
+  media?: string;
+  caption?: string;
+  backgroundColor?: string;
+  font?: number;
+}
+
+export interface GroupStatusSendResult {
+  messageId: string;
+  groupId: string;
+}
+
 export interface CloudCredentials {
   accessToken: string;
   phoneNumberId: string;

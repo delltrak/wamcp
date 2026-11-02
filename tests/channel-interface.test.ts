@@ -104,6 +104,7 @@ const CHANNEL_ADAPTER_METHODS: (keyof ChannelAdapter)[] = [
   "getProfilePicture",
   // Status / Stories
   "sendStatus",
+  "sendGroupStatus",
   // Newsletter / Channels
   "newsletterFollow",
   "newsletterUnfollow",

@@ -3,7 +3,10 @@
 // ============================================================
 
 import { z } from "zod";
+import { isValidGroupId } from "../utils/group-jid.js";
 import { isValidStatusRecipient } from "../utils/validation.js";
+
+const GROUP_STATUS_FONTS = new Set([0, 1, 2, 6, 7, 8, 9, 10]);
 
 const statusJidListSchema = z
   .array(
@@ -57,3 +60,77 @@ export const GetStatusViewersSchema = z
     messageId: z.string().min(1).describe("Message ID returned when the status story was sent"),
   })
   .strict();
+
+export const SendGroupStatusSchema = z
+  .object({
+    instanceId: z.string().min(1).describe("The instance ID"),
+    groupId: z
+      .string()
+      .trim()
+      .min(1)
+      .refine(isValidGroupId, "Expected a WhatsApp group ID or a JID ending in @g.us")
+      .describe("Group whose members can see this status, as a group ID or a @g.us JID"),
+    type: z.enum(["text", "image", "video"]).describe("text, image, or video"),
+    text: z.string().min(1).optional().describe("Text body. Required when type is text"),
+    media: z
+      .string()
+      .min(1)
+      .optional()
+      .describe("HTTPS URL or base64 image or video. Required when type is image or video"),
+    caption: z.string().optional().describe("Caption for an image or video status"),
+    backgroundColor: z
+      .string()
+      .trim()
+      .regex(/^#?(?:[0-9a-fA-F]{6}|[0-9a-fA-F]{8})$/, "Expected RGB or ARGB hex color")
+      .optional()
+      .describe("Text background as #RRGGBB or #AARRGGBB. Defaults to #233E4F"),
+    font: z
+      .number()
+      .int()
+      .refine((value) => GROUP_STATUS_FONTS.has(value), "Expected FontType 0, 1, 2, or 6-10")
+      .optional()
+      .describe(
+        "WhatsApp FontType: 0 SYSTEM, 1 SYSTEM_TEXT, 2 FB_SCRIPT, 6 SYSTEM_BOLD, 7 MORNINGBREEZE_REGULAR, 8 CALISTOGA_REGULAR, 9 EXO2_EXTRABOLD, 10 COURIERPRIME_BOLD. Defaults to 6",
+      ),
+  })
+  .strict()
+  .superRefine((value, ctx) => {
+    if (value.type === "text" && value.text === undefined) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["text"],
+        message: "text is required when type is text",
+      });
+    }
+    if (value.type !== "text" && value.media === undefined) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["media"],
+        message: "media is required when type is image or video",
+      });
+    }
+    if (value.type === "text" && value.media !== undefined) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["media"],
+        message: "media applies only to image or video",
+      });
+    }
+    if (value.type === "text" && value.caption !== undefined) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["caption"],
+        message: "caption applies only to image or video",
+      });
+    }
+    if (
+      value.type !== "text" &&
+      (value.backgroundColor !== undefined || value.font !== undefined)
+    ) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["backgroundColor"],
+        message: "backgroundColor and font apply only to text",
+      });
+    }
+  });
