@@ -5,6 +5,8 @@
 // ============================================================
 
 import makeWASocket, {
+  CALL_AUDIO_PREFIX,
+  CALL_VIDEO_PREFIX,
   DisconnectReason,
   proto,
   BufferJSON,
@@ -103,6 +105,7 @@ import type {
   EventResponseStatus,
   MessageSearchOptions,
   SendEventOptions,
+  CallLinkResult,
   NormalizedLabelUpdateEvent,
   NormalizedGroupMemberLabelEvent,
   CatalogProductCreateInput,
@@ -114,6 +117,7 @@ import type {
   InstanceAuthMethod,
   InstanceRuntimeStatus,
 } from "../../types/channel.types.js";
+import { pinDurationSeconds, type PinDuration } from "../../types/channel.types.js";
 import { useSqliteAuthState, clearAuthState } from "./baileys.auth.js";
 import { normalizePrivacySettings } from "./privacy.js";
 import { getWaVersion } from "./baileys.version.js";
@@ -3166,13 +3170,18 @@ export class BaileysAdapter implements ChannelAdapter {
     });
   }
 
-  async pinMessage(chatId: string, msgId: string, pin: boolean): Promise<void> {
+  async pinMessage(
+    chatId: string,
+    msgId: string,
+    pin: boolean,
+    duration: PinDuration = "7d",
+  ): Promise<void> {
     const sock = this.getSock();
     const jid = this.normalizeJid(chatId);
     const pinMsg = {
       pin: await this.resolveMessageKey(jid, msgId, true),
       type: pin ? 1 : 0,
-      time: pin ? 604800 : undefined,
+      time: pin ? pinDurationSeconds(duration) : undefined,
     };
     await this.sendMessageWithActivity(sock, jid, pinMsg as unknown as AnyMessageContent);
   }
@@ -5635,6 +5644,36 @@ export class BaileysAdapter implements ChannelAdapter {
     }
     await sock.rejectCall(callId, this.normalizeJid(caller));
     this.pendingCalls.delete(callId);
+  }
+
+  async createCallLink(type: "audio" | "video", startTime?: number): Promise<CallLinkResult> {
+    const media: string = type;
+    if (media !== "audio" && media !== "video") {
+      throw new Error("Invalid call link type: expected audio or video");
+    }
+    if (
+      startTime !== undefined &&
+      (!Number.isSafeInteger(startTime) || startTime < 0 || startTime > 4_000_000_000)
+    ) {
+      throw new Error("Invalid call link startTime: expected Unix seconds from 0 to 4000000000");
+    }
+
+    const sock = this.getSock();
+    const token = await sock.createCallLink(
+      media,
+      startTime === undefined ? undefined : { startTime },
+    );
+    if (typeof token !== "string" || token.trim().length === 0) {
+      throw new Error("Baileys createCallLink returned no call link token");
+    }
+
+    const prefix = type === "audio" ? CALL_AUDIO_PREFIX : CALL_VIDEO_PREFIX;
+    return {
+      type,
+      token,
+      link: `${prefix}${token}`,
+      ...(startTime === undefined ? {} : { startTime }),
+    };
   }
 
   // ---- Data access ----

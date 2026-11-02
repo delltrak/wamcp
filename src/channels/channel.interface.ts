@@ -50,8 +50,10 @@ import type {
   MessageReceipt,
   MessageReaction,
   LinkPreviewOptions,
+  PinDuration,
   MessageSearchOptions,
   SendEventOptions,
+  CallLinkResult,
   CatalogProductCreateInput,
   CatalogProductUpdateInput,
   NewsletterPostsPage,
@@ -108,7 +110,7 @@ export interface ChannelAdapter {
   deleteMessage(chatId: string, msgId: string, statusJidList?: string[]): Promise<void>;
   forwardMessage(to: string, msgId: string, fromChat: string): Promise<MessageResponse>;
   sendReaction(chatId: string, msgId: string, emoji: string): Promise<void>;
-  pinMessage(chatId: string, msgId: string, pin: boolean): Promise<void>;
+  pinMessage(chatId: string, msgId: string, pin: boolean, duration?: PinDuration): Promise<void>;
   sendViewOnce(
     to: string,
     media: string,
@@ -294,6 +296,7 @@ export interface ChannelAdapter {
 
   // ---- Calls ----
   rejectCall(callId: string, callFrom?: string): Promise<void>;
+  createCallLink(type: "audio" | "video", startTime?: number): Promise<CallLinkResult>;
 
   // ---- Data access ----
   getContacts(search?: string): Promise<Contact[]>;

@@ -815,6 +815,63 @@ describe("issue 78 messaging and group features", () => {
       type: 1,
       time: 604800,
     });
+
+    await invoke("wa_pin_message", {
+      chatId: GROUP_ID,
+      messageId: "pin-24h",
+      pin: true,
+      duration: "24h",
+    });
+    expect(vi.mocked(socket.sendMessage).mock.calls[3]?.[1]).toMatchObject({
+      pin: { remoteJid: GROUP_ID, id: "pin-24h", fromMe: true },
+      type: 1,
+      time: 86400,
+    });
+
+    await invoke("wa_pin_message", {
+      chatId: GROUP_ID,
+      messageId: "pin-30d",
+      pin: true,
+      duration: "30d",
+    });
+    expect(vi.mocked(socket.sendMessage).mock.calls[4]?.[1]).toMatchObject({
+      pin: { remoteJid: GROUP_ID, id: "pin-30d", fromMe: true },
+      type: 1,
+      time: 2592000,
+    });
+
+    await invoke("wa_pin_message", {
+      chatId: GROUP_ID,
+      messageId: "pin-7d",
+      pin: true,
+      duration: "7d",
+    });
+    expect(vi.mocked(socket.sendMessage).mock.calls[5]?.[1]).toMatchObject({
+      type: 1,
+      time: 604800,
+    });
+
+    await invoke("wa_pin_message", {
+      chatId: GROUP_ID,
+      messageId: "unpin-with-duration",
+      pin: false,
+      duration: "24h",
+    });
+    const unpinPayload = vi.mocked(socket.sendMessage).mock.calls[6]?.[1] as {
+      type?: number;
+      time?: number;
+    };
+    expect(unpinPayload).toMatchObject({ type: 0 });
+    expect(unpinPayload.time).toBeUndefined();
+
+    await expect(
+      invoke("wa_pin_message", {
+        chatId: GROUP_ID,
+        messageId: "pin-forever",
+        pin: true,
+        duration: "forever",
+      }),
+    ).rejects.toThrow();
     await expect(
       new CloudApiAdapter("cloud-test").editMessage(GROUP_ID, "message-id", "edit"),
     ).rejects.toThrow("Editing sent messages is not supported on Cloud API");

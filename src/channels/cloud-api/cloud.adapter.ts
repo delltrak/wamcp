@@ -61,8 +61,10 @@ import type {
   MessageReceipt,
   MessageReaction,
   LinkPreviewOptions,
+  PinDuration,
   MessageSearchOptions,
   SendEventOptions,
+  CallLinkResult,
   CatalogProductCreateInput,
   CatalogProductUpdateInput,
   NewsletterMediaDownload,
@@ -670,7 +672,12 @@ export class CloudApiAdapter implements ChannelAdapter {
     });
   }
 
-  async pinMessage(_chatId: string, _msgId: string, _pin: boolean): Promise<void> {
+  async pinMessage(
+    _chatId: string,
+    _msgId: string,
+    _pin: boolean,
+    _duration?: PinDuration,
+  ): Promise<void> {
     throw new Error("Pinning messages is not supported on Cloud API");
   }
 
@@ -1271,6 +1278,10 @@ export class CloudApiAdapter implements ChannelAdapter {
 
   async rejectCall(_callId: string): Promise<void> {
     throw new Error("Call rejection is not supported on Cloud API");
+  }
+
+  async createCallLink(_type: "audio" | "video", _startTime?: number): Promise<CallLinkResult> {
+    throw new Error("Call link creation is not supported on Cloud API");
   }
 
   // ---- Data access ----

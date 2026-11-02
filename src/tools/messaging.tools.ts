@@ -760,7 +760,8 @@ Returns: { status: "queued", jobId }`,
   server.registerTool(
     "wa_pin_message",
     {
-      description: "Pin or unpin a message in a chat.",
+      description:
+        "Pin or unpin a message in a chat. When pinning, duration is 24h, 7d, or 30d and defaults to 7d. Duration is ignored when unpinning.",
       inputSchema: PinMessageSchema,
     },
     async (params) => {
@@ -768,8 +769,11 @@ Returns: { status: "queued", jobId }`,
       const start = Date.now();
       try {
         const adapter = instanceManager.getAdapter(params.instanceId);
-        await adapter.pinMessage(params.chatId, params.messageId, params.pin);
-        log.info({ duration: Date.now() - start, pin: params.pin }, "Message pin toggled");
+        await adapter.pinMessage(params.chatId, params.messageId, params.pin, params.duration);
+        log.info(
+          { duration: Date.now() - start, pin: params.pin, pinDuration: params.duration },
+          "Message pin toggled",
+        );
         return toolSuccess({ success: true, pinned: params.pin });
       } catch (err) {
         return handleToolError("wa_pin_message", err, params.instanceId);

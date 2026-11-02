@@ -125,6 +125,7 @@ const CHANNEL_ADAPTER_METHODS: (keyof ChannelAdapter)[] = [
   "getOrderDetails",
   // Calls
   "rejectCall",
+  "createCallLink",
   // Data access
   "getContacts",
   "getChats",

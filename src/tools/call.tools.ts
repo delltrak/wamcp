@@ -8,7 +8,7 @@ import type { MessageQueue } from "../services/message-queue.js";
 import { toolSuccess } from "../types/mcp.types.js";
 import { handleToolError } from "../utils/tool-handler.js";
 import { createRequestLogger } from "../utils/logger.js";
-import { RejectCallSchema } from "../schemas/call.schema.js";
+import { CreateCallLinkSchema, RejectCallSchema } from "../schemas/call.schema.js";
 
 export function registerCallTools(
   server: McpServer,
@@ -32,6 +32,27 @@ export function registerCallTools(
         return toolSuccess({ success: true, callId: params.callId });
       } catch (err) {
         return handleToolError("wa_reject_call", err, params.instanceId);
+      }
+    },
+  );
+
+  server.registerTool(
+    "wa_create_call_link",
+    {
+      description:
+        "Create a WhatsApp audio or video call link on Baileys. createCallLink returns only a token; the result adds the public https://call.whatsapp.com/voice/ or /video/ URL. Optional startTime is Unix seconds. Cloud API does not support this operation.",
+      inputSchema: CreateCallLinkSchema,
+    },
+    async (params) => {
+      const log = createRequestLogger("wa_create_call_link", params.instanceId);
+      const start = Date.now();
+      try {
+        const adapter = instanceManager.getAdapter(params.instanceId);
+        const result = await adapter.createCallLink(params.type, params.startTime);
+        log.info({ duration: Date.now() - start, type: params.type }, "Call link created");
+        return toolSuccess(result);
+      } catch (err) {
+        return handleToolError("wa_create_call_link", err, params.instanceId);
       }
     },
   );
