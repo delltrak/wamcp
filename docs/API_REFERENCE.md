@@ -2763,12 +2763,22 @@ in `groupStatusMessageV2` when `contextInfo.isGroupStatus` is true. The hook is 
 existing `groupStatusMessageV2` is returned unchanged. The outer message carries a 32-byte
 `messageSecret`, and the stanza includes `<meta is_group_status="true" origin="group_status">`.
 
-rc14 stores the pre-wrap message in its retry cache and, on a retry that names `participant`,
-sends that object without calling the hook. After a successful relay the server replaces the
-cache entry with the envelope and writes the same envelope to the local messages table, which is
-what `getMessage` reads after the cache expires (about five minutes). A retry therefore stays a
-group status. The normalized row is the inner text or image, so it can show up in local message
-reads.
+rc14's `sendMessagesAgain` calls `relayMessage` again with no `additionalNodes`. A
+`patch-package` patch on `@whiskeysockets/baileys@7.0.0-rc14`
+(`patches/@whiskeysockets+baileys+7.0.0-rc14.patch`) adds
+`<meta is_group_status="true" origin="group_status">` whenever the relayed message is already a
+`groupStatusMessageV2`, and reads `<enc mediatype>` from `normalizeMessageContent` so a
+`sendToAll` retry still marks image or video. `npm ci` applies it via `postinstall`. The Docker
+image runs `npx patch-package` after `npm ci --ignore-scripts`, because that flag skips
+`postinstall`.
+
+After a successful relay the server replaces the in-memory retry cache with the envelope and
+writes the same envelope to the local messages table. Enums are stored as numbers
+(`proto.Message.toObject` with `enums: Number`); `getMessage` rebuilds the proto with
+`fromObject`, which is what a retry uses after the cache expires (about five minutes). The
+normalized row is the inner text or image, so it can show up in local message reads. If that
+write fails, the tool still returns the stanza id and a `warning`, because the status was already
+sent.
 
 The call is blocked unless `WA_GROUP_STATUS_ENABLED=true`. It is not an app-state write. It does
 not use the BullMQ queue; `WA_GROUP_STATUS_MIN_INTERVAL_MS` (default `1500`) spaces posts for one
@@ -2801,6 +2811,8 @@ not support group status.
   "groupId": "120363000000000000@g.us"
 }
 ```
+
+If the status was sent but the local retry copy was not stored, the same object includes `warning`.
 
 ---
 

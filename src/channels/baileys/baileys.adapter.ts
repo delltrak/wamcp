@@ -214,6 +214,7 @@ const DEFAULT_BAILEYS_EVENT_BUFFER_STALL_MS = 60_000;
 const DEFAULT_PRESENCE_IDLE_SECONDS = 30;
 const DEFAULT_APP_STATE_MIN_INTERVAL_MS = 1_500;
 const DEFAULT_GROUP_STATUS_MIN_INTERVAL_MS = 1_500;
+const DEFAULT_CALL_LINK_MIN_INTERVAL_MS = 1_500;
 const CALL_LINK_START_SKEW_SECONDS = 60;
 const MAX_NODE_TIMEOUT_MS = 2_147_483_647;
 const MAX_PRESENCE_IDLE_SECONDS = Math.floor(MAX_NODE_TIMEOUT_MS / 1000);
@@ -237,6 +238,8 @@ const GROUP_STATUS_DISABLED_ERROR =
   "Group status posts are disabled. Set WA_GROUP_STATUS_ENABLED=true to enable them.";
 const GROUP_STATUS_VIDEO_DISABLED_ERROR =
   "Group status video is disabled. Set WA_GROUP_STATUS_VIDEO_ENABLED=true to enable it.";
+const GROUP_STATUS_PERSIST_WARNING =
+  "The status was sent, but the local retry copy was not stored. A later retry may not keep the status envelope.";
 const GROUP_WRITES_DISABLED_ERROR =
   "WhatsApp group, community, and Channel writes are disabled. Set WA_GROUP_WRITES_ENABLED=true or WA_APP_STATE_WRITES_ENABLED=true to enable them.";
 
@@ -247,6 +250,7 @@ interface AppStateWriteQueue {
 
 const appStateWriteQueues = new Map<string, AppStateWriteQueue>();
 const groupStatusSendQueues = new Map<string, AppStateWriteQueue>();
+const callLinkQueues = new Map<string, AppStateWriteQueue>();
 
 export class AppStateNotSyncedError extends Error {
   readonly code = "app_state_not_synced";
@@ -1054,6 +1058,7 @@ export class BaileysAdapter implements ChannelAdapter {
   private readonly groupStatusEnabled: boolean;
   private readonly groupStatusVideoEnabled: boolean;
   private readonly groupStatusMinIntervalMs: number;
+  private readonly callLinkMinIntervalMs: number;
   private readonly appStateWriteMinIntervalMs: number;
   private readonly appStateResyncLogObserver = new AppStateResyncLogObserver();
   private readonly presenceMode: PresenceMode;
@@ -1146,6 +1151,11 @@ export class BaileysAdapter implements ChannelAdapter {
       process.env.WA_GROUP_STATUS_MIN_INTERVAL_MS,
       "WA_GROUP_STATUS_MIN_INTERVAL_MS",
       DEFAULT_GROUP_STATUS_MIN_INTERVAL_MS,
+    );
+    this.callLinkMinIntervalMs = parseNonNegativeIntegerEnv(
+      process.env.WA_CALL_LINK_MIN_INTERVAL_MS,
+      "WA_CALL_LINK_MIN_INTERVAL_MS",
+      DEFAULT_CALL_LINK_MIN_INTERVAL_MS,
     );
     this.appStateWriteMinIntervalMs = parseNonNegativeIntegerEnv(
       process.env.WA_APP_STATE_MIN_INTERVAL_MS,
@@ -2210,6 +2220,9 @@ export class BaileysAdapter implements ChannelAdapter {
           try {
             const stored = JSON.parse(row.rawData, BufferJSON.reviver) as WAMessage;
             normalizeStoredMessageSecret(stored);
+            if (stored.message?.groupStatusMessageV2) {
+              stored.message = proto.Message.fromObject(stored.message);
+            }
             return stored.message ?? undefined;
           } catch {
             return undefined;
@@ -2982,9 +2995,12 @@ export class BaileysAdapter implements ChannelAdapter {
       .run();
   }
 
-  private async persistOutgoingMessage(result: WAMessage | undefined, jid: string): Promise<void> {
+  private async persistOutgoingMessage(
+    result: WAMessage | undefined,
+    jid: string,
+  ): Promise<boolean> {
     const outgoingId = result?.key.id;
-    if (!result?.message || !outgoingId) return;
+    if (!result?.message || !outgoingId) return false;
 
     const outgoing: WAMessage = {
       ...result,
@@ -2995,7 +3011,7 @@ export class BaileysAdapter implements ChannelAdapter {
       },
     };
     const details = extractMessageDetails(outgoing);
-    await this.persistMessage(
+    const persisted = await this.persistMessage(
       {
         instanceId: this.instanceId,
         chatId: outgoing.key.remoteJid ?? jid,
@@ -3019,6 +3035,7 @@ export class BaileysAdapter implements ChannelAdapter {
       true,
     );
     if (details.type === "poll") await this.retryPendingPollVotes(outgoingId);
+    return persisted;
   }
 
   private async persistReceipt(
@@ -5434,14 +5451,14 @@ export class BaileysAdapter implements ChannelAdapter {
     const userJid = sock.user?.id;
     if (!userJid) throw new Error("Instance not connected");
     const groupJid = normalizeGroupJid(content.groupId);
-    const { message, messageId } = await createGroupStatusMessage(groupJid, content, {
-      userJid,
-      upload: sock.waUploadToServer,
-      resolveMedia: (input) => this.resolveMedia(input),
-    });
-    const wrapped = wrapGroupStatusMessage(message);
-    await this.withGroupStatusInterval(() =>
-      this.withSendActivity(sock, async () => {
+    return this.withMinInterval(groupStatusSendQueues, this.groupStatusMinIntervalMs, async () => {
+      const { message, messageId } = await createGroupStatusMessage(groupJid, content, {
+        userJid,
+        upload: sock.waUploadToServer,
+        resolveMedia: (input) => this.resolveMedia(input),
+      });
+      const wrapped = wrapGroupStatusMessage(message);
+      await this.withSendActivity(sock, async () => {
         await sock.relayMessage(groupJid, message, {
           messageId,
           additionalNodes: [groupStatusMetaNode()],
@@ -5449,24 +5466,49 @@ export class BaileysAdapter implements ChannelAdapter {
         // rc14 caches the pre-patch message. Overwrite it with the envelope so a
         // participant retry does not resend the status as a normal group message.
         sock.messageRetryManager?.addRecentMessage(groupJid, messageId, wrapped);
-      }),
-    );
-    await this.persistOutgoingMessage(
-      {
-        key: { remoteJid: groupJid, fromMe: true, id: messageId },
-        message: wrapped,
-        messageTimestamp: Math.floor(Date.now() / 1000),
-      },
-      groupJid,
-    );
-    return { messageId, groupId: groupJid };
+      });
+      const stored = proto.Message.toObject(wrapped as proto.Message, {
+        enums: Number,
+        longs: Number,
+        bytes: Buffer,
+      });
+      let warning: string | undefined;
+      try {
+        const persisted = await this.persistOutgoingMessage(
+          {
+            key: { remoteJid: groupJid, fromMe: true, id: messageId },
+            message: stored as proto.IMessage,
+            messageTimestamp: Math.floor(Date.now() / 1000),
+          },
+          groupJid,
+        );
+        if (!persisted) {
+          warning = GROUP_STATUS_PERSIST_WARNING;
+          logger.warn(
+            { instanceId: this.instanceId, messageId, groupJid },
+            "Group status was sent but the local retry copy was not stored",
+          );
+        }
+      } catch (err) {
+        warning = GROUP_STATUS_PERSIST_WARNING;
+        logger.warn(
+          { err, instanceId: this.instanceId, messageId, groupJid },
+          "Group status was sent but the local retry copy was not stored",
+        );
+      }
+      return { messageId, groupId: groupJid, ...(warning ? { warning } : {}) };
+    });
   }
 
-  private async withGroupStatusInterval<T>(run: () => Promise<T>): Promise<T> {
-    let queue = groupStatusSendQueues.get(this.instanceId);
+  private async withMinInterval<T>(
+    queues: Map<string, AppStateWriteQueue>,
+    minIntervalMs: number,
+    run: () => Promise<T>,
+  ): Promise<T> {
+    let queue = queues.get(this.instanceId);
     if (!queue) {
       queue = { tail: Promise.resolve(), lastStartedAt: null };
-      groupStatusSendQueues.set(this.instanceId, queue);
+      queues.set(this.instanceId, queue);
     }
     const previous = queue.tail;
     let release!: () => void;
@@ -5475,8 +5517,8 @@ export class BaileysAdapter implements ChannelAdapter {
     });
     await previous;
     try {
-      if (queue.lastStartedAt !== null && this.groupStatusMinIntervalMs > 0) {
-        const remainingMs = this.groupStatusMinIntervalMs - (Date.now() - queue.lastStartedAt);
+      if (queue.lastStartedAt !== null && minIntervalMs > 0) {
+        const remainingMs = minIntervalMs - (Date.now() - queue.lastStartedAt);
         if (remainingMs > 0) await new Promise<void>((resolve) => setTimeout(resolve, remainingMs));
       }
       queue.lastStartedAt = Date.now();
@@ -5721,21 +5763,23 @@ export class BaileysAdapter implements ChannelAdapter {
     }
 
     const sock = this.getSock();
-    const token = await sock.createCallLink(
-      media,
-      startTime === undefined ? undefined : { startTime },
-    );
-    if (typeof token !== "string" || token.trim().length === 0) {
-      throw new Error("Baileys createCallLink returned no call link token");
-    }
+    return this.withMinInterval(callLinkQueues, this.callLinkMinIntervalMs, async () => {
+      const token = await sock.createCallLink(
+        media,
+        startTime === undefined ? undefined : { startTime },
+      );
+      if (typeof token !== "string" || token.trim().length === 0) {
+        throw new Error("Baileys createCallLink returned no call link token");
+      }
 
-    const prefix = type === "audio" ? CALL_AUDIO_PREFIX : CALL_VIDEO_PREFIX;
-    return {
-      type,
-      token,
-      link: `${prefix}${token}`,
-      ...(startTime === undefined ? {} : { startTime }),
-    };
+      const prefix = type === "audio" ? CALL_AUDIO_PREFIX : CALL_VIDEO_PREFIX;
+      return {
+        type,
+        token,
+        link: `${prefix}${token}`,
+        ...(startTime === undefined ? {} : { startTime }),
+      };
+    });
   }
 
   // ---- Data access ----

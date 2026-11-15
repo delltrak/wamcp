@@ -38,19 +38,22 @@ function messageSentOnRetry(
   return patchGroupStatusMessage(cached);
 }
 
-async function connectedAdapter(options?: { instanceId?: string; minIntervalMs?: number }) {
+async function connectedAdapter(options?: {
+  instanceId?: string;
+  minIntervalMs?: number;
+  storeInstance?: boolean;
+}) {
   const instanceId = options?.instanceId ?? INSTANCE_ID;
   vi.stubEnv("WA_GROUP_STATUS_ENABLED", "true");
-  vi.stubEnv(
-    "WA_GROUP_STATUS_MIN_INTERVAL_MS",
-    String(options?.minIntervalMs ?? 0),
-  );
-  const now = Date.now();
-  await db
-    .insert(instances)
-    .values({ id: instanceId, name: "test", createdAt: now, updatedAt: now })
-    .onConflictDoNothing()
-    .run();
+  vi.stubEnv("WA_GROUP_STATUS_MIN_INTERVAL_MS", String(options?.minIntervalMs ?? 0));
+  if (options?.storeInstance !== false) {
+    const now = Date.now();
+    await db
+      .insert(instances)
+      .values({ id: instanceId, name: "test", createdAt: now, updatedAt: now })
+      .onConflictDoNothing()
+      .run();
+  }
   const relayMessage = vi.fn(async () => undefined);
   const addRecentMessage = vi.fn();
   const sendPresenceUpdate = vi.fn(async () => undefined);
@@ -71,6 +74,7 @@ describe("group status wire format", () => {
     vi.unstubAllEnvs();
     await db.delete(instances).where(eq(instances.id, INSTANCE_ID)).run();
     await db.delete(instances).where(eq(instances.id, `${INSTANCE_ID}-spaced`)).run();
+    await db.delete(instances).where(eq(instances.id, `${INSTANCE_ID}-unsaved`)).run();
   });
 
   it("relays text to the group and wraps it only in the send hook", async () => {
@@ -248,6 +252,21 @@ describe("group status wire format", () => {
       }),
     ).rejects.toThrow("Media URLs must use HTTPS");
     expect(relayMessage).not.toHaveBeenCalled();
+  });
+
+  it("returns success with a warning when the local retry copy is not stored", async () => {
+    const { adapter, relayMessage } = await connectedAdapter({
+      instanceId: `${INSTANCE_ID}-unsaved`,
+      storeInstance: false,
+    });
+    const result = await adapter.sendGroupStatus({
+      groupId: GROUP_JID,
+      type: "text",
+      text: "Sent anyway",
+    });
+    expect(relayMessage).toHaveBeenCalledTimes(1);
+    expect(result.messageId).toEqual(expect.any(String));
+    expect(result.warning).toContain("local retry copy");
   });
 
   it("rejects video unless WA_GROUP_STATUS_VIDEO_ENABLED=true", async () => {

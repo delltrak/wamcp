@@ -34,6 +34,7 @@ describe("wa_create_call_link", () => {
     ),
   ) {
     delete process.env.WA_APP_STATE_WRITES_ENABLED;
+    vi.stubEnv("WA_CALL_LINK_MIN_INTERVAL_MS", "0");
     const appPatch = vi.fn();
     const socket = { createCallLink, appPatch } as unknown as WASocket;
     const adapter = new BaileysAdapter("call-link-instance");
@@ -117,6 +118,21 @@ describe("wa_create_call_link", () => {
     ).toBe(false);
     await expect(adapter.createCallLink("audio", past)).rejects.toThrow("60 seconds");
     expect(createCallLink).not.toHaveBeenCalled();
+  });
+
+  it("spaces call link creation for one instance", async () => {
+    vi.stubEnv("WA_CALL_LINK_MIN_INTERVAL_MS", "40");
+    const createCallLink = vi.fn(async () => "spaced-token");
+    const socket = { createCallLink } as unknown as WASocket;
+    const adapter = new BaileysAdapter("call-link-spaced");
+    const internals = adapter as unknown as { sock: WASocket; status: "connected" };
+    internals.sock = socket;
+    internals.status = "connected";
+    const started = Date.now();
+    await adapter.createCallLink("audio");
+    await adapter.createCallLink("audio");
+    expect(Date.now() - started).toBeGreaterThanOrEqual(40);
+    expect(createCallLink).toHaveBeenCalledTimes(2);
   });
 
   it("rejects a missing token and an unsupported type before calling the socket", async () => {

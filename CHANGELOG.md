@@ -55,6 +55,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Group status retries keep `<meta is_group_status="true" origin="group_status">` and, on a
+  full-group retry, `<enc mediatype>`. rc14's `sendMessagesAgain` calls `relayMessage` without
+  `additionalNodes`, and `getMediaType` of the envelope is empty. A `patch-package` patch on
+  `@whiskeysockets/baileys@7.0.0-rc14` adds the node and reads the media type from
+  `normalizeMessageContent`. `postinstall` applies it; the Docker build runs `npx patch-package`
+  because `npm ci --ignore-scripts` skips that hook. The stored retry copy uses numeric protobuf
+  enums so `font` does not come back as `0`. Upload runs inside the per-instance spacing gate. A
+  failed local save after a successful send returns the stanza id with a warning.
+  `wa_create_call_link` is spaced by `WA_CALL_LINK_MIN_INTERVAL_MS` (default `1500`).
+
 - Group status retries no longer resend the inner message as a normal group message. rc14 caches
   the pre-patch payload and skips `patchMessageBeforeSending` when a retry names `participant`.
   The wrap is now based on `contextInfo.isGroupStatus` and is idempotent for an existing
