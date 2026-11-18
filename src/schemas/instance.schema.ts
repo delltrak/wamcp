@@ -130,3 +130,14 @@ export const DeleteInstanceWebhookSchema = z
     instanceId: z.string().min(1).describe("Instance whose outgoing event webhook to remove"),
   })
   .strict();
+
+export const GetAccountRestrictionsSchema = z
+  .object({
+    instanceId: z
+      .string()
+      .min(1)
+      .describe(
+        "The instance ID to check account restrictions and new-chat quota for (Baileys only)",
+      ),
+  })
+  .strict();

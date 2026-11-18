@@ -143,8 +143,173 @@ export interface SendEventOptions {
   start: string;
   end?: string;
   locationText?: string;
+  latitude?: number;
+  longitude?: number;
   callType?: "voice" | "video";
+  extraGuestsAllowed?: boolean;
+  isScheduleCall?: boolean;
   quotedMessageId?: string;
+}
+
+export interface AccountRestrictions {
+  reachoutTimelock: {
+    isActive: boolean;
+    timeEnforcementEnds: string | null;
+    enforcementType: string | null;
+  };
+  newChatMessageCap: {
+    totalQuota: number | null;
+    usedQuota: number | null;
+    cycleStartTimestamp: string | null;
+    cycleEndTimestamp: string | null;
+    serverSentTimestamp: string | null;
+    oteStatus: string | null;
+    mvStatus: string | null;
+    cappingStatus: string | null;
+  };
+}
+
+export interface NewsletterMediaContent {
+  type: "image" | "video" | "audio" | "document";
+  media: string;
+  caption?: string;
+  fileName?: string;
+  mimeType?: string;
+  ptt?: boolean;
+}
+
+export interface NewsletterStats {
+  jid: string;
+  subscribers: number;
+  adminCount: number;
+}
+
+export type BusinessHoursDayOfWeek =
+  | "SUN"
+  | "MON"
+  | "TUE"
+  | "WED"
+  | "THU"
+  | "FRI"
+  | "SAT"
+  | "sun"
+  | "mon"
+  | "tue"
+  | "wed"
+  | "thu"
+  | "fri"
+  | "sat";
+
+export interface BusinessHoursDay {
+  day: BusinessHoursDayOfWeek;
+  mode: "open_24" | "open_24h" | "specific_hours" | "appointment_only";
+  openTimeInMinutes?: number | string;
+  closeTimeInMinutes?: number | string;
+}
+
+export interface UpdateBusinessProfileInput {
+  address?: string;
+  websites?: string[];
+  email?: string;
+  description?: string;
+  hours?: {
+    timezone: string;
+    days: BusinessHoursDay[];
+  };
+}
+
+export interface SendProductInput {
+  productId: string;
+  title?: string;
+  description?: string;
+  currencyCode?: string;
+  priceAmount1000?: number;
+  salePriceAmount1000?: number;
+  retailerId?: string;
+  url?: string;
+  productImageCount?: number;
+  firstImageId?: string;
+  thumbnail?: string;
+  productImage?: string;
+  businessOwnerJid?: string;
+  catalogId?: string;
+  body?: string;
+  footer?: string;
+}
+
+export interface GroupInviteV4AcceptInput {
+  groupJid: string;
+  inviteCode: string;
+  inviteExpiration: number;
+  inviterJid?: string;
+  groupName?: string;
+  caption?: string;
+}
+
+export interface SaveContactInput {
+  jid: string;
+  fullName: string;
+  firstName?: string;
+  username?: string;
+  lidJid?: string;
+  saveOnPrimaryAddressbook?: boolean;
+}
+
+export interface DisappearingDurationInfo {
+  jid: string;
+  duration: number | null;
+  setAt: string | null;
+}
+
+export type TemplateComponentParameter =
+  | {
+      type: "text";
+      text: string;
+    }
+  | {
+      type: "image" | "video";
+      link: string;
+    }
+  | {
+      type: "document";
+      link: string;
+      filename?: string;
+    };
+
+export interface SendTemplateOptions {
+  templateName: string;
+  languageCode: string;
+  headerParameters?: TemplateComponentParameter[];
+  bodyParameters?: TemplateComponentParameter[];
+  buttons?: Array<{
+    index: number;
+    subType: "quick_reply" | "url" | "copy_code";
+    parameter: string;
+  }>;
+}
+
+export interface SendCtaUrlOptions {
+  bodyText: string;
+  displayText: string;
+  url: string;
+  headerText?: string;
+  footerText?: string;
+}
+
+export interface SendFlowOptions {
+  bodyText: string;
+  flowCta: string;
+  flowId?: string;
+  flowName?: string;
+  flowToken?: string;
+  headerText?: string;
+  footerText?: string;
+  mode?: "draft" | "published";
+  flowAction?: "navigate" | "data_exchange";
+  flowActionPayload?: {
+    screen?: string;
+    data?: Record<string, unknown>;
+  };
 }
 
 /** Public call link assembled from the token returned by Baileys createCallLink. */
@@ -177,6 +342,7 @@ export type OnlinePrivacyValue = "all" | "match_last_seen";
 export type ReadReceiptsPrivacyValue = "all" | "none";
 export type GroupAddPrivacyValue = "all" | "contacts" | "contact_blacklist";
 export type CallPrivacyValue = "all" | "known";
+export type MessagesPrivacyValue = "all" | "contacts";
 export type DefaultDisappearingModeDuration = 0 | 86400 | 604800 | 7776000;
 
 /**
@@ -209,6 +375,8 @@ export type PrivacyUpdate =
   | { setting: "readReceipts"; value: ReadReceiptsPrivacyValue }
   | { setting: "groupAdd"; value: GroupAddPrivacyValue }
   | { setting: "calls"; value: CallPrivacyValue }
+  | { setting: "messages"; value: MessagesPrivacyValue }
+  | { setting: "disableLinkPreviews"; value: boolean }
   | { setting: "defaultDisappearingMode"; value: DefaultDisappearingModeDuration };
 
 // ---- Message Content Types ----

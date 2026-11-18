@@ -46,7 +46,9 @@ const PRIVACY_SETTINGS = [
   "readReceipts",
   "groupAdd",
   "calls",
+  "messages",
   "defaultDisappearingMode",
+  "disableLinkPreviews",
 ] as const;
 
 const privacyValuesBySetting = {
@@ -57,8 +59,13 @@ const privacyValuesBySetting = {
   readReceipts: ["all", "none"],
   groupAdd: ["all", "contacts", "contact_blacklist"],
   calls: ["all", "known"],
+  messages: ["all", "contacts"],
   defaultDisappearingMode: [0, 86400, 604800, 7776000],
-} as const satisfies Record<(typeof PRIVACY_SETTINGS)[number], readonly (string | number)[]>;
+  disableLinkPreviews: [true, false, "true", "false"],
+} as const satisfies Record<
+  (typeof PRIVACY_SETTINGS)[number],
+  readonly (string | number | boolean)[]
+>;
 
 export const UpdatePrivacySchema = z
   .object({
@@ -66,12 +73,12 @@ export const UpdatePrivacySchema = z
     setting: z
       .enum(PRIVACY_SETTINGS)
       .describe(
-        "Privacy setting: lastSeen, online, profilePic, status (About/profile text visibility), readReceipts, groupAdd, calls, or defaultDisappearingMode (requires WA_APP_STATE_WRITES_ENABLED=true)",
+        "Privacy setting: lastSeen, online, profilePic, status (About/profile text visibility), readReceipts, groupAdd, calls, messages, defaultDisappearingMode (requires WA_APP_STATE_WRITES_ENABLED=true), or disableLinkPreviews (requires WA_APP_STATE_WRITES_ENABLED=true)",
       ),
     value: z
-      .union([z.string(), z.number()])
+      .union([z.string(), z.number(), z.boolean()])
       .describe(
-        'Allowed values depend on setting: lastSeen/profilePic/status use "all", "contacts", "contact_blacklist", or "none"; online uses "all" or "match_last_seen"; readReceipts uses "all" or "none"; groupAdd uses "all", "contacts", or "contact_blacklist"; calls uses "all" or "known"; defaultDisappearingMode uses 0, 86400, 604800, or 7776000 seconds.',
+        'Allowed values depend on setting: lastSeen/profilePic/status use "all", "contacts", "contact_blacklist", or "none"; online uses "all" or "match_last_seen"; readReceipts uses "all" or "none"; groupAdd uses "all", "contacts", or "contact_blacklist"; calls uses "all" or "known"; messages uses "all" or "contacts"; defaultDisappearingMode uses 0, 86400, 604800, or 7776000 seconds; disableLinkPreviews uses true or false.',
       ),
   })
   .strict()

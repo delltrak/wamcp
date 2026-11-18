@@ -231,3 +231,126 @@ export const GetOrderDetailsSchema = z
     ),
   })
   .strict();
+
+const BusinessHoursDaySchema = z
+  .object({
+    day: z.enum(["SUN", "MON", "TUE", "WED", "THU", "FRI", "SAT"]).describe("Day of the week"),
+    mode: z
+      .enum(["open_24", "specific_hours", "appointment_only"])
+      .describe("Operating mode for the day"),
+    openTimeInMinutes: z
+      .number()
+      .int()
+      .min(0)
+      .max(1439)
+      .optional()
+      .describe("Opening time in minutes from midnight (required when mode is specific_hours)"),
+    closeTimeInMinutes: z
+      .number()
+      .int()
+      .min(0)
+      .max(1440)
+      .optional()
+      .describe("Closing time in minutes from midnight (required when mode is specific_hours)"),
+  })
+  .strict();
+
+export const UpdateBusinessProfileSchema = z
+  .object({
+    instanceId: InstanceIdSchema,
+    address: z.string().max(256).optional().describe("Business street address"),
+    description: z.string().max(512).optional().describe("Business description"),
+    email: z.string().email().max(128).optional().describe("Business contact email"),
+    websites: z
+      .array(z.string().url().max(256))
+      .max(2)
+      .optional()
+      .describe("Up to 2 business website URLs"),
+    hours: z
+      .object({
+        timezone: z
+          .string()
+          .trim()
+          .min(1)
+          .max(64)
+          .describe("IANA timezone identifier (e.g. 'America/Sao_Paulo')"),
+        days: z
+          .array(BusinessHoursDaySchema)
+          .min(1)
+          .max(7)
+          .describe("Operating hours schedule by day of week"),
+      })
+      .strict()
+      .optional()
+      .describe("Optional business hours configuration (Baileys only)"),
+  })
+  .strict();
+
+export const UpdateBusinessCoverPhotoSchema = z
+  .object({
+    instanceId: InstanceIdSchema,
+    image: z
+      .string()
+      .min(1)
+      .describe("Cover photo as an HTTPS URL or base64-encoded image (Baileys only)"),
+  })
+  .strict();
+
+export const RemoveBusinessCoverPhotoSchema = z
+  .object({
+    instanceId: InstanceIdSchema,
+    photoId: z
+      .string()
+      .trim()
+      .min(1)
+      .describe("Cover photo ID returned by wa_update_business_cover_photo (Baileys only)"),
+  })
+  .strict();
+
+export const SendProductSchema = z
+  .object({
+    instanceId: InstanceIdSchema,
+    to: z.string().min(5).describe("Recipient phone number or group JID"),
+    productId: z.string().trim().min(1).describe("Catalog product ID or retailer ID"),
+    businessOwnerJid: z
+      .string()
+      .trim()
+      .min(5)
+      .optional()
+      .describe("Business owner JID or catalog ID (defaults to connected account on Baileys)"),
+    title: z.string().trim().min(1).max(100).optional().describe("Product title"),
+    description: z.string().max(2048).optional().describe("Product description"),
+    currencyCode: z
+      .string()
+      .regex(/^[A-Z]{3}$/)
+      .optional()
+      .describe("Three-letter ISO 4217 currency code (e.g. 'BRL', 'USD')"),
+    priceAmount1000: z
+      .number()
+      .int()
+      .nonnegative()
+      .optional()
+      .describe("Price multiplied by 1000 (e.g. 19900 for 19.90)"),
+    salePriceAmount1000: z
+      .number()
+      .int()
+      .nonnegative()
+      .optional()
+      .describe("Optional sale price multiplied by 1000"),
+    retailerId: z.string().max(100).optional().describe("Optional retailer SKU/ID"),
+    url: z.string().url().optional().describe("Optional product URL"),
+    productImageCount: z
+      .number()
+      .int()
+      .nonnegative()
+      .optional()
+      .describe("Number of images associated with the product"),
+    thumbnail: z
+      .string()
+      .min(1)
+      .optional()
+      .describe("Product thumbnail image as an HTTPS URL or base64 data (Baileys)"),
+    body: z.string().max(1024).optional().describe("Optional message body text"),
+    footer: z.string().max(60).optional().describe("Optional message footer text"),
+  })
+  .strict();

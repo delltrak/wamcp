@@ -162,7 +162,9 @@ describe("channel feature discovery and MCP registration", () => {
   it("matches adapter restrictions and references only tools that actually exist", () => {
     const names = new Set(
       readdirSync("src/tools").flatMap((f) =>
-        [...readFileSync(`src/tools/${f}`, "utf8").matchAll(/"(wa_[a-z_]+)"/g)].map((m) => m[1]),
+        [...readFileSync(`src/tools/${f}`, "utf8").matchAll(/"(wa_[a-z0-9_]+)"/g)].map(
+          (m) => m[1],
+        ),
       ),
     );
     for (const channel of ["baileys", "cloud"] as const) {

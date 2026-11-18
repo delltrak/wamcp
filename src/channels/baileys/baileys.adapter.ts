@@ -40,10 +40,13 @@ import makeWASocket, {
   jidNormalizedUser,
   ALL_WA_PATCH_NAMES,
   chatModificationToAppPatch,
+  aesEncryptGCM,
+  hmacSign,
+  sha256,
   type ChatModification as BaileysChatModification,
   type WAPatchName,
 } from "@whiskeysockets/baileys";
-import { randomUUID } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 import {
   closeBaileysProxyAgents,
   createBaileysProxyAgents,
@@ -56,6 +59,7 @@ import { redactError } from "../../utils/proxy-redact.js";
 import { Boom } from "@hapi/boom";
 import type { ChannelAdapter, ChannelEventHandler } from "../channel.interface.js";
 import type {
+  AccountRestrictions,
   OtpOptions,
   ConnectionStatus,
   MessageContent,
@@ -63,15 +67,20 @@ import type {
   GroupResponse,
   NumberExistsResponse,
   BusinessProfile,
+  UpdateBusinessProfileInput,
+  SendProductInput,
   ProfileInfo,
   PrivacySettings,
   PrivacyUpdate,
   Contact,
+  SaveContactInput,
+  DisappearingDurationInfo,
   ContactResyncResult,
   Chat,
   Message,
   GroupSummary,
   GroupMetadata,
+  GroupInviteV4AcceptInput,
   CommunityHierarchy,
   CommunityInviteV4,
   CommunityParticipantAction,
@@ -105,6 +114,9 @@ import type {
   EventResponseStatus,
   MessageSearchOptions,
   SendEventOptions,
+  SendTemplateOptions,
+  SendCtaUrlOptions,
+  SendFlowOptions,
   CallLinkResult,
   NormalizedLabelUpdateEvent,
   NormalizedGroupMemberLabelEvent,
@@ -113,6 +125,8 @@ import type {
   NewsletterPost,
   NewsletterPostsPage,
   NewsletterMediaDownload,
+  NewsletterMediaContent,
+  NewsletterStats,
   GroupParticipantsExport,
   InstanceAuthMethod,
   InstanceRuntimeStatus,
@@ -2459,6 +2473,40 @@ export class BaileysAdapter implements ChannelAdapter {
     throw new Error("setCredentials is only available for Cloud API instances");
   }
 
+  async getAccountRestrictions(): Promise<AccountRestrictions> {
+    const sock = this.getSock();
+    const [timelock, cap] = await Promise.all([
+      sock.fetchAccountReachoutTimelock(),
+      sock.fetchNewChatMessageCap(),
+    ]);
+    return {
+      reachoutTimelock: {
+        isActive: Boolean(timelock?.isActive),
+        timeEnforcementEnds:
+          timelock?.timeEnforcementEnds instanceof Date
+            ? timelock.timeEnforcementEnds.toISOString()
+            : typeof timelock?.timeEnforcementEnds === "string"
+              ? timelock.timeEnforcementEnds
+              : null,
+        enforcementType:
+          timelock?.enforcementType !== undefined ? String(timelock.enforcementType) : null,
+      },
+      newChatMessageCap: {
+        totalQuota: typeof cap?.total_quota === "number" ? cap.total_quota : null,
+        usedQuota: typeof cap?.used_quota === "number" ? cap.used_quota : null,
+        cycleStartTimestamp:
+          typeof cap?.cycle_start_timestamp === "string" ? cap.cycle_start_timestamp : null,
+        cycleEndTimestamp:
+          typeof cap?.cycle_end_timestamp === "string" ? cap.cycle_end_timestamp : null,
+        serverSentTimestamp:
+          typeof cap?.server_sent_timestamp === "string" ? cap.server_sent_timestamp : null,
+        oteStatus: cap?.ote_status !== undefined ? String(cap.ote_status) : null,
+        mvStatus: cap?.mv_status !== undefined ? String(cap.mv_status) : null,
+        cappingStatus: cap?.capping_status !== undefined ? String(cap.capping_status) : null,
+      },
+    };
+  }
+
   // ---- Messaging ----
 
   supportsNativeGroupMentionAll(): Promise<boolean> {
@@ -2475,6 +2523,68 @@ export class BaileysAdapter implements ChannelAdapter {
     throw new Error(
       "Authentication template discovery is not supported on Baileys; use a Cloud API instance configured with a WABA ID.",
     );
+  }
+
+  async sendTemplate(_to: string, _options: SendTemplateOptions): Promise<MessageResponse> {
+    throw new Error(
+      "WhatsApp template messages are only supported on Cloud API instances; use a Cloud API instance.",
+    );
+  }
+
+  async sendCtaUrl(to: string, options: SendCtaUrlOptions): Promise<MessageResponse> {
+    const lines: string[] = [];
+    if (options.headerText) lines.push(`*${options.headerText}*`);
+    lines.push(options.bodyText);
+    lines.push(`${options.displayText}: ${options.url}`);
+    if (options.footerText) lines.push(options.footerText);
+    return this.sendLinkPreview(to, lines.join("\n\n"), options.url);
+  }
+
+  async sendFlow(_to: string, _options: SendFlowOptions): Promise<MessageResponse> {
+    throw new Error(
+      "WhatsApp Flows are only supported on Cloud API instances; use a Cloud API instance.",
+    );
+  }
+
+  async sendProduct(to: string, input: SendProductInput): Promise<MessageResponse> {
+    const sock = this.getSock();
+    const jid = this.normalizeJid(to);
+    const imageSource = input.thumbnail ?? input.productImage;
+    if (!imageSource) {
+      throw new Error(
+        "thumbnail (or productImage) is required to send a product message on Baileys",
+      );
+    }
+    if (!input.title) {
+      throw new Error("Product title is required to send a product message on Baileys");
+    }
+    const businessOwnerJid = this.normalizeJid(input.businessOwnerJid ?? this.getMeJid());
+    const productImage = await mediaService.getMediaBuffer(imageSource, {
+      maxBytes: MEDIA_LIMITS.image,
+    });
+    const msg: AnyMessageContent = {
+      product: {
+        productImage,
+        productId: input.productId,
+        title: input.title,
+        ...(input.description !== undefined ? { description: input.description } : {}),
+        ...(input.currencyCode !== undefined ? { currencyCode: input.currencyCode } : {}),
+        ...(input.priceAmount1000 !== undefined ? { priceAmount1000: input.priceAmount1000 } : {}),
+        ...(input.retailerId !== undefined ? { retailerId: input.retailerId } : {}),
+        ...(input.url !== undefined ? { url: input.url } : {}),
+        productImageCount: input.productImageCount ?? 1,
+        ...(input.firstImageId !== undefined ? { firstImageId: input.firstImageId } : {}),
+        ...(input.salePriceAmount1000 !== undefined
+          ? { salePriceAmount1000: input.salePriceAmount1000 }
+          : {}),
+      },
+      businessOwnerJid,
+      ...(input.body !== undefined ? { body: input.body } : {}),
+      ...(input.footer !== undefined ? { footer: input.footer } : {}),
+    };
+    const result = await this.sendMessageWithActivity(sock, jid, msg);
+    await this.persistOutgoingMessage(result, jid);
+    return { messageId: result?.key.id ?? "", timestamp: Date.now(), status: "sent" };
   }
 
   async sendMessage(to: string, content: MessageContent): Promise<MessageResponse> {
@@ -2741,15 +2851,33 @@ export class BaileysAdapter implements ChannelAdapter {
       throw new Error("Event start and end must be valid ISO datetimes");
     }
 
+    const hasCoordinates =
+      options.latitude !== undefined &&
+      options.longitude !== undefined &&
+      Number.isFinite(options.latitude) &&
+      Number.isFinite(options.longitude);
+    const hasLocation = Boolean(options.locationText) || hasCoordinates;
     const event: EventMessageOptions = {
       name: options.name,
       ...(options.description ? { description: options.description } : {}),
       startDate,
       ...(endDate ? { endDate } : {}),
-      ...(options.locationText
-        ? { location: { name: options.locationText, address: options.locationText } }
+      ...(hasLocation
+        ? {
+            location: {
+              degreesLatitude: hasCoordinates ? options.latitude! : 0,
+              degreesLongitude: hasCoordinates ? options.longitude! : 0,
+              ...(options.locationText
+                ? { name: options.locationText, address: options.locationText }
+                : {}),
+            },
+          }
         : {}),
       ...(options.callType ? { call: options.callType === "voice" ? "audio" : "video" } : {}),
+      ...(options.extraGuestsAllowed !== undefined
+        ? { extraGuestsAllowed: options.extraGuestsAllowed }
+        : {}),
+      ...(options.isScheduleCall !== undefined ? { isScheduleCall: options.isScheduleCall } : {}),
     };
     const sendOptions: MiscMessageGenerationOptions = {};
     if (options.quotedMessageId) {
@@ -2763,6 +2891,107 @@ export class BaileysAdapter implements ChannelAdapter {
     }
     return {
       messageId: result?.key.id ?? "",
+      timestamp: Date.now(),
+      status: "sent",
+    };
+  }
+
+  async cancelEvent(chatId: string, eventMessageId: string): Promise<MessageResponse> {
+    const sock = this.getSock();
+    const jid = this.normalizeJid(chatId);
+    const chatAliases = await this.getChatJidAliases(jid);
+    const row = await db
+      .select({
+        chatId: messagesTable.chatId,
+        type: messagesTable.type,
+        content: messagesTable.content,
+        isFromMe: messagesTable.isFromMe,
+        rawData: messagesTable.rawData,
+      })
+      .from(messagesTable)
+      .where(
+        and(
+          eq(messagesTable.instanceId, this.instanceId),
+          eq(messagesTable.id, eventMessageId),
+          inArray(messagesTable.chatId, chatAliases),
+        ),
+      )
+      .get();
+    if (!row || row.type !== "event") {
+      throw new Error(`Event '${eventMessageId}' was not found in chat '${jid}'`);
+    }
+    if (row.isFromMe !== 1) {
+      throw new Error(
+        `Cannot cancel event '${eventMessageId}': only the event creator can cancel it`,
+      );
+    }
+
+    let stored: WAMessage | undefined;
+    if (row.rawData) {
+      try {
+        stored = JSON.parse(row.rawData, BufferJSON.reviver) as WAMessage;
+      } catch {
+        // Fall back to normalized content when raw data is malformed.
+      }
+    }
+    const msgContainer =
+      stored?.message?.ephemeralMessage?.message ??
+      stored?.message?.viewOnceMessage?.message ??
+      stored?.message;
+    const eventMsg = msgContainer?.eventMessage;
+    const startSeconds = eventMsg?.startTime
+      ? Number(eventMsg.startTime)
+      : Math.floor(Date.now() / 1000);
+    const endSeconds = eventMsg?.endTime ? Number(eventMsg.endTime) : undefined;
+    const startDate = new Date(
+      Number.isFinite(startSeconds) && startSeconds > 0 ? startSeconds * 1000 : Date.now(),
+    );
+    const endDate =
+      endSeconds !== undefined && Number.isFinite(endSeconds) && endSeconds > 0
+        ? new Date(endSeconds * 1000)
+        : undefined;
+    const messageSecret = stored ? normalizeStoredMessageSecret(stored) : undefined;
+    const editKey = await this.resolveMessageKey(row.chatId, eventMessageId, true);
+
+    const event: EventMessageOptions = {
+      name: eventMsg?.name ?? row.content ?? "Cancelled Event",
+      ...(eventMsg?.description ? { description: eventMsg.description } : {}),
+      startDate,
+      ...(endDate ? { endDate } : {}),
+      isCancelled: true,
+      ...(eventMsg?.extraGuestsAllowed !== undefined && eventMsg?.extraGuestsAllowed !== null
+        ? { extraGuestsAllowed: eventMsg.extraGuestsAllowed }
+        : {}),
+      ...(eventMsg?.isScheduleCall !== undefined && eventMsg?.isScheduleCall !== null
+        ? { isScheduleCall: eventMsg.isScheduleCall }
+        : {}),
+      ...(eventMsg?.location
+        ? {
+            location: {
+              degreesLatitude: eventMsg.location.degreesLatitude ?? 0,
+              degreesLongitude: eventMsg.location.degreesLongitude ?? 0,
+              ...(eventMsg.location.name ? { name: eventMsg.location.name } : {}),
+              ...(eventMsg.location.address ? { address: eventMsg.location.address } : {}),
+            },
+          }
+        : {}),
+      ...(messageSecret ? { messageSecret } : {}),
+    };
+
+    const result = await this.sendMessageWithActivity(sock, row.chatId, {
+      event,
+      edit: editKey,
+    } as AnyMessageContent);
+    if (result?.message) {
+      const edited =
+        result.message.protocolMessage?.editedMessage ??
+        result.message.editedMessage?.message?.protocolMessage?.editedMessage;
+      if (edited) {
+        await this.persistMessageEdit(row.chatId, eventMessageId, edited);
+      }
+    }
+    return {
+      messageId: result?.key.id ?? eventMessageId,
       timestamp: Date.now(),
       status: "sent",
     };
@@ -2857,6 +3086,136 @@ export class BaileysAdapter implements ChannelAdapter {
         };
       }),
     );
+  }
+
+  async votePoll(
+    chatId: string,
+    pollMessageId: string,
+    selectedOptions: string[],
+  ): Promise<MessageResponse> {
+    const sock = this.getSock();
+    const requestedChat = jidNormalizedUser(this.normalizeJid(chatId));
+    const row = await db
+      .select({
+        chatId: messagesTable.chatId,
+        type: messagesTable.type,
+        isFromMe: messagesTable.isFromMe,
+        rawData: messagesTable.rawData,
+      })
+      .from(messagesTable)
+      .where(
+        and(eq(messagesTable.instanceId, this.instanceId), eq(messagesTable.id, pollMessageId)),
+      )
+      .get();
+    if (!row || row.type !== "poll") {
+      throw new Error(`Poll '${pollMessageId}' was not found`);
+    }
+    if (jidNormalizedUser(row.chatId) !== requestedChat) {
+      throw new Error(`Poll '${pollMessageId}' was not found in chat '${requestedChat}'`);
+    }
+    if (!row.rawData) {
+      throw new Error(`Poll '${pollMessageId}' has no stored poll data`);
+    }
+
+    let poll: WAMessage;
+    try {
+      poll = JSON.parse(row.rawData, BufferJSON.reviver) as WAMessage;
+    } catch {
+      throw new Error(`Poll '${pollMessageId}' has invalid stored data`);
+    }
+    const creation =
+      poll.message?.pollCreationMessage ??
+      poll.message?.pollCreationMessageV2 ??
+      poll.message?.pollCreationMessageV3;
+    if (!creation) throw new Error(`Poll '${pollMessageId}' has no stored poll question`);
+
+    const pollSecret = normalizeStoredMessageSecret(poll);
+    if (!pollSecret) {
+      throw new Error(`Poll '${pollMessageId}' is missing its encryption secret`);
+    }
+
+    const availableOptions = new Set(
+      (creation.options ?? []).map((opt) => opt.optionName ?? "").filter(Boolean),
+    );
+    const uniqueSelected = [...new Set(selectedOptions)];
+    for (const option of uniqueSelected) {
+      if (!availableOptions.has(option)) {
+        throw new Error(`Option '${option}' is not a valid option for poll '${pollMessageId}'`);
+      }
+    }
+    if (creation.selectableOptionsCount === 1 && uniqueSelected.length > 1) {
+      throw new Error(`Poll '${pollMessageId}' only allows selecting 1 option`);
+    }
+
+    const ownJids = await this.pollVoteJidCandidates([], true);
+    const voterJid =
+      ownJids.find((jid) => jid.endsWith("@s.whatsapp.net")) ??
+      ownJids[0] ??
+      jidNormalizedUser(this.getMeJid());
+    const pollWasCreatedByUs =
+      row.isFromMe === 1 || (await this.pollVoteKeyPointsToOwnAccount([poll.key]));
+    const creatorCandidates = await this.pollVoteJidCandidates([poll.key], pollWasCreatedByUs);
+    const pollCreatorJid =
+      creatorCandidates.find((jid) => jid.endsWith("@s.whatsapp.net")) ??
+      creatorCandidates[0] ??
+      voterJid;
+
+    const optionHashes = uniqueSelected.map((opt) => sha256(Buffer.from(opt)));
+    const votePlaintext = proto.Message.PollVoteMessage.encode({
+      selectedOptions: optionHashes,
+    }).finish();
+    const sign = Buffer.concat([
+      Buffer.from(pollMessageId),
+      Buffer.from(pollCreatorJid),
+      Buffer.from(voterJid),
+      Buffer.from("Poll Vote"),
+      new Uint8Array([1]),
+    ]);
+    const key0 = hmacSign(pollSecret, new Uint8Array(32), "sha256");
+    const encKey = hmacSign(sign, key0, "sha256");
+    const aad = Buffer.from(`${pollMessageId}\u0000${voterJid}`);
+    const encIv = randomBytes(12);
+    const encPayload = aesEncryptGCM(votePlaintext, encKey, encIv, aad);
+
+    const senderTimestampMs = Date.now();
+    const pollCreationMessageKey: WAMessageKey = {
+      remoteJid: poll.key.remoteJid ?? row.chatId,
+      id: pollMessageId,
+      fromMe: row.isFromMe === 1 || poll.key.fromMe === true,
+      ...(poll.key.participant ? { participant: poll.key.participant } : {}),
+    };
+    const pollUpdateMessage: proto.Message.IPollUpdateMessage = {
+      pollCreationMessageKey,
+      vote: { encPayload, encIv },
+      senderTimestampMs,
+    };
+
+    const voteMsgId = await this.withSendActivity(sock, () =>
+      sock.relayMessage(
+        row.chatId,
+        { pollUpdateMessage },
+        { additionalNodes: [{ tag: "meta", attrs: { polltype: "vote" } }] },
+      ),
+    );
+    const voteKey: WAMessageKey = {
+      remoteJid: row.chatId,
+      id: voteMsgId || randomUUID(),
+      fromMe: true,
+      participant: voterJid,
+    };
+    await this.persistDecryptedPollUpdates(pollCreationMessageKey, [
+      {
+        pollUpdateMessageKey: voteKey,
+        vote: { selectedOptions: optionHashes },
+        senderTimestampMs,
+      },
+    ]);
+
+    return {
+      messageId: voteKey.id ?? "",
+      timestamp: senderTimestampMs,
+      status: "sent",
+    };
   }
 
   async getPollResults(chatId: string, pollMessageId: string): Promise<PollResults> {
@@ -4760,6 +5119,36 @@ export class BaileysAdapter implements ChannelAdapter {
     await sock.groupMemberAddMode(normalizeGroupJid(groupId), mode);
   }
 
+  async acceptGroupInviteV4(input: GroupInviteV4AcceptInput): Promise<string> {
+    this.requireGroupWritesEnabled();
+    if (
+      !Number.isSafeInteger(input.inviteExpiration) ||
+      input.inviteExpiration <= Date.now() / 1000
+    ) {
+      throw new Error("The group V4 invitation is expired or has an invalid expiration");
+    }
+    const sock = this.getSock();
+    const groupJid = normalizeGroupJid(input.groupJid);
+    const inviterJid = input.inviterJid
+      ? jidNormalizedUser(this.normalizeJid(input.inviterJid))
+      : "";
+    const code = normalizeGroupInviteCode(input.inviteCode);
+    const result = await sock.groupAcceptInviteV4(inviterJid, {
+      groupJid,
+      inviteCode: code,
+      inviteExpiration: input.inviteExpiration,
+    });
+    return typeof result === "string" && result.trim() ? normalizeGroupJid(result) : groupJid;
+  }
+
+  async revokeGroupInviteV4(groupId: string, invitedJid: string): Promise<boolean> {
+    this.requireGroupWritesEnabled();
+    const sock = this.getSock();
+    const groupJid = normalizeGroupJid(groupId);
+    const participantJid = jidNormalizedUser(this.normalizeJid(invitedJid));
+    return await sock.groupRevokeInviteV4(groupJid, participantJid);
+  }
+
   // ---- Communities ----
 
   private async requireCommunity(
@@ -5267,6 +5656,65 @@ export class BaileysAdapter implements ChannelAdapter {
     return typeof result?.status === "string" ? result.status : null;
   }
 
+  async getDisappearingDuration(jids: string[]): Promise<DisappearingDurationInfo[]> {
+    const sock = this.getSock();
+    const normalized = [...new Set(jids.map((jid) => jidNormalizedUser(this.normalizeJid(jid))))];
+    if (normalized.length === 0) return [];
+    const results = (await sock.fetchDisappearingDuration(...normalized)) ?? [];
+    return results.map(
+      (entry: {
+        id?: string;
+        status?: { duration?: number; setAt?: Date | string | number };
+        disappearing_mode?: { duration?: number; setAt?: Date | string | number };
+      }) => {
+        const mode = entry.disappearing_mode ?? entry.status;
+        const setAtVal = mode?.setAt;
+        return {
+          jid: entry.id ?? "",
+          duration:
+            typeof mode?.duration === "number" && Number.isFinite(mode.duration)
+              ? mode.duration
+              : 0,
+          setAt:
+            setAtVal instanceof Date
+              ? setAtVal.toISOString()
+              : typeof setAtVal === "string"
+                ? setAtVal
+                : typeof setAtVal === "number"
+                  ? new Date(setAtVal).toISOString()
+                  : null,
+        };
+      },
+    );
+  }
+
+  async saveContact(input: SaveContactInput): Promise<void> {
+    this.requireAppStateWritesEnabled();
+    const sock = this.getSock();
+    const jid = jidNormalizedUser(this.normalizeJid(input.jid));
+    const contact: proto.SyncActionValue.IContactAction = {
+      fullName: input.fullName,
+      ...(input.firstName !== undefined ? { firstName: input.firstName } : {}),
+      ...(input.username !== undefined ? { username: input.username } : {}),
+      ...(input.lidJid !== undefined ? { lidJid: input.lidJid } : {}),
+      ...(input.saveOnPrimaryAddressbook !== undefined
+        ? { saveOnPrimaryAddressbook: input.saveOnPrimaryAddressbook }
+        : {}),
+    };
+    await this.runSafeChatModification(sock, { contact }, jid, () =>
+      sock.addOrEditContact(jid, contact),
+    );
+  }
+
+  async removeContact(jid: string): Promise<void> {
+    this.requireAppStateWritesEnabled();
+    const sock = this.getSock();
+    const normalizedJid = jidNormalizedUser(this.normalizeJid(jid));
+    await this.runSafeChatModification(sock, { contact: null }, normalizedJid, () =>
+      sock.removeContact(normalizedJid),
+    );
+  }
+
   async getBusinessProfile(jid: string): Promise<BusinessProfile | null> {
     const sock = this.getSock();
     const profile = await sock.getBusinessProfile(this.normalizeJid(jid));
@@ -5279,6 +5727,55 @@ export class BaileysAdapter implements ChannelAdapter {
       email: profile.email ?? undefined,
       address: profile.address ?? undefined,
     };
+  }
+
+  async updateBusinessProfile(input: UpdateBusinessProfileInput): Promise<void> {
+    this.requireAppStateWritesEnabled();
+    const sock = this.getSock();
+    type BaileysBusinessProfileProps = Parameters<WASocket["updateBussinesProfile"]>[0];
+    type BaileysDayOfWeek = "sun" | "mon" | "tue" | "wed" | "thu" | "fri" | "sat";
+    const hours = input.hours
+      ? {
+          timezone: input.hours.timezone,
+          days: input.hours.days.map((d) => {
+            const day = d.day.toLowerCase() as BaileysDayOfWeek;
+            if (d.mode === "specific_hours") {
+              return {
+                day,
+                mode: "specific_hours" as const,
+                openTimeInMinutes: String(d.openTimeInMinutes ?? 0),
+                closeTimeInMinutes: String(d.closeTimeInMinutes ?? 0),
+              };
+            }
+            return {
+              day,
+              mode: (d.mode === "open_24" ? "open_24h" : d.mode) as "open_24h" | "appointment_only",
+            };
+          }),
+        }
+      : undefined;
+    const props: BaileysBusinessProfileProps = {
+      ...(input.address !== undefined ? { address: input.address } : {}),
+      ...(input.email !== undefined ? { email: input.email } : {}),
+      ...(input.description !== undefined ? { description: input.description } : {}),
+      ...(input.websites !== undefined ? { websites: input.websites } : {}),
+      ...(hours !== undefined ? { hours } : {}),
+    };
+    await sock.updateBussinesProfile(props);
+  }
+
+  async updateBusinessCoverPhoto(image: string): Promise<string> {
+    this.requireAppStateWritesEnabled();
+    const sock = this.getSock();
+    const buffer = await mediaService.getMediaBuffer(image, { maxBytes: MEDIA_LIMITS.image });
+    const fbid = await sock.updateCoverPhoto(buffer);
+    return String(fbid ?? "");
+  }
+
+  async removeBusinessCoverPhoto(photoId: string): Promise<void> {
+    this.requireAppStateWritesEnabled();
+    const sock = this.getSock();
+    await sock.removeCoverPhoto(photoId);
   }
 
   // ---- Profile ----
@@ -5308,7 +5805,7 @@ export class BaileysAdapter implements ChannelAdapter {
   }
 
   async updatePrivacy(update: PrivacyUpdate): Promise<void> {
-    if (update.setting === "defaultDisappearingMode") {
+    if (update.setting === "defaultDisappearingMode" || update.setting === "disableLinkPreviews") {
       this.requireAppStateWritesEnabled();
     }
     const sock = this.getSock();
@@ -5335,8 +5832,19 @@ export class BaileysAdapter implements ChannelAdapter {
       case "calls":
         await sock.updateCallPrivacy(update.value);
         break;
+      case "messages":
+        await sock.updateMessagesPrivacy(update.value);
+        break;
       case "defaultDisappearingMode":
         await sock.updateDefaultDisappearingMode(update.value);
+        break;
+      case "disableLinkPreviews":
+        await this.runSafeChatModification(
+          sock,
+          { disableLinkPreviews: { isPreviewsDisabled: update.value } },
+          "",
+          () => sock.updateDisableLinkPreviewsPrivacy(update.value),
+        );
         break;
     }
   }
@@ -5508,6 +6016,46 @@ export class BaileysAdapter implements ChannelAdapter {
     return { messageId: result?.key.id ?? "", timestamp: Date.now(), status: "sent" };
   }
 
+  async newsletterSendMedia(
+    jid: string,
+    content: NewsletterMediaContent,
+  ): Promise<MessageResponse> {
+    this.requireGroupWritesEnabled();
+    const sock = this.getSock();
+    let msg: AnyMessageContent;
+    switch (content.type) {
+      case "image":
+        msg = {
+          image: this.resolveMedia(content.media),
+          ...(content.caption !== undefined ? { caption: content.caption } : {}),
+        };
+        break;
+      case "video":
+        msg = {
+          video: this.resolveMedia(content.media),
+          ...(content.caption !== undefined ? { caption: content.caption } : {}),
+        };
+        break;
+      case "audio":
+        msg = {
+          audio: this.resolveMedia(content.media),
+          ptt: content.ptt === true,
+          mimetype: content.mimeType ?? WHATSAPP_VOICE_MIME_TYPE,
+        };
+        break;
+      case "document":
+        msg = {
+          document: this.resolveMedia(content.media),
+          fileName: content.fileName,
+          mimetype: content.mimeType ?? "application/octet-stream",
+          ...(content.caption !== undefined ? { caption: content.caption } : {}),
+        };
+        break;
+    }
+    const result = await this.sendMessageWithActivity(sock, jid, msg);
+    return { messageId: result?.key.id ?? "", timestamp: Date.now(), status: "sent" };
+  }
+
   async createNewsletter(name: string, description?: string): Promise<NewsletterMetadata> {
     this.requireGroupWritesEnabled();
     const sock = this.getSock();
@@ -5533,6 +6081,35 @@ export class BaileysAdapter implements ChannelAdapter {
     return sock.newsletterMetadata(type, key);
   }
 
+  async getNewsletterStats(jid: string): Promise<NewsletterStats> {
+    if (!/^\d{5,20}@newsletter$/.test(jid)) {
+      throw new Error("Invalid Channel JID; expected a JID ending in @newsletter");
+    }
+    const sock = this.getSock();
+    const [subRes, adminCount] = await Promise.all([
+      sock.newsletterSubscribers(jid),
+      sock.newsletterAdminCount(jid),
+    ]);
+    return {
+      jid,
+      subscribers:
+        typeof subRes?.subscribers === "number"
+          ? subRes.subscribers
+          : Number(subRes?.subscribers ?? 0),
+      adminCount: typeof adminCount === "number" ? adminCount : Number(adminCount ?? 0),
+    };
+  }
+
+  async newsletterMute(jid: string, mute: boolean): Promise<void> {
+    this.requireGroupWritesEnabled();
+    const sock = this.getSock();
+    if (mute) {
+      await sock.newsletterMute(jid);
+    } else {
+      await sock.newsletterUnmute(jid);
+    }
+  }
+
   async updateNewsletterName(jid: string, name: string): Promise<void> {
     this.requireGroupWritesEnabled();
     const sock = this.getSock();
@@ -5550,6 +6127,30 @@ export class BaileysAdapter implements ChannelAdapter {
     const sock = this.getSock();
     const jpeg = await mediaService.prepareGroupProfilePicture(image);
     await sock.newsletterUpdatePicture(jid, jpeg);
+  }
+
+  async removeNewsletterPicture(jid: string): Promise<void> {
+    this.requireGroupWritesEnabled();
+    const sock = this.getSock();
+    await sock.newsletterRemovePicture(jid);
+  }
+
+  async deleteNewsletter(jid: string): Promise<void> {
+    this.requireGroupWritesEnabled();
+    const sock = this.getSock();
+    await sock.newsletterDelete(jid);
+  }
+
+  async changeNewsletterOwner(jid: string, newOwnerJid: string): Promise<void> {
+    this.requireGroupWritesEnabled();
+    const sock = this.getSock();
+    await sock.newsletterChangeOwner(jid, jidNormalizedUser(this.normalizeJid(newOwnerJid)));
+  }
+
+  async demoteNewsletterAdmin(jid: string, userJid: string): Promise<void> {
+    this.requireGroupWritesEnabled();
+    const sock = this.getSock();
+    await sock.newsletterDemote(jid, jidNormalizedUser(this.normalizeJid(userJid)));
   }
 
   async reactToNewsletterMessage(jid: string, serverId: string, reaction?: string): Promise<void> {

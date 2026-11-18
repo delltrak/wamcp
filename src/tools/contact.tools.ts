@@ -17,6 +17,9 @@ import {
   ResyncContactsSchema,
   ListBlockedContactsSchema,
   GetContactAboutSchema,
+  SaveContactSchema,
+  RemoveContactSchema,
+  GetDisappearingDurationSchema,
 } from "../schemas/contact.schema.js";
 
 export function registerContactTools(
@@ -194,6 +197,80 @@ export function registerContactTools(
         return toolSuccess({ jid: params.jid, about });
       } catch (err) {
         return handleToolError("wa_get_contact_about", err, params.instanceId);
+      }
+    },
+  );
+
+  server.registerTool(
+    "wa_save_contact",
+    {
+      description:
+        "Add or edit a contact in WhatsApp app state (addOrEditContact). This writes WhatsApp app state and is blocked unless WA_APP_STATE_WRITES_ENABLED=true. Baileys only.",
+      inputSchema: SaveContactSchema,
+    },
+    async (params) => {
+      const log = createRequestLogger("wa_save_contact", params.instanceId);
+      const start = Date.now();
+      try {
+        const adapter = instanceManager.getAdapter(params.instanceId);
+        await adapter.saveContact({
+          jid: params.jid,
+          fullName: params.fullName,
+          ...(params.firstName ? { firstName: params.firstName } : {}),
+          ...(params.username ? { username: params.username } : {}),
+          ...(params.saveOnPrimaryAddressbook !== undefined
+            ? { saveOnPrimaryAddressbook: params.saveOnPrimaryAddressbook }
+            : {}),
+        });
+        log.info({ duration: Date.now() - start }, "Contact saved to app state");
+        return toolSuccess({ success: true, jid: params.jid, fullName: params.fullName });
+      } catch (err) {
+        return handleToolError("wa_save_contact", err, params.instanceId);
+      }
+    },
+  );
+
+  server.registerTool(
+    "wa_remove_contact",
+    {
+      description:
+        "Remove a contact from WhatsApp app state (removeContact). This writes WhatsApp app state and is blocked unless WA_APP_STATE_WRITES_ENABLED=true. Baileys only.",
+      inputSchema: RemoveContactSchema,
+    },
+    async (params) => {
+      const log = createRequestLogger("wa_remove_contact", params.instanceId);
+      const start = Date.now();
+      try {
+        const adapter = instanceManager.getAdapter(params.instanceId);
+        await adapter.removeContact(params.jid);
+        log.info({ duration: Date.now() - start }, "Contact removed from app state");
+        return toolSuccess({ success: true, jid: params.jid, removed: true });
+      } catch (err) {
+        return handleToolError("wa_remove_contact", err, params.instanceId);
+      }
+    },
+  );
+
+  server.registerTool(
+    "wa_get_disappearing_duration",
+    {
+      description:
+        "Query default disappearing-message duration settings for one or more contacts via Baileys USync fetchDisappearingDuration. Read-only; Baileys only.",
+      inputSchema: GetDisappearingDurationSchema,
+    },
+    async (params) => {
+      const log = createRequestLogger("wa_get_disappearing_duration", params.instanceId);
+      const start = Date.now();
+      try {
+        const adapter = instanceManager.getAdapter(params.instanceId);
+        const results = await adapter.getDisappearingDuration(params.jids);
+        log.info(
+          { duration: Date.now() - start, count: results.length },
+          "Disappearing durations read",
+        );
+        return toolSuccess({ count: results.length, results });
+      } catch (err) {
+        return handleToolError("wa_get_disappearing_duration", err, params.instanceId);
       }
     },
   );

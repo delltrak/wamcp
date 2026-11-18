@@ -60,7 +60,9 @@ function makeConnectedAdapter() {
     updateReadReceiptsPrivacy: vi.fn(async () => {}),
     updateGroupsAddPrivacy: vi.fn(async () => {}),
     updateCallPrivacy: vi.fn(async () => {}),
+    updateMessagesPrivacy: vi.fn(async () => {}),
     updateDefaultDisappearingMode: vi.fn(async () => {}),
+    updateDisableLinkPreviewsPrivacy: vi.fn(async () => {}),
   } as unknown as WASocket;
   const adapter = new BaileysAdapter("synthetic-instance");
   Object.assign(adapter as unknown as { sock: WASocket | null; status: string }, {
@@ -93,6 +95,7 @@ describe("Baileys privacy tools", () => {
         { setting: "readReceipts", value: "none" },
         { setting: "groupAdd", value: "contact_blacklist" },
         { setting: "calls", value: "known" },
+        { setting: "messages", value: "contacts" },
         { setting: "defaultDisappearingMode", value: 0 },
         { setting: "defaultDisappearingMode", value: 86400 },
         { setting: "defaultDisappearingMode", value: 604800 },
@@ -111,6 +114,7 @@ describe("Baileys privacy tools", () => {
       expect(socket.updateReadReceiptsPrivacy).toHaveBeenCalledWith("none");
       expect(socket.updateGroupsAddPrivacy).toHaveBeenCalledWith("contact_blacklist");
       expect(socket.updateCallPrivacy).toHaveBeenCalledWith("known");
+      expect(socket.updateMessagesPrivacy).toHaveBeenCalledWith("contacts");
       expect(socket.updateDefaultDisappearingMode).toHaveBeenNthCalledWith(1, 0);
       expect(socket.updateDefaultDisappearingMode).toHaveBeenNthCalledWith(2, 86400);
       expect(socket.updateDefaultDisappearingMode).toHaveBeenNthCalledWith(3, 604800);
@@ -134,12 +138,16 @@ describe("Baileys privacy tools", () => {
         { setting: "readReceipts", value: "none" },
         { setting: "groupAdd", value: "contact_blacklist" },
         { setting: "calls", value: "known" },
+        { setting: "messages", value: "all" },
       ];
       for (const update of updates) {
         await expect(adapter.updatePrivacy(update)).resolves.toBeUndefined();
       }
       await expect(
         adapter.updatePrivacy({ setting: "defaultDisappearingMode", value: 86400 }),
+      ).rejects.toThrow("WA_APP_STATE_WRITES_ENABLED=true");
+      await expect(
+        adapter.updatePrivacy({ setting: "disableLinkPreviews", value: true }),
       ).rejects.toThrow("WA_APP_STATE_WRITES_ENABLED=true");
 
       expect(socket.updateLastSeenPrivacy).toHaveBeenCalledWith("none");
@@ -149,7 +157,9 @@ describe("Baileys privacy tools", () => {
       expect(socket.updateReadReceiptsPrivacy).toHaveBeenCalledWith("none");
       expect(socket.updateGroupsAddPrivacy).toHaveBeenCalledWith("contact_blacklist");
       expect(socket.updateCallPrivacy).toHaveBeenCalledWith("known");
+      expect(socket.updateMessagesPrivacy).toHaveBeenCalledWith("all");
       expect(socket.updateDefaultDisappearingMode).not.toHaveBeenCalled();
+      expect(socket.updateDisableLinkPreviewsPrivacy).not.toHaveBeenCalled();
     } finally {
       if (previous === undefined) delete process.env.WA_APP_STATE_WRITES_ENABLED;
       else process.env.WA_APP_STATE_WRITES_ENABLED = previous;
@@ -203,7 +213,9 @@ describe("Baileys privacy tools", () => {
       { instanceId: "synthetic-instance", setting: "groupAdd", value: "none" },
       { instanceId: "synthetic-instance", setting: "calls", value: "contacts" },
       { instanceId: "synthetic-instance", setting: "calls", value: "none" },
+      { instanceId: "synthetic-instance", setting: "messages", value: "none" },
       { instanceId: "synthetic-instance", setting: "defaultDisappearingMode", value: 3600 },
+      { instanceId: "synthetic-instance", setting: "disableLinkPreviews", value: "maybe" },
     ]) {
       expect(UpdatePrivacySchema.safeParse(input).success).toBe(false);
     }
@@ -238,7 +250,9 @@ describe("Baileys privacy tools", () => {
           "readReceipts",
           "groupAdd",
           "calls",
+          "messages",
           "defaultDisappearingMode",
+          "disableLinkPreviews",
         ],
       });
 

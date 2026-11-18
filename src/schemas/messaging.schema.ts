@@ -484,3 +484,133 @@ export const MarkPlayedSchema = z
       .describe("Sender JID for a group message when storage has no sender. Private chats omit it"),
   })
   .strict();
+
+export const VotePollSchema = z
+  .object({
+    instanceId: z.string().min(1).describe("The instance ID"),
+    chatId: z.string().min(5).describe("Chat JID containing the poll message"),
+    pollMessageId: z.string().min(1).describe("Poll creation message ID"),
+    selectedOptions: z
+      .array(z.string().min(1))
+      .max(12)
+      .describe("Poll option texts to vote for (pass an empty array to clear existing votes)"),
+  })
+  .strict();
+
+const TemplateParameterSchema = z.discriminatedUnion("type", [
+  z
+    .object({
+      type: z.literal("text"),
+      text: z.string().min(1).describe("Parameter text value"),
+    })
+    .strict(),
+  z
+    .object({
+      type: z.literal("image"),
+      link: z.string().url().describe("HTTPS image URL for template header"),
+    })
+    .strict(),
+  z
+    .object({
+      type: z.literal("video"),
+      link: z.string().url().describe("HTTPS video URL for template header"),
+    })
+    .strict(),
+  z
+    .object({
+      type: z.literal("document"),
+      link: z.string().url().describe("HTTPS document URL for template header"),
+      filename: z.string().min(1).optional().describe("Optional document filename"),
+    })
+    .strict(),
+]);
+
+export const SendTemplateSchema = z
+  .object({
+    instanceId: z.string().min(1).describe("The instance ID (Cloud API)"),
+    to: z.string().min(5).describe("Recipient phone number"),
+    templateName: z.string().trim().min(1).describe("Approved WhatsApp template name"),
+    languageCode: z
+      .string()
+      .trim()
+      .min(2)
+      .default("pt_BR")
+      .describe("Template language code (e.g. 'pt_BR', 'en_US')"),
+    headerParameters: z
+      .array(TemplateParameterSchema)
+      .max(10)
+      .optional()
+      .describe("Optional header component parameters (text, image, video, or document)"),
+    bodyParameters: z
+      .array(TemplateParameterSchema)
+      .max(20)
+      .optional()
+      .describe("Optional body component parameters"),
+    buttons: z
+      .array(
+        z
+          .object({
+            subType: z
+              .enum(["quick_reply", "url", "copy_code"])
+              .describe("Template button subtype"),
+            index: z.number().int().min(0).max(9).describe("Zero-based button index"),
+            parameter: z.string().min(1).describe("Button payload, URL suffix, or coupon code"),
+          })
+          .strict(),
+      )
+      .max(10)
+      .optional()
+      .describe("Optional dynamic button parameters"),
+  })
+  .strict();
+
+export const SendCtaUrlSchema = z
+  .object({
+    instanceId: z.string().min(1).describe("The instance ID"),
+    to: z.string().min(5).describe("Recipient phone number or group JID"),
+    bodyText: z.string().min(1).max(1024).describe("Main body text of the CTA message"),
+    displayText: z.string().trim().min(1).max(20).describe("Button label text"),
+    url: z.string().url().describe("Target URL opened when the button is tapped"),
+    headerText: z.string().max(60).optional().describe("Optional header text"),
+    footerText: z.string().max(60).optional().describe("Optional footer text"),
+  })
+  .strict();
+
+export const SendFlowSchema = z
+  .object({
+    instanceId: z.string().min(1).describe("The instance ID (Cloud API)"),
+    to: z.string().min(5).describe("Recipient phone number"),
+    bodyText: z.string().min(1).max(1024).describe("Main body text of the Flow message"),
+    flowCta: z.string().trim().min(1).max(20).describe("Call-to-action button label"),
+    flowId: z.string().trim().min(1).optional().describe("Meta WhatsApp Flow ID"),
+    flowName: z.string().trim().min(1).optional().describe("Meta WhatsApp Flow name"),
+    headerText: z.string().max(60).optional().describe("Optional header text"),
+    footerText: z.string().max(60).optional().describe("Optional footer text"),
+    flowToken: z.string().min(1).optional().describe("Optional Flow session token"),
+    mode: z.enum(["draft", "published"]).optional().describe("Flow mode (defaults to published)"),
+    flowAction: z
+      .enum(["navigate", "data_exchange"])
+      .optional()
+      .describe("Flow initial action type"),
+    flowActionPayload: z
+      .object({
+        screen: z.string().min(1).optional().describe("Initial Flow screen ID"),
+        data: z
+          .record(z.string(), z.unknown())
+          .optional()
+          .describe("Optional initial data object passed to the Flow screen"),
+      })
+      .strict()
+      .optional()
+      .describe("Optional payload for the initial Flow screen"),
+  })
+  .strict()
+  .superRefine((value, context) => {
+    if (Boolean(value.flowId) === Boolean(value.flowName)) {
+      context.addIssue({
+        code: "custom",
+        path: ["flowId"],
+        message: "Provide either flowId or flowName, but not both",
+      });
+    }
+  });

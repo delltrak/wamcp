@@ -27,13 +27,17 @@ const ONLINE_VALUES = ["all", "match_last_seen"] as const;
 const READ_RECEIPTS_VALUES = ["all", "none"] as const;
 const GROUP_ADD_VALUES = ["all", "contacts", "contact_blacklist"] as const;
 const CALL_VALUES = ["all", "known"] as const;
+const MESSAGES_VALUES = ["all", "contacts"] as const;
 const DEFAULT_DISAPPEARING_DURATIONS = [0, 86400, 604800, 7776000] as const;
 
 function isOneOf<T extends string | number>(value: unknown, allowed: readonly T[]): value is T {
   return allowed.some((candidate) => candidate === value);
 }
 
-function toPrivacyUpdate(setting: PrivacyUpdate["setting"], value: string | number): PrivacyUpdate {
+function toPrivacyUpdate(
+  setting: PrivacyUpdate["setting"],
+  value: string | number | boolean,
+): PrivacyUpdate {
   switch (setting) {
     case "lastSeen":
     case "profilePic":
@@ -52,8 +56,16 @@ function toPrivacyUpdate(setting: PrivacyUpdate["setting"], value: string | numb
     case "calls":
       if (isOneOf(value, CALL_VALUES)) return { setting, value };
       break;
+    case "messages":
+      if (isOneOf(value, MESSAGES_VALUES)) return { setting, value };
+      break;
     case "defaultDisappearingMode":
       if (isOneOf(value, DEFAULT_DISAPPEARING_DURATIONS)) return { setting, value };
+      break;
+    case "disableLinkPreviews":
+      if (typeof value === "boolean") return { setting, value };
+      if (value === "true") return { setting, value: true };
+      if (value === "false") return { setting, value: false };
       break;
   }
 

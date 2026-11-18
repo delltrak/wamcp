@@ -60,3 +60,48 @@ export const GetContactAboutSchema = z
       .describe("Private contact phone number or JID"),
   })
   .strict();
+
+export const SaveContactSchema = z
+  .object({
+    instanceId: z.string().min(1).describe("The instance ID"),
+    jid: z
+      .string()
+      .trim()
+      .refine(isValidStatusRecipient, "Expected an individual WhatsApp phone number or JID")
+      .describe("Contact phone number or JID to save"),
+    fullName: z.string().trim().min(1).max(128).describe("Contact full display name"),
+    firstName: z.string().trim().min(1).max(64).optional().describe("Optional contact first name"),
+    username: z.string().trim().min(1).max(64).optional().describe("Optional WhatsApp username"),
+    saveOnPrimaryAddressbook: z
+      .boolean()
+      .optional()
+      .describe("Whether to also save the contact in the primary phone address book"),
+  })
+  .strict();
+
+export const RemoveContactSchema = z
+  .object({
+    instanceId: z.string().min(1).describe("The instance ID"),
+    jid: z
+      .string()
+      .trim()
+      .refine(isValidStatusRecipient, "Expected an individual WhatsApp phone number or JID")
+      .describe("Contact phone number or JID to remove from WhatsApp app state"),
+  })
+  .strict();
+
+export const GetDisappearingDurationSchema = z
+  .object({
+    instanceId: z.string().min(1).describe("The instance ID"),
+    jids: z
+      .array(
+        z
+          .string()
+          .trim()
+          .refine(isValidStatusRecipient, "Expected an individual WhatsApp phone number or JID"),
+      )
+      .min(1)
+      .max(50)
+      .describe("Contact phone numbers or JIDs to query default disappearing duration for (1-50)"),
+  })
+  .strict();

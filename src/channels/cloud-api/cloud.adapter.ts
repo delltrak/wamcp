@@ -16,6 +16,7 @@ import {
 } from "../../services/media.js";
 import { MEDIA_LIMITS } from "../../constants.js";
 import type {
+  AccountRestrictions,
   AuthenticationTemplateOptions,
   AuthenticationTemplatesPage,
   OtpOptions,
@@ -25,12 +26,17 @@ import type {
   GroupResponse,
   CreateGroupFromGroupResponse,
   GroupSummary,
+  GroupInviteV4AcceptInput,
   NumberExistsResponse,
   BusinessProfile,
+  UpdateBusinessProfileInput,
+  SendProductInput,
   ProfileInfo,
   PrivacySettings,
   PrivacyUpdate,
   Contact,
+  SaveContactInput,
+  DisappearingDurationInfo,
   Chat,
   Message,
   GroupMetadata,
@@ -64,10 +70,15 @@ import type {
   PinDuration,
   MessageSearchOptions,
   SendEventOptions,
+  SendTemplateOptions,
+  SendCtaUrlOptions,
+  SendFlowOptions,
   CallLinkResult,
   CatalogProductCreateInput,
   CatalogProductUpdateInput,
   NewsletterMediaDownload,
+  NewsletterMediaContent,
+  NewsletterStats,
   InstanceRuntimeStatus,
 } from "../../types/channel.types.js";
 import type {
@@ -327,6 +338,12 @@ export class CloudApiAdapter implements ChannelAdapter {
     logger.info({ instanceId: this.instanceId }, "Cloud API credentials set");
   }
 
+  async getAccountRestrictions(): Promise<AccountRestrictions> {
+    throw new Error(
+      "Account reachout timelock and new-chat message caps are only available on Baileys instances",
+    );
+  }
+
   // ---- Messaging ----
 
   async supportsNativeGroupMentionAll(): Promise<boolean> {
@@ -392,6 +409,155 @@ export class CloudApiAdapter implements ChannelAdapter {
         "Cloud API OTP send failed; delivery may be uncertain. Check template approval, language and credentials before issuing a new code.",
       );
     }
+  }
+
+  async sendTemplate(to: string, options: SendTemplateOptions): Promise<MessageResponse> {
+    const phone = this.normalizePhone(to);
+    const mapParam = (p: NonNullable<SendTemplateOptions["headerParameters"]>[number]) => {
+      if (p.type === "text") {
+        return { type: "text", text: p.text };
+      }
+      const mediaObj: Record<string, string> = p.link.startsWith("https://")
+        ? { link: p.link }
+        : { id: p.link };
+      if (p.type === "document" && p.filename) {
+        mediaObj.filename = p.filename;
+      }
+      return { type: p.type, [p.type]: mediaObj };
+    };
+
+    const components: Array<Record<string, unknown>> = [];
+
+    if (options.headerParameters && options.headerParameters.length > 0) {
+      components.push({
+        type: "header",
+        parameters: options.headerParameters.map(mapParam),
+      });
+    }
+
+    if (options.bodyParameters && options.bodyParameters.length > 0) {
+      components.push({
+        type: "body",
+        parameters: options.bodyParameters.map(mapParam),
+      });
+    }
+
+    if (options.buttons && options.buttons.length > 0) {
+      for (const btn of options.buttons) {
+        components.push({
+          type: "button",
+          sub_type: btn.subType,
+          index: String(btn.index),
+          parameters: [
+            btn.subType === "quick_reply"
+              ? { type: "payload", payload: btn.parameter }
+              : btn.subType === "copy_code"
+                ? { type: "coupon_code", coupon_code: btn.parameter }
+                : { type: "text", text: btn.parameter },
+          ],
+        });
+      }
+    }
+
+    const res = await this.sendRaw({
+      recipient_type: "individual",
+      to: phone,
+      type: "template",
+      template: {
+        name: options.templateName,
+        language: { code: options.languageCode },
+        ...(components.length > 0 ? { components } : {}),
+      },
+    });
+    return this.toMessageResponse(res);
+  }
+
+  async sendCtaUrl(to: string, options: SendCtaUrlOptions): Promise<MessageResponse> {
+    const phone = this.normalizePhone(to);
+    const res = await this.sendRaw({
+      recipient_type: "individual",
+      to: phone,
+      type: "interactive",
+      interactive: {
+        type: "cta_url",
+        ...(options.headerText ? { header: { type: "text", text: options.headerText } } : {}),
+        body: { text: options.bodyText },
+        ...(options.footerText ? { footer: { text: options.footerText } } : {}),
+        action: {
+          name: "cta_url",
+          parameters: {
+            display_text: options.displayText,
+            url: options.url,
+          },
+        },
+      },
+    });
+    return this.toMessageResponse(res);
+  }
+
+  async sendFlow(to: string, options: SendFlowOptions): Promise<MessageResponse> {
+    const phone = this.normalizePhone(to);
+    const flowAction = options.flowAction ?? "navigate";
+    const actionParameters: Record<string, unknown> = {
+      flow_message_version: "3",
+      flow_cta: options.flowCta,
+      flow_action: flowAction,
+      ...(options.flowId ? { flow_id: options.flowId } : {}),
+      ...(options.flowName ? { flow_name: options.flowName } : {}),
+      ...(options.flowToken ? { flow_token: options.flowToken } : {}),
+      ...(options.mode ? { mode: options.mode } : {}),
+    };
+    if (options.flowActionPayload) {
+      actionParameters.flow_action_payload = {
+        ...(options.flowActionPayload.screen ? { screen: options.flowActionPayload.screen } : {}),
+        ...(options.flowActionPayload.data ? { data: options.flowActionPayload.data } : {}),
+      };
+    }
+    const res = await this.sendRaw({
+      recipient_type: "individual",
+      to: phone,
+      type: "interactive",
+      interactive: {
+        type: "flow",
+        ...(options.headerText ? { header: { type: "text", text: options.headerText } } : {}),
+        body: { text: options.bodyText },
+        ...(options.footerText ? { footer: { text: options.footerText } } : {}),
+        action: {
+          name: "flow",
+          parameters: actionParameters,
+        },
+      },
+    });
+    return this.toMessageResponse(res);
+  }
+
+  async sendProduct(to: string, input: SendProductInput): Promise<MessageResponse> {
+    const catalogId = input.catalogId ?? input.businessOwnerJid;
+    if (!catalogId) {
+      throw new Error(
+        "catalogId or businessOwnerJid is required to send a product message on Cloud API",
+      );
+    }
+    const productRetailerId = input.retailerId || input.productId;
+    if (!productRetailerId) {
+      throw new Error("retailerId or productId is required to send a product message on Cloud API");
+    }
+    const phone = this.normalizePhone(to);
+    const res = await this.sendRaw({
+      recipient_type: "individual",
+      to: phone,
+      type: "interactive",
+      interactive: {
+        type: "product",
+        ...(input.body ? { body: { text: input.body } } : {}),
+        ...(input.footer ? { footer: { text: input.footer } } : {}),
+        action: {
+          catalog_id: catalogId,
+          product_retailer_id: productRetailerId,
+        },
+      },
+    });
+    return this.toMessageResponse(res);
   }
 
   async sendMessage(to: string, content: MessageContent): Promise<MessageResponse> {
@@ -631,12 +797,26 @@ export class CloudApiAdapter implements ChannelAdapter {
     );
   }
 
+  async cancelEvent(_chatId: string, _eventMessageId: string): Promise<MessageResponse> {
+    throw new Error(
+      "Canceling WhatsApp event messages is not supported on Cloud API; use a Baileys instance",
+    );
+  }
+
   async getEventResponses(_chatId: string, _eventMessageId: string): Promise<EventResponse[]> {
     throw new Error("WhatsApp event responses are only available on Baileys instances");
   }
 
   async getPollResults(_chatId: string, _pollMessageId: string): Promise<PollResults> {
     throw new Error("Poll results are only available on Baileys instances");
+  }
+
+  async votePoll(
+    _chatId: string,
+    _pollMessageId: string,
+    _selectedOptions: string[],
+  ): Promise<MessageResponse> {
+    throw new Error("Voting on polls is not supported on Cloud API; use a Baileys instance");
   }
 
   async starMessage(_chatId: string, _messageId: string, _star: boolean): Promise<void> {
@@ -940,6 +1120,14 @@ export class CloudApiAdapter implements ChannelAdapter {
     throw new Error("Group member-add mode is only available on Baileys instances");
   }
 
+  async acceptGroupInviteV4(_input: GroupInviteV4AcceptInput): Promise<string> {
+    throw new Error("Group V4 invites are not supported on Cloud API; use a Baileys instance");
+  }
+
+  async revokeGroupInviteV4(_groupId: string, _invitedJid: string): Promise<boolean> {
+    throw new Error("Group V4 invites are not supported on Cloud API; use a Baileys instance");
+  }
+
   // ---- Communities ----
   async joinCommunityV4(
     _invite: CommunityInviteV4,
@@ -1085,6 +1273,18 @@ export class CloudApiAdapter implements ChannelAdapter {
     throw new Error("Contact About lookup is only available on Baileys instances");
   }
 
+  async getDisappearingDuration(_jids: string[]): Promise<DisappearingDurationInfo[]> {
+    throw new Error("Contact disappearing duration lookup is only available on Baileys instances");
+  }
+
+  async saveContact(_input: SaveContactInput): Promise<void> {
+    throw new Error("Saving contacts to app state is only available on Baileys instances");
+  }
+
+  async removeContact(_jid: string): Promise<void> {
+    throw new Error("Removing contacts from app state is only available on Baileys instances");
+  }
+
   async getBusinessProfile(_jid: string): Promise<BusinessProfile | null> {
     const { phoneNumberId } = this.getCredentials();
     const url = `${GRAPH_API_BASE}/${phoneNumberId}/whatsapp_business_profile?fields=about,address,description,email,vertical,websites,profile_picture_url`;
@@ -1105,6 +1305,34 @@ export class CloudApiAdapter implements ChannelAdapter {
     } catch {
       return null;
     }
+  }
+
+  async updateBusinessProfile(input: UpdateBusinessProfileInput): Promise<void> {
+    if (input.hours) {
+      throw new Error(
+        "Updating business hours via updateBusinessProfile is only supported on Baileys instances",
+      );
+    }
+    const { phoneNumberId } = this.getCredentials();
+    const url = `${GRAPH_API_BASE}/${phoneNumberId}/whatsapp_business_profile`;
+    await this.request(url, {
+      method: "POST",
+      body: JSON.stringify({
+        messaging_product: "whatsapp",
+        ...(input.address !== undefined ? { address: input.address } : {}),
+        ...(input.description !== undefined ? { description: input.description } : {}),
+        ...(input.email !== undefined ? { email: input.email } : {}),
+        ...(input.websites !== undefined ? { websites: input.websites } : {}),
+      }),
+    });
+  }
+
+  async updateBusinessCoverPhoto(_image: string): Promise<string> {
+    throw new Error("Business cover photo updates are only available on Baileys instances");
+  }
+
+  async removeBusinessCoverPhoto(_photoId: string): Promise<void> {
+    throw new Error("Business cover photo removal is only available on Baileys instances");
   }
 
   async resyncContacts(): Promise<never> {
@@ -1192,6 +1420,37 @@ export class CloudApiAdapter implements ChannelAdapter {
 
   async newsletterSend(_jid: string, _text: string): Promise<MessageResponse> {
     throw new Error("Newsletters are only available for Baileys instances");
+  }
+
+  async newsletterSendMedia(
+    _jid: string,
+    _content: NewsletterMediaContent,
+  ): Promise<MessageResponse> {
+    throw new Error("Channel media posts are only available on Baileys instances");
+  }
+
+  async getNewsletterStats(_jid: string): Promise<NewsletterStats> {
+    throw new Error("Channel statistics are only available on Baileys instances");
+  }
+
+  async newsletterMute(_jid: string, _mute: boolean): Promise<void> {
+    throw new Error("Channel mute settings are only available on Baileys instances");
+  }
+
+  async removeNewsletterPicture(_jid: string): Promise<void> {
+    throw new Error("Channel picture removal is only available on Baileys instances");
+  }
+
+  async deleteNewsletter(_jid: string): Promise<void> {
+    throw new Error("Deleting a Channel is only available on Baileys instances");
+  }
+
+  async changeNewsletterOwner(_jid: string, _newOwnerJid: string): Promise<void> {
+    throw new Error("Changing Channel ownership is only available on Baileys instances");
+  }
+
+  async demoteNewsletterAdmin(_jid: string, _userJid: string): Promise<void> {
+    throw new Error("Demoting a Channel admin is only available on Baileys instances");
   }
 
   async createNewsletter(_name: string, _description?: string): Promise<NewsletterMetadata> {

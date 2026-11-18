@@ -42,6 +42,8 @@ import {
   SendGroupHistoryToMemberSchema,
   SetGroupMemberLabelSchema,
   RemoveGroupMemberLabelSchema,
+  GroupAcceptInviteV4Schema,
+  GroupRevokeInviteV4Schema,
 } from "../schemas/group.schema.js";
 import { sendGroupHistoryToMember } from "../services/group-history.js";
 import { assertGroupHistoryWritesEnabled } from "../utils/group-history-error.js";
@@ -708,6 +710,60 @@ export function registerGroupTools(
         return toolSuccess({ success: true, groupId: params.groupId, mode: params.mode });
       } catch (err) {
         return handleToolError("wa_group_member_add_mode", err, params.instanceId);
+      }
+    },
+  );
+
+  server.registerTool(
+    "wa_group_accept_invite_v4",
+    {
+      description:
+        "Accept a WhatsApp Group V4 direct invite card (groupInviteMessage). This server operation is blocked unless WA_GROUP_WRITES_ENABLED=true or WA_APP_STATE_WRITES_ENABLED=true. Baileys only.",
+      inputSchema: GroupAcceptInviteV4Schema,
+    },
+    async (params) => {
+      const log = createRequestLogger("wa_group_accept_invite_v4", params.instanceId);
+      const start = Date.now();
+      try {
+        const adapter = instanceManager.getAdapter(params.instanceId);
+        const groupId = await adapter.acceptGroupInviteV4({
+          groupJid: params.groupJid,
+          inviteCode: params.inviteCode,
+          inviteExpiration: params.inviteExpiration,
+          ...(params.inviterJid ? { inviterJid: params.inviterJid } : {}),
+          ...(params.groupName ? { groupName: params.groupName } : {}),
+          ...(params.caption ? { caption: params.caption } : {}),
+        });
+        log.info({ duration: Date.now() - start, groupId }, "Group V4 invite accepted");
+        return toolSuccess({ success: true, groupId });
+      } catch (err) {
+        return handleToolError("wa_group_accept_invite_v4", err, params.instanceId);
+      }
+    },
+  );
+
+  server.registerTool(
+    "wa_group_revoke_invite_v4",
+    {
+      description:
+        "Revoke a pending WhatsApp Group V4 direct invite sent to a specific user. This server operation is blocked unless WA_GROUP_WRITES_ENABLED=true or WA_APP_STATE_WRITES_ENABLED=true. Baileys only.",
+      inputSchema: GroupRevokeInviteV4Schema,
+    },
+    async (params) => {
+      const log = createRequestLogger("wa_group_revoke_invite_v4", params.instanceId);
+      const start = Date.now();
+      try {
+        const adapter = instanceManager.getAdapter(params.instanceId);
+        const revoked = await adapter.revokeGroupInviteV4(params.groupId, params.invitedJid);
+        log.info({ duration: Date.now() - start, revoked }, "Group V4 invite revoked");
+        return toolSuccess({
+          success: true,
+          groupId: params.groupId,
+          invitedJid: params.invitedJid,
+          revoked,
+        });
+      } catch (err) {
+        return handleToolError("wa_group_revoke_invite_v4", err, params.instanceId);
       }
     },
   );
