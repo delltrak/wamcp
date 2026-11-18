@@ -5,6 +5,7 @@
 // ============================================================
 
 import type {
+  AccountRestrictions,
   AuthenticationTemplateOptions,
   AuthenticationTemplatesPage,
   OtpOptions,
@@ -16,15 +17,20 @@ import type {
   GroupSummary,
   NumberExistsResponse,
   BusinessProfile,
+  UpdateBusinessProfileInput,
+  SendProductInput,
   ProfileInfo,
   PrivacySettings,
   PrivacyUpdate,
   Contact,
+  SaveContactInput,
+  DisappearingDurationInfo,
   ContactResyncResult,
   Chat,
   Message,
   GroupMetadata,
   GroupParticipantsExport,
+  GroupInviteV4AcceptInput,
   CommunityHierarchy,
   CommunityInviteV4,
   CommunityParticipantAction,
@@ -53,9 +59,14 @@ import type {
   PinDuration,
   MessageSearchOptions,
   SendEventOptions,
+  SendTemplateOptions,
+  SendCtaUrlOptions,
+  SendFlowOptions,
   CallLinkResult,
   CatalogProductCreateInput,
   CatalogProductUpdateInput,
+  NewsletterMediaContent,
+  NewsletterStats,
   NewsletterPostsPage,
   NewsletterMediaDownload,
   InstanceRuntimeStatus,
@@ -87,6 +98,7 @@ export interface ChannelAdapter {
   /** True when this adapter owns a socket that can still reach WhatsApp. */
   hasLiveSocket?(): boolean;
   getLifecycleStatus?(): InstanceRuntimeStatus;
+  getAccountRestrictions(): Promise<AccountRestrictions>;
 
   // ---- Authentication ----
   getQrCode(): Promise<string | null>;
@@ -96,13 +108,23 @@ export interface ChannelAdapter {
   // ---- Messaging ----
   sendMessage(to: string, content: MessageContent): Promise<MessageResponse>;
   sendOtp(to: string, options: OtpOptions): Promise<MessageResponse>;
+  sendTemplate(to: string, options: SendTemplateOptions): Promise<MessageResponse>;
+  sendCtaUrl(to: string, options: SendCtaUrlOptions): Promise<MessageResponse>;
+  sendFlow(to: string, options: SendFlowOptions): Promise<MessageResponse>;
+  sendProduct(to: string, input: SendProductInput): Promise<MessageResponse>;
   listAuthenticationTemplates(
     options: AuthenticationTemplateOptions,
   ): Promise<AuthenticationTemplatesPage>;
   /** True when the channel can send native group @all without listing participant JIDs. */
   supportsNativeGroupMentionAll(): Promise<boolean>;
   sendEvent(options: SendEventOptions): Promise<MessageResponse>;
+  cancelEvent(chatId: string, eventMessageId: string): Promise<MessageResponse>;
   getEventResponses(chatId: string, eventMessageId: string): Promise<EventResponse[]>;
+  votePoll(
+    chatId: string,
+    pollMessageId: string,
+    selectedOptions: string[],
+  ): Promise<MessageResponse>;
   getPollResults(chatId: string, pollMessageId: string): Promise<PollResults>;
   starMessage(chatId: string, messageId: string, star: boolean): Promise<void>;
   validateQuotedMessage?(to: string, messageId: string): void | Promise<void>;
@@ -155,6 +177,7 @@ export interface ChannelAdapter {
   setChatLabel(chatId: string, labelId: string, add: boolean): Promise<void>;
   setMessageLabel(chatId: string, messageId: string, labelId: string, add: boolean): Promise<void>;
   setDisappearingMessages(chatId: string, duration: 0 | 86400 | 604800 | 7776000): Promise<void>;
+  getDisappearingDuration(jids: string[]): Promise<DisappearingDurationInfo[]>;
   createQuickReply(input: QuickReplyInput): Promise<void>;
   editQuickReply(input: QuickReplyInput & { timestamp: string }): Promise<void>;
   deleteQuickReply(timestamp: string): Promise<void>;
@@ -183,6 +206,8 @@ export interface ChannelAdapter {
   getGroupInviteCode(groupId: string): Promise<string>;
   getGroupInviteInfo(inviteCode: string): Promise<GroupMetadata>;
   joinGroup(inviteCode: string): Promise<string>;
+  acceptGroupInviteV4(input: GroupInviteV4AcceptInput): Promise<string>;
+  revokeGroupInviteV4(groupId: string, invitedJid: string): Promise<boolean>;
   listGroupJoinRequests(groupId: string): Promise<GroupJoinRequest[]>;
   sendGroupInviteMessage(to: string, groupId: string, text?: string): Promise<MessageResponse>;
   handleJoinRequest(
@@ -246,6 +271,11 @@ export interface ChannelAdapter {
   getBlocklist(): Promise<string[]>;
   getContactAbout(jid: string): Promise<string | null>;
   getBusinessProfile(jid: string): Promise<BusinessProfile | null>;
+  updateBusinessProfile(input: UpdateBusinessProfileInput): Promise<void>;
+  updateBusinessCoverPhoto(image: string): Promise<string>;
+  removeBusinessCoverPhoto(photoId: string): Promise<void>;
+  saveContact(input: SaveContactInput): Promise<void>;
+  removeContact(jid: string): Promise<void>;
   resyncContacts(): Promise<ContactResyncResult>;
 
   // ---- Profile ----
@@ -265,6 +295,13 @@ export interface ChannelAdapter {
   newsletterFollow(jid: string): Promise<void>;
   newsletterUnfollow(jid: string): Promise<void>;
   newsletterSend(jid: string, text: string): Promise<MessageResponse>;
+  newsletterSendMedia(jid: string, content: NewsletterMediaContent): Promise<MessageResponse>;
+  getNewsletterStats(jid: string): Promise<NewsletterStats>;
+  newsletterMute(jid: string, mute: boolean): Promise<void>;
+  removeNewsletterPicture(jid: string): Promise<void>;
+  deleteNewsletter(jid: string): Promise<void>;
+  changeNewsletterOwner(jid: string, newOwnerJid: string): Promise<void>;
+  demoteNewsletterAdmin(jid: string, userJid: string): Promise<void>;
   createNewsletter(name: string, description?: string): Promise<NewsletterMetadata>;
   getNewsletterMetadata(type: "invite" | "jid", key: string): Promise<NewsletterMetadata | null>;
   updateNewsletterName(jid: string, name: string): Promise<void>;

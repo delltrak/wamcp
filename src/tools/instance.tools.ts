@@ -27,6 +27,7 @@ import {
   GetQrCodeSchema,
   GetPairingCodeSchema,
   SetCloudCredentialsSchema,
+  GetAccountRestrictionsSchema,
 } from "../schemas/instance.schema.js";
 
 export function registerInstanceTools(
@@ -38,6 +39,36 @@ export function registerInstanceTools(
   if (instanceWebhookToolsEnabled()) {
     registerInstanceWebhookTools(server, eventWebhook);
   }
+
+  server.registerTool(
+    "wa_get_account_restrictions",
+    {
+      description:
+        "Inspect WhatsApp account reachout timelock status and new-chat message quota for a connected Baileys instance (uses Baileys 7.0.0-rc14 fetchAccountReachoutTimelock and fetchNewChatMessageCap). Read-only; Baileys only.",
+      inputSchema: GetAccountRestrictionsSchema,
+      annotations: {
+        readOnlyHint: true,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: false,
+      },
+    },
+    async (params) => {
+      const log = createRequestLogger("wa_get_account_restrictions", params.instanceId);
+      const start = Date.now();
+      try {
+        const adapter = instanceManager.getAdapter(params.instanceId);
+        const restrictions = await adapter.getAccountRestrictions();
+        log.info({ duration: Date.now() - start }, "Account restrictions read");
+        return toolSuccess({
+          instanceId: params.instanceId,
+          ...restrictions,
+        });
+      } catch (err) {
+        return handleToolError("wa_get_account_restrictions", err, params.instanceId);
+      }
+    },
+  );
 
   server.registerTool(
     "wa_get_channel_capabilities",

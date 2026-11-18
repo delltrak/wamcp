@@ -1,6 +1,7 @@
 import type {
   CallPrivacyValue,
   GroupAddPrivacyValue,
+  MessagesPrivacyValue,
   OnlinePrivacyValue,
   PrivacySettings,
   PrivacyValue,
@@ -12,6 +13,7 @@ const ONLINE_VALUES = ["all", "match_last_seen"] as const;
 const READ_RECEIPT_VALUES = ["all", "none"] as const;
 const GROUP_ADD_VALUES = ["all", "contacts", "contact_blacklist"] as const;
 const CALL_VALUES = ["all", "known"] as const;
+const MESSAGES_VALUES = ["all", "contacts"] as const;
 
 function normalizeValue<T extends string>(
   value: string | undefined,
@@ -36,5 +38,10 @@ export function normalizePrivacySettings(settings: Record<string, string>): Priv
     ),
     groupAdd: normalizeValue<GroupAddPrivacyValue>(settings.groupadd, GROUP_ADD_VALUES, "contacts"),
     calls: normalizeValue<CallPrivacyValue>(settings.calladd, CALL_VALUES, "all"),
+    ...(settings.messages !== undefined
+      ? {
+          messages: normalizeValue<MessagesPrivacyValue>(settings.messages, MESSAGES_VALUES, "all"),
+        }
+      : {}),
   };
 }

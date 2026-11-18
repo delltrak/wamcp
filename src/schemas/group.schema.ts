@@ -271,3 +271,36 @@ export const GroupMemberAddModeSchema = z
     mode: z.enum(["admin_add", "all_member_add"]).describe("Who can add members"),
   })
   .strict();
+
+export const GroupAcceptInviteV4Schema = z
+  .object({
+    instanceId: z.string().min(1).describe("The instance ID"),
+    groupJid: GroupIdSchema.describe("WhatsApp group JID or bare group ID from the V4 invite"),
+    inviteCode: z.string().trim().min(1).describe("V4 invite code from the groupInviteMessage"),
+    inviteExpiration: z
+      .number()
+      .int()
+      .positive()
+      .describe("Unix expiration timestamp from the V4 groupInviteMessage"),
+    inviterJid: z
+      .string()
+      .trim()
+      .min(5)
+      .optional()
+      .describe("Phone number or JID of the user who sent the V4 invite"),
+    groupName: z.string().max(100).optional().describe("Optional group name from the invite"),
+    caption: z.string().max(1024).optional().describe("Optional invite caption"),
+  })
+  .strict();
+
+export const GroupRevokeInviteV4Schema = z
+  .object({
+    instanceId: z.string().min(1).describe("The instance ID"),
+    groupId: GroupIdSchema.describe("WhatsApp group JID or bare group ID"),
+    invitedJid: z
+      .string()
+      .trim()
+      .min(5)
+      .describe("Phone number or JID of the invited user whose V4 invite should be revoked"),
+  })
+  .strict();

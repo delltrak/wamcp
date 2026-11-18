@@ -33,6 +33,10 @@ import {
   UpdateProductSchema,
   DeleteProductsSchema,
   GetOrderDetailsSchema,
+  UpdateBusinessProfileSchema,
+  UpdateBusinessCoverPhotoSchema,
+  RemoveBusinessCoverPhotoSchema,
+  SendProductSchema,
 } from "../schemas/business.schema.js";
 
 function registerBusinessTool<S extends z.ZodObject>(
@@ -305,5 +309,54 @@ export function registerBusinessTools(server: McpServer, instanceManager: Instan
     "Read WhatsApp Business order details using the order ID and token from an order message.",
     GetOrderDetailsSchema,
     (adapter, params) => adapter.getOrderDetails(params.orderId, params.tokenBase64),
+  );
+
+  registerBusinessTool(
+    server,
+    instanceManager,
+    "wa_update_business_profile",
+    "Update WhatsApp Business profile details (address, description, email, websites, and Baileys operating hours). On Baileys, this account change is blocked unless WA_APP_STATE_WRITES_ENABLED=true.",
+    UpdateBusinessProfileSchema,
+    async (adapter, params) => {
+      const { instanceId: _instanceId, ...input } = params;
+      await adapter.updateBusinessProfile(input);
+      return { success: true };
+    },
+  );
+
+  registerBusinessTool(
+    server,
+    instanceManager,
+    "wa_update_business_cover_photo",
+    "Update the WhatsApp Business cover photo from an HTTPS URL or base64 image (Baileys only). Blocked unless WA_APP_STATE_WRITES_ENABLED=true.",
+    UpdateBusinessCoverPhotoSchema,
+    async (adapter, params) => {
+      const photoId = await adapter.updateBusinessCoverPhoto(params.image);
+      return { success: true, photoId };
+    },
+  );
+
+  registerBusinessTool(
+    server,
+    instanceManager,
+    "wa_remove_business_cover_photo",
+    "Remove the WhatsApp Business cover photo by its photo ID (Baileys only). Blocked unless WA_APP_STATE_WRITES_ENABLED=true.",
+    RemoveBusinessCoverPhotoSchema,
+    async (adapter, params) => {
+      await adapter.removeBusinessCoverPhoto(params.photoId);
+      return { success: true, photoId: params.photoId };
+    },
+  );
+
+  registerBusinessTool(
+    server,
+    instanceManager,
+    "wa_send_product",
+    "Send a WhatsApp Business catalog product card message to a contact or group.",
+    SendProductSchema,
+    (adapter, params) => {
+      const { instanceId: _instanceId, to, ...input } = params;
+      return adapter.sendProduct(to, input);
+    },
   );
 }

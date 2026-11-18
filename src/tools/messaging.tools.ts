@@ -48,6 +48,10 @@ import {
   SendGroupMentionAllSchema,
   GetMessageReceiptsSchema,
   GetMessageReactionsSchema,
+  VotePollSchema,
+  SendTemplateSchema,
+  SendCtaUrlSchema,
+  SendFlowSchema,
 } from "../schemas/messaging.schema.js";
 
 export function registerMessagingTools(
@@ -1068,6 +1072,127 @@ Returns: { status: "queued", jobId }`,
         return toolSuccess({ success: true, count: params.messageIds.length });
       } catch (err) {
         return handleToolError("wa_mark_played", err, params.instanceId);
+      }
+    },
+  );
+
+  server.registerTool(
+    "wa_vote_poll",
+    {
+      description:
+        "Vote on a WhatsApp poll message (or clear votes by passing an empty selectedOptions array). Requires the poll creation message to be stored locally on the Baileys instance.",
+      inputSchema: VotePollSchema,
+    },
+    async (params) => {
+      const log = createRequestLogger("wa_vote_poll", params.instanceId);
+      const start = Date.now();
+      try {
+        const adapter = instanceManager.getAdapter(params.instanceId);
+        const result = await adapter.votePoll(
+          params.chatId,
+          params.pollMessageId,
+          params.selectedOptions,
+        );
+        log.info(
+          { duration: Date.now() - start, selectedCount: params.selectedOptions.length },
+          "Poll vote sent",
+        );
+        return toolSuccess(result);
+      } catch (err) {
+        return handleToolError("wa_vote_poll", err, params.instanceId);
+      }
+    },
+  );
+
+  server.registerTool(
+    "wa_send_template",
+    {
+      description:
+        "Send an approved WhatsApp Cloud API template message (UTILITY, MARKETING, or custom) with optional header, body, and button parameters. Cloud API only.",
+      inputSchema: SendTemplateSchema,
+    },
+    async (params) => {
+      const log = createRequestLogger("wa_send_template", params.instanceId);
+      const start = Date.now();
+      try {
+        const adapter = instanceManager.getAdapter(params.instanceId);
+        const result = await adapter.sendTemplate(params.to, {
+          templateName: params.templateName,
+          languageCode: params.languageCode,
+          ...(params.headerParameters ? { headerParameters: params.headerParameters } : {}),
+          ...(params.bodyParameters ? { bodyParameters: params.bodyParameters } : {}),
+          ...(params.buttons ? { buttons: params.buttons } : {}),
+        });
+        log.info(
+          { duration: Date.now() - start, templateName: params.templateName },
+          "Template message sent",
+        );
+        return toolSuccess(result);
+      } catch (err) {
+        return handleToolError("wa_send_template", err, params.instanceId);
+      }
+    },
+  );
+
+  server.registerTool(
+    "wa_send_cta_url",
+    {
+      description:
+        "Send a Call-To-Action (CTA) URL button message. Cloud API sends a native interactive cta_url message; Baileys sends a formatted text + link preview fallback.",
+      inputSchema: SendCtaUrlSchema,
+    },
+    async (params) => {
+      const log = createRequestLogger("wa_send_cta_url", params.instanceId);
+      const start = Date.now();
+      try {
+        const channel = await instanceManager.getInstanceChannel(params.instanceId);
+        const adapter = instanceManager.getAdapter(params.instanceId);
+        const result = await adapter.sendCtaUrl(params.to, {
+          bodyText: params.bodyText,
+          displayText: params.displayText,
+          url: params.url,
+          ...(params.headerText ? { headerText: params.headerText } : {}),
+          ...(params.footerText ? { footerText: params.footerText } : {}),
+        });
+        log.info({ duration: Date.now() - start, channel }, "CTA URL message sent");
+        return toolSuccess({
+          ...result,
+          mode: channel === "cloud" ? "interactive" : "text_fallback",
+        });
+      } catch (err) {
+        return handleToolError("wa_send_cta_url", err, params.instanceId);
+      }
+    },
+  );
+
+  server.registerTool(
+    "wa_send_flow",
+    {
+      description:
+        "Send an interactive Meta WhatsApp Flow message (forms, scheduling, surveys) by flowId or flowName. Cloud API only.",
+      inputSchema: SendFlowSchema,
+    },
+    async (params) => {
+      const log = createRequestLogger("wa_send_flow", params.instanceId);
+      const start = Date.now();
+      try {
+        const adapter = instanceManager.getAdapter(params.instanceId);
+        const result = await adapter.sendFlow(params.to, {
+          bodyText: params.bodyText,
+          flowCta: params.flowCta,
+          ...(params.flowId ? { flowId: params.flowId } : {}),
+          ...(params.flowName ? { flowName: params.flowName } : {}),
+          ...(params.headerText ? { headerText: params.headerText } : {}),
+          ...(params.footerText ? { footerText: params.footerText } : {}),
+          ...(params.flowToken ? { flowToken: params.flowToken } : {}),
+          ...(params.mode ? { mode: params.mode } : {}),
+          ...(params.flowAction ? { flowAction: params.flowAction } : {}),
+          ...(params.flowActionPayload ? { flowActionPayload: params.flowActionPayload } : {}),
+        });
+        log.info({ duration: Date.now() - start }, "Flow message sent");
+        return toolSuccess(result);
+      } catch (err) {
+        return handleToolError("wa_send_flow", err, params.instanceId);
       }
     },
   );
