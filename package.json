@@ -49,17 +49,17 @@
     "@modelcontextprotocol/sdk": "^1.32.2",
     "@whiskeysockets/baileys": "^7.0.0-rc14",
     "better-sqlite3": "^13.2.0",
-    "bullmq": "^6.7.7",
+    "bullmq": "^6.7.10",
     "dotenv": "^18.0.10",
     "drizzle-orm": "^0.45.4",
     "https-proxy-agent": "^9.1.0",
-    "ioredis": "^6.0.0",
+    "ioredis": "^6.1.0",
     "pg": "^8.23.1",
     "pino": "^10.4.0",
     "pino-pretty": "^13.2.0",
     "qrcode": "^1.5.4",
     "socks-proxy-agent": "^10.1.0",
-    "undici": "^8.12.4",
+    "undici": "^8.13.1",
     "zod": "^4.6.7"
   },
   "devDependencies": {
@@ -67,13 +67,13 @@
     "@types/better-sqlite3": "^9.6.0",
     "@types/node": "^24.19.2",
     "@types/pg": "^8.23.1",
-    "@vitest/coverage-v8": "^5.1.0",
+    "@vitest/coverage-v8": "^5.1.1",
     "drizzle-kit": "^0.31.11",
     "eslint": "^10.15.0",
     "prettier": "^3.10.1",
     "tsx": "^4.23.15",
     "typescript": "^6.0.3",
-    "typescript-eslint": "^8.73.0",
+    "typescript-eslint": "^8.74.0",
     "vitest": "^5.1.0"
   }
 }
